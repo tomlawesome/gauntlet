@@ -1,0 +1,24 @@
+# Go test-coverage floors, one per package. Read by
+# scripts/coverage-floor.py, which runs against
+# `go test ./... -race -coverprofile=...` in the `test:go` job in
+# .gitlab-ci.yml. Shape and script copied from birdcage's
+# supply-chain/coverage-floors.yml; see that file for the full rationale
+# (STATEMENT coverage, not branch; ratchet, not a fixed target).
+#
+# - each floor below is set at the value measured on this checkout,
+#   rounded DOWN to a whole percent -- so introducing this file does not
+#   turn the build red over coverage nobody has touched.
+# - a floor only ever goes UP, when a package's coverage genuinely
+#   improves. Never lower one to make a change pass.
+# - scripts/coverage-floor.py also fails a package sitting more than 5
+#   points ABOVE its floor (RATCHET_SLACK) -- raise the floor here to
+#   lock the gain in rather than leaving the headroom.
+# - scripts/coverage-floor.py also fails on any package present in the
+#   coverage profile but missing from this file: a new package must get
+#   a floor added here as a reviewed change, not slip in unmeasured.
+#
+# Measured 2026-09-26 from `go test ./... -race -coverprofile=...` on
+# this checkout: persist at 90.9%.
+
+floors:
+  persist: 90

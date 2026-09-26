@@ -1,0 +1,25 @@
+# Licence policy for gauntlet's dependencies -- the Go modules linked
+# into the built library, not build/test tooling. Read by
+# scripts/licence-check.sh, which runs `go-licenses check` against this
+# list, in the `lint:licences` job in .gitlab-ci.yml, on every merge
+# request and on push to dev. Shape copied from birdcage's
+# supply-chain/licence-policy.yml; gauntlet has no npm or pip tree, so
+# only the Go key exists here.
+#
+# A licence is never added to this list to make one specific package
+# pass. An exception for a package whose licence is genuinely outside
+# this list is instead an exact entry under allow-dependencies-licenses,
+# in the form `pkg:golang/<module>@<version>`, with a comment giving the
+# reason and a review date.
+#
+# G1 has no dependencies at all (persist is stdlib-only). BSD-3-Clause and
+# Apache-2.0 are listed ahead of need, for the three modules the owner has
+# already approved for G2/G5 (AGENTS.md): golang.org/x/crypto (BSD-3-Clause),
+# golang.org/x/oauth2 (BSD-3-Clause), github.com/coreos/go-oidc/v3
+# (Apache-2.0).
+allow-licenses:
+  - BSD-3-Clause
+  - Apache-2.0
+  - MIT
+
+allow-dependencies-licenses: []

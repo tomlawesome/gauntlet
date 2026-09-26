@@ -1,0 +1,14 @@
+# Coverage output, produced per run and read from the job log or the
+# merge request; a committed copy would only ever be stale.
+coverage.out
+
+# Session handoffs agents write under the checkout; never part of the
+# project.
+/.agents/
+
+# Local go build output.
+/gauntlet
+
+# Python bytecode from running the guard scripts locally.
+__pycache__/
+*.pyc

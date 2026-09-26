@@ -1,0 +1,124 @@
+# GitLab is where gauntlet is developed and released (AGENTS.md); this
+# file is the CI that gates every merge request and every push to the
+# default branch, `dev`. Modelled on birdcage's `.gitlab-ci.yml`, but far
+# smaller: gauntlet ships a tag, not an image, so there is no build,
+# release, image or live-stack e2e stage here -- see docs/testing.md.
+#
+# Runner lane (ai/agent-infra#3): `light` is 4 CPU / 6 GB, which is ample
+# for a dependency-free Go module. `big` is not needed here.
+
+stages:
+  - lint
+  - test
+
+default:
+  tags: [light]
+  interruptible: true
+  # Infra-only retry: a job that fails because the runner died or hung
+  # gets one automatic second try; a job that fails because the code is
+  # wrong does not, and never silently passes on a retry.
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+      - api_failure
+      - scheduler_failure
+
+variables:
+  GOFLAGS: "-mod=readonly"
+  # Same image, same tag, as birdcage's GOLANG_IMAGE -- routed through the
+  # group's dependency proxy the same way, so this pull is cached on the
+  # GitLab server rather than re-crossing the WAN on every job (refs
+  # ai/birdcage#128).
+  GOLANG_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/golang:1.27
+  ALPINE_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/alpine:3.24
+
+# Avoids the duplicate branch+MR pipeline birdcage's own `.gate` anchor
+# avoids: a merge request always gets a pipeline, and so does a push to
+# `dev` itself (in practice, a merge landing); a push to any other branch
+# does not, because that same commit already has -- or is about to get --
+# an MR pipeline covering it.
+.gate: &gate
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+.git_safe: &git_safe
+  before_script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+# ---------------------------------------------------------------------------
+# LINT
+# ---------------------------------------------------------------------------
+lint:go:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  script:
+    - go build ./...
+    - go vet ./...
+    - |
+      files=$(git ls-files '*.go')
+      [ -n "$files" ] || { echo "git ls-files returned no Go files"; exit 1; }
+      unformatted=$(gofmt -l $files)
+      [ -z "$unformatted" ] || { echo "Not gofmt-clean:"; echo "$unformatted"; gofmt -d $files; exit 1; }
+    # Built from source with the image's Go, matching birdcage's own
+    # lint:go: a prebuilt binary built with an older Go refuses go.mod's
+    # `go 1.27.0` directive.
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+    - golangci-lint run ./...
+
+lint:licences:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  script:
+    - scripts/licence-check.sh
+
+lint:vulncheck:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+    - govulncheck ./...
+
+# gitleaks is a Go module, so it installs the same way golangci-lint and
+# govulncheck do above -- no separate image or Docker Hub pull needed.
+# `--redact` keeps a matched secret's own bytes out of the job log even
+# when the job is red.
+lint:secrets:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  variables:
+    GIT_DEPTH: 0 # gitleaks scans git history; a shallow clone would miss all but the newest commit.
+  script:
+    - go install github.com/zricethezav/gitleaks/v8@v8.30.1
+    - gitleaks detect --no-banner --redact
+
+# ---------------------------------------------------------------------------
+# TEST
+# ---------------------------------------------------------------------------
+test:go:
+  stage: test
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 15m
+  script:
+    - go test ./... -race -coverprofile=coverage.out
+    - go tool cover -func=coverage.out | tail -1
+    - python3 scripts/coverage-floor.py coverage.out
+  coverage: '/total:\s+\(statements\)\s+([\d.]+)%/'
+  artifacts:
+    expire_in: 1 day
+    when: always
+    paths:
+      - coverage.out
