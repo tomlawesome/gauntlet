@@ -18,7 +18,15 @@
 #   a floor added here as a reviewed change, not slip in unmeasured.
 #
 # Measured 2026-09-26 from `go test ./... -race -coverprofile=...` on
-# this checkout: persist at 90.9%.
+# this checkout: persist at 90.9%. Re-measured on G2 (issue #3): the
+# root `gauntlet` package (accounts, passwords, roles, username
+# validation, ids) at 91.2%. That package's key here is the empty
+# string, quoted: the coverage profile's package key is the directory
+# holding each source file relative to the module root, and the root
+# package's files (store.go, etc.) have no directory component --
+# os.path.dirname("store.go") is "", not ".". coverage-floor.py strips
+# a double-quoted key the same way real YAML would.
 
 floors:
   persist: 90
+  "": 91 # the root `gauntlet` package -- see the note above on the empty key
