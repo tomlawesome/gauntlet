@@ -18,7 +18,12 @@
 #   a floor added here as a reviewed change, not slip in unmeasured.
 #
 # Measured 2026-09-26 from `go test ./... -race -coverprofile=...` on
-# this checkout: persist at 90.9%.
+# this checkout: persist at 90.9%; oidc at 86.98%; internal/testutil at
+# 0.0% -- it is the fake OIDC provider (docs/design.md §1.4), exercised
+# through oidc's own tests but carrying none of its own, the "known debt
+# ... packages with no test files" case this script already expects.
 
 floors:
   persist: 90
+  oidc: 86
+  internal/testutil: 0
