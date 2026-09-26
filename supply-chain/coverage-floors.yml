@@ -25,8 +25,13 @@
 # holding each source file relative to the module root, and the root
 # package's files (store.go, etc.) have no directory component --
 # os.path.dirname("store.go") is "", not ".". coverage-floor.py strips
-# a double-quoted key the same way real YAML would.
+# a double-quoted key the same way real YAML would. G5 (issue #6): oidc at
+# 86.98%; internal/testutil at 0.0% -- the fake OIDC provider, exercised
+# through oidc's own tests but carrying none of its own, the "known debt
+# ... packages with no test files" case this script already expects.
 
 floors:
   persist: 90
   "": 91 # the root `gauntlet` package -- see the note above on the empty key
+  oidc: 86
+  internal/testutil: 0
