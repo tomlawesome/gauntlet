@@ -151,6 +151,11 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if deps.Limiter == nil {
 		return nil, fmt.Errorf("%w: Deps.Limiter", errMissingDep)
 	}
+	// SSO on means the flow cookie gets sealed on the first click; a nil
+	// codec there is a panic on that request, not here.
+	if deps.OIDC != nil && deps.OIDCState == nil {
+		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}

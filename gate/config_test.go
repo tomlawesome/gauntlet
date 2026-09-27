@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/oidc"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -72,6 +73,9 @@ func TestNewFailsClosedOnMissingDeps(t *testing.T) {
 		{"no Sessions", func(d *Deps) { d.Sessions = nil }},
 		{"no Tokens", func(d *Deps) { d.Tokens = nil }},
 		{"no Limiter", func(d *Deps) { d.Limiter = nil }},
+		// SSO wired without the codec that seals its flow cookie would
+		// panic on the first "sign in with SSO" click, not at startup.
+		{"OIDC without OIDCState", func(d *Deps) { d.OIDC = &oidc.Client{}; d.OIDCState = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
