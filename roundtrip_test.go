@@ -12,8 +12,9 @@ import (
 )
 
 // TestMikroviewUsersJSONFixtureRoundTripsByteIdentical is gauntlet issue
-// #3's done-when: a copy of a mikroview users.json-shaped fixture loads,
-// saves and reloads byte-identical.
+// #3's (G2) and #5's (G4) done-when: a copy of a mikroview
+// users.json-shaped fixture, with every field populated including every
+// second-factor kind, loads, saves and reloads byte-identical.
 //
 // The fixture is built from gauntlet's own User/RecoveryCode/Passkey
 // types -- copied field-for-field, JSON tag-for-tag, from mikroview's
@@ -21,12 +22,14 @@ import (
 // user data. It covers every field category a whole-document store must
 // round-trip without dropping anything, per the design's Summary: an
 // admin with every second-factor field populated (TOTP, two recovery
-// codes, a passkey), a plain local user, an SSO-linked account with no
-// local password, and a roleless legacy account (loads as-is; see
-// TestOpenLeavesAnEmptyRoleFailingClosed). Every password hash below is
-// produced by this package's own HashPassword on a fixed test string --
-// a real Argon2id hash, but of a value invented for this test, never a
-// secret from anywhere real.
+// codes, a passkey, and an outstanding admin-issued reset code -- data
+// shape only; a real account would not carry all of these live at
+// once), a plain local user, an SSO-linked account with no local
+// password, and a roleless legacy account (loads as-is; see
+// TestOpenLeavesAnEmptyRoleFailingClosed). Every password/code hash
+// below is produced by this package's own HashPassword on a fixed test
+// string -- a real Argon2id hash, but of a value invented for this
+// test, never a secret from anywhere real.
 func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
@@ -44,6 +47,12 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Stands in for IssueResetCode's ResetCodeHash -- a real Argon2id
+	// hash of a fixture code nobody will ever type.
+	resetHash, err := HashPassword("FIXTURERESETCODE0000")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// fixture.Users is already in the username-sorted order
 	// tryPersistLocked writes ("admin" < "bob" < "carol@example.com" <
@@ -51,17 +60,20 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	fixture := storeFile{
 		Users: []*User{
 			{
-				ID:                "admin-id-0001",
-				Username:          "admin",
-				PasswordHash:      adminHash,
-				Role:              RoleAdmin,
-				CreatedAt:         now,
-				LastLogin:         now.Add(time.Hour),
-				PasswordChangedAt: now,
-				HasLocalPassword:  true,
-				TOTPSecret:        "JBSWY3DPEHPK3PXP",
-				TOTPConfirmedAt:   now,
-				TOTPLastCounter:   99,
+				ID:                 "admin-id-0001",
+				Username:           "admin",
+				PasswordHash:       adminHash,
+				Role:               RoleAdmin,
+				CreatedAt:          now,
+				LastLogin:          now.Add(time.Hour),
+				PasswordChangedAt:  now,
+				HasLocalPassword:   true,
+				ResetCodeHash:      resetHash,
+				ResetCodeExpiresAt: now.Add(ResetCodeTTL),
+				MustChangePassword: true,
+				TOTPSecret:         "JBSWY3DPEHPK3PXP",
+				TOTPConfirmedAt:    now,
+				TOTPLastCounter:    99,
 				RecoveryCodes: []RecoveryCode{
 					{Hash: "fixture-recovery-hash-a"},
 					{Hash: "fixture-recovery-hash-b", UsedAt: now},

@@ -29,9 +29,11 @@
 # 86.98%; internal/testutil at 0.0% -- the fake OIDC provider, exercised
 # through oidc's own tests but carrying none of its own, the "known debt
 # ... packages with no test files" case this script already expects.
+# Re-measured on G4 (issue #5, second-factor data and stdlib flows): the
+# root package at 95.4%.
 
 floors:
   persist: 90
-  "": 91 # the root `gauntlet` package -- see the note above on the empty key
+  "": 95 # the root `gauntlet` package -- see the note above on the empty key
   oidc: 86
   internal/testutil: 0
