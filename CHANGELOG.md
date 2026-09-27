@@ -42,3 +42,5 @@ All notable changes to this project are documented in this file.
   `RecordPasskeyAssertionIfFresh`, `ClearPasskeys`,
   `ClearAllSecondFactors`, `PasskeyCount`). Every mutating method rolls
   back its in-memory change on a backend write failure.
+- Runnable examples (`example_test.go`, `persist/example_test.go`) and a
+  README "Using gauntlet" section for apps adopting the module.

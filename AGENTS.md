@@ -19,6 +19,9 @@ back into birdcage's or mikroview's own types.
 **Mikroview's auth code is the reference this module is read against**,
 continuously, until mikroview actually moves onto it (birdcage ADR-0005
 decision 3, mikroview #1202) -- not a one-time source to copy from.
+Read it from mikroview's GitLab `dev` (`git -C ~/projects/mikroview show
+gitlab/dev:<path>`), never the GitHub `origin/dev`: mikroview is
+GitLab-first and the mirror lags by days (owner, 2026-09-27).
 
 ## Delivery host
 
