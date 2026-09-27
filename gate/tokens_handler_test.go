@@ -4,7 +4,9 @@ package gate
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/tomlawesome/gauntlet"
@@ -132,5 +134,32 @@ func TestCreateTokenRejectsAnUnscopedIngestToken(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for an ingest token with no device, got %d", resp.StatusCode)
+	}
+}
+
+// TestCreateTokenWithoutStorageSaysWhatToDo: the 503 for a token store
+// with no backend carries gateErrorMessages' entry for it, which names
+// the fix, not the generic text every other unmapped error gets.
+func TestCreateTokenWithoutStorageSaysWhatToDo(t *testing.T) {
+	g := newTestGate(t)
+	tokens, err := gauntlet.OpenTokenStore(nil, gauntlet.TokenOptions{})
+	if err != nil {
+		t.Fatalf("OpenTokenStore(nil): %v", err)
+	}
+	g.deps.Tokens = tokens
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with no token storage, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(body)), gateErrorMessages[gauntlet.ErrTokenNotPersisted]; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
