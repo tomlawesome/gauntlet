@@ -223,9 +223,20 @@ func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 func (g *Gate) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := g.now()
+		// The ESCAPED path, not the decoded one: http.ServeMux's own
+		// pattern matching works on r.URL.EscapedPath() (a request for
+		// "/api/auth%2Fsession" matches a registered "/api/{resource}"
+		// pattern, never "/api/auth/session" -- %2F stays inside one
+		// path segment rather than splitting it in two). Every
+		// exempt/bootstrap/door comparison below has to use the same
+		// path the mux will actually dispatch on, or a path that is
+		// exempt only after decoding is treated as exempt here while
+		// dispatching somewhere this check never intended to admit
+		// (issue #13).
+		path := r.URL.EscapedPath()
 
 		if g.deps.Users.Count() == 0 {
-			if !bootstrapExemptPaths[r.URL.Path] {
+			if !bootstrapExemptPaths[path] {
 				http.Error(w, "setup required", http.StatusServiceUnavailable)
 				return
 			}
@@ -253,7 +264,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			http.Error(w, "missing required header", http.StatusForbidden)
 			return
 		}
-		if g.isExempt(r.URL.Path) {
+		if g.isExempt(path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -263,7 +274,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			writeUnauthorized(w, "unauthorized")
 			return
 		}
-		if user.MustChangePassword && r.URL.Path != changePasswordPath {
+		if user.MustChangePassword && path != changePasswordPath {
 			writeForcedAuthGate(w, authGateMustChangePassword, "an administrator reset this account -- set a new password before going any further")
 			return
 		}
@@ -287,7 +298,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// while this door holds -- without it, an account with
 		// RequireSecondFactor set and no factor yet would have no route
 		// left to enrol one on.
-		if !user.MustChangePassword && g.cfg.RequireSecondFactor && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[r.URL.Path] {
+		if !user.MustChangePassword && g.cfg.RequireSecondFactor && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
 			writeForcedAuthGate(w, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")
 			return
 		}
