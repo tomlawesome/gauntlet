@@ -4,7 +4,9 @@ package gate
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,6 +248,13 @@ func TestDeletingTheAdminIsRefused(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("expected 409 for deleting the admin, got %d", resp.StatusCode)
 	}
+	// gauntlet #15: ErrCannotDeleteAdmin gets its own message now,
+	// instead of falling through to the generic "unable to complete the
+	// request" -- see gateErrorMessages (httpjson.go).
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "admin account cannot be deleted") {
+		t.Errorf("expected a specific admin-cannot-be-deleted message, got %q", body)
+	}
 	if _, ok := g.deps.Users.Get(admin.ID); !ok {
 		t.Error("the admin account must still exist")
 	}
@@ -265,5 +274,31 @@ func TestDeleteUserNotFound(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for an unknown user id, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "no such user") {
+		t.Errorf("expected the not-found message, got %q", body)
+	}
+}
+
+// TestCreateAdminRoleRequestGetsSpecificMessage covers the other half of
+// gauntlet #15's error-message work: ErrSingleAdmin, from a create-user
+// request asking for role "admin".
+func TestCreateAdminRoleRequestGetsSpecificMessage(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password123")
+
+	resp := postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "second", Password: "password456", Role: "admin"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an admin-role request, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "only one admin account") {
+		t.Errorf("expected a specific single-admin message, got %q", body)
+	}
+	if _, ok := g.deps.Users.ByUsername("second"); ok {
+		t.Error("a refused admin-role request created the account anyway")
 	}
 }

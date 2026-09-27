@@ -62,6 +62,22 @@ All notable changes to this project are documented in this file.
   second-factor door deadlock and its machine-readable auth-gate header
   (gitlab/dev 683704c4), generalized to a non-mikroview-branded name.
 
+### Changed
+
+- `gate` hardening beyond mikroview's own behaviour (issue #15): a
+  failed token revocation on user delete now answers 500 with a JSON
+  error body naming the account, instead of mikroview's 200 with
+  `tokensRevoked=0` -- indistinguishable on the wire from "this user
+  held no tokens" -- and the failure is recorded in the audit detail
+  too. `decodeJSONBody` rejects a request body carrying an unrecognized
+  field or data left over after the JSON value (`DisallowUnknownFields`
+  plus a trailing-data check), 400 either way; mikroview accepts both
+  silently. `ErrSingleAdmin` and `ErrCannotDeleteAdmin` get their own
+  message in `gateErrorMessages` (409/400 respectively) instead of
+  falling through to the generic "unable to complete the request" --
+  mikroview's matching map has neither entry either. See
+  `gate/users_handler.go` and `gate/httpjson.go`'s header comments.
+
 ### Security
 
 - `VerifyPassword` now refuses, before hashing, a stored hash whose
