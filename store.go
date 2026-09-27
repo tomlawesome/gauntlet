@@ -74,6 +74,13 @@ var (
 	// ErrNoAdmin is returned by TransferAdmin when no account holds the
 	// role -- nothing to transfer.
 	ErrNoAdmin = errors.New("gauntlet: this deployment has no admin account")
+
+	// errMultipleAdmins is the decode error for an accounts document
+	// holding more than one admin. No write in this package produces
+	// one (see CreateUser and TransferAdmin), so it can only come from a
+	// hand edit or a foreign writer, and it is refused the way an
+	// unparseable document is.
+	errMultipleAdmins = errors.New("more than one account holds the admin role; this package allows exactly one")
 	// ErrOIDCAlreadyLinked is returned by LinkOIDCIdentity when the
 	// account is already connected to a different (issuer, subject).
 	ErrOIDCAlreadyLinked = errors.New("gauntlet: account is already connected to an SSO identity")
@@ -103,6 +110,22 @@ type oidcKey struct {
 // storeFile is the on-disk shape: an object wrapping the user list.
 type storeFile struct {
 	Users []*User `json:"users"`
+}
+
+// checkAdmins refuses a document with more than one admin. None is fine:
+// that is a deployment before Register, or one whose admin was never
+// created.
+func (f storeFile) checkAdmins() error {
+	admins := 0
+	for _, u := range f.Users {
+		if u != nil && u.Role == RoleAdmin {
+			admins++
+		}
+	}
+	if admins > 1 {
+		return fmt.Errorf("%w (found %d)", errMultipleAdmins, admins)
+	}
+	return nil
 }
 
 // Options configures OpenStore.
@@ -144,6 +167,13 @@ type Store struct {
 	// hold a lock the reload itself needs to take. See reloadIfStale.
 	reloadMu       sync.Mutex
 	reloadInFlight chan struct{}
+
+	// refusedVersion is the last document version reloadIfStale refused
+	// to apply (see checkAdmins), so a refused document is logged once
+	// rather than on every request until someone fixes it. Only
+	// reloadIfStale touches it, and only one of those runs at a time.
+	refusedVersion    int64
+	hasRefusedVersion bool
 }
 
 // reloadTimeout bounds one staleness check against the backend. Long
@@ -189,6 +219,9 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
 		var file storeFile
 		if err := json.Unmarshal(data, &file); err != nil {
+			return err
+		}
+		if err := file.checkAdmins(); err != nil {
 			return err
 		}
 		// version isn't in scope yet here -- persist.Open hasn't
@@ -287,7 +320,7 @@ func (s *Store) reloadIfStale() {
 		s.mu.RLock()
 		stale := version != s.version
 		s.mu.RUnlock()
-		if !stale {
+		if !stale || (s.hasRefusedVersion && version == s.refusedVersion) {
 			return
 		}
 	}
@@ -308,12 +341,22 @@ func (s *Store) reloadIfStale() {
 	if err != nil || !snap.Exists {
 		return
 	}
-	if snap.Version == beforeLoad {
+	if snap.Version == beforeLoad || (s.hasRefusedVersion && snap.Version == s.refusedVersion) {
 		return
 	}
 
 	var file storeFile
 	if err := json.Unmarshal(snap.Payload, &file); err != nil {
+		return
+	}
+	// Unlike a transient read failure, this is a document someone wrote:
+	// keep serving what is in memory, and say why once. The next write
+	// from this process saves over it.
+	if err := file.checkAdmins(); err != nil {
+		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
+		if s.log != nil {
+			s.log.Error(fmt.Sprintf("accounts store (%s) was changed by another process and is not being applied: %v", s.backend.Describe(), err))
+		}
 		return
 	}
 
