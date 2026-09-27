@@ -84,6 +84,19 @@ func TestCreateUserRejectsUnrecognizedRole(t *testing.T) {
 	}
 }
 
+func TestAdminCreateUserRejectsDuplicateUsername(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password123")
+	_ = postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
+
+	resp := postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password789", Role: "user"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("expected 409 for a duplicate username, got %d", resp.StatusCode)
+	}
+}
+
 func TestAdminCannotCreateASecondAdmin(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)

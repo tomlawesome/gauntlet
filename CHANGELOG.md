@@ -44,15 +44,21 @@ All notable changes to this project are documented in this file.
   back its in-memory change on a backend write failure.
 - Runnable examples (`example_test.go`, `persist/example_test.go`) and a
   README "Using gauntlet" section for apps adopting the module.
-- `gate` package, stage 1 (G6 part 1): `Config`, `Deps`, `New`, `Gate`,
-  `Protect`, `Handle`, `Exempt`, `Routes`, `UserFromContext`,
-  `TokenFromContext`, `RequireRole` and the `Auditor` interface --
-  mikroview's `internal/api/{auth,tokens}.go` turned into configuration
-  (docs/design.md §1.5). `Routes` serves session/register/login/logout/
-  logout-all/password and the users/tokens admin endpoints; second-factor
-  login, TOTP, admin password reset and the OIDC routes are stage 2 (see
-  the "G6 stage 2" TODOs in `gate/login_handler.go` and
-  `gate/protect.go`). Includes mikroview's own fix for a MustChangePassword/
+- `gate` package (issue #7): `Config`, `Deps`, `New`, `Gate`, `Protect`,
+  `Handle`, `Exempt`, `Routes`, `UserFromContext`, `TokenFromContext`,
+  `RequireRole` and the `Auditor` interface -- mikroview's
+  `internal/api/{auth,tokens,oidc}.go` turned into configuration
+  (docs/design.md §1.5). `Routes` serves the full mikroview route table:
+  session/register/login/logout/logout-all/password, the two-step
+  second-factor login (`POST /api/auth/login/factor`, sealed
+  pending-login cookie, TOTP code or a recovery code), TOTP enrol/
+  confirm/delete plus the admin clear route, recovery-codes regenerate,
+  the admin reset-password route, the OIDC login/callback/link trio
+  (404 when `Deps.OIDC` is nil), and the users/tokens admin endpoints.
+  `Config.ProductName` is required (used in the TOTP enrolment URI,
+  fails closed in `New` if empty); `Config.LoginPath` is where a failed
+  OIDC callback redirects with `?ssoError=`. Passkey/WebAuthn routes are
+  deferred to G8. Includes mikroview's own fix for a MustChangePassword/
   second-factor door deadlock and its machine-readable auth-gate header
   (gitlab/dev 683704c4), generalized to a non-mikroview-branded name.
 

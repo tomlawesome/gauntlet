@@ -177,6 +177,35 @@ func TestBearerTokenRevokedRejected(t *testing.T) {
 	}
 }
 
+// TestBearerSchemeMatchedCaseInsensitively pins RFC 7235 §2.1: the
+// auth-scheme token is case-insensitive, so "bearer <token>" is bearer
+// authentication too, not "no token" silently falling through to the
+// session-cookie path.
+func TestBearerSchemeMatchedCaseInsensitively(t *testing.T) {
+	g := newTestGate(t)
+	registerUserDirect(t, g, "admin", "password123")
+	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
+	if err != nil {
+		t.Fatalf("Tokens.Create: %v", err)
+	}
+	g.Handle(gauntlet.TokenKindAPI, kindEchoHandler("/api/readonly"))
+	ts := newTestServer(t, g)
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/readonly", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "bearer "+raw)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("a lower-case \"bearer\" scheme got %d, want 200", resp.StatusCode)
+	}
+}
+
 // TestBearerTokenKindOrderMatchesHandleRegistration: with two kinds
 // registered, a token of the second-registered kind still authenticates
 // -- Protect tries every registered kind, not just the first.

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/tomlawesome/gauntlet"
@@ -76,6 +77,56 @@ func TestChangePasswordRejectsInvalidJSON(t *testing.T) {
 	ts := newTestServer(t, g)
 	client := registerAdmin(t, ts, "admin", "password123")
 	resp := postRawBody(t, client, ts.URL+"/api/auth/password", "not json")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestLoginFactorRejectsInvalidJSON(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", "password123")
+	resp := postRawBody(t, &http.Client{}, ts.URL+"/api/auth/login/factor", "not json")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestTOTPConfirmRejectsInvalidJSON(t *testing.T) {
+	_, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	resp := postRawBody(t, bob, ts.URL+"/api/auth/totp/confirm", "not json")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestTOTPDeleteRejectsInvalidJSON(t *testing.T) {
+	_, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/totp", strings.NewReader("not json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	resp, err := bob.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestRecoveryCodesRegenerateRejectsInvalidJSON(t *testing.T) {
+	_, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	resp := postRawBody(t, bob, ts.URL+"/api/auth/recovery-codes", "not json")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)

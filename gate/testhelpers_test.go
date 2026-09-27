@@ -21,6 +21,15 @@ const testCSRFValue = "test-frontend"
 // testCookieName is the fixture's session cookie name.
 const testCookieName = "gate_test_session"
 
+// testProductName is the fixture's Config.ProductName -- required since
+// New fails closed on an empty one (Routes always serves the TOTP
+// enrolment routes, which read it).
+const testProductName = "Gate Test Suite"
+
+// testLoginPath is the fixture's Config.LoginPath, the frontend route a
+// failed OIDC callback redirects to with ?ssoError=.
+const testLoginPath = "/login"
+
 // newTestGate builds a Gate over fresh, empty, in-memory stores --
 // gauntlet ships no file backend for tests to open against (persist.
 // Memory is the one persist.Backend this module carries; see
@@ -43,6 +52,8 @@ func newTestGate(t *testing.T) *Gate {
 		CookieName:      testCookieName,
 		CSRFHeaderValue: testCSRFValue,
 		ClientIP:        func(r *http.Request) string { return "198.51.100.1" },
+		ProductName:     testProductName,
+		LoginPath:       testLoginPath,
 	}, Deps{Users: users, Sessions: sessions, Tokens: tokens, Limiter: limiter})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -83,6 +94,14 @@ func newTestServer(t *testing.T, g *Gate) *httptest.Server {
 func postJSON(t *testing.T, client *http.Client, url string, body any) *http.Response {
 	t.Helper()
 	return doJSON(t, client, http.MethodPost, url, body)
+}
+
+// deleteJSON is postJSON's DELETE-with-a-body sibling -- for the routes
+// that gate a removal behind a re-entered password (DELETE
+// /api/auth/totp) rather than taking no body at all.
+func deleteJSON(t *testing.T, client *http.Client, url string, body any) *http.Response {
+	t.Helper()
+	return doJSON(t, client, http.MethodDelete, url, body)
 }
 
 func doJSON(t *testing.T, client *http.Client, method, url string, body any) *http.Response {

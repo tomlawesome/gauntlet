@@ -54,11 +54,15 @@ type Config struct {
 	RequireSecondFactor bool
 	// ProductName names the deployment in TOTP enrolment URIs and
 	// passkey display names (docs/design.md §1.5's last paragraph).
-	// Unused in this stage: no route reads it yet.
+	// Required: Routes always serves the TOTP enrolment routes, and an
+	// empty product name would land in the otpauth:// URI an
+	// authenticator app scans, which is worse than refusing to start.
 	ProductName string
 	// LoginPath is the frontend route the OIDC callback's `?ssoError=`
-	// redirect points at. Unused in this stage: OIDC routes are not
-	// registered by Routes yet.
+	// redirect points at on a failed login. Not required: unused unless
+	// Deps.OIDC is configured, and an empty value simply redirects to a
+	// bare "?ssoError=..." (relative to the current path), which is
+	// tolerable degradation rather than a security hole.
 	LoginPath string
 	// Log receives everything gate logs (nothing is fatal to a request
 	// on its own). nil discards it.
@@ -131,6 +135,9 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	}
 	if cfg.ClientIP == nil {
 		return nil, fmt.Errorf("gate: Config.ClientIP is required")
+	}
+	if cfg.ProductName == "" {
+		return nil, fmt.Errorf("gate: Config.ProductName is required")
 	}
 	if deps.Users == nil {
 		return nil, fmt.Errorf("%w: Deps.Users", errMissingDep)

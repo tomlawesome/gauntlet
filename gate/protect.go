@@ -24,16 +24,26 @@ const changePasswordPath = "/api/auth/password"
 // worth a 401 for. Beyond the built-in set, an application adds its own
 // with Exempt.
 //
-// TODO(G6 stage 2): add "/api/auth/login/factor" once the second-factor
-// login step exists (it is reached with a pending-login cookie, never a
-// session, same reasoning as /api/auth/login itself), and the OIDC
-// login/callback pair once those routes are registered.
+// POST /api/auth/login/factor is the second half of a login that stopped
+// at handleLogin because the account holds an active second factor --
+// reached with the short-lived pending-login cookie, never a session, so
+// it has to work before one exists, same reasoning as /api/auth/login
+// itself. GET /api/auth/oidc/login and /callback are a top-level
+// browser redirect/navigation the provider issues, not a fetch() an
+// application's frontend controls -- being listed here is what exempts
+// them from requiring an existing session (state/nonce/PKCE, oidc.go, is
+// the callback's real protection against a forged request, not the
+// session check); isSafeMethod already exempts both from the CSRF-header
+// check since they're GET.
 var exemptPaths = map[string]bool{
-	"/api/healthz":       true,
-	"/api/auth/session":  true,
-	"/api/auth/register": true,
-	"/api/auth/login":    true,
-	"/api/auth/logout":   true,
+	"/api/healthz":            true,
+	"/api/auth/session":       true,
+	"/api/auth/register":      true,
+	"/api/auth/login":         true,
+	"/api/auth/logout":        true,
+	"/api/auth/login/factor":  true,
+	"/api/auth/oidc/login":    true,
+	"/api/auth/oidc/callback": true,
 }
 
 // bootstrapExemptPaths is the narrower set reachable while no account
@@ -43,12 +53,30 @@ var exemptPaths = map[string]bool{
 // /api/auth/register creates the permanent admin), so widening it is a
 // decision for this package, not a per-application setting.
 //
-// TODO(G6 stage 2): add the OIDC login/callback pair once those routes
-// exist, symmetrically with register for the local-password path.
+// The OIDC login/callback pair is included symmetrically with register:
+// so the very first-ever login can happen via SSO too (gauntlet.Store.
+// FindOrCreateOIDCUser makes the first OIDC user admin only when the
+// store is empty, docs/design.md §4).
 var bootstrapExemptPaths = map[string]bool{
-	"/api/healthz":       true,
-	"/api/auth/session":  true,
-	"/api/auth/register": true,
+	"/api/healthz":            true,
+	"/api/auth/session":       true,
+	"/api/auth/register":      true,
+	"/api/auth/oidc/login":    true,
+	"/api/auth/oidc/callback": true,
+}
+
+// secondFactorEnrolPaths are the routes a session may still reach while
+// stuck at the forced-enrolment door (Config.RequireSecondFactor) --
+// enrolling a TOTP factor, and nothing else. Named once here, the same
+// reasoning changePasswordPath is, so Protect's gate and this list
+// cannot drift apart silently.
+//
+// Deliberately excludes DELETE /api/auth/totp: there is nothing yet
+// enrolled for it to act on while this gate holds, and admitting it
+// would be surface this door has no reason to open.
+var secondFactorEnrolPaths = map[string]bool{
+	"/api/auth/totp/enrol":   true,
+	"/api/auth/totp/confirm": true,
 }
 
 func isSafeMethod(method string) bool {
@@ -58,13 +86,18 @@ func isSafeMethod(method string) bool {
 const bearerPrefix = "Bearer "
 
 // bearerToken extracts the raw token value from an Authorization: Bearer
-// <token> header, if present in that exact form.
+// <token> header. The scheme name is matched case-insensitively --
+// RFC 7235 §2.1 defines auth-scheme as a token compared case-
+// insensitively, so "bearer x" and "BEARER x" are both bearer
+// authentication, not "no token" falling through to the session-cookie
+// path. Only the scheme name folds case; the token value after it is
+// passed through exactly as sent.
 func bearerToken(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, bearerPrefix) {
+	if len(h) < len(bearerPrefix) || !strings.EqualFold(h[:len(bearerPrefix)], bearerPrefix) {
 		return "", false
 	}
-	return strings.TrimPrefix(h, bearerPrefix), true
+	return h[len(bearerPrefix):], true
 }
 
 // sessionUser resolves r's session cookie to a user, if any -- shared by
@@ -190,9 +223,20 @@ func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 func (g *Gate) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := g.now()
+		// The ESCAPED path, not the decoded one: http.ServeMux's own
+		// pattern matching works on r.URL.EscapedPath() (a request for
+		// "/api/auth%2Fsession" matches a registered "/api/{resource}"
+		// pattern, never "/api/auth/session" -- %2F stays inside one
+		// path segment rather than splitting it in two). Every
+		// exempt/bootstrap/door comparison below has to use the same
+		// path the mux will actually dispatch on, or a path that is
+		// exempt only after decoding is treated as exempt here while
+		// dispatching somewhere this check never intended to admit
+		// (issue #13).
+		path := r.URL.EscapedPath()
 
 		if g.deps.Users.Count() == 0 {
-			if !bootstrapExemptPaths[r.URL.Path] {
+			if !bootstrapExemptPaths[path] {
 				http.Error(w, "setup required", http.StatusServiceUnavailable)
 				return
 			}
@@ -220,7 +264,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			http.Error(w, "missing required header", http.StatusForbidden)
 			return
 		}
-		if g.isExempt(r.URL.Path) {
+		if g.isExempt(path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -230,7 +274,23 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			writeUnauthorized(w, "unauthorized")
 			return
 		}
-		if user.MustChangePassword && r.URL.Path != changePasswordPath {
+		// docs/design.md §4's fail-closed list: "Unknown role → denied
+		// everything." Checked here, before either door below, because
+		// neither of them is what this is about -- a role no
+		// CreateUser/Register call could ever produce only reaches a
+		// live User via a document written outside this package (see
+		// Role.rank's own doc comment), and the right response to that
+		// is refusing the request outright, not routing it through
+		// checks that assume a real tier. Without this, an ordinary
+		// session-gated route with no RequireRole wrapper at all -- most
+		// of an application's own routes -- let such an account straight
+		// through; only a RequireRole-wrapped route ever consulted
+		// Role.AtLeast (issue #14).
+		if !isKnownRole(user.Role) {
+			http.Error(w, "account role is not recognized", http.StatusForbidden)
+			return
+		}
+		if user.MustChangePassword && path != changePasswordPath {
 			writeForcedAuthGate(w, authGateMustChangePassword, "an administrator reset this account -- set a new password before going any further")
 			return
 		}
@@ -250,16 +310,32 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// request from that account able to escape (mikroview's own fix
 		// for exactly this, gitlab/dev 683704c4).
 		//
-		// TODO(G6 stage 2): exempt the TOTP/passkey enrolment routes here
-		// once they exist (mikroview's secondFactorEnrolPaths) -- without
-		// it, an account with RequireSecondFactor set and no factor yet
-		// has no route left to enrol one on.
-		if !user.MustChangePassword && g.cfg.RequireSecondFactor && user.LocalPassword() && !user.HasSecondFactor() {
+		// secondFactorEnrolPaths (TOTP enrol/confirm) stays reachable
+		// while this door holds -- without it, an account with
+		// RequireSecondFactor set and no factor yet would have no route
+		// left to enrol one on.
+		if !user.MustChangePassword && g.cfg.RequireSecondFactor && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
 			writeForcedAuthGate(w, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+// isKnownRole reports whether r is one of the three roles this package
+// actually assigns (docs/design.md §4's fail-closed list names the
+// alternative: "Unknown role → denied everything"). gauntlet.Role.rank
+// already ranks an unrecognized value at 0, below every named tier, but
+// that alone only matters to a caller that compares ranks -- Protect's
+// own check (above) and RequireRole's panic guard (below) are what
+// actually act on it.
+func isKnownRole(r gauntlet.Role) bool {
+	switch r {
+	case gauntlet.RoleAdmin, gauntlet.RoleUser, gauntlet.RoleViewer:
+		return true
+	default:
+		return false
+	}
 }
 
 // RequireRole wraps next so that a caller below min is refused with 403.
@@ -270,7 +346,17 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 // request, none of which ever populate it -- is refused the same way a
 // real caller below min is, since gauntlet.Role's own AtLeast ranks a
 // nil/unknown role below every named tier.
+//
+// Panics immediately -- at construction, not on the first request -- if
+// min itself is not a recognized role: a caller passing anything else is
+// a wiring mistake in this package's own route table, the same class of
+// error a typo'd route pattern would be, and the way to catch it is
+// failing loudly at startup rather than quietly admitting nothing to a
+// route no request could ever satisfy (issue #14).
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler {
+	if !isKnownRole(min) {
+		panic("gate: RequireRole given an unrecognized role: " + string(min))
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := UserFromContext(r)
 		if user == nil || !user.Role.AtLeast(min) {
