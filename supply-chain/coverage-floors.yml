@@ -32,6 +32,7 @@
 # Re-measured on G3 (issue #4), which adds sessions, tokens and the login
 # limiter to the root package: still 91.8%, rounding down to the same
 # 91 floor. internal/evict is new in G3, at 100.0%.
+# G6 stage 1 (issue #7): gate is new, at 91.2%.
 
 floors:
   persist: 90
@@ -39,3 +40,4 @@ floors:
   oidc: 86
   internal/testutil: 0
   internal/evict: 100
+  gate: 91
