@@ -34,6 +34,7 @@
 # 91 floor. internal/evict is new in G3, at 100.0%.
 # Re-measured on G4 (issue #5, second-factor data and stdlib flows): the
 # root package at 95.4%; 95.0% once merged with G3, still at the 95 floor.
+# G6 stage 1 (issue #7): gate is new, at 91.2%.
 
 floors:
   persist: 90
@@ -41,3 +42,4 @@ floors:
   oidc: 86
   internal/testutil: 0
   internal/evict: 100
+  gate: 91

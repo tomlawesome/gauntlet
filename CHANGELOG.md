@@ -44,6 +44,17 @@ All notable changes to this project are documented in this file.
   back its in-memory change on a backend write failure.
 - Runnable examples (`example_test.go`, `persist/example_test.go`) and a
   README "Using gauntlet" section for apps adopting the module.
+- `gate` package, stage 1 (G6 part 1): `Config`, `Deps`, `New`, `Gate`,
+  `Protect`, `Handle`, `Exempt`, `Routes`, `UserFromContext`,
+  `TokenFromContext`, `RequireRole` and the `Auditor` interface --
+  mikroview's `internal/api/{auth,tokens}.go` turned into configuration
+  (docs/design.md §1.5). `Routes` serves session/register/login/logout/
+  logout-all/password and the users/tokens admin endpoints; second-factor
+  login, TOTP, admin password reset and the OIDC routes are stage 2 (see
+  the "G6 stage 2" TODOs in `gate/login_handler.go` and
+  `gate/protect.go`). Includes mikroview's own fix for a MustChangePassword/
+  second-factor door deadlock and its machine-readable auth-gate header
+  (gitlab/dev 683704c4), generalized to a non-mikroview-branded name.
 
 ### Security
 
