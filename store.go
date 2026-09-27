@@ -156,6 +156,17 @@ type Store struct {
 // tests assigns to it.
 var reloadTimeout = 5 * time.Second
 
+// saveTimeout is the write-side counterpart: it bounds one save in
+// tryPersistLocked (Store and TokenStore alike), which runs while the
+// store's write lock is held. Without it a backend that stops answering
+// mid-save would hold that lock, and with it every login and every
+// signed-in request, until the process was restarted. A save that
+// overruns fails like any other save failure: the caller rolls its
+// change back and reports the error.
+//
+// A var, not a const, only so tests can shorten it.
+var saveTimeout = 5 * time.Second
+
 // OpenStore returns a Store persisting through b. A nil b gives a usable
 // but unpersisted store -- see Store's doc comment.
 //
@@ -1170,7 +1181,9 @@ func (s *Store) tryPersistLocked() error {
 		return fmt.Errorf("encoding accounts for persistence failed: %w", err)
 	}
 
-	version, conflicted, err := persist.SaveWithRetry(context.Background(), s.backend, data, s.version)
+	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+	defer cancel()
+	version, conflicted, err := persist.SaveWithRetry(ctx, s.backend, data, s.version)
 	if err != nil {
 		return fmt.Errorf("writing accounts to %s failed: %w", s.backend.Describe(), err)
 	}
