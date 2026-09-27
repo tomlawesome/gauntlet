@@ -53,7 +53,18 @@ type SessionStore struct {
 	// tests want -- they construct a store to exercise one behaviour and
 	// have no interest in wall-clock ageing.
 	maxLifetime time.Duration
+	// nextSweep is the map size at which Create next drops every
+	// expired entry. Validate evicts an expired session only when that
+	// exact ID is presented again, so a login whose cookie is never
+	// used again -- a script that signs in per poll, a browser that
+	// never comes back -- would otherwise stay in the map for the life
+	// of the process. Sweeping at a size that doubles each time keeps
+	// the cost amortised at O(1) per Create.
+	nextSweep int
 }
+
+// minSessionSweep is the smallest map size at which Create sweeps.
+const minSessionSweep = 1024
 
 // NewSessionStore builds a store with sliding expiry ttl, capped at
 // maxLifetime from each session's IssuedAt however often it is used. A
@@ -63,7 +74,7 @@ func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore {
 	if maxLifetime < 0 {
 		maxLifetime = 0
 	}
-	return &SessionStore{sessions: make(map[string]Session), ttl: ttl, maxLifetime: maxLifetime}
+	return &SessionStore{sessions: make(map[string]Session), ttl: ttl, maxLifetime: maxLifetime, nextSweep: minSessionSweep}
 }
 
 // Create starts a new session for userID.
@@ -72,7 +83,24 @@ func (s *SessionStore) Create(userID string, now time.Time) Session {
 	defer s.mu.Unlock()
 	sess := Session{ID: newID(), UserID: userID, IssuedAt: now, ExpiresAt: now.Add(s.ttl)}
 	s.sessions[sess.ID] = sess
+	if len(s.sessions) >= s.nextSweep {
+		s.sweepExpiredLocked(now)
+		s.nextSweep = max(2*len(s.sessions), minSessionSweep)
+	}
 	return sess
+}
+
+// sweepExpiredLocked drops every session Validate would refuse at now.
+func (s *SessionStore) sweepExpiredLocked(now time.Time) {
+	for id, sess := range s.sessions {
+		if now.After(sess.ExpiresAt) {
+			delete(s.sessions, id)
+			continue
+		}
+		if deadline, capped := s.deadline(sess); capped && now.After(deadline) {
+			delete(s.sessions, id)
+		}
+	}
 }
 
 // Validate reports whether id is a live session, extending its expiry
