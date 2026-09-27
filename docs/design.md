@@ -294,7 +294,8 @@ Routes carried over (mikroview `internal/api/server.go` route table):
 logout,logout-all,password}`; `GET|POST /api/auth/users`,
 `DELETE /api/auth/users/{id}`, `POST /api/auth/users/{id}/reset-password`,
 `DELETE /api/auth/users/{id}/totp`; `POST /api/auth/totp/{enrol,confirm}`,
-`DELETE /api/auth/totp`; `GET /api/auth/oidc/{login,callback}`,
+`DELETE /api/auth/totp`; `POST /api/auth/recovery-codes`;
+`GET /api/auth/oidc/{login,callback}`,
 `POST /api/auth/oidc/link`; `GET|POST /api/tokens`,
 `DELETE /api/tokens/{id}`. Passkey routes join when `passkey/` lands.
 

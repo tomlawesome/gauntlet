@@ -1138,7 +1138,7 @@ func (s *Store) List() []User {
 		// an admin-facing account list has no business serializing,
 		// same stance as the three fields above. Blanked wholesale
 		// rather than per-field: a caller that needs a count must call
-		// a dedicated accessor (a later slice) instead of reading
+		// a dedicated accessor instead of reading
 		// len(this copy's Passkeys), which always reads zero now.
 		cp.Passkeys = nil
 		out = append(out, cp)

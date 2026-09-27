@@ -13,8 +13,8 @@
 //   - TOTPEnrollmentURI takes a productName parameter instead of
 //     mikroview's hard-coded "MikroView" label. docs/design.md §1.5
 //     calls this out explicitly as a string that "must not leak into
-//     birdcage" -- gate.Config gains ProductName for exactly this call,
-//     a later slice (G6).
+//     birdcage" -- gate.Config.ProductName exists for exactly this
+//     call.
 //   - VerifyAndRecordTOTP is the only login-time entry point; mikroview's
 //     separate RecordTOTPCounter (call VerifyTOTP, then record what
 //     matched, as two store calls) is not carried over. mikroview added

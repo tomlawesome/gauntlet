@@ -60,7 +60,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// A correct password on an account holding an active second factor
 	// must NOT create a session -- see docs/design.md §1.6 and the
-	// SECURITY note this stage's brief called out explicitly. What it
+	// SECURITY note gauntlet #7's brief called out explicitly. What it
 	// gets instead is a short-lived pending-login cookie naming the
 	// account, and the caller is told which factor to ask for next. The
 	// real login only happens in handleLoginFactor below, once that

@@ -16,7 +16,7 @@ const cookieMaxAge = 30 * 24 * time.Hour
 // writeCookie is the only place a cookie is handed to the client, so the
 // three fixed security attributes -- HttpOnly, SameSite=Lax, path -- are
 // decided once. SameSite is Lax rather than Strict for the same reason
-// mikroview's own writeCookie is: a future OIDC flow cookie (stage 2)
+// mikroview's own writeCookie is: the OIDC flow cookie (oidc_handler.go)
 // has to survive the provider's top-level cross-site redirect back to
 // the callback route, and the session cookie is happy either way.
 func (g *Gate) writeCookie(w http.ResponseWriter, name, value, path string, maxAge int) {

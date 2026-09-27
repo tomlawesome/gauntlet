@@ -73,7 +73,7 @@ All notable changes to this project are documented in this file.
   field or data left over after the JSON value (`DisallowUnknownFields`
   plus a trailing-data check), 400 either way; mikroview accepts both
   silently. `ErrSingleAdmin` and `ErrCannotDeleteAdmin` get their own
-  message in `gateErrorMessages` (409/400 respectively) instead of
+  message in `gateErrorMessages` (400/409 respectively) instead of
   falling through to the generic "unable to complete the request" --
   mikroview's matching map has neither entry either. See
   `gate/users_handler.go` and `gate/httpjson.go`'s header comments.

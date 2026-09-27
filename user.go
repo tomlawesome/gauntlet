@@ -13,9 +13,9 @@
 // because Store persists the whole document on every save (docs/design.md
 // Summary): a field this package didn't know about would be silently
 // dropped on the first write. The methods that generate, verify or
-// clear those second-factor fields are a later slice (G3/G4); this
-// package only carries the data and the predicates already listed in
-// docs/design.md §1.3 (LocalPassword, HasActiveTOTP, HasSecondFactor).
+// clear those fields live beside them: totp.go, recoverycodes.go,
+// resetcode.go and passkeys.go; the predicates docs/design.md §1.3
+// lists (LocalPassword, HasActiveTOTP, HasSecondFactor) are below.
 package gauntlet
 
 import "time"
@@ -101,8 +101,8 @@ type User struct {
 	// password gets, because for as long as it is live this *is* the
 	// account's password. Empty whenever no reset is outstanding, and
 	// cleared again the moment the code is spent (single use) or a new
-	// password is set. Issuing a code (IssueResetCode) is a later slice;
-	// this package's Authenticate already redeems a live one (§1.3).
+	// password is set. IssueResetCode (resetcode.go) issues one;
+	// Authenticate redeems a live one (§1.3).
 	ResetCodeHash string `json:"resetCodeHash,omitempty"`
 	// ResetCodeExpiresAt ends an unspent code, 24 hours after it was
 	// issued. Checked against, never the only check -- see
@@ -117,9 +117,7 @@ type User struct {
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
 	// recomputing HMAC-SHA1 over it, not comparing a hash. RFC 6238 code
-	// verification is a later slice (G4, totp.go); this package only
-	// carries the field, because a whole-document store must round-trip
-	// it regardless.
+	// verification is in totp.go.
 	//
 	// A non-empty secret alone is not an active factor: see
 	// TOTPConfirmedAt and HasActiveTOTP.
@@ -136,7 +134,7 @@ type User struct {
 	// RecoveryCodes are the single-use fallback codes for signing in
 	// without the authenticator app -- hashed with HashPassword, the same
 	// Argon2id treatment a password gets, never stored in clear.
-	// Generation and redemption (recoverycodes.go) are a later slice.
+	// Generation and redemption are in recoverycodes.go.
 	RecoveryCodes []RecoveryCode `json:"recoveryCodes,omitempty"`
 	// Passkeys are this account's registered WebAuthn credentials -- zero
 	// or more, unlike TOTPSecret's single shared secret. The ceremony
