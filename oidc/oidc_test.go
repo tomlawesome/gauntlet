@@ -301,14 +301,101 @@ func TestHTTPTimeoutBoundsAHungProvider(t *testing.T) {
 	}
 }
 
+// TestHTTPTimeoutBoundsAHungDiscoveryRequest is TestHTTPTimeoutBoundsAHungProvider's
+// sibling for New's own discovery fetch (the .well-known document), the
+// first of the three call sites defaultHTTPTimeout's doc comment names.
+// A provider that accepts the connection but never answers discovery
+// must fail New within the configured timeout, not hang whatever called
+// New (an application's own startup) indefinitely.
+func TestHTTPTimeoutBoundsAHungDiscoveryRequest(t *testing.T) {
+	fp := testutil.NewFakeProvider(t)
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	fp.Server.Config.Handler = wrapHangPath(fp.Server.Config.Handler, hang, "/.well-known/openid-configuration")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := New(context.Background(), Config{
+			IssuerURL:    fp.Issuer(),
+			ClientID:     "test-client",
+			ClientSecret: "test-secret",
+			RedirectURL:  "https://gauntlet.example/api/auth/oidc/callback",
+			HTTPTimeout:  100 * time.Millisecond,
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("New against a hung discovery endpoint returned no error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("New did not respect HTTPTimeout -- still blocked well past it")
+	}
+}
+
+// TestHTTPTimeoutBoundsAHungJWKSFetch is the third call site: go-oidc
+// fetches the provider's JWKS lazily, on first Verify, rather than
+// during discovery (VerifyIDToken's own doc comment) -- so this hangs
+// /jwks specifically, only once a token is ready to verify, and checks
+// VerifyIDToken itself respects the timeout rather than New having
+// already forced a fetch.
+func TestHTTPTimeoutBoundsAHungJWKSFetch(t *testing.T) {
+	fp := testutil.NewFakeProvider(t)
+	c, err := New(context.Background(), Config{
+		IssuerURL:    fp.Issuer(),
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://gauntlet.example/api/auth/oidc/callback",
+		HTTPTimeout:  100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	claims := fp.DefaultClaims("test-client", "nonce-1")
+	fp.NextIDToken = fp.SignRS256(t, claims)
+	tok, err := c.Exchange(context.Background(), "any-code", "any-verifier")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	fp.Server.Config.Handler = wrapHangPath(fp.Server.Config.Handler, hang, "/jwks")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.VerifyIDToken(context.Background(), tok)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("VerifyIDToken against a hung /jwks endpoint returned no error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("VerifyIDToken did not respect HTTPTimeout -- still blocked well past it")
+	}
+}
+
 // wrapHang makes every /token request block until hang is closed,
 // simulating a provider that's up (accepts the connection) but never
 // responds -- the scenario an HTTP client Timeout guards against, as
 // opposed to a connection-refused/DNS failure that fails fast on its own
 // regardless of any timeout setting.
 func wrapHang(next http.Handler, hang chan struct{}) http.Handler {
+	return wrapHangPath(next, hang, "/token")
+}
+
+// wrapHangPath generalizes wrapHang to an arbitrary path, so the
+// discovery- and JWKS-timeout tests above can hang their own endpoint
+// instead of /token.
+func wrapHangPath(next http.Handler, hang chan struct{}, path string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/token" {
+		if r.URL.Path == path {
 			<-hang
 		}
 		next.ServeHTTP(w, r)
