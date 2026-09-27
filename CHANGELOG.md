@@ -62,6 +62,23 @@ All notable changes to this project are documented in this file.
   second-factor door deadlock and its machine-readable auth-gate header
   (gitlab/dev 683704c4), generalized to a non-mikroview-branded name.
 
+- `persist.EncryptedFileBackend` (issue #18): AES-256-GCM with
+  HKDF-SHA256, a fresh random salt and nonce per save, and the store's
+  path as AAD, moved from mikroview's `internal/persist.EncryptedFileBackend`
+  so a hand-edited or tampered accounts file fails to open in both apps.
+  `NewEncryptedFileBackend(path, key)` takes raw key bytes (refusing one
+  shorter than `MinKeyBytes`, 32, mikroview's own floor) rather than a
+  key-file path or mikroview's `*retention.Key` -- reading the key file
+  stays the application's job. The on-disk envelope and HKDF info string
+  are unchanged from mikroview's, so an existing mikroview-written file
+  loads here byte-for-byte; proved with a fixture written by mikroview's
+  own code (`persist/testdata/mikroview-encrypted-fixture-v1.bin`,
+  generated at mikroview gitlab/dev commit
+  bb29f23eb5e9918fdd888a6d34640eb5b228a129). The plain single-file
+  mechanics it wraps are an unexported `fileBackend`: gauntlet has no
+  unencrypted file mode. Now the documented default for file-backed
+  storage (docs/design.md §1.7, docs/security-by-design.md).
+
 ### Changed
 
 - `gate` hardening beyond mikroview's own behaviour (issue #15): a

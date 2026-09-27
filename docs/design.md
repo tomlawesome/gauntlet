@@ -46,7 +46,8 @@ github.com/tomlawesome/gauntlet
 ├── totp.go  recoverycodes.go  resetcode.go  passkeys.go   (storage + stdlib logic)
 ├── id.go
 ├── persist/                    Backend, Snapshot, ErrConflict, VersionReader,
-│                               Open, SaveWithRetry, LoadDocument, Memory (tests)
+│                               Open, SaveWithRetry, LoadDocument, Memory (tests),
+│                               EncryptedFileBackend, MinKeyBytes (issue #18)
 ├── oidc/                       Config, Client, Identity, Policy, FlowState, StateCodec,
 │                               AllowIssuer, IsMultiTenantIssuer
 ├── gate/                       Config, Deps, Gate, Protect, Routes, RequireRole,
@@ -66,16 +67,21 @@ a fifth package that is *not* in v0.1.0 -- §1.6.
   tokens. Splitting it would mean exporting internals for the sake of
   tidiness. Mikroview's move is then an import rewrite
   (`auth "github.com/tomlawesome/gauntlet"`) rather than a refactor.
-- **`persist` holds the interface, not the backends.** Mikroview's
-  `FileBackend`, `PostgresBackend`, `EncryptedFileBackend` and the
-  write-behind wrapper serve six other stores there and stay in
-  mikroview. Go's structural typing means they already satisfy
-  gauntlet's interface (same four methods, same `VersionReader`
-  extension). The one thing that does not carry across a package
-  boundary is the sentinel `ErrConflict`, so mikroview's
-  `internal/persist` will assign `var ErrConflict = gpersist.ErrConflict`
-  when it moves -- one line, no data change. Gauntlet ships only a
-  `Memory` backend for its own tests and for apps' tests.
+- **`persist` holds the interface, plus one shared backend.** Mikroview's
+  `FileBackend`, `PostgresBackend` and the write-behind wrapper serve
+  six other stores there and stay in mikroview; Go's structural typing
+  means they already satisfy gauntlet's interface (same four methods,
+  same `VersionReader` extension) without moving. `EncryptedFileBackend`
+  is the one exception (issue #18): both apps need the same
+  authenticated-encryption file backend, so it moved into
+  `gauntlet/persist` rather than staying duplicated, and gauntlet takes
+  key bytes directly rather than a key file path -- reading the key
+  file stays each application's job (§1.7). The one thing that does not
+  carry across a package boundary is the sentinel `ErrConflict`, so
+  mikroview's `internal/persist` will assign `var ErrConflict =
+  gpersist.ErrConflict` when it moves -- one line, no data change.
+  Gauntlet also ships a `Memory` backend for its own tests and for
+  apps' tests.
 - **`gate` is in the module.** [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md)'s survey counted the handlers
   and middleware as auth code, and they are where most of the pitfalls
   live (§4). Leaving them out would make birdcage rewrite 2,000 lines
@@ -374,8 +380,13 @@ it. The data for all of this lives on `User`.
 - Persisted sessions. Mikroview's are in-memory by design (re-login after
   restart, no signing keys); persisting them would change behaviour for
   existing users, which [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) forbids.
-- A file or SQL backend. Mikroview keeps its own; birdcage writes ~120
-  lines (§2.2). `persist.Memory` is for tests.
+- A SQL backend. Mikroview keeps its own (`internal/persist.PostgresBackend`);
+  birdcage writes its own if it ever needs one. `persist.Memory` is for
+  tests.
+- Reading the key file itself. `persist.EncryptedFileBackend` (issue #18,
+  see below) takes raw key bytes; finding, mounting and reading that
+  file -- and deciding a store has no key and therefore no persistence
+  -- stays each application's own job.
 - The recovery-key store (`recovery.go`, mikroview's CLI gate) and the
   `-recover-admin-account` tooling. They are mikroview's operational
   surface; birdcage gets a `birdcage user` CLI over the same `Store`
@@ -501,9 +512,13 @@ Not done in this work; recorded so the API above is checked against it.
   `users.json`/`tokens.json` files) are unchanged, so a copy of real
   data loads without migration -- the acceptance test [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) assigns
   to #1202.
-- `persist.Backend`: mikroview's file, Postgres, encrypted and
-  write-behind backends satisfy gauntlet's interface as they stand.
-  One line: `ErrConflict = gpersist.ErrConflict`.
+- `persist.Backend`: mikroview's file, Postgres and write-behind
+  backends satisfy gauntlet's interface as they stand. One line:
+  `ErrConflict = gpersist.ErrConflict`. Its own
+  `internal/persist.EncryptedFileBackend` already moved to
+  `gauntlet/persist` (issue #18); mikroview's stores can switch to the
+  gauntlet one directly, passing `retention.Key`'s raw material rather
+  than the `*retention.Key` type.
 - Constructor renames: `OpenWithBackend(b)` → `OpenStore(b, Options{Log:
   logging.New("auth")})`; `OpenTokenStoreWithBackend(b)` →
   `OpenTokenStore(b, TokenOptions{Kinds: […, TokenKindDroplistPull]})`;
