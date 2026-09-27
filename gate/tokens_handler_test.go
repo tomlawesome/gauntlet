@@ -26,6 +26,30 @@ func TestTokensCreateRequiresAdmin(t *testing.T) {
 	}
 }
 
+func TestCreateTokenRejectsEmptyName(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: ""})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for an empty name, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateTokenRejectsInvalidKind(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Kind: "not-a-real-kind"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for an unregistered kind, got %d", resp.StatusCode)
+	}
+}
+
 func TestTokensListAdminOnly(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)

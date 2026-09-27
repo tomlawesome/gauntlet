@@ -57,6 +57,10 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrTokenDeviceRequired:   gauntlet.ErrTokenDeviceRequired.Error(),
 	gauntlet.ErrTokenDeviceNotAllowed: gauntlet.ErrTokenDeviceNotAllowed.Error(),
 	gauntlet.ErrTokenDeviceInvalid:    gauntlet.ErrTokenDeviceInvalid.Error(),
+	gauntlet.ErrUserNotFound:          "no such user",
+	gauntlet.ErrTOTPAlreadyActive:     gauntlet.ErrTOTPAlreadyActive.Error(), // already phrased for an end user
+	gauntlet.ErrNoPendingTOTP:         gauntlet.ErrNoPendingTOTP.Error(),     // already phrased for an end user
+	gauntlet.ErrNoLocalPassword:       gauntlet.ErrNoLocalPassword.Error(),   // already phrased for an end user
 }
 
 // writeAuthError translates err into a safe, user-facing message via

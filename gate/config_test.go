@@ -34,6 +34,7 @@ func validConfig() Config {
 		CookieName:      "session",
 		CSRFHeaderValue: "app",
 		ClientIP:        func(r *http.Request) string { return "1.2.3.4" },
+		ProductName:     "Test Product",
 	}
 }
 
@@ -51,6 +52,7 @@ func TestNewFailsClosedOnMissingConfig(t *testing.T) {
 		{"no cookie name", func() Config { c := validConfig(); c.CookieName = ""; return c }()},
 		{"no CSRF header value", func() Config { c := validConfig(); c.CSRFHeaderValue = ""; return c }()},
 		{"no ClientIP", func() Config { c := validConfig(); c.ClientIP = nil; return c }()},
+		{"no ProductName", func() Config { c := validConfig(); c.ProductName = ""; return c }()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

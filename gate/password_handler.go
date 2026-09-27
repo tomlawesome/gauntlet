@@ -86,7 +86,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if user.MustChangePassword {
 		detail += ", after an administrator's reset"
 	}
-	g.audit(user.Username, "user.password_changed", user.Username, detail)
+	g.audit(user.Username, "account.password_changed", user.Username, detail)
 
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)
