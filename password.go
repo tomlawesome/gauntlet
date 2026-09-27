@@ -31,6 +31,20 @@ const (
 	argon2SaltLen        = 16
 )
 
+// Upper bounds VerifyPassword accepts from a stored hash (issue #12).
+// A stored hash is data, not necessarily one HashPassword wrote -- a
+// corrupt document, or anyone with write access to the backend, can put
+// any cost into it -- so its declared cost is checked before any memory
+// is allocated. Four times today's cost leaves room to raise the
+// constants above without locking out existing hashes; raising them
+// past these bounds means raising the bounds in the same change.
+const (
+	maxVerifyMemory  = 4 * argon2Memory // KiB
+	maxVerifyTime    = 4 * argon2Time
+	maxVerifyKeyLen  = 64
+	maxVerifySaltLen = 64
+)
+
 // maxConcurrentHashes bounds how many Argon2id computations may run at
 // once, process-wide.
 //
@@ -92,7 +106,9 @@ func mustHashPassword(password string) string {
 // VerifyPassword reports whether password matches encodedHash (as
 // produced by HashPassword), comparing in constant time. A malformed
 // encodedHash is treated as a non-match, never an error -- there's
-// nothing a caller can usefully do differently.
+// nothing a caller can usefully do differently. So is one whose declared
+// cost or lengths are outside the maxVerify* bounds above: it is refused
+// before any hashing is done.
 func VerifyPassword(password, encodedHash string) bool {
 	parts := strings.Split(encodedHash, "$")
 	if len(parts) != 5 || parts[0] != "argon2id" {
@@ -107,17 +123,27 @@ func VerifyPassword(password, encodedHash string) bool {
 	if _, err := fmt.Sscanf(parts[2], "m=%d,t=%d,p=%d", &memory, &iterations, &threads); err != nil {
 		return false
 	}
+	if version != argon2.Version ||
+		iterations < 1 || iterations > maxVerifyTime ||
+		threads < 1 ||
+		memory < 8*uint32(threads) || memory > maxVerifyMemory {
+		return false
+	}
+	if len(parts[3]) > base64.RawStdEncoding.EncodedLen(maxVerifySaltLen) ||
+		len(parts[4]) > base64.RawStdEncoding.EncodedLen(maxVerifyKeyLen) {
+		return false
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[3])
-	if err != nil {
+	if err != nil || len(salt) == 0 {
 		return false
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
+	if err != nil || len(want) == 0 {
 		return false
 	}
 	release := acquireHashSlot()
+	defer release() // a panic inside argon2 must not keep the slot
 	got := argon2.IDKey([]byte(password), salt, iterations, memory, threads, uint32(len(want)))
-	release()
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 

@@ -44,3 +44,11 @@ All notable changes to this project are documented in this file.
   back its in-memory change on a backend write failure.
 - Runnable examples (`example_test.go`, `persist/example_test.go`) and a
   README "Using gauntlet" section for apps adopting the module.
+
+### Security
+
+- `VerifyPassword` now refuses, before hashing, a stored hash whose
+  cost settings or lengths are outside what this module writes (with
+  4x headroom). A corrupt or tampered hash could previously crash the
+  check and leave a hashing slot taken, so enough of them stalled every
+  later login, or force an unbounded Argon2id computation.

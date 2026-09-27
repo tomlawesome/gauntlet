@@ -20,29 +20,6 @@ import (
 
 // --- VerifyPassword ---
 
-// fuzzArgon2CostTooHigh reports whether encoded declares Argon2id cost
-// parameters above a fuzz-safe bound, using the same "m=,t=,p=" parse
-// VerifyPassword itself uses (password.go). VerifyPassword places no
-// upper bound on these attacker-influenced values before passing them to
-// argon2.IDKey -- see this fuzz run's report for #10 -- so a corpus entry
-// that declares a huge m or t would make the *fuzz process itself* OOM or
-// hang rather than exercising the parser. This skip only protects the
-// fuzz run; it does not change VerifyPassword's behaviour.
-func fuzzArgon2CostTooHigh(encoded string) bool {
-	parts := strings.Split(encoded, "$")
-	if len(parts) != 5 || parts[0] != "argon2id" {
-		return false
-	}
-	var memory, iterations uint32
-	var threads uint8
-	if _, err := fmt.Sscanf(parts[2], "m=%d,t=%d,p=%d", &memory, &iterations, &threads); err != nil {
-		return false
-	}
-	const maxMemoryKiB = 128 * 1024 // 128 MiB: 2x the real 64 MiB profile
-	const maxIterations = 10
-	return memory > maxMemoryKiB || iterations > maxIterations
-}
-
 // fuzzEncodeHash builds an encoded hash in HashPassword's format with a
 // caller-fixed salt, rather than HashPassword's own crypto/rand salt.
 // go's fuzzing engine re-executes this whole Fuzz function in separate
@@ -73,13 +50,13 @@ func FuzzVerifyPassword(f *testing.F) {
 	f.Add("", "")
 	f.Add("x", "argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA")
 	f.Add("password", "argon2id$v=19$m=999999999,t=999999999,p=255$c2FsdA$aGFzaA")
+	f.Add("x", "argon2id$v=19$m=65536,t=0,p=4$c2FsdA$aGFzaA") // #12: panicked before the bounds
+	f.Add("x", "argon2id$v=19$m=65536,t=3,p=0$c2FsdA$aGFzaA")
+	f.Add("x", "argon2id$v=19$m=65536,t=3,p=4$c2FsdA$")
 	f.Add("correct-password", knownHashes["correct-password"][:len(knownHashes["correct-password"])-1])
 	f.Add("unicode-🎉-pw", knownHashes["unicode-🎉-pw"])
 
 	f.Fuzz(func(t *testing.T, password, encoded string) {
-		if fuzzArgon2CostTooHigh(encoded) {
-			t.Skip("declared argon2 cost exceeds fuzz-safe bound")
-		}
 		got := VerifyPassword(password, encoded)
 		if got && knownHashes[password] != encoded {
 			t.Fatalf("VerifyPassword(%q, %q) = true, but that is not a hash this test produced for that password", password, encoded)
