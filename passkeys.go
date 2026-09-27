@@ -1,0 +1,470 @@
+// Copied from mikroview's internal/auth/passkeys.go, names kept
+// (docs/design.md §1.3). This file is the store-layer half only -- it
+// holds what a WebAuthn registration or login ceremony produced, and
+// never performs the ceremony itself. That work (talking to
+// go-webauthn, building the RP config, sealing session data into
+// cookies) is deferred to the gauntlet/passkey package (G8, per
+// docs/design.md §1.6); this package does not import go-webauthn and
+// must not gain a reason to. Passkey.Transports and Passkey.Flags below
+// reproduce the shapes of two go-webauthn types for exactly that
+// reason -- see their doc comments.
+//
+// One divergence from mikroview: RecordPasskeyAssertion, the two-step
+// "verify with go-webauthn, then record" method, is not carried over.
+// Only RecordPasskeyAssertionIfFresh is (docs/design.md §1.3) -- the
+// version mikroview added after finding that the two-step form let two
+// concurrent submissions of the same assertion both clear against the
+// same not-yet-advanced stored count and both win a session, the
+// passkey shape of totp.go's VerifyAndRecordTOTP race. There is no
+// reason for a new caller to have the unsafe two-step option. Likewise
+// not carried over: AnyPasskeysExist, mikroview's own start-up check for
+// whether its RelyingParty configuration can still serve existing
+// credentials -- an application concern once the passkey ceremony
+// exists (G8), not this package's.
+package gauntlet
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+const (
+	// maxPasskeysPerAccount bounds AddPasskey -- see
+	// ErrPasskeyLimitReached. Ten is generous for "a phone, a security
+	// key, a couple of spares" while still keeping the list an account
+	// owner has to review, to know what can sign in as them, from
+	// growing without bound.
+	maxPasskeysPerAccount = 10
+	// maxPasskeyNameLength bounds a passkey's display name in runes --
+	// generous for "YubiKey 5C NFC (backup)" while keeping the list
+	// readable and the stored document small.
+	maxPasskeyNameLength = 64
+)
+
+var (
+	// ErrPasskeyNotFound is returned by RenamePasskey, DeletePasskey and
+	// RecordPasskeyAssertionIfFresh when credID matches none of userID's
+	// stored passkeys -- covers both "never existed" and "already
+	// removed"; a caller has no legitimate reason to tell those apart.
+	ErrPasskeyNotFound = errors.New("gauntlet: no such passkey on this account")
+	// ErrPasskeyLimitReached is returned by AddPasskey once an account
+	// already holds maxPasskeysPerAccount credentials.
+	ErrPasskeyLimitReached = fmt.Errorf("gauntlet: an account may hold at most %d passkeys -- remove one before adding another", maxPasskeysPerAccount)
+	// ErrPasskeyDuplicate is returned by AddPasskey when the credential
+	// ID being added already exists on the account -- the same
+	// authenticator (or a replayed registration ceremony) offered
+	// twice. Checked before ErrPasskeyLimitReached, so a re-presented
+	// credential is never reported as "limit reached" merely because
+	// the account happens to be full.
+	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
+)
+
+// Passkey is one registered WebAuthn credential, held on User.Passkeys.
+type Passkey struct {
+	// ID is the credential ID the registration ceremony returned -- the
+	// value every later assertion presents to say "this is the same
+	// credential". JSON as base64, the standard encoding for a []byte
+	// field.
+	ID []byte `json:"id"`
+	// PublicKey is the COSE-encoded public key the authenticator proved
+	// it holds the matching private key for at registration -- needed to
+	// verify every later assertion's signature. Not secret the way a
+	// private key would be, but still credential material, not something
+	// an admin-facing account list should serialize -- see Store.List.
+	PublicKey []byte `json:"publicKey"`
+	// SignCount is the authenticator's signature counter as of the most
+	// recently accepted assertion (registration supplies the first
+	// value). Forward-only, advanced only through
+	// RecordPasskeyAssertionIfFresh below.
+	SignCount uint32 `json:"signCount"`
+	// Transports is what the authenticator reported it can be reached
+	// over (usb, nfc, ble, internal, hybrid, ...) at registration.
+	Transports []string `json:"transports,omitempty"`
+	// Flags carries the four authenticator flags a real WebAuthn
+	// credential exposes, reproduced here as PasskeyFlags so this
+	// package does not depend on a WebAuthn library for the data shape.
+	Flags PasskeyFlags `json:"flags"`
+	// RPID is the relying-party ID (essentially the registered domain)
+	// this credential was created against -- carried here so a later
+	// caller can compare it against the server's current RPID to decide
+	// whether the credential is stale.
+	RPID string `json:"rpId"`
+	// Name is the operator-chosen label shown in the passkey list --
+	// never empty once stored.
+	Name string `json:"name"`
+	// CreatedAt is when this credential was registered.
+	CreatedAt time.Time `json:"createdAt"`
+	// LastUsedAt is when this credential last completed a login -- zero
+	// until the first one.
+	LastUsedAt time.Time `json:"lastUsedAt,omitzero"`
+}
+
+// PasskeyFlags mirrors the four authenticator flags a WebAuthn
+// credential carries. Field names and JSON tags match mikroview's
+// internal/auth/passkeys.go exactly, so a caller's conversion to and
+// from a WebAuthn library type is a straight field-by-field copy, not a
+// translation.
+type PasskeyFlags struct {
+	UserPresent    bool `json:"userPresent"`
+	UserVerified   bool `json:"userVerified"`
+	BackupEligible bool `json:"backupEligible"`
+	BackupState    bool `json:"backupState"`
+}
+
+// normalisePasskeyName trims name, bounds it to maxPasskeyNameLength
+// runes, and falls back to a numbered default ("Passkey <n>") if what's
+// left is empty. Shared by AddPasskey and RenamePasskey so a stored
+// Name is never blank and the two rules can't drift apart. n is the
+// 1-based number to use in the fallback.
+func normalisePasskeyName(name string, n int) string {
+	trimmed := strings.TrimSpace(name)
+	// Bounded on runes, not bytes: a byte-index slice of a UTF-8 string
+	// can cut a multi-byte character in half and leave invalid UTF-8
+	// stored right in the accounts document.
+	if r := []rune(trimmed); len(r) > maxPasskeyNameLength {
+		trimmed = string(r[:maxPasskeyNameLength])
+	}
+	if trimmed == "" {
+		return fmt.Sprintf("Passkey %d", n)
+	}
+	return trimmed
+}
+
+// findPasskeyIndex returns the index of the passkey on u matching
+// credID by exact bytes, or -1. Shared by every method below that acts
+// on one specific credential.
+func findPasskeyIndex(u *User, credID []byte) int {
+	for i, pk := range u.Passkeys {
+		if bytes.Equal(pk.ID, credID) {
+			return i
+		}
+	}
+	return -1
+}
+
+// AddPasskey registers a new WebAuthn credential on userID's account --
+// the store-layer half of the registration ceremony an application's
+// own WebAuthn wiring drives (G8). pk arrives fully populated by the
+// caller.
+//
+// The credential ID is checked against every passkey already on the
+// account before the account's capacity is: ErrPasskeyDuplicate takes
+// priority over ErrPasskeyLimitReached, so an authenticator presented
+// twice against a full account is told it's already registered rather
+// than that the account is full. Name is normalised (see
+// normalisePasskeyName) before it's stored. Returns the stored Passkey,
+// with its normalised name, so the caller's response doesn't have to
+// re-derive it.
+func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
+	if !s.Persisted() {
+		return Passkey{}, ErrNotPersisted
+	}
+	s.reloadIfStale()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.byID[userID]
+	if !ok {
+		return Passkey{}, ErrUserNotFound
+	}
+
+	if findPasskeyIndex(u, pk.ID) != -1 {
+		return Passkey{}, ErrPasskeyDuplicate
+	}
+	if len(u.Passkeys) >= maxPasskeysPerAccount {
+		return Passkey{}, ErrPasskeyLimitReached
+	}
+
+	pk.Name = normalisePasskeyName(pk.Name, len(u.Passkeys)+1)
+
+	prevPasskeys := u.Passkeys
+	u.Passkeys = append(u.Passkeys, pk)
+	if err := s.tryPersistLocked(); err != nil {
+		// A registration that only exists in memory must not be
+		// reported as done: the caller is about to tell its user the
+		// passkey was added -- and, on a first factor, mint recovery
+		// codes and revoke other sessions around that claim -- and a
+		// restart before the next good write would drop the credential
+		// while nothing else remembers it ever existed.
+		u.Passkeys = prevPasskeys
+		return Passkey{}, fmt.Errorf("saving accounts: %w", err)
+	}
+	return pk, nil
+}
+
+// RenamePasskey changes the display name of one of userID's passkeys,
+// found by credential ID. No password check here -- a rename is
+// cosmetic and reversible, unlike DeletePasskey below. Runs the same
+// normalisation AddPasskey does, so a rename to blank or to something
+// absurdly long behaves the same way giving that name at registration
+// would have.
+func (s *Store) RenamePasskey(userID string, credID []byte, name string) (Passkey, error) {
+	if !s.Persisted() {
+		return Passkey{}, ErrNotPersisted
+	}
+	s.reloadIfStale()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.byID[userID]
+	if !ok {
+		return Passkey{}, ErrUserNotFound
+	}
+
+	idx := findPasskeyIndex(u, credID)
+	if idx == -1 {
+		return Passkey{}, ErrPasskeyNotFound
+	}
+
+	// A fresh backing array, not an in-place field write on
+	// u.Passkeys[idx]: Get hands out a shallow *User copy that shares
+	// this slice's backing array without holding the lock while the
+	// caller reads it, so mutating an element in place races that
+	// read. Here the element count doesn't change, only its contents,
+	// so every element is copied across including the one being
+	// renamed.
+	prevPasskeys := u.Passkeys
+	kept := make([]Passkey, len(u.Passkeys))
+	copy(kept, u.Passkeys)
+	kept[idx].Name = normalisePasskeyName(name, idx+1)
+	u.Passkeys = kept
+	if err := s.tryPersistLocked(); err != nil {
+		u.Passkeys = prevPasskeys
+		return Passkey{}, fmt.Errorf("saving accounts: %w", err)
+	}
+	return u.Passkeys[idx], nil
+}
+
+// DeletePasskey removes one of userID's passkeys, found by credential
+// ID, and -- in the same locked write -- clears RecoveryCodes too if
+// that removal leaves the account with no second factor of either kind
+// (User.HasSecondFactor). That conditional clear is the load-bearing
+// part of the shared-recovery-codes design (docs/design.md §1.6): codes
+// minted for a passkey must survive removing a *different* passkey, or
+// an authenticator app that isn't the last factor standing, and must
+// not survive the account actually going back to password-only.
+// Getting this wrong in either direction either orphans a still-active
+// factor's fallback, or leaves stale codes able to sign in to an
+// account that looks, from the outside, like it has no second factor at
+// all. ClearTOTP (totp.go) makes the same call from the other
+// direction.
+//
+// Returns the removed Passkey, so a caller building an audit entry
+// doesn't have to look it up separately beforehand.
+func (s *Store) DeletePasskey(userID string, credID []byte) (Passkey, error) {
+	if !s.Persisted() {
+		return Passkey{}, ErrNotPersisted
+	}
+	s.reloadIfStale()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.byID[userID]
+	if !ok {
+		return Passkey{}, ErrUserNotFound
+	}
+
+	idx := findPasskeyIndex(u, credID)
+	if idx == -1 {
+		return Passkey{}, ErrPasskeyNotFound
+	}
+
+	removed := u.Passkeys[idx]
+	prevPasskeys := u.Passkeys
+	prevCodes := u.RecoveryCodes
+
+	// A fresh backing array rather than the usual in-place
+	// append(s[:i], s[i+1:]...) splice: Get/List hand out a shallow
+	// *User copy that shares this slice's backing array, and splicing
+	// in place would shift elements underneath a copy taken a moment
+	// earlier by a concurrent reader.
+	kept := make([]Passkey, 0, len(u.Passkeys)-1)
+	kept = append(kept, u.Passkeys[:idx]...)
+	kept = append(kept, u.Passkeys[idx+1:]...)
+	u.Passkeys = kept
+
+	if !u.HasSecondFactor() {
+		u.RecoveryCodes = nil
+	}
+	if err := s.tryPersistLocked(); err != nil {
+		// A removal that only exists in memory must not be reported as
+		// done: the caller is about to tell its user this credential no
+		// longer works (and, if it was the last factor, that recovery
+		// codes are gone too), and a restart before the next good write
+		// would silently bring both back.
+		u.Passkeys = prevPasskeys
+		u.RecoveryCodes = prevCodes
+		return Passkey{}, fmt.Errorf("saving accounts: %w", err)
+	}
+	return removed, nil
+}
+
+// RecordPasskeyAssertionIfFresh advances userID's credID passkey after
+// a login assertion, and -- under the same lock acquisition -- decides
+// whether the login is accepted. See this file's package comment for
+// why this is the only entry point: a separate verify-then-record pair
+// left a race where two concurrent submissions of the same assertion
+// both won a session.
+//
+// SignCount is forward-only, the same stance VerifyAndRecordTOTP
+// (totp.go) takes for its counter: a value at or below what's already
+// stored is a no-op on the count, not an error, since many platform
+// authenticators always report 0 and that must never be treated as a
+// regression. LastUsedAt is set to now unconditionally, even on a
+// 0-to-0 call, so the passkey list can show "last used" for an
+// authenticator that never advances its counter at all.
+//
+// accepted is false when signCount is not fresh: nonzero and at or
+// below what's already stored -- the sign-count regression that flags
+// a possible cloned authenticator (docs/design.md §4, "Second
+// factors"). Zero is exempt: an authenticator that always reports 0
+// must not be locked out after its first login, so its logins carry no
+// counter-based replay protection here.
+//
+// The caller is expected to have already verified the assertion's
+// signature (an application's own WebAuthn wiring, G8) before calling
+// this -- this method only decides freshness and records the outcome.
+func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, signCount uint32, now time.Time) (accepted bool, err error) {
+	if !s.Persisted() {
+		return false, ErrNotPersisted
+	}
+	s.reloadIfStale()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.byID[userID]
+	if !ok {
+		return false, ErrUserNotFound
+	}
+
+	idx := findPasskeyIndex(u, credID)
+	if idx == -1 {
+		return false, ErrPasskeyNotFound
+	}
+
+	stored := u.Passkeys[idx].SignCount
+	if signCount != 0 && signCount <= stored {
+		return false, nil
+	}
+
+	// A fresh backing array, not in-place field writes on
+	// u.Passkeys[idx] -- see RenamePasskey's identical comment.
+	prevPasskeys := u.Passkeys
+	kept := make([]Passkey, len(u.Passkeys))
+	copy(kept, u.Passkeys)
+	if signCount > stored {
+		kept[idx].SignCount = signCount
+	}
+	kept[idx].LastUsedAt = now
+	u.Passkeys = kept
+	if err := s.tryPersistLocked(); err != nil {
+		u.Passkeys = prevPasskeys
+		return true, fmt.Errorf("saving accounts: %w", err)
+	}
+	return true, nil
+}
+
+// ClearPasskeys removes every passkey on userID's account in one write.
+// Same conditional recovery-code clear as DeletePasskey: codes survive
+// if the account still has an active authenticator-app factor, and are
+// cleared only if this was the account's last second factor.
+func (s *Store) ClearPasskeys(userID string) error {
+	if !s.Persisted() {
+		return ErrNotPersisted
+	}
+	s.reloadIfStale()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.byID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+
+	prevPasskeys := u.Passkeys
+	prevCodes := u.RecoveryCodes
+
+	u.Passkeys = nil
+	if !u.HasSecondFactor() {
+		u.RecoveryCodes = nil
+	}
+	if err := s.tryPersistLocked(); err != nil {
+		u.Passkeys = prevPasskeys
+		u.RecoveryCodes = prevCodes
+		return fmt.Errorf("saving accounts: %w", err)
+	}
+	return nil
+}
+
+// ClearAllSecondFactors removes every second factor on userID's
+// account -- the authenticator app and every passkey -- and the
+// recovery codes that backed them, all in the one write. Meant for an
+// "I've lost everything" recovery path: unlike DeletePasskey,
+// ClearPasskeys and ClearTOTP there is no factor-remaining check to make
+// here -- there is nothing left standing after this call, by
+// construction.
+func (s *Store) ClearAllSecondFactors(userID string) error {
+	if !s.Persisted() {
+		return ErrNotPersisted
+	}
+	s.reloadIfStale()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.byID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+
+	prevSecret := u.TOTPSecret
+	prevConfirmedAt := u.TOTPConfirmedAt
+	prevCounter := u.TOTPLastCounter
+	prevPasskeys := u.Passkeys
+	prevCodes := u.RecoveryCodes
+
+	u.TOTPSecret = ""
+	u.TOTPConfirmedAt = time.Time{}
+	u.TOTPLastCounter = 0
+	u.Passkeys = nil
+	u.RecoveryCodes = nil
+	if err := s.tryPersistLocked(); err != nil {
+		// A clear that only exists in memory must not be reported as
+		// done: the caller tells its operator every second factor is
+		// off, and a restart before the next good write would silently
+		// bring all of it back underneath that claim.
+		u.TOTPSecret = prevSecret
+		u.TOTPConfirmedAt = prevConfirmedAt
+		u.TOTPLastCounter = prevCounter
+		u.Passkeys = prevPasskeys
+		u.RecoveryCodes = prevCodes
+		return fmt.Errorf("saving accounts: %w", err)
+	}
+	return nil
+}
+
+// PasskeyCount reports how many passkeys userID's account holds. It
+// exists because List() blanks Passkeys entirely on every copy it
+// returns (see List's doc comment in store.go), so len(copy.Passkeys)
+// on a List() result always reads zero -- this is the guard against
+// that mistake for an admin-facing users list's passkey count. An
+// unknown user answers 0 rather than erroring, the same yes/no-gate
+// stance User.HasActiveTOTP takes.
+func (s *Store) PasskeyCount(userID string) int {
+	s.reloadIfStale()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u, ok := s.byID[userID]
+	if !ok {
+		return 0
+	}
+	return len(u.Passkeys)
+}

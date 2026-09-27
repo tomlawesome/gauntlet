@@ -190,6 +190,15 @@ def parse_floors(path):
                      f"{stripped!r}")
         key, _, value = body.partition(":")
         key = key.strip()
+        # A double-quoted key, e.g. "": 91, is how the module's own root
+        # package is written -- the coverage profile's package key is the
+        # directory holding each source file relative to the module root,
+        # and the root package's files (store.go, etc.) have no directory
+        # component, so that key is "". This parser is hand-rolled, not a
+        # real YAML reader (see the module docstring), so it has to be
+        # taught this the same way real YAML already understands it.
+        if len(key) >= 2 and key[0] == '"' and key[-1] == '"':
+            key = key[1:-1]
         value = value.strip()
         try:
             floors[key] = int(value)
