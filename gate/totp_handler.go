@@ -207,15 +207,14 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := g.now()
-	// Rate-limited on passwordRecheckLimiterKey, same bucket and
+	// Rate-limited on the per-account password re-check bucket (ReserveRecheck), same bucket and
 	// reasoning as handleChangePassword's current-password check: a
 	// guess at a live credential, made by a caller who -- unlike an
 	// ordinary login attempt -- already holds a session, which is
 	// exactly the position a stolen-cookie attacker is in. Without this,
 	// "turn off 2FA" would be an unthrottled password oracle sitting
 	// behind nothing but a cookie.
-	userKey := passwordRecheckLimiterKey(user.Username)
-	if !g.deps.Limiter.Reserve(userKey, now) {
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
@@ -223,7 +222,7 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		writeUnauthorized(w, "incorrect password")
 		return
 	}
-	g.deps.Limiter.Release(userKey, now)
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 	if err := g.deps.Users.ClearTOTP(user.ID); err != nil {
 		g.writeAuthError(w, r, err, http.StatusInternalServerError)

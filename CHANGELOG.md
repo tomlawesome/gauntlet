@@ -80,6 +80,19 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `LoginLimiter` keeps a real account's counter apart from the capped
+  map of addresses and unknown names (#19): keyed by account ID, never
+  evicted, so no flood of made-up names can reset it; and a login
+  lockout is saved on the account (`User.LoginLockedUntil`) as it begins
+  and clears, so a restart does not lift it. New `ReserveAccount`/
+  `ReleaseAccount`, `ReserveRecheck`/`ReleaseRecheck`, `SetLog` and the
+  `AccountLockouts` interface, which `*Store` implements; `gate` uses
+  them. The capped map drops every expired key before evicting a live
+  one.
+- `OpenStore` refuses an accounts document with more than one admin, as
+  it refuses one that will not parse; a reload that finds one is ignored
+  and logged.
+
 - `VerifyPassword` now refuses, before hashing, a stored hash whose
   cost settings or lengths are outside what this module writes (with
   4x headroom). A corrupt or tampered hash could previously crash the

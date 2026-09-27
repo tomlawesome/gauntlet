@@ -274,7 +274,7 @@ func TestTOTPConfirmAgainAfterAlreadyConfirmedRefused(t *testing.T) {
 }
 
 // TestTOTPDeleteRateLimited proves DELETE /api/auth/totp's password
-// re-check is throttled on passwordRecheckLimiterKey, not an unbounded
+// re-check is throttled on the per-account re-check bucket, not an unbounded
 // oracle behind a stolen session cookie.
 func TestTOTPDeleteRateLimited(t *testing.T) {
 	g, ts, _ := totpFixture(t)

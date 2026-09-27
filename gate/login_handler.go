@@ -8,16 +8,53 @@ import (
 	"github.com/tomlawesome/gauntlet"
 )
 
-// loginLimiterKeys returns the two LoginLimiter buckets a login attempt
-// is reserved against -- client IP and username, mirroring mikroview's
-// handleAuthLogin -- so that either a single source hammering many
-// usernames or many sources hammering one username is bounded.
-func (g *Gate) loginLimiterKeys(r *http.Request, username string) (ipKey, userKey string) {
-	return "ip:" + g.cfg.ClientIP(r), "user:" + strings.ToLower(username)
+// loginReservation is what one login attempt holds against the
+// LoginLimiter: the client address, and the account being tried -- by
+// its ID when the name matches an account, so its counter and its
+// persisted lockout are the account's own (#19), or by the typed name
+// when it matches none. Either a single source hammering many usernames
+// or many sources hammering one account is bounded, as in mikroview's
+// handleAuthLogin.
+type loginReservation struct {
+	ipKey     string
+	accountID string // set when the name matched an account
+	nameKey   string // set when it did not
 }
 
-// handleLogin is rate-limited independently by username and by source
-// IP (gauntlet.LoginLimiter) -- see loginLimiterKeys.
+// reserveLogin reserves one attempt on both buckets, or neither.
+// accountID is "" for a name that matches no account.
+func (g *Gate) reserveLogin(r *http.Request, accountID, username string, now time.Time) (loginReservation, bool) {
+	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID}
+	if accountID == "" {
+		res.nameKey = "user:" + strings.ToLower(username)
+	}
+	if !g.deps.Limiter.Reserve(res.ipKey, now) {
+		return res, false
+	}
+	var ok bool
+	if accountID != "" {
+		ok = g.deps.Limiter.ReserveAccount(g.deps.Users, accountID, now)
+	} else {
+		ok = g.deps.Limiter.Reserve(res.nameKey, now)
+	}
+	if !ok {
+		g.deps.Limiter.Release(res.ipKey, now)
+	}
+	return res, ok
+}
+
+// releaseLogin returns both reservations after a successful attempt.
+func (g *Gate) releaseLogin(res loginReservation, now time.Time) {
+	g.deps.Limiter.Release(res.ipKey, now)
+	if res.accountID != "" {
+		g.deps.Limiter.ReleaseAccount(g.deps.Users, res.accountID, now)
+	} else {
+		g.deps.Limiter.Release(res.nameKey, now)
+	}
+}
+
+// handleLogin is rate-limited independently by account and by source
+// IP (gauntlet.LoginLimiter) -- see reserveLogin.
 func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req credentialsRequest
 	if err := decodeJSONBody(w, r, &req); err != nil {
@@ -26,19 +63,18 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := g.now()
-	ipKey, userKey := g.loginLimiterKeys(r, req.Username)
+	var accountID string
+	if u, ok := g.deps.Users.ByUsername(req.Username); ok {
+		accountID = u.ID
+	}
 	// Reserve, not a read-then-record: the attempt is claimed *before*
 	// the ~100ms Argon2id verification, exactly as mikroview's own
 	// handleAuthLogin explains -- otherwise a simultaneous burst all
 	// pass a plain check before any of them finishes verifying, and a
 	// threshold of N admits as many concurrent attempts as an attacker
 	// cares to send.
-	if !g.deps.Limiter.Reserve(ipKey, now) {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
-		return
-	}
-	if !g.deps.Limiter.Reserve(userKey, now) {
-		g.deps.Limiter.Release(ipKey, now)
+	res, ok := g.reserveLogin(r, accountID, req.Username, now)
+	if !ok {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
@@ -55,8 +91,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only a success releases, so ordinary repeated logins never
 	// accumulate toward the threshold.
-	g.deps.Limiter.Release(ipKey, now)
-	g.deps.Limiter.Release(userKey, now)
+	g.releaseLogin(res, now)
 
 	// A correct password on an account holding an active second factor
 	// must NOT create a session -- see docs/design.md §1.6 and the
@@ -108,7 +143,7 @@ type loginFactorRequest struct {
 // ten recovery codes, burned the moment it works.
 //
 // Rate-limited on the exact same LoginLimiter buckets handleLogin itself
-// reserves against (ip: and user:, keyed the same way) -- a wrong code
+// reserves against (the address and the account) -- a wrong code
 // here is exactly as good a brute-force move as a wrong password there,
 // so both share one budget rather than each getting their own.
 func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
@@ -142,13 +177,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ipKey, userKey := g.loginLimiterKeys(r, user.Username)
-	if !g.deps.Limiter.Reserve(ipKey, now) {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
-		return
-	}
-	if !g.deps.Limiter.Reserve(userKey, now) {
-		g.deps.Limiter.Release(ipKey, now)
+	res, ok := g.reserveLogin(r, user.ID, user.Username, now)
+	if !ok {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
@@ -164,14 +194,14 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 			// VerifyAndRecordTOTP's own doc comment.
 			g.logWarn("advancing TOTP replay counter for " + user.Username + ": " + err.Error())
 		}
-		g.completeLoginFactor(w, user, ipKey, userKey, now)
+		g.completeLoginFactor(w, user, res, now)
 		return
 	}
 
 	if burned, err := g.deps.Users.BurnRecoveryCode(user.ID, req.Code, now); err != nil {
 		g.logError("recording spent recovery code for " + user.Username + ": " + err.Error())
 	} else if burned {
-		g.completeLoginFactor(w, user, ipKey, userKey, now)
+		g.completeLoginFactor(w, user, res, now)
 		return
 	}
 
@@ -186,9 +216,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // completeLoginFactor is handleLoginFactor's success path: release the
 // reservations a wrong guess would have kept, drop the now-spent pending
 // cookie, and issue the real session handleLogin withheld.
-func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, ipKey, userKey string, now time.Time) {
-	g.deps.Limiter.Release(ipKey, now)
-	g.deps.Limiter.Release(userKey, now)
+func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, res loginReservation, now time.Time) {
+	g.releaseLogin(res, now)
 	g.clearPendingLoginCookie(w)
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)

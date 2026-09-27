@@ -274,6 +274,27 @@ func TestLoginRateLimited(t *testing.T) {
 	}
 }
 
+// TestLoginLockoutSurvivesALimiterRestart: the lockout is written to the
+// account (#19), so a fresh limiter -- what a restarted process has --
+// still refuses the account, even with the right password.
+func TestLoginLockoutSurvivesALimiterRestart(t *testing.T) {
+	g := newTestGate(t)
+	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	ts := newTestServer(t, g)
+
+	registerAdmin(t, ts, "admin", "password123")
+	for i := 0; i < 2; i++ {
+		_ = postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "wrong"}).Body.Close()
+	}
+
+	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected the persisted lockout to refuse the account after a restart, got %d", resp.StatusCode)
+	}
+}
+
 func TestLogoutRevokesSession(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)

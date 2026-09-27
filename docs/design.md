@@ -207,9 +207,18 @@ func (s *TokenStore) List() []Token
 func (s *TokenStore) ByKind(kind TokenKind) []*Token
 
 func NewLoginLimiter(threshold int, window time.Duration) *LoginLimiter
-func (l *LoginLimiter) Reserve(key string, now time.Time) bool
+func (l *LoginLimiter) SetLog(log *slog.Logger)                    // eviction pressure, unsaved lockouts
+func (l *LoginLimiter) Reserve(key string, now time.Time) bool     // addresses, unknown names: capped map
 func (l *LoginLimiter) Release(key string, now time.Time)
 func (l *LoginLimiter) RecordFailure(key string, now time.Time)
+func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
+func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
+func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
+func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
+type AccountLockouts interface {                                    // *Store implements it
+    LoginLockedUntil(accountID string) time.Time
+    SetLoginLockedUntil(accountID string, until time.Time) error
+}
 
 func ValidateUsername(username string) error       // 1–64 runes, no control/format chars
 func ValidateLocalUsername(username string) error  // additionally: no "@"
@@ -228,6 +237,19 @@ Reasons for the three *new* items:
 - `Device` keeps its Go name and JSON tag (mikroview's data has it). Its
   meaning is "the one principal an ingest token is bound to": a router in
   mikroview, nothing yet in birdcage (§2.3).
+
+The limiter differs from mikroview's (#19, owner 2026-09-27). Mikroview
+keeps every counter in one map of 4096 caller-chosen keys, evicted
+oldest-first, so a flood of made-up names or addresses can evict the
+counter guarding a real account. Here a real account's counters are
+keyed by its ID in a map that is never evicted (bounded by the account
+count, entries leave only by expiring), and only addresses and unknown
+names share the capped map, which drops every expired key before
+evicting a live one and logs, once per window, when it has to. A login
+lockout is written to the account (`User.LoginLockedUntil`) so it
+survives a restart, but only as it begins and as it clears: one save per
+lockout episode, not one per wrong guess. Re-checking a signed-in
+caller's own password has its own per-account budget, memory only.
 
 Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
@@ -305,8 +327,9 @@ taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
 scoped to `/api/auth/oidc` with a 5-minute life; the 503 "setup required"
 state while `Count()==0` with only healthz, session, register and the
 OIDC pair reachable; identical 401 bodies for unknown and revoked tokens;
-login limiter keyed on both client IP and username with
-reserve-then-release so a correct password does not count as a failure.
+login limiter keyed on both client IP and the account (its ID when the
+name matches one, the name otherwise; §1.3) with reserve-then-release so
+a correct password does not count as a failure.
 The machine-readable 403 header that tells a frontend which door
 refused it is `X-Auth-Gate`, the same for every app -- mikroview's
 `X-Mikroview-Auth-Gate` is renamed, and its frontend follows when it
@@ -553,7 +576,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
-| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | kept; birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the username bucket still holds |
+| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save per lockout, not per guess); addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
 | `golang.org/x/crypto` advisories | all 30 entries are in `ssh`, `ssh/agent` or `openpgp`; none touches `argon2` | import only `argon2`; birdcage already carries this module at 0.57.0 |
 
 ### Second factors (data in v1; ceremonies per §1.6)
