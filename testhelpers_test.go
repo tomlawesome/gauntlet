@@ -100,3 +100,26 @@ func setSecondFactorForTest(t *testing.T, s *Store, userID string, now time.Time
 // constant of the same name -- the shape here only has to look like the
 // base32 a caller would actually store.
 const testTOTPSecret = "JBSWY3DPEHPK3PXP"
+
+// setTOTPForTest already exists in store_test.go (added alongside G2's
+// TestUnconfirmedTOTPSecretIsNotAnActiveFactor, ahead of this slice) --
+// reused here rather than redeclared.
+
+// testPasskey builds a fixture Passkey with a distinct credential ID --
+// id is folded into ID and PublicKey so every fixture in a test is
+// trivially distinguishable in a failure message.
+func testPasskey(id byte, name string) Passkey {
+	return Passkey{
+		ID:         []byte{id},
+		PublicKey:  []byte{id, id, id},
+		Transports: []string{"internal"},
+		Flags: PasskeyFlags{
+			UserPresent:    true,
+			UserVerified:   true,
+			BackupEligible: true,
+			BackupState:    true,
+		},
+		RPID: "gauntlet.example",
+		Name: name,
+	}
+}
