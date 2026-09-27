@@ -114,6 +114,17 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 // used with: a live session cookie and a bearer token neither re-check
 // that the account still exists on every request, so both would outlive
 // the deletion if not revoked here.
+//
+// Divergence from mikroview (gauntlet #15): when RevokeAllCreatedBy
+// fails, mikroview's handleAuthDeleteUser logs it and still answers 200
+// with tokensRevoked=0 -- indistinguishable, on the wire, from "this
+// user held no tokens". gate answers 500 instead, with a JSON body
+// naming the account and what went wrong, and records the failure in
+// the audit detail too. The account is already gone by this point and
+// there is no undoing the delete to retry the revoke, so a quiet 200
+// would be the only signal lost, not the fix: the tokens themselves are
+// exactly as revocable after a 500 as after a 200 -- an admin just has
+// to be told to go do it by hand.
 func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -140,13 +151,17 @@ func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	g.deps.Sessions.RevokeAllForUser(user.ID)
 	revokedTokens, err := g.deps.Tokens.RevokeAllCreatedBy(user.ID)
 	if err != nil {
-		// The account deletion already committed, so this request still
-		// succeeds -- but a failed revoke here leaves this user's tokens
-		// durably intact, so it is said out loud server-side rather than
-		// reported as done: the response reflects what actually
-		// persisted (zero), not what was attempted.
+		// The account deletion already committed and cannot be undone
+		// from here, but that is not a reason to answer as if this part
+		// succeeded too -- see this handler's doc comment.
 		g.logError(fmt.Sprintf("revoking tokens for deleted user %s: %v", user.ID, err))
-		revokedTokens = 0
+		g.audit(auditActor(r), "user.delete", user.Username,
+			fmt.Sprintf("role=%s tokensRevoked=0 tokenRevokeFailed=true", user.Role))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"username": user.Username,
+			"error":    "the account was deleted, but its API tokens could not be revoked -- check the server log and revoke them by hand",
+		})
+		return
 	}
 
 	g.audit(auditActor(r), "user.delete", user.Username,

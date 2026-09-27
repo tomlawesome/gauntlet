@@ -6,6 +6,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -179,13 +180,17 @@ type errBoomType struct{}
 
 func (errBoomType) Error() string { return "boom: backend unavailable" }
 
-// TestDeleteUserLogsWhenTokenRevocationFails covers handleDeleteUser's
-// R6 path: the account deletion has already committed by the time the
-// token revocation is attempted, so a failure there must not turn a
-// successful delete into an error response -- it is said out loud
-// server-side (Gate.logError) and the response reports zero tokens
-// revoked, not what was attempted.
-func TestDeleteUserLogsWhenTokenRevocationFails(t *testing.T) {
+// TestDeleteUserReportsWhenTokenRevocationFails covers handleDeleteUser's
+// fail-closed path (gauntlet #15): the account deletion has already
+// committed by the time the token revocation is attempted, and there is
+// no undoing that to retry, but a failure revoking this user's tokens
+// must not be answered as a plain success either -- the deleted user's
+// tokens are still live, and a 200 with tokensRevoked=0 would read
+// exactly like "this user held none". It is said out loud server-side
+// (Gate.logError), recorded in the audit detail, and reported to the
+// caller as a 500 with a JSON body naming the account and what still
+// needs doing by hand.
+func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	client := registerAdmin(t, ts, "admin", "password123")
@@ -218,7 +223,58 @@ func TestDeleteUserLogsWhenTokenRevocationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected the delete itself to still succeed, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected a failed token revocation to answer 500, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding the error body: %v", err)
+	}
+	if body["error"] == nil || body["error"] == "" {
+		t.Errorf("expected a non-empty error field, got %+v", body)
+	}
+	if body["username"] != "operator" {
+		t.Errorf("expected the response to still name the deleted account, got %+v", body)
+	}
+	// The account deletion itself is not undone by the token-revoke
+	// failure -- it already committed before RevokeAllCreatedBy was
+	// even called.
+	if _, ok := g.deps.Users.Get(operator.ID); ok {
+		t.Error("expected the account to still be deleted despite the 500")
+	}
+}
+
+// TestJSONBodyRejectsUnknownField covers every handler's request struct
+// against a body carrying one extra field alongside its real ones --
+// gauntlet #15's DisallowUnknownFields divergence from mikroview (this
+// file's own header comment).
+func TestJSONBodyRejectsUnknownField(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password123")
+
+	resp := postRawBody(t, client, ts.URL+"/api/auth/users",
+		`{"username":"operator","password":"password456","role":"user","admin":true}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for an unrecognized field", resp.StatusCode)
+	}
+	if _, ok := g.deps.Users.ByUsername("operator"); ok {
+		t.Error("expected the account to not have been created")
+	}
+}
+
+// TestJSONBodyRejectsTrailingData covers the other half of the same
+// divergence: a body that decodes cleanly but then has more after it.
+func TestJSONBodyRejectsTrailingData(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", "password123")
+
+	resp := postRawBody(t, &http.Client{}, ts.URL+"/api/auth/login",
+		`{"username":"admin","password":"password123"}{"trailing":true}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for trailing data after the JSON value", resp.StatusCode)
 	}
 }
