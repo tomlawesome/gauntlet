@@ -43,6 +43,9 @@ every line ran, not that every condition was tried both ways.
 - A refusal is behaviour: fail-closed paths (`persist.Open` on an
   unparseable document, an unknown token kind, a refused OIDC issuer) get
   negative tests, not only the happy path.
+- Every mutating `Store` and `TokenStore` method has a test that makes
+  the backend write fail and checks both the returned error and that the
+  in-memory change was rolled back.
 - A check that fails and passes again on unchanged code is a flake:
   record it in `docs/flakes.md` (create it on first use), and file an
   issue on its third sighting.

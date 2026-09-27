@@ -755,3 +755,52 @@ func TestUnconfirmedTOTPSecretIsNotAnActiveFactor(t *testing.T) {
 		t.Error("a confirmed secret does not count as an active factor")
 	}
 }
+
+// Not from mikroview (the audit for #1 found no direct test of it): an
+// unknown username must still pay for one Argon2id verification against
+// dummyHash, or response time tells an attacker which usernames exist.
+// Proved without timing: with every hash slot taken, an unknown-user
+// Authenticate has to wait for a slot rather than return at once.
+func TestAuthenticateUnknownUserStillRunsTheHash(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Register("admin", "correct-password", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < maxConcurrentHashes; i++ {
+		select {
+		case hashSlots <- struct{}{}:
+		case <-time.After(30 * time.Second):
+			t.Fatal("could not take every hash slot")
+		}
+	}
+	drained := 0
+	defer func() {
+		for ; drained < maxConcurrentHashes; drained++ {
+			<-hashSlots
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Authenticate("nobody", "anything", time.Now())
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("unknown-user Authenticate returned (%v) without waiting for a hash slot: it skipped the dummy hash", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	<-hashSlots
+	drained++
+	select {
+	case err := <-done:
+		if err != ErrInvalidCredentials {
+			t.Errorf("got %v, want ErrInvalidCredentials", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("unknown-user Authenticate never finished once a slot was free")
+	}
+}
