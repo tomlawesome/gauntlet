@@ -8,10 +8,12 @@ import (
 )
 
 // Ported from mikroview's internal/persist/open_test.go, against Memory
-// only (gauntlet ships no file backend, so
-// TestOpenLoadFailureFailsClosed there -- which denies filesystem
-// permissions to force Load itself to fail -- has no Memory analogue and
-// is not ported).
+// for everything except the Load-failure case: gauntlet ships no file
+// backend, so there is no filesystem-permissions trick to force Load
+// itself to fail, as mikroview's TestOpenLoadFailureFailsClosed does.
+// TestOpenLoadFailureFailsClosed here instead reuses failingBackend
+// (document_test.go), which returns an arbitrary error from Load
+// directly.
 
 // TestOpenAbsentDocumentIsFreshStart pins the "never written" half of
 // Open's policy: no document at all is a normal first boot, not a
@@ -74,6 +76,43 @@ func TestOpenDecodeFailureFailsClosed(t *testing.T) {
 	}
 	if !errors.Is(err, startupErr.Err) {
 		t.Error("StartupError does not unwrap to the decode error")
+	}
+}
+
+// TestOpenLoadFailureFailsClosed covers Open's other fail-closed path:
+// the backend's Load itself errors (a read failure, not a decode
+// failure). Open must report a *StartupError and must never call decode
+// against a document it couldn't even read.
+func TestOpenLoadFailureFailsClosed(t *testing.T) {
+	b := &failingBackend{err: errors.New("disk on fire")}
+
+	called := false
+	_, existed, err := Open(context.Background(), b, "the test store", func(data []byte) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Open returned a nil error for a Load failure, want fail-closed")
+	}
+	if existed {
+		t.Error("existed=true on a Load failure, want false")
+	}
+	if called {
+		t.Error("decode was called for a document that could not even be loaded")
+	}
+
+	var startupErr *StartupError
+	if !errors.As(err, &startupErr) {
+		t.Fatalf("err is not a *StartupError: %v (%T)", err, err)
+	}
+	if startupErr.Store != "the test store" {
+		t.Errorf("StartupError.Store = %q, want %q", startupErr.Store, "the test store")
+	}
+	if startupErr.Location != b.Describe() {
+		t.Errorf("StartupError.Location = %q, want %q", startupErr.Location, b.Describe())
+	}
+	if !errors.Is(err, startupErr.Err) {
+		t.Error("StartupError does not unwrap to the Load error")
 	}
 }
 
