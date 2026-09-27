@@ -26,8 +26,10 @@ GitLab-first and the mirror lags by days (owner, 2026-09-27).
 ## Delivery host
 
 GitLab-first: `gitlab.tomlawson.io/ai/gauntlet` (project id 56), default
-branch `dev`. A GitHub mirror is created only once v0.1.0 tags (owner,
-2026-09-26) -- no mirror, no GitHub issues or pull requests before that.
+branch `dev`. v0.1.0 is released on GitLab only, so integration is tested
+with mikroview and then birdcage before anything is public; the GitHub
+mirror arrives with v0.2.0 (#17, owner 2026-09-27) -- no mirror, no GitHub
+issues or pull requests before that.
 
 ## Closing issues from commits
 
