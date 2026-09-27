@@ -804,3 +804,67 @@ func TestAuthenticateUnknownUserStillRunsTheHash(t *testing.T) {
 		t.Fatal("unknown-user Authenticate never finished once a slot was free")
 	}
 }
+
+// TestWritesPickUpAnotherProcessesAccountFirst covers the three write
+// paths that did not reload before saving. A whole-document save is
+// built from what this process holds; a store that has not refreshed
+// since a CLI tool (a second process) added an account writes that
+// account away again. Every other write method reloads first, so these
+// must too.
+func TestWritesPickUpAnotherProcessesAccountFirst(t *testing.T) {
+	cases := []struct {
+		name  string
+		write func(t *testing.T, server *Store)
+	}{
+		{"CreateUser", func(t *testing.T, server *Store) {
+			if _, err := server.CreateUser("dave", "password789", RoleUser, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SetPassword", func(t *testing.T, server *Store) {
+			if err := server.SetPassword("admin", "new-password", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"TransferAdmin", func(t *testing.T, server *Store) {
+			if _, _, err := server.TransferAdmin("bob", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := persist.NewMemory()
+			server, err := OpenStore(m, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = server.Register("admin", "password123", time.Now())
+			if _, err := server.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+
+			// A second, independent Store against the same backend --
+			// standing in for a CLI tool's own separate process.
+			cli, err := OpenStore(m, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := cli.CreateUser("carol", "password456", RoleUser, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.write(t, server)
+
+			// Read what is on disk through a fresh store, not the one
+			// that just wrote: the question is what survived the save.
+			after, err := OpenStore(m, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := after.ByUsername("carol"); !ok {
+				t.Errorf("%s wrote over the account another process had just added", tc.name)
+			}
+		})
+	}
+}

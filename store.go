@@ -409,6 +409,10 @@ func (s *Store) CreateUser(username, password string, role Role, now time.Time) 
 	if role != RoleUser && role != RoleViewer {
 		return nil, ErrInvalidRole
 	}
+	// Same as Register: a whole-document save is built from what this
+	// process holds, so pick up another process's writes first or the
+	// save writes over them.
+	s.reloadIfStale()
 	return s.createLocked(username, password, role, now, nil)
 }
 
@@ -473,6 +477,10 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 // admin beforehand, is the check-then-act race behind the Appsmith
 // duplicate-admin and open-webui zero-admin bugs.
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) {
+	// Like every other write here: the save below is a whole-document
+	// rewrite of what this process holds.
+	s.reloadIfStale()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1054,6 +1062,10 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	if err != nil {
 		return err
 	}
+
+	// After the hash, before the lock, like every other write here: the
+	// save below is a whole-document rewrite of what this process holds.
+	s.reloadIfStale()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
