@@ -7,6 +7,7 @@
 package gate
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 )
@@ -44,16 +45,18 @@ func TestPendingLoginCodecRefusesTamperedCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered := []byte(encoded)
-	// Flip one character well past the nonce prefix -- anywhere in the
-	// ciphertext or its auth tag fails GCM's Open.
-	i := len(tampered) - 1
-	if tampered[i] == 'A' {
-		tampered[i] = 'B'
-	} else {
-		tampered[i] = 'A'
+	// Flip one bit of the sealed bytes themselves, in the auth tag at the
+	// end. Editing the last base64 character instead only sometimes
+	// changes a byte: its low bits are padding a non-strict decoder
+	// ignores, so that version passed about 1 run in 150 with nothing
+	// tampered at all.
+	sealed, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := pendingLoginCodec.decode(string(tampered), time.Now()); err != errPendingLoginInvalid {
+	sealed[len(sealed)-1] ^= 0x01
+	tampered := base64.RawURLEncoding.EncodeToString(sealed)
+	if _, err := pendingLoginCodec.decode(tampered, time.Now()); err != errPendingLoginInvalid {
 		t.Errorf("got %v, want errPendingLoginInvalid", err)
 	}
 }
