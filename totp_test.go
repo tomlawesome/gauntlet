@@ -680,3 +680,33 @@ func TestTOTPWritesLeaveStateWhenPersistFails(t *testing.T) {
 		}
 	})
 }
+
+// TestVerifyAndRecordTOTPIgnoresAPendingSecret: a secret that was set
+// by SetPendingTOTPSecret and never confirmed is not a factor, and a
+// code computed from it must not pass the sign-in step -- an account
+// with a passkey (so it reaches that step) and an abandoned enrolment
+// would otherwise have a second factor its owner never activated.
+func TestVerifyAndRecordTOTPIgnoresAPendingSecret(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	u, err := s.Register("admin", "password123", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := GenerateTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPendingTOTPSecret(u.ID, EncodeTOTPSecret(secret)); err != nil {
+		t.Fatal(err)
+	}
+
+	code := GenerateTOTPCode(secret, totpCounter(now, totpStep))
+	if ok, err := s.VerifyAndRecordTOTP(u.ID, code, now); err != nil || ok {
+		t.Errorf("VerifyAndRecordTOTP with only a pending secret: ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+	stored, _ := s.Get(u.ID)
+	if stored.TOTPLastCounter != 0 {
+		t.Errorf("TOTPLastCounter = %d after a refused code, want 0", stored.TOTPLastCounter)
+	}
+}

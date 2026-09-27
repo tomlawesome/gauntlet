@@ -415,6 +415,15 @@ func (s *Store) VerifyAndRecordTOTP(userID, code string, now time.Time) (ok bool
 	if !found {
 		return false, ErrUserNotFound
 	}
+	// Only a confirmed secret is a factor. A pending one (set by
+	// SetPendingTOTPSecret, never confirmed) is mid-setup, and an
+	// account that reaches this step through another factor -- a
+	// passkey -- must not be let in by a code from it: whoever started
+	// that enrolment and stopped would hold a working second factor the
+	// account owner never activated.
+	if !u.HasActiveTOTP() {
+		return false, nil
+	}
 
 	matched, matchedOK := VerifyTOTP(u.TOTPSecret, code, now, u.TOTPLastCounter)
 	if !matchedOK {
