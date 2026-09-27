@@ -29,9 +29,13 @@
 # 86.98%; internal/testutil at 0.0% -- the fake OIDC provider, exercised
 # through oidc's own tests but carrying none of its own, the "known debt
 # ... packages with no test files" case this script already expects.
+# Re-measured on G3 (issue #4), which adds sessions, tokens and the login
+# limiter to the root package: still 91.8%, rounding down to the same
+# 91 floor. internal/evict is new in G3, at 100.0%.
 
 floors:
   persist: 90
   "": 91 # the root `gauntlet` package -- see the note above on the empty key
   oidc: 86
   internal/testutil: 0
+  internal/evict: 100

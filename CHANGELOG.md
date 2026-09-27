@@ -19,3 +19,14 @@ All notable changes to this project are documented in this file.
   Depends on `github.com/coreos/go-oidc/v3` and `golang.org/x/oauth2`
   (owner-approved, AGENTS.md). `internal/testutil` carries the fake OIDC
   provider used by its tests, and by `gate`'s once that package exists.
+- Sessions, API tokens and the login limiter, copied from mikroview's
+  `internal/auth/{session,token,ratelimit}.go` with names kept.
+  `SessionStore` has one constructor, `NewSessionStore(ttl,
+  maxLifetime)`, replacing mikroview's two; sessions stay in-memory only
+  (docs/design.md §1.7). `TokenStore`'s `TokenOptions.Kinds` replaces
+  mikroview's hard-coded `TokenKind.Valid()`: a token whose kind is not
+  registered is kept in its document and logged, but never
+  authenticates, so a caller-specific kind (mikroview's `droplist-pull`)
+  can be registered without a change here. `internal/evict` (`Batch`,
+  `Target`, `DownTo`) bounds `LoginLimiter`'s tracked-key map, copied
+  from mikroview's `internal/evict`.
