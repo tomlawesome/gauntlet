@@ -14,6 +14,18 @@ stages:
 default:
   tags: [light]
   interruptible: true
+  # Every job starts in a fresh container, and four of the five build a
+  # pinned tool from source on top of fetching the module graph. Both
+  # caches live under the project dir (GOMODCACHE/GOCACHE below) so one
+  # cache entry carries them between jobs and pipelines; the key turns
+  # over when a dependency or a tool version changes.
+  cache:
+    key:
+      files:
+        - go.sum
+        - .gitlab-ci.yml
+    paths:
+      - .gocache/
   # Infra-only retry: a job that fails because the runner died or hung
   # gets one automatic second try; a job that fails because the code is
   # wrong does not, and never silently passes on a retry.
@@ -27,6 +39,8 @@ default:
 
 variables:
   GOFLAGS: "-mod=readonly"
+  GOMODCACHE: $CI_PROJECT_DIR/.gocache/mod
+  GOCACHE: $CI_PROJECT_DIR/.gocache/build
   # Same image, same tag, as birdcage's GOLANG_IMAGE -- routed through the
   # group's dependency proxy the same way, so this pull is cached on the
   # GitLab server rather than re-crossing the WAN on every job (refs

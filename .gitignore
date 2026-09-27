@@ -12,3 +12,7 @@ coverage.out
 # Python bytecode from running the guard scripts locally.
 __pycache__/
 *.pyc
+
+# CI's Go module and build caches (GOMODCACHE/GOCACHE in .gitlab-ci.yml),
+# in case a job is reproduced locally with the same variables.
+/.gocache/
