@@ -6,9 +6,10 @@ import (
 )
 
 // sessionResponse is GET /api/auth/session's body -- mikroview's own
-// shape (internal/api/auth.go), narrowed to what this stage's Store
-// already supports: no SSO/passkey session fields, since neither OIDC
-// nor the passkey ceremony are wired into gate yet.
+// shape (internal/api/auth.go) minus the passkey fields, which join
+// when passkey/ lands. The booleans below are emitted even when false,
+// as mikroview emits them: its frontend reads them as answers, not as
+// keys that may be absent.
 type sessionResponse struct {
 	SetupRequired bool   `json:"setupRequired"`
 	SSOAvailable  bool   `json:"ssoAvailable"`
@@ -17,26 +18,22 @@ type sessionResponse struct {
 	Role          string `json:"role,omitempty"`
 	// HasLocalPassword mirrors gauntlet.User.LocalPassword: false only
 	// for an SSO-provisioned account that has never set one.
-	HasLocalPassword bool `json:"hasLocalPassword,omitempty"`
+	HasLocalPassword bool `json:"hasLocalPassword"`
 	// SSOConnected reports whether this account is linked to an OIDC
-	// identity -- read directly off the user's OIDCSubject rather than
-	// through an OIDC-specific call, since gate has no OIDC handlers
-	// yet to have established the link with.
-	SSOConnected bool `json:"ssoConnected,omitempty"`
+	// identity, read directly off the user's OIDCSubject.
+	SSOConnected bool `json:"ssoConnected"`
 	// MustChangePassword mirrors the door Protect enforces in
 	// protect.go.
-	MustChangePassword bool `json:"mustChangePassword,omitempty"`
+	MustChangePassword bool `json:"mustChangePassword"`
 	// MustEnrolSecondFactor is true only when Config.RequireSecondFactor
 	// is set and this account has none yet -- it names the actual door
 	// Protect enforces, not gauntlet.User.HasSecondFactor's raw fact,
 	// so a deployment that leaves RequireSecondFactor off never tells a
 	// client to enrol something nothing is checking for.
-	MustEnrolSecondFactor bool `json:"mustEnrolSecondFactor,omitempty"`
-	// HasTOTP reports gauntlet.User.HasActiveTOTP -- data gate can read
-	// today even though enrolling one is a stage-2 route (TOTP
-	// confirmation only sets the fields this reads; it does not need
-	// gate's own TOTP handlers to exist).
-	HasTOTP bool `json:"hasTOTP,omitempty"`
+	MustEnrolSecondFactor bool `json:"mustEnrolSecondFactor"`
+	// HasTOTP reports gauntlet.User.HasActiveTOTP: a confirmed
+	// authenticator-app factor, not a pending enrolment.
+	HasTOTP bool `json:"hasTOTP"`
 	// SignedInSince is the current session's IssuedAt, RFC3339 --
 	// present only while Authenticated.
 	SignedInSince string `json:"signedInSince,omitempty"`

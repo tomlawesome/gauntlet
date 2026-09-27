@@ -449,3 +449,27 @@ func TestRequireSecondFactorOffAllowsAccountWithNone(t *testing.T) {
 		t.Errorf("expected RequireSecondFactor=false to let the account through, got %d", resp.StatusCode)
 	}
 }
+
+// TestAuthSessionEmitsFalseBooleans: mikroview's frontend reads
+// hasLocalPassword and its siblings as answers, so a false one has to
+// be on the wire as false, not left out.
+func TestAuthSessionEmitsFalseBooleans(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password123")
+
+	resp, err := client.Get(ts.URL + "/api/auth/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"hasLocalPassword", "ssoConnected", "mustChangePassword", "mustEnrolSecondFactor", "hasTOTP"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("session response is missing %q; a false value must still be emitted", key)
+		}
+	}
+}
