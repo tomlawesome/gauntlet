@@ -227,3 +227,28 @@ func TestMemoryLoadReturnsACopy(t *testing.T) {
 		t.Errorf("mutating a returned Snapshot changed the stored document: %q", again.Payload)
 	}
 }
+
+func TestMemoryCloseIsSafe(t *testing.T) {
+	b := NewMemory()
+	if err := b.Close(); err != nil {
+		t.Errorf("Close on an unused Memory: %v", err)
+	}
+	if _, err := b.Save(context.Background(), []byte(`{}`), 0); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Errorf("Close after use: %v", err)
+	}
+}
+
+// A write that expects a document to already exist, against a store
+// that was never written, is a conflict -- not a special "someone else
+// deleted it" case. TestMemoryStaleWriteIsRefused above covers the
+// stale-version-on-an-existing-document half of Save's checks; this
+// covers the other half.
+func TestMemorySaveExpectingExistingDocumentThatWasNeverWritten(t *testing.T) {
+	b := NewMemory()
+	if _, err := b.Save(context.Background(), []byte(`{}`), 42); err != ErrConflict {
+		t.Errorf("Save with expect=42 against a never-written store: got %v, want ErrConflict", err)
+	}
+}
