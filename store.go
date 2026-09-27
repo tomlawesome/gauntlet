@@ -855,6 +855,8 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 	prevTOTPLastCounter := u.TOTPLastCounter
 	prevRecoveryCodes := u.RecoveryCodes
 	prevPasskeys := u.Passkeys
+	prevResetHash, prevResetExpiresAt := u.ResetCodeHash, u.ResetCodeExpiresAt
+	prevMustChange := u.MustChangePassword
 	_, hadIndexEntry := s.oidcIndex[key]
 
 	u.OIDCIssuer = issuer
@@ -869,6 +871,15 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 		u.TOTPLastCounter = 0
 		u.RecoveryCodes = nil
 		u.Passkeys = nil
+		// An outstanding admin reset dies with the password it was a
+		// stand-in for: Authenticate treats a live code as the
+		// password, so left here it would keep a local way in open for
+		// up to 24 hours after the account became SSO-only, and the
+		// forced-change flag would then door an account with nothing
+		// to change.
+		u.ResetCodeHash = ""
+		u.ResetCodeExpiresAt = time.Time{}
+		u.MustChangePassword = false
 	}
 	// Invalidates every session issued before this point, including in
 	// another process -- the account's credentials just changed
@@ -894,6 +905,8 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 		u.TOTPLastCounter = prevTOTPLastCounter
 		u.RecoveryCodes = prevRecoveryCodes
 		u.Passkeys = prevPasskeys
+		u.ResetCodeHash, u.ResetCodeExpiresAt = prevResetHash, prevResetExpiresAt
+		u.MustChangePassword = prevMustChange
 		if hadIndexEntry {
 			s.oidcIndex[key] = userID
 		} else {

@@ -4,6 +4,7 @@
 package gauntlet
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -258,5 +259,37 @@ func TestLinkOIDCIdentityLeavesThePasswordWorkingWhenPersistFails(t *testing.T) 
 	}
 	if !got.LocalPassword() {
 		t.Error("expected the account to still report as locally recoverable after a failed link")
+	}
+}
+
+// TestLinkingKillsAnOutstandingResetCode: an admin reset code stands in
+// for the password (Authenticate redeems it as one), so converting a
+// non-admin to SSO-only has to end it with the password -- otherwise
+// whoever saw the code keeps a local way into an account that is meant
+// to have none, and the forced-change flag then doors an account with
+// no password to change.
+func TestLinkingKillsAnOutstandingResetCode(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	_, _ = s.Register("alice", "password123", now)
+	u, _ := s.CreateUser("bob", "password456", RoleUser, now)
+	_, code, err := s.IssueResetCode(u.ID, now)
+	if err != nil {
+		t.Fatalf("IssueResetCode: %v", err)
+	}
+
+	if err := s.LinkOIDCIdentity(u.ID, "https://idp.example", "subject-1", now); err != nil {
+		t.Fatalf("LinkOIDCIdentity: %v", err)
+	}
+
+	if _, err := s.Authenticate("bob", code, now); !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("Authenticate with the reset code after linking = %v, want %v", err, ErrInvalidCredentials)
+	}
+	linked, _ := s.Get(u.ID)
+	if linked.ResetCodeHash != "" || !linked.ResetCodeExpiresAt.IsZero() {
+		t.Error("the reset code survived linking")
+	}
+	if linked.MustChangePassword {
+		t.Error("a linked non-admin is still flagged to change a password it no longer has")
 	}
 }
