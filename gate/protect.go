@@ -274,6 +274,22 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			writeUnauthorized(w, "unauthorized")
 			return
 		}
+		// docs/design.md §4's fail-closed list: "Unknown role → denied
+		// everything." Checked here, before either door below, because
+		// neither of them is what this is about -- a role no
+		// CreateUser/Register call could ever produce only reaches a
+		// live User via a document written outside this package (see
+		// Role.rank's own doc comment), and the right response to that
+		// is refusing the request outright, not routing it through
+		// checks that assume a real tier. Without this, an ordinary
+		// session-gated route with no RequireRole wrapper at all -- most
+		// of an application's own routes -- let such an account straight
+		// through; only a RequireRole-wrapped route ever consulted
+		// Role.AtLeast (issue #14).
+		if !isKnownRole(user.Role) {
+			http.Error(w, "account role is not recognized", http.StatusForbidden)
+			return
+		}
 		if user.MustChangePassword && path != changePasswordPath {
 			writeForcedAuthGate(w, authGateMustChangePassword, "an administrator reset this account -- set a new password before going any further")
 			return
@@ -306,6 +322,22 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 	})
 }
 
+// isKnownRole reports whether r is one of the three roles this package
+// actually assigns (docs/design.md §4's fail-closed list names the
+// alternative: "Unknown role → denied everything"). gauntlet.Role.rank
+// already ranks an unrecognized value at 0, below every named tier, but
+// that alone only matters to a caller that compares ranks -- Protect's
+// own check (above) and RequireRole's panic guard (below) are what
+// actually act on it.
+func isKnownRole(r gauntlet.Role) bool {
+	switch r {
+	case gauntlet.RoleAdmin, gauntlet.RoleUser, gauntlet.RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
 // RequireRole wraps next so that a caller below min is refused with 403.
 // It reads the caller from context (UserFromContext), so it belongs
 // after Protect in a handler chain, never before: Protect is what puts
@@ -314,7 +346,17 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 // request, none of which ever populate it -- is refused the same way a
 // real caller below min is, since gauntlet.Role's own AtLeast ranks a
 // nil/unknown role below every named tier.
+//
+// Panics immediately -- at construction, not on the first request -- if
+// min itself is not a recognized role: a caller passing anything else is
+// a wiring mistake in this package's own route table, the same class of
+// error a typo'd route pattern would be, and the way to catch it is
+// failing loudly at startup rather than quietly admitting nothing to a
+// route no request could ever satisfy (issue #14).
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler {
+	if !isKnownRole(min) {
+		panic("gate: RequireRole given an unrecognized role: " + string(min))
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := UserFromContext(r)
 		if user == nil || !user.Role.AtLeast(min) {
