@@ -306,6 +306,10 @@ state while `Count()==0` with only healthz, session, register and the
 OIDC pair reachable; identical 401 bodies for unknown and revoked tokens;
 login limiter keyed on both client IP and username with
 reserve-then-release so a correct password does not count as a failure.
+The machine-readable 403 header that tells a frontend which door
+refused it is `X-Auth-Gate`, the same for every app -- mikroview's
+`X-Mikroview-Auth-Gate` is renamed, and its frontend follows when it
+moves onto the module (owner, 2026-09-27, on #7).
 
 Hard-coded strings that are mikroview's today and must not leak into
 birdcage: the product name in TOTP enrolment URIs and passkey display
