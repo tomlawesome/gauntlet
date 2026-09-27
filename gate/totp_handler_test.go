@@ -5,7 +5,10 @@
 package gate
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"github.com/tomlawesome/gauntlet/persist"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -443,4 +446,76 @@ func totpListedHasTOTP(t *testing.T, admin *http.Client, ts *httptest.Server, us
 	}
 	t.Fatalf("no row for %q in the user list", username)
 	return false
+}
+
+// budgetBackend saves normally until armed, then fails every save. It
+// lets a test make the second of two saves in one request fail.
+type budgetBackend struct {
+	inner persist.Backend
+	left  int // saves allowed once armed; -1 = unarmed
+}
+
+func (b *budgetBackend) Load(ctx context.Context) (persist.Snapshot, error) {
+	return b.inner.Load(ctx)
+}
+
+func (b *budgetBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
+	if b.left >= 0 {
+		if b.left == 0 {
+			return 0, errors.New("budget backend: save refused")
+		}
+		b.left--
+	}
+	return b.inner.Save(ctx, payload, expect)
+}
+
+func (b *budgetBackend) Close() error     { return b.inner.Close() }
+func (b *budgetBackend) Describe() string { return "budget test backend" }
+
+// TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail: the
+// factor is committed by ConfirmTOTP's own save, so a session from
+// before it must end even when the recovery-code save that follows
+// fails -- otherwise a session stolen before 2FA was on keeps working
+// against an account that now claims to require it.
+func TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail(t *testing.T) {
+	g := newTestGate(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Users = users
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
+		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
+
+	deviceA := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	deviceB := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	enrolled := totpEnrol(t, deviceA, ts)
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+
+	// One save left: ConfirmTOTP lands, the recovery-code save does not.
+	backend.left = 1
+	resp := postJSON(t, deviceA, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500", resp.StatusCode)
+	}
+	if u, ok := g.deps.Users.Get(totpBobID(t, g)); !ok || !u.HasActiveTOTP() {
+		t.Fatal("the fixture did not leave the factor active; the test proves nothing")
+	}
+
+	r, err := deviceB.Get(ts.URL + "/api/protected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("deviceB's pre-factor session got %d after the factor was confirmed, want 401", r.StatusCode)
+	}
 }

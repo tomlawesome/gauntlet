@@ -147,6 +147,14 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The factor is committed from here on, so every other session ends
+	// here too -- before the recovery codes, whose failure below must
+	// not leave a session from before the factor alive against an
+	// account that now requires it.
+	g.deps.Sessions.RevokeAllForUser(user.ID)
+	sess := g.deps.Sessions.Create(user.ID, now)
+	g.setSessionCookie(w, sess.ID)
+
 	// Mint-if-absent, atomically under the store's lock: a snapshot
 	// taken before this call and a separate unconditional
 	// GenerateRecoveryCodes would leave a window where two concurrent
@@ -171,10 +179,6 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	} else {
 		detail += "; recovery codes issued"
 	}
-
-	g.deps.Sessions.RevokeAllForUser(user.ID)
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
 
 	g.audit(user.Username, "account.totp_enabled", user.Username, detail)
 
