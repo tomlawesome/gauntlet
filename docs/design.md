@@ -212,7 +212,7 @@ func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error)
 func (s *TokenStore) List() []Token
 func (s *TokenStore) ByKind(kind TokenKind) []*Token
 
-func NewLoginLimiter(threshold int, window time.Duration) *LoginLimiter
+func NewLoginLimiter(threshold int, window time.Duration) (*LoginLimiter, error) // ErrLimiterConfig on threshold < 1 or window <= 0
 func (l *LoginLimiter) SetLog(log *slog.Logger)                    // eviction pressure, unsaved lockouts
 func (l *LoginLimiter) Reserve(key string, now time.Time) bool     // addresses, unknown names: capped map
 func (l *LoginLimiter) Release(key string, now time.Time)

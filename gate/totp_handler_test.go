@@ -278,7 +278,7 @@ func TestTOTPConfirmAgainAfterAlreadyConfirmedRefused(t *testing.T) {
 // oracle behind a stolen session cookie.
 func TestTOTPDeleteRateLimited(t *testing.T) {
 	g, ts, _ := totpFixture(t)
-	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	totpEnrolAndConfirm(t, bob, ts)
 

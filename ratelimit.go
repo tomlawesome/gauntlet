@@ -5,6 +5,7 @@
 package gauntlet
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -64,14 +65,31 @@ const (
 	recheckBucket = "password-recheck:"
 )
 
-func NewLoginLimiter(threshold int, window time.Duration) *LoginLimiter {
+// ErrLimiterConfig is returned by NewLoginLimiter for a threshold or
+// window that cannot run: threshold below one would block every login
+// before a first attempt, and a non-positive window never lets a
+// blocked key age out.
+var ErrLimiterConfig = errors.New("gauntlet: login limiter: invalid configuration")
+
+// NewLoginLimiter returns a LoginLimiter that allows threshold attempts
+// per window, for each key or account it is asked about. It refuses a
+// threshold under one or a non-positive window: either would leave
+// every login refused before a first attempt is made, with nothing
+// persisted or logged to say why -- see ErrLimiterConfig.
+func NewLoginLimiter(threshold int, window time.Duration) (*LoginLimiter, error) {
+	if threshold < 1 {
+		return nil, fmt.Errorf("%w: threshold must be a whole number of one or more, got %d", ErrLimiterConfig, threshold)
+	}
+	if window <= 0 {
+		return nil, fmt.Errorf("%w: window must be positive, got %v", ErrLimiterConfig, window)
+	}
 	return &LoginLimiter{
 		attempts:    make(map[string][]time.Time),
 		accounts:    make(map[string][]time.Time),
 		wantLockout: make(map[string]time.Time),
 		threshold:   threshold,
 		window:      window,
-	}
+	}, nil
 }
 
 // SetLog sets where the limiter reports eviction pressure on the capped

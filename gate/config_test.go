@@ -26,7 +26,7 @@ func validDeps(t *testing.T) Deps {
 		Users:    users,
 		Sessions: gauntlet.NewSessionStore(time.Hour, 0),
 		Tokens:   tokens,
-		Limiter:  gauntlet.NewLoginLimiter(5, time.Minute),
+		Limiter:  mustNewLoginLimiter(t, 5, time.Minute),
 	}
 }
 

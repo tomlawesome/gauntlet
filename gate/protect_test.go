@@ -259,7 +259,7 @@ func TestLoginRejectsUnknownUsernameWithIdenticalBody(t *testing.T) {
 
 func TestLoginRateLimited(t *testing.T) {
 	g := newTestGate(t)
-	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	ts := newTestServer(t, g)
 
 	registerAdmin(t, ts, "admin", "password123")
@@ -279,7 +279,7 @@ func TestLoginRateLimited(t *testing.T) {
 // still refuses the account, even with the right password.
 func TestLoginLockoutSurvivesALimiterRestart(t *testing.T) {
 	g := newTestGate(t)
-	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	ts := newTestServer(t, g)
 
 	registerAdmin(t, ts, "admin", "password123")
@@ -287,7 +287,7 @@ func TestLoginLockoutSurvivesALimiterRestart(t *testing.T) {
 		_ = postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "wrong"}).Body.Close()
 	}
 
-	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {

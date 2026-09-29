@@ -97,6 +97,9 @@ All notable changes to this project are documented in this file.
 - `oidc.New` now refuses a multi-tenant issuer itself (the same check
   `oidc.AllowIssuer` runs), instead of relying solely on a caller's own
   startup check.
+- `NewLoginLimiter` now returns an error (`ErrLimiterConfig`) for a
+  threshold under one or a non-positive window, instead of building a
+  limiter that refuses every login from the start.
 
 ### Security
 

@@ -45,7 +45,7 @@ func TestAccountLockoutSurvivesARestart(t *testing.T) {
 	s, id := openLockoutStore(t, m)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	l := NewLoginLimiter(3, time.Minute)
+	l := mustNewLoginLimiter(t, 3, time.Minute)
 	for i := range 3 {
 		if !l.ReserveAccount(s, id, now) {
 			t.Fatalf("attempt %d refused under the threshold", i+1)
@@ -59,7 +59,7 @@ func TestAccountLockoutSurvivesARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := NewLoginLimiter(3, time.Minute)
+	fresh := mustNewLoginLimiter(t, 3, time.Minute)
 	if fresh.ReserveAccount(restarted, id, now.Add(30*time.Second)) {
 		t.Fatal("a restart lifted the lockout: a fresh limiter admitted an attempt inside the window")
 	}
@@ -87,7 +87,7 @@ func TestFarLockoutIsHonouredForOneWindowOnly(t *testing.T) {
 	if err := s.SetLoginLockedUntil(id, now.Add(365*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	l := NewLoginLimiter(5, window)
+	l := mustNewLoginLimiter(t, 5, window)
 	if l.ReserveAccount(s, id, now) {
 		t.Fatal("a lockout further out than one window was not honoured at all, want it clamped")
 	}
@@ -111,7 +111,7 @@ func TestFarLockoutIsHonouredForOneWindowOnly(t *testing.T) {
 	if err := s2.SetLoginLockedUntil(id2, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	shrunk := NewLoginLimiter(5, window)
+	shrunk := mustNewLoginLimiter(t, 5, window)
 	if shrunk.ReserveAccount(s2, id2, now) {
 		t.Fatal("a lockout from a shrunk window was not honoured at all, want it clamped")
 	}
@@ -130,7 +130,7 @@ func TestAddressFloodDoesNotDisplaceAnAccountCounter(t *testing.T) {
 
 	s, id := openLockoutStore(t, persist.NewMemory())
 	now := time.Now()
-	l := NewLoginLimiter(2, time.Hour)
+	l := mustNewLoginLimiter(t, 2, time.Hour)
 	l.ReserveAccount(s, id, now)
 	l.ReserveAccount(s, id, now)
 
@@ -157,7 +157,7 @@ func TestLockoutWritesAreBoundedPerEpisode(t *testing.T) {
 	before := b.saves.Load()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	l := NewLoginLimiter(5, time.Minute)
+	l := mustNewLoginLimiter(t, 5, time.Minute)
 	for i := range 500 {
 		l.ReserveAccount(s, id, now.Add(time.Duration(i)*time.Millisecond))
 	}
@@ -187,7 +187,7 @@ func TestLockoutWritesAreBoundedPerEpisode(t *testing.T) {
 func TestSuccessClearsTheLockoutItsOwnAttemptRecorded(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	now := time.Now()
-	l := NewLoginLimiter(2, time.Minute)
+	l := mustNewLoginLimiter(t, 2, time.Minute)
 
 	l.ReserveAccount(s, id, now) // fails, stays counted
 	if !l.ReserveAccount(s, id, now) {
@@ -210,7 +210,7 @@ func TestRecheckCounterIsNotDisplacedByAFlood(t *testing.T) {
 	defer func() { maxLoginLimiterKeys = orig }()
 
 	now := time.Now()
-	l := NewLoginLimiter(2, time.Hour)
+	l := mustNewLoginLimiter(t, 2, time.Hour)
 	l.ReserveRecheck("u1", now)
 	l.ReserveRecheck("u1", now)
 	for i := range 20 * maxLoginLimiterKeys {
@@ -232,7 +232,7 @@ func TestCappedMapDropsEveryExpiredKeyUnderPressure(t *testing.T) {
 	defer func() { maxLoginLimiterKeys = orig }()
 
 	start := time.Now()
-	l := NewLoginLimiter(2, time.Minute)
+	l := mustNewLoginLimiter(t, 2, time.Minute)
 	for i := range maxLoginLimiterKeys - 1 {
 		l.Reserve(fmt.Sprintf("ip:old-%d", i), start)
 	}
@@ -253,7 +253,7 @@ func TestEvictionPressureIsLoggedOncePerWindow(t *testing.T) {
 
 	var logs bytes.Buffer
 	now := time.Now()
-	l := NewLoginLimiter(5, time.Minute)
+	l := mustNewLoginLimiter(t, 5, time.Minute)
 	l.SetLog(slog.New(slog.NewTextHandler(&logs, nil)))
 	for i := range 50 * maxLoginLimiterKeys {
 		l.Reserve(fmt.Sprintf("ip:%d", i), now)

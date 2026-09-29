@@ -2,13 +2,53 @@
 package gauntlet
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 )
 
+// A threshold below one blocks every login before a first attempt is
+// even made, and a non-positive window never lets a blocked key age
+// out -- both are refused rather than silently misconfiguring the
+// limiter.
+func TestNewLoginLimiterRefusesAnUnusableConfiguration(t *testing.T) {
+	tests := []struct {
+		name      string
+		threshold int
+		window    time.Duration
+	}{
+		{name: "zero threshold", threshold: 0, window: time.Minute},
+		{name: "negative threshold", threshold: -1, window: time.Minute},
+		{name: "zero window", threshold: 1, window: 0},
+		{name: "negative window", threshold: 1, window: -time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewLoginLimiter(tc.threshold, tc.window); !errors.Is(err, ErrLimiterConfig) {
+				t.Errorf("err = %v, want ErrLimiterConfig", err)
+			}
+		})
+	}
+}
+
+func TestNewLoginLimiterAcceptsAUsableConfiguration(t *testing.T) {
+	if _, err := NewLoginLimiter(1, time.Second); err != nil {
+		t.Fatalf("NewLoginLimiter(1, time.Second): %v", err)
+	}
+}
+
+func mustNewLoginLimiter(t *testing.T, threshold int, window time.Duration) *LoginLimiter {
+	t.Helper()
+	l, err := NewLoginLimiter(threshold, window)
+	if err != nil {
+		t.Fatalf("NewLoginLimiter: %v", err)
+	}
+	return l
+}
+
 func TestLoginLimiterAllowsUnderThreshold(t *testing.T) {
-	l := NewLoginLimiter(3, time.Minute)
+	l := mustNewLoginLimiter(t, 3, time.Minute)
 	now := time.Now()
 
 	for i := 0; i < 2; i++ {
@@ -23,7 +63,7 @@ func TestLoginLimiterAllowsUnderThreshold(t *testing.T) {
 }
 
 func TestLoginLimiterBlocksAtThreshold(t *testing.T) {
-	l := NewLoginLimiter(3, time.Minute)
+	l := mustNewLoginLimiter(t, 3, time.Minute)
 	now := time.Now()
 
 	for i := 0; i < 3; i++ {
@@ -35,7 +75,7 @@ func TestLoginLimiterBlocksAtThreshold(t *testing.T) {
 }
 
 func TestLoginLimiterWindowExpires(t *testing.T) {
-	l := NewLoginLimiter(2, time.Minute)
+	l := mustNewLoginLimiter(t, 2, time.Minute)
 	now := time.Now()
 
 	l.RecordFailure("alice", now)
@@ -50,7 +90,7 @@ func TestLoginLimiterWindowExpires(t *testing.T) {
 }
 
 func TestLoginLimiterKeysAreIndependent(t *testing.T) {
-	l := NewLoginLimiter(1, time.Minute)
+	l := mustNewLoginLimiter(t, 1, time.Minute)
 	now := time.Now()
 
 	l.RecordFailure("alice", now)
@@ -67,7 +107,7 @@ func TestLoginLimiterEvictsOldestKeyOverCap(t *testing.T) {
 	maxLoginLimiterKeys = 2
 	defer func() { maxLoginLimiterKeys = orig }()
 
-	l := NewLoginLimiter(10, time.Hour)
+	l := mustNewLoginLimiter(t, 10, time.Hour)
 	now := time.Now()
 
 	l.RecordFailure("alice", now)
@@ -91,7 +131,7 @@ func TestLoginLimiterCapIsEnforcedOnTheReservePath(t *testing.T) {
 	maxLoginLimiterKeys = 64
 	defer func() { maxLoginLimiterKeys = orig }()
 
-	l := NewLoginLimiter(5, time.Hour)
+	l := mustNewLoginLimiter(t, 5, time.Hour)
 	now := time.Now()
 
 	// Each distinct key stands in for a distinct source address. Reserve
@@ -112,7 +152,7 @@ func TestLoginLimiterCapIsEnforcedOnTheReservePath(t *testing.T) {
 // forever, and it is also what would make the cap check above dead
 // code.
 func TestLoginLimiterForgetsKeysWhoseAttemptsAgedOut(t *testing.T) {
-	l := NewLoginLimiter(5, time.Minute)
+	l := mustNewLoginLimiter(t, 5, time.Minute)
 	now := time.Now()
 
 	l.RecordFailure("198.51.100.7", now)
@@ -130,7 +170,7 @@ func TestLoginLimiterForgetsKeysWhoseAttemptsAgedOut(t *testing.T) {
 // A successful login releases its reservation; the last one out must not
 // leave an empty entry behind either.
 func TestLoginLimiterReleaseOfTheLastAttemptForgetsTheKey(t *testing.T) {
-	l := NewLoginLimiter(5, time.Hour)
+	l := mustNewLoginLimiter(t, 5, time.Hour)
 	now := time.Now()
 
 	if !l.Reserve("alice", now) {
