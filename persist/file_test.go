@@ -2,10 +2,13 @@ package persist
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
 )
 
 // Direct tests of the unexported fileBackend -- exercised only through
@@ -67,6 +70,100 @@ func TestFileBackendStaleWriteIsConflict(t *testing.T) {
 	}
 	if _, err := b.Save(context.Background(), []byte(`{"n":3}`), v1); err != ErrConflict {
 		t.Errorf("stale write: got %v, want ErrConflict", err)
+	}
+}
+
+// Save holds path+".lock" for its whole read-compare-write, so a
+// concurrent Save (here, another goroutine, but flock does not
+// distinguish that from another process) must wait for it rather than
+// running in between the read and the rename.
+func TestFileBackendSaveWaitsForTheLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	b := newFileBackend(path)
+	v1, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	held, err := lockFile(path + ".lock")
+	if err != nil {
+		t.Fatalf("lockFile: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := b.Save(context.Background(), []byte(`{"n":2}`), v1); err != nil {
+			t.Errorf("Save while lock was held then released: %v", err)
+		}
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("Save returned before the held lock was released")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := held.unlock(); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Save did not return after the lock was released")
+	}
+}
+
+// Without the lock, two processes (simulated here as goroutines against
+// the same fileBackend) can each Load, both pass the version compare in
+// Save, and both rename -- the later one silently discards the earlier
+// write. With the lock, at most one Save against any given expect value
+// can ever succeed.
+func TestFileBackendConcurrentSavesNeverBothWinTheSameVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	b := newFileBackend(path)
+	if _, err := b.Save(context.Background(), []byte(`{"n":0}`), 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	const goroutines = 8
+	const iterations = 50
+
+	var mu sync.Mutex
+	winsByExpect := make(map[int64]int)
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				snap, err := b.Load(context.Background())
+				if err != nil {
+					t.Errorf("Load: %v", err)
+					return
+				}
+				payload := []byte(fmt.Sprintf(`{"g":%d,"i":%d}`, g, i))
+				if _, err := b.Save(context.Background(), payload, snap.Version); err == nil {
+					mu.Lock()
+					winsByExpect[snap.Version]++
+					mu.Unlock()
+				} else if err != ErrConflict {
+					t.Errorf("Save: unexpected error %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for expect, wins := range winsByExpect {
+		if wins > 1 {
+			t.Fatalf("expect version %d won %d saves, want at most 1 -- a later rename silently discarded an earlier write", expect, wins)
+		}
 	}
 }
 

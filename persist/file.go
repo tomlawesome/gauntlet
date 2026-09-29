@@ -15,6 +15,11 @@ import (
 // handling. Ported from mikroview's internal/persist.FileBackend
 // (issue #18), including the file mode and the write-temp-then-rename
 // dance, so wrapping it in encryption is not itself a behaviour change.
+//
+// Save also maintains a sidecar lock file alongside path, named path
+// with ".lock" appended -- worth knowing if the store is ever backed up
+// or moved by hand, though it holds no data of its own and is fine to
+// leave behind.
 type fileBackend struct {
 	path string
 }
@@ -121,6 +126,20 @@ func (b *fileBackend) Save(ctx context.Context, payload []byte, expect int64) (i
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return 0, err
 	}
+
+	// The read-compare-write below has to run as one unit across
+	// processes, not just goroutines in this one: a CLI tool and a
+	// running server (persist.go's Backend doc) can each read the same
+	// current version, both pass the compare, and both rename -- the
+	// later rename wins and the earlier write is gone with no error to
+	// anyone. A sidecar lock file, not a lock on b.path itself, because
+	// b.path is replaced wholesale by rename below, so a lock tied to its
+	// inode would not be seen by the next writer that opens the new one.
+	lock, err := lockFile(b.path + ".lock")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = lock.unlock() }()
 
 	current, readErr := os.ReadFile(b.path)
 	switch {

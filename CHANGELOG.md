@@ -122,3 +122,8 @@ All notable changes to this project are documented in this file.
   one window past the attempt that would have set it -- impossible under
   a sane clock, and previously locked the account out indefinitely if the
   host clock had ever run ahead when the lockout was written.
+- The file backend's `Save` now holds an exclusive lock on a sidecar
+  `.lock` file for its whole read-compare-write, so a CLI tool and a
+  running server saving against the same version can no longer both pass
+  the check and both "succeed", with the later one silently discarding
+  the earlier write.
