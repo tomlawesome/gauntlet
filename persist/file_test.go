@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -203,14 +204,24 @@ func TestFileBackendSaveWriteFailure(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.json")
+	// The lock file exists before the directory is made read-only, so
+	// Save gets past taking the lock and fails where this test means it
+	// to: creating the temp file for the write itself.
+	if err := os.WriteFile(path+".lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(dir, 0o500); err != nil { // read+execute, no write
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	b := newFileBackend(path)
-	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 0); err == nil {
+	_, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
+	if err == nil {
 		t.Fatal("Save into a read-only directory succeeded, want the underlying write error")
+	}
+	if !strings.Contains(err.Error(), ".tmp-") {
+		t.Fatalf("Save failed before reaching the write: %v", err)
 	}
 }
 
@@ -316,5 +327,22 @@ func TestContentVersionNeverReturnsZero(t *testing.T) {
 	}
 	if v := contentVersion([]byte("some content")); v == 0 {
 		t.Error("contentVersion(...) == 0 for nonempty input")
+	}
+}
+
+// Save takes the sidecar lock before anything else, so a lock file it
+// cannot open is a Save that fails before the version check, not one
+// that quietly runs unlocked.
+func TestFileBackendSaveFailsWhenTheLockFileCannotBeOpened(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	if err := os.Mkdir(path+".lock", 0o700); err != nil { // a directory cannot be opened O_RDWR
+		t.Fatal(err)
+	}
+	b := newFileBackend(path)
+	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 0); err == nil {
+		t.Fatal("Save with an unopenable lock file succeeded, want an error")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Save wrote the document without holding the lock: stat err = %v", err)
 	}
 }
