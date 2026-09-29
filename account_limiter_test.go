@@ -68,11 +68,13 @@ func TestAccountLockoutSurvivesARestart(t *testing.T) {
 	}
 }
 
-// A persisted lockout can never end more than one window after the
-// attempt that set it (ratelimit.go writes entries[0].Add(l.window)). A
-// value further out than that cannot have come from this limiter under a
-// sane clock -- most likely the host clock was ahead when it was
-// written -- and must not be honoured: nothing else would ever clear it.
+// A persisted lockout never ends more than one window after the attempt
+// that set it (ratelimit.go writes entries[0].Add(l.window)). A value
+// further out than that is either a clock that was ahead when it was
+// written or a window shortened across a restart, so it is honoured for
+// one window from now and no longer -- not wiped, which would let a
+// still-valid lockout through the moment the window shrinks, and not
+// honoured as written, which nothing would ever clear.
 func TestFarLockoutIsHonouredForOneWindowOnly(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
