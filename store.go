@@ -271,6 +271,10 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 		}
 	}
 	s.version = version
+	// A refusal only holds while the refused document is still the one
+	// on disk: this document was just accepted, so any earlier refusal
+	// no longer describes what's out there.
+	s.refusedVersion, s.hasRefusedVersion = 0, false
 }
 
 // reloadIfStale re-reads the document if the backend has moved on since

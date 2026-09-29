@@ -107,3 +107,34 @@ func TestRegisterStaysClosedWhileATwoAdminDocumentIsRefused(t *testing.T) {
 		t.Errorf("expected this store's own view to stay empty, got %d", n)
 	}
 }
+
+// TestRegisterReopensOnceTheRefusedDocumentIsReplaced: an operator who
+// sees the previous test's refusal fixes it by replacing the bad
+// document on disk, not by restarting the process. The next reload must
+// apply that replacement and let registration proceed again -- a
+// refusal only holds while the refused document is still the one on
+// disk.
+func TestRegisterReopensOnceTheRefusedDocumentIsReplaced(t *testing.T) {
+	m := persist.NewMemory()
+	s, err := OpenStore(m, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	primeMemory(t, m, twoAdminsDocument)
+
+	if _, err := s.Register("carol", "password123", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
+		t.Fatalf("expected ErrRegistrationClosed, got %v", err)
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Save(context.Background(), []byte(`{"users":[]}`), snap.Version); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Register("carol", "password123", time.Now()); err != nil {
+		t.Fatalf("expected Register to succeed once the refused document was replaced, got %v", err)
+	}
+}
