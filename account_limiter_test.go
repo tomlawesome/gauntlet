@@ -73,28 +73,48 @@ func TestAccountLockoutSurvivesARestart(t *testing.T) {
 // value further out than that cannot have come from this limiter under a
 // sane clock -- most likely the host clock was ahead when it was
 // written -- and must not be honoured: nothing else would ever clear it.
-func TestImpossiblyFarLockoutIsNotHonoured(t *testing.T) {
+func TestFarLockoutIsHonouredForOneWindowOnly(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	window := 5 * time.Minute
 
+	// A lockout a year out cannot have come from this limiter (it never
+	// writes more than one window ahead), but it is still honoured --
+	// clamped to one window from now, not wiped -- since a shortened
+	// window (below) looks exactly the same on the record.
 	if err := s.SetLoginLockedUntil(id, now.Add(365*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	l := NewLoginLimiter(5, 5*time.Minute)
-	if !l.ReserveAccount(s, id, now) {
-		t.Fatal("a lockout further out than one window refused the attempt, want it ignored")
+	l := NewLoginLimiter(5, window)
+	if l.ReserveAccount(s, id, now) {
+		t.Fatal("a lockout further out than one window was not honoured at all, want it clamped")
+	}
+	if u := s.LoginLockedUntil(id); !u.Equal(now.Add(window)) {
+		t.Fatalf("expected the record clamped to one window from now (%v), got %v", now.Add(window), u)
+	}
+	// One window on, the clamped lockout has ended: the next attempt
+	// succeeds and clears the record like any other expired lockout.
+	later := now.Add(window).Add(time.Second)
+	if !l.ReserveAccount(s, id, later) {
+		t.Fatal("expected the clamped lockout to have ended one window on")
 	}
 	if u := s.LoginLockedUntil(id); !u.IsZero() {
-		t.Fatalf("impossible lockout was not cleared from the record, got %v", u)
+		t.Fatalf("expected the ended lockout to be cleared from the record, got %v", u)
 	}
 
-	// A lockout that could actually have come from this limiter -- inside
-	// one window -- must still be honoured.
-	if err := s.SetLoginLockedUntil(id, now.Add(2*time.Minute)); err != nil {
+	// A window shortened across a restart (written at 1h, reopened at
+	// 5m) must not be wiped either: it is honoured for one window from
+	// now, same as the impossible-clock case above.
+	s2, id2 := openLockoutStore(t, persist.NewMemory())
+	if err := s2.SetLoginLockedUntil(id2, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if l.ReserveAccount(s, id, now) {
-		t.Fatal("a lockout within one window was not honoured")
+	shrunk := NewLoginLimiter(5, window)
+	if shrunk.ReserveAccount(s2, id2, now) {
+		t.Fatal("a lockout from a shrunk window was not honoured at all, want it clamped")
+	}
+	if u := s2.LoginLockedUntil(id2); !u.Equal(now.Add(window)) {
+		t.Fatalf("expected the record clamped to the new window from now (%v), got %v", now.Add(window), u)
 	}
 }
 
