@@ -15,7 +15,7 @@ func TestNewIDShapeAndUniqueness(t *testing.T) {
 			t.Fatalf("newID() = %q, length %d, want 32", id, len(id))
 		}
 		for _, r := range id {
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 				t.Fatalf("newID() = %q contains non-lowercase-hex character %q", id, r)
 			}
 		}
