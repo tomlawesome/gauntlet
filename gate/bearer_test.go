@@ -31,6 +31,22 @@ func kindEchoHandler(path string) http.Handler {
 	return mux
 }
 
+// kindEchoHandlerAnyMethod is kindEchoHandler without a method
+// restriction -- needed for a POST, since the CSRF check bearer
+// dispatch is supposed to bypass only ever fires on an unsafe method.
+func kindEchoHandlerAnyMethod(path string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		tok := TokenFromContext(r)
+		if tok == nil {
+			http.Error(w, "no token in context", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(tok.Name))
+	})
+	return mux
+}
+
 // registerUserDirect registers the first account directly through the
 // store -- these tests only need Protect past its bootstrap state, not
 // a real registration request.
@@ -45,7 +61,16 @@ func nowUTC() time.Time { return time.Now() }
 
 func bearerRequest(t *testing.T, ts string, path, raw string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, ts+path, nil)
+	return bearerRequestMethod(t, http.MethodGet, ts, path, raw)
+}
+
+// bearerRequestMethod is bearerRequest with an explicit method -- added
+// because proving the bearer branch is tried before the CSRF check
+// needs a POST, and bearerRequest's method was hard-coded to GET, which
+// is always a safe method and so never reaches that check at all.
+func bearerRequestMethod(t *testing.T, method, ts, path, raw string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, ts+path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,5 +263,46 @@ func TestBearerTokenKindOrderMatchesHandleRegistration(t *testing.T) {
 	defer func() { _ = crossResp.Body.Close() }()
 	if crossResp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for an ingest token presented at the API kind's mux, got %d", crossResp.StatusCode)
+	}
+}
+
+// TestBearerTokenPOSTBypassesCSRF pins docs/design.md's claim that
+// bearer requests bypass CSRF because no cookie is involved (line
+// ~567) -- the rest of this file only ever sends GET, an always-safe
+// method that would pass the CSRF check anyway, so it never actually
+// exercised the bypass. A POST with a valid Bearer token and no
+// X-Requested-With header must still reach its kind's handler, and the
+// same POST with no Bearer token must be refused by the CSRF check.
+func TestBearerTokenPOSTBypassesCSRF(t *testing.T) {
+	g := newTestGate(t)
+	registerUserDirect(t, g, "admin", "password123")
+	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
+	if err != nil {
+		t.Fatalf("Tokens.Create: %v", err)
+	}
+	g.Handle(gauntlet.TokenKindAPI, kindEchoHandlerAnyMethod("/api/readonly"))
+	ts := newTestServer(t, g)
+
+	resp := bearerRequestMethod(t, http.MethodPost, ts.URL, "/api/readonly", raw)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST with a valid Bearer token and no X-Requested-With: expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "integration" {
+		t.Errorf("expected the dispatched handler to see the token, got body %q", body)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/protected", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrfResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = csrfResp.Body.Close() }()
+	if csrfResp.StatusCode != http.StatusForbidden {
+		t.Errorf("POST with no Bearer token and no X-Requested-With: expected 403 from the CSRF check, got %d", csrfResp.StatusCode)
 	}
 }
