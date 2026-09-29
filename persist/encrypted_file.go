@@ -226,7 +226,13 @@ func openSealed(material, aad, envelope []byte) ([]byte, error) {
 
 	plain, err := aead.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
-		return nil, fmt.Errorf("persist: did not decrypt -- wrong key, or the document has been altered: %w", err)
+		// The path is part of what is authenticated (see aad), so a file
+		// that was moved -- or is mounted at a different path than it was
+		// written at -- fails exactly like a wrong key, and a backup taken
+		// at the old path fails the same way. Said here, because the
+		// startup advice that follows ("restore from a backup") cannot
+		// help with that case.
+		return nil, fmt.Errorf("persist: did not decrypt -- wrong key, the document has been altered, or the file was moved from the path it was written at: %w", err)
 	}
 	return plain, nil
 }

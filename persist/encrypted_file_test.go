@@ -169,8 +169,15 @@ func TestEncryptedFileBackendDocumentCopiedToAnotherPathFailsToOpen(t *testing.T
 	if err != nil {
 		t.Fatalf("NewEncryptedFileBackend: %v", err)
 	}
-	if _, err := reader.Load(context.Background()); err == nil {
+	_, err = reader.Load(context.Background())
+	if err == nil {
 		t.Fatal("Load of a document copied to a different logical path succeeded, want the AAD check to refuse it")
+	}
+	// The operator's most likely mistake is a moved file, and the advice
+	// that follows this error (restore a backup) does not help with that,
+	// so the message has to name it.
+	if !strings.Contains(err.Error(), "moved") {
+		t.Fatalf("refusal does not tell the operator the file may have been moved: %v", err)
 	}
 }
 
