@@ -30,12 +30,9 @@ func lockFile(path string) (*fileLock, error) {
 	return &fileLock{f: f}, nil
 }
 
-// unlock releases the lock and closes the underlying file handle.
+// unlock releases the lock by closing the file handle: an flock lives on
+// the open file description, and this is the only handle to it, so
+// closing releases the lock without a separate LOCK_UN call.
 func (l *fileLock) unlock() error {
-	unlockErr := syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
-	closeErr := l.f.Close()
-	if unlockErr != nil {
-		return unlockErr
-	}
-	return closeErr
+	return l.f.Close()
 }

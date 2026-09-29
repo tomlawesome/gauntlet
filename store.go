@@ -199,10 +199,10 @@ var reloadTimeout = 5 * time.Second
 //
 // That protection only reaches a backend that honours ctx. The shipped
 // file backends (persist/file.go's Save, and EncryptedFileBackend on top
-// of it) call plain os.ReadFile/CreateTemp/Write/Sync/Rename, none of
-// which take a context or can be interrupted by one -- so on a hung
-// mount the deadline never fires. reloadTimeout has the same limit on
-// the read side.
+// of it) call plain os.ReadFile/CreateTemp/Write/Sync/Rename, and wait on
+// the lock file before any of them -- none of which take a context or
+// can be interrupted by one -- so on a hung mount the deadline never
+// fires. reloadTimeout has the same limit on the read side.
 //
 // A var, not a const, only so tests can shorten it.
 var saveTimeout = 5 * time.Second
