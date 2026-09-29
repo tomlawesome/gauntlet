@@ -42,6 +42,74 @@ func TestOpenRefusesADocumentWithTwoAdmins(t *testing.T) {
 	}
 }
 
+// noAdminDocument is an accounts document no code path in this package
+// can write either: DeleteUser refuses to remove the admin account, so
+// an existing deployment can never be emptied of one from underneath
+// it. Only a hand edit, or a foreign writer, produces it.
+const noAdminDocument = `{"users":[` +
+	`{"id":"u1","username":"alice","passwordHash":"$argon2id$fake","role":"user","createdAt":"2026-01-01T00:00:00Z"},` +
+	`{"id":"u2","username":"bob","passwordHash":"$argon2id$fake","role":"user","createdAt":"2026-01-01T00:00:00Z"}]}`
+
+// TestOpenRefusesADocumentWithNoAdmin: a document holding accounts but
+// no admin is refused at startup the same way as one with two, rather
+// than loaded as a fresh install -- it is not one, and nothing in this
+// package can ever grant admin back once it loads (Register is closed
+// as soon as Count()>0, CreateUser refuses RoleAdmin, and TransferAdmin
+// needs a current admin to transfer from).
+func TestOpenRefusesADocumentWithNoAdmin(t *testing.T) {
+	m := persist.NewMemory()
+	primeMemory(t, m, noAdminDocument)
+
+	s, err := OpenStore(m, Options{})
+	if err == nil {
+		t.Fatalf("OpenStore accepted a document with no admin (count: %d)", s.Count())
+	}
+	var startup *persist.StartupError
+	if !errors.As(err, &startup) {
+		t.Fatalf("expected a *persist.StartupError, got %T: %v", err, err)
+	}
+	if !errors.Is(err, errNoAdmin) {
+		t.Errorf("expected the error to name the missing admin, got: %v", err)
+	}
+}
+
+// TestReloadIfStaleIgnoresADocumentWithNoAdmin: the same document
+// written under a running server is not applied, for the same reason as
+// the two-admin case -- the server keeps serving what it holds, logs
+// the refusal once, and does not re-log on every request while the
+// document stays as it is.
+func TestReloadIfStaleIgnoresADocumentWithNoAdmin(t *testing.T) {
+	var logs bytes.Buffer
+	m := persist.NewMemory()
+	s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Save(context.Background(), []byte(noAdminDocument), snap.Version); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 3 { // each read runs reloadIfStale
+		if u, ok := s.ByUsername("bob"); ok {
+			t.Fatalf("a document with no admin was applied: bob loaded as %+v", u)
+		}
+	}
+	if a := s.Admin(); a == nil || a.Username != "alice" {
+		t.Fatalf("expected alice to remain the only admin, got %+v", a)
+	}
+	if n := strings.Count(logs.String(), "admin"); n != 1 {
+		t.Errorf("expected exactly one log line about the refused document, got %d:\n%s", n, logs.String())
+	}
+}
+
 // TestReloadIfStaleIgnoresADocumentWithTwoAdmins: the same document
 // written under a running server is not applied. The server keeps
 // serving what it holds, says so in the log once, and does not re-log

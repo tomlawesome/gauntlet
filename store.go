@@ -81,6 +81,9 @@ var (
 	// hand edit or a foreign writer, and it is refused the way an
 	// unparseable document is.
 	errMultipleAdmins = errors.New("more than one account holds the admin role; this package allows exactly one")
+	// errNoAdmin is the decode error for an accounts document that holds
+	// accounts but none of them is the admin. See checkAdmins.
+	errNoAdmin = errors.New("accounts document holds accounts but no admin")
 	// ErrOIDCAlreadyLinked is returned by LinkOIDCIdentity when the
 	// account is already connected to a different (issuer, subject).
 	ErrOIDCAlreadyLinked = errors.New("gauntlet: account is already connected to an SSO identity")
@@ -112,9 +115,15 @@ type storeFile struct {
 	Users []*User `json:"users"`
 }
 
-// checkAdmins refuses a document with more than one admin. None is fine:
-// that is a deployment before Register, or one whose admin was never
-// created.
+// checkAdmins refuses a document with more than one admin, and refuses
+// one that holds accounts but none of them admin. An empty document (no
+// users at all) is fine -- that's a deployment before Register. But once
+// accounts exist, losing the admin is a one-way door: Register is closed
+// as soon as Count()>0, CreateUser refuses RoleAdmin, and TransferAdmin
+// needs a current admin to transfer from, so nothing in this package
+// could ever create a new one. Loading such a document anyway would mean
+// a server that answers 403 on every admin route forever, with a backup
+// the only way back -- refusing it at startup says so up front instead.
 func (f storeFile) checkAdmins() error {
 	admins := 0
 	for _, u := range f.Users {
@@ -124,6 +133,9 @@ func (f storeFile) checkAdmins() error {
 	}
 	if admins > 1 {
 		return fmt.Errorf("%w (found %d)", errMultipleAdmins, admins)
+	}
+	if admins == 0 && len(f.Users) > 0 {
+		return fmt.Errorf("%w (found %d)", errNoAdmin, len(f.Users))
 	}
 	return nil
 }

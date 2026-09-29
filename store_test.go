@@ -402,10 +402,15 @@ func TestOpenReadsNewObjectFormat(t *testing.T) {
 // "role" key can now only have been hand-edited, so the empty Role is
 // loaded as-is and rank() denies it every gate -- not even viewer.
 // Silently promoting an unassigned role to RoleUser is the wrong
-// direction for a value nobody legitimately wrote.
+// direction for a value nobody legitimately wrote. The fixture also
+// carries an admin account, otherwise OpenStore would refuse the whole
+// document for a different reason (no admin) before the roleless
+// account is even considered.
 func TestOpenLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 	m := persist.NewMemory()
-	data := `{"users":[{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"}]}`
+	data := `{"users":[` +
+		`{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"},` +
+		`{"id":"u2","username":"admin","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"}]}`
 	primeMemory(t, m, data)
 
 	s, err := OpenStore(m, Options{})
@@ -428,7 +433,10 @@ func TestOpenLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 
 // TestReloadIfStaleLeavesAnEmptyRoleFailingClosed is the same behaviour
 // reached through reloadIfStale, which a live server calls on every read
-// once a separate process has touched the backend.
+// once a separate process has touched the backend. The fixture also
+// carries an admin account, otherwise reloadIfStale would refuse the
+// whole document for a different reason (no admin) before the roleless
+// account is even considered.
 func TestReloadIfStaleLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 	m := persist.NewMemory()
 
@@ -437,7 +445,9 @@ func TestReloadIfStaleLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data := `{"users":[{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"}]}`
+	data := `{"users":[` +
+		`{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"},` +
+		`{"id":"u2","username":"admin","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"}]}`
 	if _, err := m.Save(context.Background(), []byte(data), 0); err != nil {
 		t.Fatal(err)
 	}
