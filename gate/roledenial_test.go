@@ -39,11 +39,21 @@ func bogusRoleFixture(t *testing.T) (*Gate, *httptest.Server, *http.Cookie) {
 	doc := struct {
 		Users []gauntlet.User `json:"users"`
 	}{
+		// An admin account rides along only so OpenStore accepts the
+		// document at all: one holding accounts but no admin is refused
+		// before any role is looked at.
 		Users: []gauntlet.User{{
 			ID:               "bogus-role-user",
 			Username:         "roguerole",
 			PasswordHash:     hash,
 			Role:             gauntlet.Role("bogus"),
+			CreatedAt:        time.Now(),
+			HasLocalPassword: true,
+		}, {
+			ID:               "fixture-admin",
+			Username:         "fixtureadmin",
+			PasswordHash:     hash,
+			Role:             gauntlet.RoleAdmin,
 			CreatedAt:        time.Now(),
 			HasLocalPassword: true,
 		}},
