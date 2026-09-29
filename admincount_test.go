@@ -77,3 +77,33 @@ func TestReloadIfStaleIgnoresADocumentWithTwoAdmins(t *testing.T) {
 		t.Errorf("expected exactly one log line about the refused document, got %d:\n%s", n, logs.String())
 	}
 }
+
+// TestRegisterStaysClosedWhileATwoAdminDocumentIsRefused: this Store
+// opens on an empty backend, so it has no admin of its own -- Count()
+// stays 0 even after the two-admin document is refused. Register must
+// not read that 0 as "registration is open": doing so would create a
+// new admin and save it over the operator's restored document on the
+// next conflict-retry.
+func TestRegisterStaysClosedWhileATwoAdminDocumentIsRefused(t *testing.T) {
+	m := persist.NewMemory()
+	s, err := OpenStore(m, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	primeMemory(t, m, twoAdminsDocument)
+
+	if _, err := s.Register("carol", "password123", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
+		t.Fatalf("expected ErrRegistrationClosed, got %v", err)
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snap.Payload) != twoAdminsDocument {
+		t.Fatalf("the refused document was overwritten:\n%s", snap.Payload)
+	}
+	if n := s.Count(); n != 0 {
+		t.Errorf("expected this store's own view to stay empty, got %d", n)
+	}
+}

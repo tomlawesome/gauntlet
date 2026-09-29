@@ -170,8 +170,11 @@ type Store struct {
 
 	// refusedVersion is the last document version reloadIfStale refused
 	// to apply (see checkAdmins), so a refused document is logged once
-	// rather than on every request until someone fixes it. Only
-	// reloadIfStale touches it, and only one of those runs at a time.
+	// rather than on every request until someone fixes it, and so
+	// registrationOpenGuard can keep registration closed while it holds.
+	// Only reloadIfStale writes it, and only one of those runs at a time,
+	// but registrationOpenGuard now reads it too, so both sides go
+	// through mu like byID/byName/version above.
 	refusedVersion    int64
 	hasRefusedVersion bool
 }
@@ -319,8 +322,9 @@ func (s *Store) reloadIfStale() {
 		}
 		s.mu.RLock()
 		stale := version != s.version
+		refused := s.hasRefusedVersion && version == s.refusedVersion
 		s.mu.RUnlock()
-		if !stale || (s.hasRefusedVersion && version == s.refusedVersion) {
+		if !stale || refused {
 			return
 		}
 	}
@@ -341,7 +345,10 @@ func (s *Store) reloadIfStale() {
 	if err != nil || !snap.Exists {
 		return
 	}
-	if snap.Version == beforeLoad || (s.hasRefusedVersion && snap.Version == s.refusedVersion) {
+	s.mu.RLock()
+	alreadyRefused := s.hasRefusedVersion && snap.Version == s.refusedVersion
+	s.mu.RUnlock()
+	if snap.Version == beforeLoad || alreadyRefused {
 		return
 	}
 
@@ -350,10 +357,15 @@ func (s *Store) reloadIfStale() {
 		return
 	}
 	// Unlike a transient read failure, this is a document someone wrote:
-	// keep serving what is in memory, and say why once. The next write
-	// from this process saves over it.
+	// keep serving what is in memory, and say why once. A server with its
+	// own live accounts saves over this on its next write; one that opened
+	// on an empty backend has none to save, so registrationOpenGuard keeps
+	// registration closed instead of treating Count() == 0 as a fresh
+	// install.
 	if err := file.checkAdmins(); err != nil {
+		s.mu.Lock()
 		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
+		s.mu.Unlock()
 		if s.log != nil {
 			s.log.Error(fmt.Sprintf("accounts store (%s) was changed by another process and is not being applied: %v", s.backend.Describe(), err))
 		}
@@ -432,8 +444,14 @@ func (s *Store) Register(username, password string, now time.Time) (*User, error
 // account may exist yet. Re-read from the live store with the write
 // lock held (see createLocked), which is what makes "exactly one
 // account can ever be self-registered" actually hold under concurrency.
+//
+// hasRefusedVersion also closes it: a document with accounts exists on
+// disk even though this process refused to apply it (see reloadIfStale),
+// so a store that opened on an empty backend must not read its own
+// empty Count() as a fresh install and create a second admin on top of
+// the one the operator already has.
 func registrationOpenGuard(s *Store) error {
-	if len(s.byID) > 0 {
+	if len(s.byID) > 0 || s.hasRefusedVersion {
 		return ErrRegistrationClosed
 	}
 	return nil
