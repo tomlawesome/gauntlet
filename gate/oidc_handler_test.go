@@ -709,9 +709,11 @@ func TestOIDCCallbackUsesEmailWhenPreferredUsernameEmpty(t *testing.T) {
 
 // TestAllowIssuerRefusesKnownMultiTenantProviders is a sanity check on
 // the fail-closed startup call an application wiring Deps.OIDC is
-// expected to make (oidc.AllowIssuer, docs/design.md §1.4/§4) -- the
-// enforcement itself lives in the oidc package's own, more exhaustive
-// tests; this pins that gate's own docs are backed by a real assertion.
+// expected to make (oidc.AllowIssuer, docs/design.md §1.4/§4) --
+// belt-and-braces over oidc.New's own enforcement of the same policy.
+// The enforcement itself lives in the oidc package's own, more
+// exhaustive tests; this pins that gate's own docs are backed by a real
+// assertion.
 func TestAllowIssuerRefusesKnownMultiTenantProviders(t *testing.T) {
 	if err := oidc.AllowIssuer("https://accounts.google.com"); err == nil {
 		t.Error("expected a known multi-tenant issuer to be refused")

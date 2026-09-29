@@ -124,6 +124,14 @@ type Client struct {
 // SSO off, never crash the whole process or fall back to a degraded
 // verification path over it.
 func New(ctx context.Context, cfg Config) (*Client, error) {
+	// Enforced here too, not just left to the caller's own startup check
+	// (AllowIssuer stays exported for that): this library exists so the
+	// self-hosted-only fix lands once, and an app that forgets its own
+	// call must not fall back to letting the first visitor become admin.
+	if err := AllowIssuer(cfg.IssuerURL); err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+
 	timeout := cfg.HTTPTimeout
 	if timeout <= 0 {
 		timeout = defaultHTTPTimeout

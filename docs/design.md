@@ -476,7 +476,9 @@ BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header) and, lat
 ```
 
 Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
-listening, as mikroview's `main.go:1723` does. Login limiter: 5 per 5
+listening, as mikroview's `main.go:1723` does -- `oidc.New` refuses it
+as well, so this call is belt-and-braces, not the only check. Login
+limiter: 5 per 5
 minutes per IP and per username (mikroview's constants). Client IP:
 `RemoteAddr` host until birdcage has a trusted-proxy setting (§5, slice
 B5).

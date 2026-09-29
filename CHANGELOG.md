@@ -94,6 +94,9 @@ All notable changes to this project are documented in this file.
   falling through to the generic "unable to complete the request" --
   mikroview's matching map has neither entry either. See
   `gate/users_handler.go` and `gate/httpjson.go`'s header comments.
+- `oidc.New` now refuses a multi-tenant issuer itself (the same check
+  `oidc.AllowIssuer` runs), instead of relying solely on a caller's own
+  startup check.
 
 ### Security
 

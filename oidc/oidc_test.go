@@ -3,6 +3,7 @@ package oidc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -112,6 +113,32 @@ func TestNewFailsClosedOnUnreachableProvider(t *testing.T) {
 		HTTPTimeout:  time.Second,
 	}); err == nil {
 		t.Fatal("New succeeded against a provider with no discovery document")
+	}
+}
+
+// TestNewRefusesMultiTenantIssuer proves New enforces the same
+// self-hosted-only policy AllowIssuer does, rather than relying entirely
+// on callers to check first -- docs/design.md §4 promises multi-tenant
+// issuers are refused at startup, not just discoverable-but-rejected
+// later. The context deadline means this test hangs instead of passing
+// if the check were missing: New would otherwise go on to dial the real
+// accounts.google.com/login.microsoftonline.com discovery endpoint.
+func TestNewRefusesMultiTenantIssuer(t *testing.T) {
+	for _, issuer := range []string{
+		"https://accounts.google.com",
+		"https://login.microsoftonline.com/common/v2.0",
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, err := New(ctx, Config{
+			IssuerURL:    issuer,
+			ClientID:     "test-client",
+			ClientSecret: "test-secret",
+			RedirectURL:  "https://app.example/callback",
+		})
+		cancel()
+		if !errors.Is(err, ErrMultiTenantIssuer) {
+			t.Errorf("New(%q) error = %v, want errors.Is(err, ErrMultiTenantIssuer)", issuer, err)
+		}
 	}
 }
 
