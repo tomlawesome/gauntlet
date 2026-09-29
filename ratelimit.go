@@ -228,6 +228,16 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 	if lockouts != nil {
 		persisted = lockouts.LoginLockedUntil(accountID)
 	}
+	wasPersisted := !persisted.IsZero()
+	// A lockout this limiter set can never end more than one window after
+	// the attempt that set it (below: entries[0].Add(l.window)). One
+	// further out than that cannot have come from here under a sane
+	// clock -- most likely the host clock was ahead when it was written --
+	// so it is treated as none here and cleared below like any other
+	// lockout that has ended, rather than honoured.
+	if wasPersisted && persisted.After(now.Add(l.window)) {
+		persisted = time.Time{}
+	}
 
 	l.mu.Lock()
 	if now.Before(persisted) {
@@ -249,8 +259,9 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		// out -- the moment the in-memory counter would admit one again.
 		l.wantLockout[accountID] = entries[0].Add(l.window)
 		sync = lockouts != nil
-	case !persisted.IsZero():
-		// A lockout on the record that has ended.
+	case wasPersisted:
+		// A lockout on the record that has ended (or, per above, could
+		// never have been ours to begin with).
 		l.wantLockout[accountID] = time.Time{}
 		sync = lockouts != nil
 	}

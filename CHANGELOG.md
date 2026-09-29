@@ -118,3 +118,7 @@ All notable changes to this project are documented in this file.
   4x headroom). A corrupt or tampered hash could previously crash the
   check and leave a hashing slot taken, so enough of them stalled every
   later login, or force an unbounded Argon2id computation.
+- `ReserveAccount` no longer honours a persisted lockout ending more than
+  one window past the attempt that would have set it -- impossible under
+  a sane clock, and previously locked the account out indefinitely if the
+  host clock had ever run ahead when the lockout was written.

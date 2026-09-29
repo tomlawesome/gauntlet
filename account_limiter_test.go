@@ -68,6 +68,36 @@ func TestAccountLockoutSurvivesARestart(t *testing.T) {
 	}
 }
 
+// A persisted lockout can never end more than one window after the
+// attempt that set it (ratelimit.go writes entries[0].Add(l.window)). A
+// value further out than that cannot have come from this limiter under a
+// sane clock -- most likely the host clock was ahead when it was
+// written -- and must not be honoured: nothing else would ever clear it.
+func TestImpossiblyFarLockoutIsNotHonoured(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if err := s.SetLoginLockedUntil(id, now.Add(365*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	l := NewLoginLimiter(5, 5*time.Minute)
+	if !l.ReserveAccount(s, id, now) {
+		t.Fatal("a lockout further out than one window refused the attempt, want it ignored")
+	}
+	if u := s.LoginLockedUntil(id); !u.IsZero() {
+		t.Fatalf("impossible lockout was not cleared from the record, got %v", u)
+	}
+
+	// A lockout that could actually have come from this limiter -- inside
+	// one window -- must still be honoured.
+	if err := s.SetLoginLockedUntil(id, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if l.ReserveAccount(s, id, now) {
+		t.Fatal("a lockout within one window was not honoured")
+	}
+}
+
 // The capped map is for addresses and unknown names. However many of
 // those arrive, a known account's counter is not in it and is never
 // displaced.
