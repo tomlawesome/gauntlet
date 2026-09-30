@@ -342,15 +342,12 @@ func TokenFromContext(r *http.Request) *gauntlet.Token
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below min
 ```
 
-Routes carried over (mikroview `internal/api/server.go` route table):
-`GET /api/auth/session`; `POST /api/auth/{register,login,login/factor,
-logout,logout-all,password}`; `GET|POST /api/auth/users`,
-`DELETE /api/auth/users/{id}`, `POST /api/auth/users/{id}/reset-password`,
-`DELETE /api/auth/users/{id}/totp`; `POST /api/auth/totp/{enrol,confirm}`,
-`DELETE /api/auth/totp`; `POST /api/auth/recovery-codes`;
-`GET /api/auth/oidc/{login,callback}`,
-`POST /api/auth/oidc/link`; `GET|POST /api/tokens`,
-`DELETE /api/tokens/{id}`. Passkey routes join when `passkey/` lands.
+The HTTP contract `Routes` serves -- every route, request, response,
+status code and error body, carried over from mikroview's
+`internal/api/server.go` route table -- is
+[`docs/api/auth.yaml`](api/auth.yaml) (OpenAPI 3.1, ADR-0002), not a
+list here. `gate/contract_test.go` fails when a handler and that
+document disagree. Passkey routes join when `passkey/` lands.
 
 What stays fixed inside `gate` because it is security behaviour, not
 taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
