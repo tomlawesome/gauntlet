@@ -11,7 +11,8 @@ contributors.
 
 Branch from and target `dev` for issue work. `dev` is the default branch;
 there is no `preview`/`main` promotion pipeline here -- a tagged release
-is the promotion, not a protected branch.
+is the promotion, not a protected branch, and it is cut from a button on
+the `dev` pipeline (docs/releasing.md).
 
 ## Before starting work
 

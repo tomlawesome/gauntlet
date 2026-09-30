@@ -2,7 +2,9 @@
 # file is the CI that gates every merge request and every push to the
 # default branch, `dev`. Modelled on birdcage's `.gitlab-ci.yml`, but far
 # smaller: gauntlet ships a tag, not an image, so there is no build,
-# release, image or live-stack e2e stage here -- see docs/testing.md.
+# image or live-stack e2e stage here -- see docs/testing.md. The
+# `release` stage is a button on a green `dev` pipeline that creates the
+# annotated `v<VERSION>` tag and its GitLab release (docs/releasing.md).
 #
 # GitHub `tomlawesome/gauntlet` is a read-only public mirror (#17, owner
 # 2026-09-29): the `sync` stage pushes `dev`, `preview`, `main` and `v*`
@@ -17,6 +19,7 @@
 stages:
   - lint
   - test
+  - release
   - sync
 
 default:
@@ -172,6 +175,75 @@ test:go:
     when: always
     paths:
       - coverage.out
+
+# ---------------------------------------------------------------------------
+# RELEASE
+# ---------------------------------------------------------------------------
+# Birdcage's release:promote / release:gitlab pair, cut down: there are no
+# images, so the whole cut is "tag this commit". release:version is the
+# button; it reads the tracked VERSION file and refuses a tag that already
+# exists, so a forgotten bump fails closed. release:gitlab then creates
+# the annotated tag and the release. release-cli acts with the rights of
+# whoever pressed the button, and `v*` tags are protected, so only the
+# owner can actually cut one (#17). The tag's own pipeline runs the sync
+# job below, which carries the tag object to the GitHub mirror.
+release:version:
+  stage: release
+  image: $ALPINE_IMAGE
+  interruptible: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
+      when: manual
+      # A manual job is allow_failure by default; forcing it false would
+      # leave every dev pipeline reading "blocked" for a release nobody
+      # intends to cut yet. A human is watching the job they pressed.
+      allow_failure: true
+  # No `needs:` on purpose: without one the button is not playable until
+  # every job in every earlier stage has passed, which is the bar.
+  cache: []
+  script:
+    - apk add --no-cache git >/dev/null
+    - |
+      set -eu
+      version="$(tr -d '[:space:]' < VERSION)"
+      case "$version" in
+        [0-9]*.[0-9]*.[0-9]*) ;;
+        *) echo "VERSION holds '$version', not a semantic version"; exit 1 ;;
+      esac
+      tag="v$version"
+      if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+        echo "$tag already exists -- bump VERSION before cutting another release."
+        exit 1
+      fi
+      echo "RELEASE_TAG=$tag" > release.env
+      cat release.env
+  artifacts:
+    reports:
+      dotenv: release.env
+    expire_in: 90 days
+
+release:gitlab:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  interruptible: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
+  needs:
+    - job: release:version
+      artifacts: true
+  cache: []
+  script:
+    - echo "tagging $CI_COMMIT_SHA as $RELEASE_TAG"
+  release:
+    tag_name: $RELEASE_TAG
+    tag_message: gauntlet $RELEASE_TAG
+    ref: $CI_COMMIT_SHA
+    name: $RELEASE_TAG
+    description: |
+      gauntlet $RELEASE_TAG -- see CHANGELOG.md for what changed.
+
+      Apps take it with `go get github.com/tomlawesome/gauntlet@$RELEASE_TAG`
+      (the GitHub mirror carries the tag) or by the GitLab path.
 
 # ---------------------------------------------------------------------------
 # SYNC
