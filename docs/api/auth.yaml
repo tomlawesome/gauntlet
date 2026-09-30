@@ -1,0 +1,1191 @@
+openapi: 3.1.0
+info:
+  title: gauntlet gate HTTP API
+  version: 0.2.0
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  description: |
+    Every route `gate.Routes` serves: `/api/auth/*` and `/api/tokens[/{id}]`.
+    This document is the source of truth both frontends build from
+    (docs/adr/0002-api-standards-and-compatibility.md). The contract tests
+    in `gate/contract_test.go` drive every route through it, and fail when
+    a handler and this document disagree or when a route exists on one
+    side only.
+
+    **Mounting.** An application mounts `Routes` under `gate.Protect`, so
+    the responses below include the ones `Protect` itself writes before a
+    handler runs:
+
+    - `503` "setup required" on every route except `GET /api/auth/session`,
+      `POST /api/auth/register` and the two `GET /api/auth/oidc/*` routes
+      while no account exists yet.
+    - `403` "missing required header" on every `POST` and `DELETE` without
+      the `X-Requested-With` header carrying the application's configured
+      value.
+    - `401` "unauthorized" on every route that needs a session and has
+      none. Exempt from that: session, register, login, login/factor,
+      logout and the two `GET /api/auth/oidc/*` routes.
+    - `403` on a session-gated route when the account's role is not one
+      gauntlet knows, when it is stopped at one of two doors (see the
+      `X-Auth-Gate` header), or, on the admin routes, when the caller is
+      not an admin.
+
+    A request carrying `Authorization: Bearer ...` never reaches these
+    routes: `Protect` sends it to the application's own handler for that
+    token kind, or answers `401` "invalid or revoked token".
+
+    **Session cookie.** Its name is the application's `Config.CookieName`;
+    it is `HttpOnly`, `SameSite=Lax`, path `/`. Routes marked "sets the
+    session cookie" issue a fresh one; logout clears it.
+
+    **Errors.** Every error body is `text/plain` holding one human-readable
+    line, except the one `application/json` body `DELETE
+    /api/auth/users/{id}` returns when the account was deleted but its
+    tokens could not be revoked. A frontend must branch on the status code
+    and the `X-Auth-Gate` header, never on the message text. The switch to
+    RFC 9457 Problem Details is #23 and is not in this version.
+
+    **Compatibility.** Additive only within a major version: routes,
+    response fields and status codes are added, never renamed or removed
+    (ADR-0002). JSON response bodies are closed (`additionalProperties:
+    false`) so the contract tests notice a field the handler added without
+    this document, and a field it dropped or renamed.
+
+security:
+  - sessionCookie: []
+
+paths:
+  /api/auth/session:
+    get:
+      operationId: getSession
+      summary: Report sign-in state
+      description: |
+        Always answers 200: it reports state, it does not gate access. A
+        frontend calls it on load to choose between first-run registration,
+        the login form and the signed-in app. Reachable with no session and
+        while no account exists.
+      security:
+        - {}
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The caller's state. Account fields are present only while `authenticated` is true.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+
+  /api/auth/register:
+    post:
+      operationId: register
+      summary: Create the first account
+      description: |
+        Creates the first (and only self-service) account, always as admin,
+        and sets the session cookie. Refused once any account exists.
+        Reachable while no account exists; still needs the CSRF header.
+      security:
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "201":
+          description: Account created and signed in; sets the session cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/CSRFRefused"
+        "409":
+          description: Registration is closed -- an account already exists.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: The deployment has no persistent storage configured.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+
+  /api/auth/login:
+    post:
+      operationId: login
+      summary: Sign in with username and password
+      description: |
+        Rate-limited per client address and per account; only a success
+        releases the attempt. On an account with no second factor this
+        signs in and sets the session cookie. On an account holding one it
+        does not: it sets a short-lived pending-login cookie and names the
+        factors to ask for next, and `POST /api/auth/login/factor` finishes
+        the sign-in. The `secondFactor` list can be empty (an account whose
+        only factor is a passkey): a recovery code still completes it.
+      security:
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "200":
+          description: Signed in, or a second factor is needed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Account"
+                  - $ref: "#/components/schemas/SecondFactorChallenge"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CSRFRefused"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/login/factor:
+    post:
+      operationId: loginFactor
+      summary: Finish a sign-in with a second factor
+      description: |
+        Completes a login `POST /api/auth/login` stopped short of a
+        session, using the pending-login cookie it set. `code` is a current
+        authenticator-app code or one unused recovery code (spent on use).
+        Shares the login rate limit. Sets the session cookie on success.
+      security:
+        - pendingLoginCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeRequest"
+      responses:
+        "200":
+          description: Signed in; sets the session cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CSRFRefused"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/logout:
+    post:
+      operationId: logout
+      summary: End this session
+      description: Ends the caller's session if there is one and clears the cookie. With no session it is a harmless no-op, not a 401. Takes no body.
+      security:
+        - {}
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Signed out.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [loggedOut]
+                properties:
+                  loggedOut:
+                    const: true
+        "403":
+          $ref: "#/components/responses/CSRFRefused"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/logout-all:
+    post:
+      operationId: logoutAll
+      summary: Sign out everywhere
+      description: Ends every session the caller's account holds, then issues this browser a fresh one (sets the session cookie). Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Every other session ended.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [signedOutEverywhere]
+                properties:
+                  signedOutEverywhere:
+                    const: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/password:
+    post:
+      operationId: changePassword
+      summary: Change the caller's own password
+      description: |
+        Needs `currentPassword` unless an administrator reset the account
+        (then only `newPassword`; this is the one route such a session can
+        reach). The re-check is rate-limited per account. Ends every
+        session on the account and sets a fresh session cookie.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+      responses:
+        "200":
+          description: Password changed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [changed, otherSessionsEnded]
+                properties:
+                  changed:
+                    const: true
+                  otherSessionsEnded:
+                    const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The account signs in through the identity provider and has no local password.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/totp/enrol:
+    post:
+      operationId: totpEnrol
+      summary: Start authenticator-app enrolment
+      description: |
+        Password-gated (rate-limited re-check). Stores a fresh secret as
+        pending; it is active only once `POST /api/auth/totp/confirm`
+        proves a code. Enrolling again before confirming replaces the
+        pending secret. Reachable at the must-enrol-factor door.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
+      responses:
+        "200":
+          description: The pending secret, as an otpauth URI for a QR code and as base32 text.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [uri, secret]
+                properties:
+                  uri:
+                    type: string
+                    description: "`otpauth://totp/...` URI naming the deployment's `Config.ProductName`."
+                  secret:
+                    type: string
+                    description: The same secret, base32, for typing in by hand.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The account has no local password (SSO-only), or already has an active authenticator app.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/totp/confirm:
+    post:
+      operationId: totpConfirm
+      summary: Activate the pending authenticator app
+      description: |
+        Checks one code against the pending secret and activates it. Ends
+        every other session and sets a fresh session cookie. Returns the
+        ten recovery codes the first time the account gets any; they are
+        never shown again. Reachable at the must-enrol-factor door.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeRequest"
+      responses:
+        "200":
+          description: Active.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [enabled, recoveryCodes]
+                properties:
+                  enabled:
+                    const: true
+                  recoveryCodes:
+                    description: Ten codes in clear, exactly once; `null` when the account already held recovery codes (then `alreadyIssued` is true).
+                    type: [array, "null"]
+                    items:
+                      type: string
+                  alreadyIssued:
+                    description: Present, and true, only when the account already held recovery codes.
+                    const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: No enrolment is pending.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/totp:
+    delete:
+      operationId: totpDelete
+      summary: Remove the caller's own authenticator app
+      description: |
+        Password-gated (rate-limited re-check). When this leaves the
+        account with no second factor, every session on it ends, this one
+        included, and `signedOut` is true.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [disabled, signedOut]
+                properties:
+                  disabled:
+                    const: true
+                  signedOut:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/recovery-codes:
+    post:
+      operationId: regenerateRecoveryCodes
+      summary: Replace the caller's recovery codes
+      description: Password-gated (rate-limited re-check). Replaces the account's recovery codes with ten fresh ones, shown once. Refused on an account with no second factor. Other sessions are not ended.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
+      responses:
+        "200":
+          description: The new codes, in clear, exactly once.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [recoveryCodes]
+                properties:
+                  recoveryCodes:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The account has no second factor for recovery codes to stand in for.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/oidc/login:
+    get:
+      operationId: oidcLogin
+      summary: Start single sign-on
+      description: |
+        A browser navigation, not a fetch. Sets the flow cookie
+        (`gate_oidc_flow`, path `/api/auth/oidc`, five minutes) and
+        redirects to the identity provider. Reachable with no session and
+        while no account exists.
+      security:
+        - {}
+      responses:
+        "302":
+          $ref: "#/components/responses/Redirect"
+        "404":
+          $ref: "#/components/responses/SSOOff"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      summary: Finish single sign-on
+      description: |
+        Where the identity provider sends the browser back. Always
+        redirects when SSO is on: to `/` after a sign-in (sets the session
+        cookie), to `/?ssoLinked=1` after a link (sets a fresh session
+        cookie), or to the application's `Config.LoginPath` with
+        `?ssoError=` and one of `state_mismatch`, `provider_error`,
+        `verification_failed`, `not_permitted`, `login_failed`,
+        `link_session_changed`, `link_identity_taken`, `link_failed`. The
+        flow cookie is cleared on every path. The first account created
+        through SSO while none exists becomes the admin.
+      security:
+        - oidcFlowCookie: []
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: error
+          in: query
+          description: Set by the provider when it refused; never echoed back.
+          schema:
+            type: string
+      responses:
+        "302":
+          $ref: "#/components/responses/Redirect"
+        "404":
+          $ref: "#/components/responses/SSOOff"
+
+  /api/auth/oidc/link:
+    post:
+      operationId: oidcLinkStart
+      summary: Start linking this account to single sign-on
+      description: |
+        Sets the flow cookie and returns the provider URL for the browser
+        to navigate to; `GET /api/auth/oidc/callback` finishes it. A
+        completed link removes the local password of every account except
+        the admin's. Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Navigate the browser to `url`.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [url]
+                properties:
+                  url:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/SSOOff"
+        "409":
+          description: The account already signs in only through the provider, or is already linked.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/users:
+    get:
+      operationId: listUsers
+      summary: List accounts (admin)
+      responses:
+        "200":
+          description: Every account.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+    post:
+      operationId: createUser
+      summary: Create an account (admin)
+      description: The only way to add an account once registration has closed. `role` defaults to `user`; `admin` is refused (one admin per deployment).
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                role:
+                  type: string
+                  description: "`user` (the default when empty or absent) or `viewer`. Anything else is a 400."
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The username is taken.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/users/{id}:
+    delete:
+      operationId: deleteUser
+      summary: Delete an account (admin)
+      description: Deletes the account, then ends its sessions and revokes every token it created. The admin account cannot be deleted. Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, tokensRevoked]
+                properties:
+                  username:
+                    type: string
+                  tokensRevoked:
+                    type: integer
+                    minimum: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NoSuchUser"
+        "409":
+          description: The account is the admin.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          description: |
+            `text/plain` when the account could not be deleted. The JSON
+            body when the account WAS deleted but its tokens could not be
+            revoked -- the admin has to revoke them by hand.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, error]
+                properties:
+                  username:
+                    type: string
+                  error:
+                    type: string
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/users/{id}/reset-password:
+    post:
+      operationId: resetPassword
+      summary: Issue a one-time reset code (admin)
+      description: |
+        Issues a single-use reset code for the account, ends its sessions,
+        and makes it change its password at next sign-in. The code exists
+        only in this response; issuing another kills it. Refused for the
+        caller's own account and for an SSO-only one. Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: The code, to read out to the account's owner.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, code, expiresAt]
+                properties:
+                  username:
+                    type: string
+                  code:
+                    type: string
+                    description: Grouped `xxxx-xxxx-xxxx-xxxx`; accepted back in any case, with or without the dashes.
+                  expiresAt:
+                    type: string
+                    format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NoSuchUser"
+        "409":
+          description: The account is the caller's own, or has no local password.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Setup required (no account exists yet), or the deployment has no persistent storage configured.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+
+  /api/auth/users/{id}/totp:
+    delete:
+      operationId: clearUserTOTP
+      summary: Remove another account's authenticator app (admin)
+      description: For a lost phone when the owner still has their password. Refused on the caller's own account. Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, cleared]
+                properties:
+                  username:
+                    type: string
+                  cleared:
+                    const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NoSuchUser"
+        "409":
+          description: The account is the caller's own.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/tokens:
+    get:
+      operationId: listTokens
+      summary: List API tokens (admin)
+      description: Metadata only; never a token's value or hash.
+      responses:
+        "200":
+          description: Every token.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [tokens]
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Token"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+    post:
+      operationId: createToken
+      summary: Issue an API token (admin)
+      description: The raw value is in this response only; the server keeps its SHA-256 hash.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Must not be empty.
+                kind:
+                  type: string
+                  description: "`api` (read-only; the default when empty or absent) or `ingest`."
+                device:
+                  type: string
+                  description: Required for, and allowed only on, an `ingest` token.
+      responses:
+        "201":
+          description: Issued. `value` is the bearer token, shown once.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Token"
+                  - required: [value]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Setup required (no account exists yet), or the deployment has no persistent storage configured.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+
+  /api/tokens/{id}:
+    delete:
+      operationId: revokeToken
+      summary: Revoke an API token (admin)
+      description: Permanent. Takes no body.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [revoked]
+                properties:
+                  revoked:
+                    const: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such token -- never existed or already revoked; the two are not told apart.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: session
+      description: The session cookie. Its real name is the application's `Config.CookieName`.
+    pendingLoginCookie:
+      type: apiKey
+      in: cookie
+      name: gate_pending_login
+      description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived.
+    oidcFlowCookie:
+      type: apiKey
+      in: cookie
+      name: gate_oidc_flow
+      description: Set by the SSO login and link routes; sealed, path `/api/auth/oidc`, five minutes.
+
+  parameters:
+    CSRFHeader:
+      name: X-Requested-With
+      in: header
+      required: true
+      description: Must equal the application's `Config.CSRFHeaderValue`. Without it every POST and DELETE is refused with 403.
+      schema:
+        type: string
+    UserID:
+      name: id
+      in: path
+      required: true
+      description: The account's `id` from `GET /api/auth/users`.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: The body is not one JSON object of the documented fields (unknown fields and trailing data are refused), or a field's value is refused.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    Unauthorized:
+      description: No valid session (or pending-login cookie), or the credential given was wrong. The body is the same for an unknown username and a wrong password.
+      headers:
+        WWW-Authenticate:
+          required: true
+          schema:
+            type: string
+            const: Bearer realm="gate"
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    CSRFRefused:
+      description: The `X-Requested-With` header is missing or wrong.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    Forbidden:
+      description: |
+        The `X-Requested-With` header is missing or wrong; the account's
+        role is not recognized; the route needs a higher role; or the
+        session is stopped at a door, named by `X-Auth-Gate`.
+      headers:
+        X-Auth-Gate:
+          description: |
+            Present only when the session is stopped at a door:
+            `must-change-password` (an administrator reset the account;
+            only `POST /api/auth/password` is reachable) or
+            `must-enrol-factor` (`Config.RequireSecondFactor` is on and the
+            account has no second factor; only the TOTP enrol and confirm
+            routes are reachable).
+          schema:
+            type: string
+            enum: [must-change-password, must-enrol-factor]
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    NoSuchUser:
+      description: No account has this id.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    TooManyRequests:
+      description: Too many failed attempts from this address or on this account; try again later.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    InternalError:
+      description: The server could not complete the request; details are in its log, never in the body.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    SetupRequired:
+      description: No account exists yet; only the session, register and SSO routes are reachable.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    SSOOff:
+      description: Single sign-on is not configured.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    Redirect:
+      description: Browser redirect.
+      headers:
+        Location:
+          required: true
+          schema:
+            type: string
+
+  schemas:
+    TextError:
+      type: string
+      description: One human-readable line. Wording may change; do not match on it.
+    Role:
+      type: string
+      description: "`admin`, `user` or `viewer`. Any other value is an account gauntlet refuses on every session-gated route."
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+    PasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+    CodeRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: An authenticator-app code, or (at login) a recovery code.
+    Account:
+      type: object
+      additionalProperties: false
+      required: [username, role]
+      properties:
+        username:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+    SecondFactorChallenge:
+      type: object
+      additionalProperties: false
+      required: [secondFactor]
+      properties:
+        secondFactor:
+          type: array
+          description: Factors to offer next; today only `totp`. A recovery code is always accepted.
+          items:
+            type: string
+    SessionState:
+      type: object
+      additionalProperties: false
+      required:
+        - setupRequired
+        - ssoAvailable
+        - authenticated
+        - hasLocalPassword
+        - ssoConnected
+        - mustChangePassword
+        - mustEnrolSecondFactor
+        - hasTOTP
+      properties:
+        setupRequired:
+          type: boolean
+          description: No account exists yet; show first-run registration.
+        ssoAvailable:
+          type: boolean
+        authenticated:
+          type: boolean
+        username:
+          type: string
+          description: Present only while authenticated.
+        role:
+          $ref: "#/components/schemas/Role"
+        hasLocalPassword:
+          type: boolean
+          description: False for an SSO-provisioned account that never set one.
+        ssoConnected:
+          type: boolean
+        mustChangePassword:
+          type: boolean
+        mustEnrolSecondFactor:
+          type: boolean
+          description: True only when `Config.RequireSecondFactor` is on and the account has no second factor.
+        hasTOTP:
+          type: boolean
+          description: A confirmed authenticator app, not a pending enrolment.
+        signedInSince:
+          type: string
+          format: date-time
+          description: This session's start (RFC 3339, seconds); present only while authenticated.
+    UserSummary:
+      type: object
+      additionalProperties: false
+      required: [id, username, role, createdAt, hasLocalPassword, sso, hasTOTP]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        createdAt:
+          type: string
+          format: date-time
+        lastLogin:
+          type: string
+          format: date-time
+          description: Absent until the account first signs in.
+        hasLocalPassword:
+          type: boolean
+        sso:
+          type: boolean
+          description: Linked to an SSO identity.
+        hasTOTP:
+          type: boolean
+    Token:
+      type: object
+      additionalProperties: false
+      required: [id, name, kind, createdAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+          description: "`api` or `ingest`."
+        device:
+          type: string
+          description: Present only on an `ingest` token.
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          description: Absent until the token is first used.
+        value:
+          type: string
+          description: The raw bearer token; only in the response that creates it.
