@@ -14,7 +14,6 @@
 package gate
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,41 +35,24 @@ func bogusRoleFixture(t *testing.T) (*Gate, *httptest.Server, *http.Cookie) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := struct {
-		Users []gauntlet.User `json:"users"`
-	}{
-		// An admin account rides along only so OpenStore accepts the
-		// document at all: one holding accounts but no admin is refused
-		// before any role is looked at.
-		Users: []gauntlet.User{{
-			ID:               "bogus-role-user",
-			Username:         "roguerole",
-			PasswordHash:     hash,
-			Role:             gauntlet.Role("bogus"),
-			CreatedAt:        time.Now(),
-			HasLocalPassword: true,
-		}, {
-			ID:               "fixture-admin",
-			Username:         "fixtureadmin",
-			PasswordHash:     hash,
-			Role:             gauntlet.RoleAdmin,
-			CreatedAt:        time.Now(),
-			HasLocalPassword: true,
-		}},
-	}
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend := persist.NewMemory()
-	if _, err := backend.Save(t.Context(), payload, 0); err != nil {
-		t.Fatal(err)
-	}
-
-	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// An admin account rides along only so OpenStore accepts the
+	// document at all: one holding accounts but no admin is refused
+	// before any role is looked at.
+	users := openStoreWithUsers(t, gauntlet.User{
+		ID:               "bogus-role-user",
+		Username:         "roguerole",
+		PasswordHash:     hash,
+		Role:             gauntlet.Role("bogus"),
+		CreatedAt:        time.Now(),
+		HasLocalPassword: true,
+	}, gauntlet.User{
+		ID:               "fixture-admin",
+		Username:         "fixtureadmin",
+		PasswordHash:     hash,
+		Role:             gauntlet.RoleAdmin,
+		CreatedAt:        time.Now(),
+		HasLocalPassword: true,
+	})
 	tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{})
 	if err != nil {
 		t.Fatal(err)

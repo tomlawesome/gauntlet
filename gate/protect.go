@@ -18,6 +18,22 @@ const csrfHeaderName = "X-Requested-With"
 // route table (routes.go) cannot drift apart silently.
 const changePasswordPath = "/api/auth/password"
 
+// The rest of the /api/auth/* paths the exempt lists and
+// secondFactorEnrolPaths below name, held as constants for the same
+// reason changePasswordPath is: routes.go registers each of them from
+// these, so a route cannot move without its exemption moving with it.
+const (
+	sessionPath      = "/api/auth/session"
+	registerPath     = "/api/auth/register"
+	loginPath        = "/api/auth/login"
+	loginFactorPath  = "/api/auth/login/factor"
+	logoutPath       = "/api/auth/logout"
+	oidcLoginPath    = "/api/auth/oidc/login"
+	oidcCallbackPath = "/api/auth/oidc/callback"
+	totpEnrolPath    = "/api/auth/totp/enrol"
+	totpConfirmPath  = "/api/auth/totp/confirm"
+)
+
 // exemptPaths lists routes reachable without a session once an account
 // exists -- either because they must work before one does (register,
 // login) or because logout without a session is a harmless no-op, not
@@ -36,14 +52,14 @@ const changePasswordPath = "/api/auth/password"
 // session check); isSafeMethod already exempts both from the CSRF-header
 // check since they're GET.
 var exemptPaths = map[string]bool{
-	"/api/healthz":            true,
-	"/api/auth/session":       true,
-	"/api/auth/register":      true,
-	"/api/auth/login":         true,
-	"/api/auth/logout":        true,
-	"/api/auth/login/factor":  true,
-	"/api/auth/oidc/login":    true,
-	"/api/auth/oidc/callback": true,
+	"/api/healthz":   true,
+	sessionPath:      true,
+	registerPath:     true,
+	loginPath:        true,
+	logoutPath:       true,
+	loginFactorPath:  true,
+	oidcLoginPath:    true,
+	oidcCallbackPath: true,
 }
 
 // bootstrapExemptPaths is the narrower set reachable while no account
@@ -58,11 +74,11 @@ var exemptPaths = map[string]bool{
 // FindOrCreateOIDCUser makes the first OIDC user admin only when the
 // store is empty, docs/design.md §4).
 var bootstrapExemptPaths = map[string]bool{
-	"/api/healthz":            true,
-	"/api/auth/session":       true,
-	"/api/auth/register":      true,
-	"/api/auth/oidc/login":    true,
-	"/api/auth/oidc/callback": true,
+	"/api/healthz":   true,
+	sessionPath:      true,
+	registerPath:     true,
+	oidcLoginPath:    true,
+	oidcCallbackPath: true,
 }
 
 // secondFactorEnrolPaths are the routes a session may still reach while
@@ -75,12 +91,23 @@ var bootstrapExemptPaths = map[string]bool{
 // enrolled for it to act on while this gate holds, and admitting it
 // would be surface this door has no reason to open.
 var secondFactorEnrolPaths = map[string]bool{
-	"/api/auth/totp/enrol":   true,
-	"/api/auth/totp/confirm": true,
+	totpEnrolPath:   true,
+	totpConfirmPath: true,
 }
 
 func isSafeMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
+}
+
+// csrfOK requires the CSRF header on an unsafe method, writing the 403
+// itself when it is missing -- the one check Protect makes in both its
+// undecided and active states.
+func (g *Gate) csrfOK(w http.ResponseWriter, r *http.Request) bool {
+	if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
+		http.Error(w, "missing required header", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 const bearerPrefix = "Bearer "
@@ -240,8 +267,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 				http.Error(w, "setup required", http.StatusServiceUnavailable)
 				return
 			}
-			if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
-				http.Error(w, "missing required header", http.StatusForbidden)
+			if !g.csrfOK(w, r) {
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -260,8 +286,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			return
 		}
 
-		if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
-			http.Error(w, "missing required header", http.StatusForbidden)
+		if !g.csrfOK(w, r) {
 			return
 		}
 		if g.isExempt(path) {
