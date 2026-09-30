@@ -21,24 +21,27 @@ type loginReservation struct {
 	nameKey   string // set when it did not
 }
 
-// reserveLogin reserves one attempt on both buckets, or neither.
-// accountID is "" for a name that matches no account.
-func (g *Gate) reserveLogin(r *http.Request, accountID, username string, now time.Time) (loginReservation, bool) {
+// reserveLogin reserves one attempt on both buckets, or neither, and
+// writes the 429 itself when it is neither. accountID is "" for a name
+// that matches no account.
+func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, now time.Time) (loginReservation, bool) {
 	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID}
 	if accountID == "" {
 		res.nameKey = "user:" + strings.ToLower(username)
 	}
-	if !g.deps.Limiter.Reserve(res.ipKey, now) {
-		return res, false
-	}
-	var ok bool
-	if accountID != "" {
-		ok = g.deps.Limiter.ReserveAccount(g.deps.Users, accountID, now)
-	} else {
-		ok = g.deps.Limiter.Reserve(res.nameKey, now)
+	ok := g.deps.Limiter.Reserve(res.ipKey, now)
+	if ok {
+		if accountID != "" {
+			ok = g.deps.Limiter.ReserveAccount(g.deps.Users, accountID, now)
+		} else {
+			ok = g.deps.Limiter.Reserve(res.nameKey, now)
+		}
+		if !ok {
+			g.deps.Limiter.Release(res.ipKey, now)
+		}
 	}
 	if !ok {
-		g.deps.Limiter.Release(res.ipKey, now)
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 	}
 	return res, ok
 }
@@ -73,9 +76,8 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// pass a plain check before any of them finishes verifying, and a
 	// threshold of N admits as many concurrent attempts as an attacker
 	// cares to send.
-	res, ok := g.reserveLogin(r, accountID, req.Username, now)
+	res, ok := g.reserveLogin(w, r, accountID, req.Username, now)
 	if !ok {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
 
@@ -177,9 +179,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, ok := g.reserveLogin(r, user.ID, user.Username, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, now)
 	if !ok {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
 
