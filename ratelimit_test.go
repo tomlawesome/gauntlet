@@ -8,6 +8,8 @@ package gauntlet
 import (
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -168,6 +170,45 @@ func TestLoginLimiterForgetsKeysWhoseAttemptsAgedOut(t *testing.T) {
 	l.Allow("198.51.100.7", now.Add(2*time.Minute))
 	if len(l.attempts) != 0 {
 		t.Errorf("expected the key to be forgotten once its attempts aged out, still tracking %d", len(l.attempts))
+	}
+}
+
+// Reserve is the check-and-take that Allow's doc comment sends callers
+// to, because a simultaneous burst must not all pass the check before
+// any of them is counted. Written for gauntlet: many goroutines reserve
+// the same key at once, and exactly threshold of them may win. Run
+// under -race, this also covers the map access itself.
+func TestLoginLimiterReserveUnderConcurrencyNeverExceedsThreshold(t *testing.T) {
+	const (
+		threshold  = 5
+		goroutines = 64
+	)
+	l := mustNewLoginLimiter(t, threshold, time.Hour)
+	now := time.Now()
+
+	var (
+		wg      sync.WaitGroup
+		granted atomic.Int64
+		start   = make(chan struct{})
+	)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if l.Reserve("203.0.113.9", now) {
+				granted.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := granted.Load(); got != threshold {
+		t.Errorf("%d concurrent Reserve calls granted %d reservations, want exactly %d", goroutines, got, threshold)
+	}
+	if got := len(l.attempts["203.0.113.9"]); got != threshold {
+		t.Errorf("the key holds %d attempts after the burst, want %d", got, threshold)
 	}
 }
 
