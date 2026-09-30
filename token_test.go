@@ -354,6 +354,39 @@ func TestIngestTokenRequiresADevice(t *testing.T) {
 	}
 }
 
+// TestValidDeviceID pins the device-scope check on its own: an IPv6
+// literal with a zone (the longest real discovered id) and non-ASCII
+// operator names pass; anything over MaxDeviceIDLen bytes, or carrying
+// a control or formatting character, or not valid UTF-8, does not.
+func TestValidDeviceID(t *testing.T) {
+	for _, ok := range []string{
+		"",
+		"router-1",
+		"192.0.2.1",
+		"fe80::1ff:fe23:4567:890a%eth0",
+		"büro-gateway",
+		strings.Repeat("d", MaxDeviceIDLen),
+	} {
+		if !validDeviceID(ok) {
+			t.Errorf("validDeviceID(%q) = false, want true", ok)
+		}
+	}
+	for why, bad := range map[string]string{
+		"one byte over the limit":        strings.Repeat("d", MaxDeviceIDLen+1),
+		"multi-byte text over the limit": strings.Repeat("ü", MaxDeviceIDLen/2+1),
+		"an ANSI escape":                 "router\x1b[2K",
+		"a newline":                      "router-1\nrouter-2",
+		"a DEL":                          "router\x7f",
+		"a bidi override":                "router‮1",
+		"a zero-width space":             "router​1",
+		"invalid UTF-8":                  "router\xff",
+	} {
+		if validDeviceID(bad) {
+			t.Errorf("validDeviceID accepted a device id with %s: %q", why, bad)
+		}
+	}
+}
+
 // TestTokenNameIsBoundedLikeTheDevice: a token's name reaches the same
 // token list, audit trail and log lines its device id does, so it gets
 // the same cap and the same refusal of control characters.
