@@ -1,15 +1,12 @@
 package gate
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
-	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // TestRequireRoleBelowMinIsRefused is a direct unit test for the
@@ -93,39 +90,23 @@ func TestExemptAddsBeyondBuiltInSet(t *testing.T) {
 // MustChangePassword=true. No method in this stage's Store sets that
 // field (SetPassword is the only public write path, and it clears the
 // flag as part of what it does), so the fixture primes a persist.Memory
-// document directly, the same way a hand-built accounts file would.
+// document directly (openStoreWithUsers), the same way a hand-built
+// accounts file would.
 func primeMustChangePasswordAdmin(t *testing.T) *gauntlet.Store {
 	t.Helper()
 	hash, err := gauntlet.HashPassword("password123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := struct {
-		Users []gauntlet.User `json:"users"`
-	}{
-		Users: []gauntlet.User{{
-			ID:                 "admin-1",
-			Username:           "admin",
-			PasswordHash:       hash,
-			Role:               gauntlet.RoleAdmin,
-			CreatedAt:          time.Now(),
-			HasLocalPassword:   true,
-			MustChangePassword: true,
-		}},
-	}
-	b, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mem := persist.NewMemory()
-	if _, err := mem.Save(context.Background(), b, 0); err != nil {
-		t.Fatal(err)
-	}
-	store, err := gauntlet.OpenStore(mem, gauntlet.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store
+	return openStoreWithUsers(t, gauntlet.User{
+		ID:                 "admin-1",
+		Username:           "admin",
+		PasswordHash:       hash,
+		Role:               gauntlet.RoleAdmin,
+		CreatedAt:          time.Now(),
+		HasLocalPassword:   true,
+		MustChangePassword: true,
+	})
 }
 
 // TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor pins the fix
