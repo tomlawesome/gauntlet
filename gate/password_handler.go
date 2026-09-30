@@ -15,8 +15,8 @@ type changePasswordRequest struct {
 // password (mikroview's #294 item 4).
 func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
-	user, ok := g.sessionUser(r, now)
-	if !ok {
+	user := UserFromContext(r)
+	if user == nil {
 		writeUnauthorized(w, "sign in first")
 		return
 	}
