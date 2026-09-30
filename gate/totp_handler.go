@@ -55,6 +55,29 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var req totpEnrolRequest
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// The password is re-checked here for the same reason handleTOTPDelete
+	// re-checks it: the caller holds a session, which is exactly what a
+	// stolen cookie gives an attacker. Planting a factor the account's
+	// owner never sees locks them out at their next login, so it needs
+	// the one thing a cookie does not carry. Same per-account bucket, so
+	// this cannot become a password oracle behind a cookie either.
+	now := g.now()
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
+	if _, err := g.deps.Users.Authenticate(user.Username, req.Password, now); err != nil {
+		writeUnauthorized(w, "incorrect password")
+		return
+	}
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
+
 	secret, err := gauntlet.GenerateTOTPSecret()
 	if err != nil {
 		g.logError("generating TOTP secret for " + user.Username + ": " + err.Error())
@@ -186,6 +209,10 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 }
 
 type totpDeleteRequest struct {
+	Password string `json:"password"`
+}
+
+type totpEnrolRequest struct {
 	Password string `json:"password"`
 }
 

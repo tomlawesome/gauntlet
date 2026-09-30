@@ -52,7 +52,7 @@ func totpBobID(t *testing.T, g *Gate) string {
 
 func totpEnrol(t *testing.T, client *http.Client, ts *httptest.Server) totpEnrolResponse {
 	t.Helper()
-	resp := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", nil)
+	resp := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: totpBobPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -237,11 +237,37 @@ func TestTOTPEnrolConflictWhenAlreadyActive(t *testing.T) {
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	totpEnrolAndConfirm(t, bob, ts)
 
-	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/enrol", nil)
+	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: totpBobPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("enrolling again while active got %d, want 409", resp.StatusCode)
 	}
+}
+
+// A session alone must not be enough to start enrolment: that is the
+// position a stolen cookie puts an attacker in, and a factor planted from
+// it locks the real owner out at their next login. The password is the
+// one thing the cookie does not carry.
+func TestTOTPEnrolRequiresPassword(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+
+	for name, body := range map[string]any{
+		"wrong password": totpEnrolRequest{Password: "not-bobs-password"},
+		"no password":    totpEnrolRequest{},
+	} {
+		resp := postJSON(t, bob, ts.URL+"/api/auth/totp/enrol", body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: enrol got %d, want 401", name, resp.StatusCode)
+		}
+	}
+	if u, ok := g.deps.Users.Get(totpBobID(t, g)); !ok || u.TOTPSecret != "" {
+		t.Fatal("a refused enrolment left a pending secret on the account")
+	}
+	// The right password still works, so the check is a check and not a
+	// broken route.
+	totpEnrol(t, bob, ts)
 }
 
 func TestTOTPConfirmRejectsBadCode(t *testing.T) {
