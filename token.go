@@ -131,6 +131,11 @@ var (
 	// an unbounded or control-bearing one is a typo that becomes a
 	// permanently, invisibly dead token at best.
 	ErrTokenDeviceInvalid = errors.New("gauntlet: device id must be at most 64 characters of printable text")
+	// ErrTokenNameInvalid is returned by Create for a name that is too
+	// long or carries control/formatting characters. The name is a
+	// display value in the same places the device id is, and bounded
+	// for the same reasons (see ErrTokenDeviceInvalid).
+	ErrTokenNameInvalid = errors.New("gauntlet: token name must be at most 64 characters of printable text")
 )
 
 // defaultTokenKinds is TokenOptions.Kinds' value when left empty --
@@ -268,15 +273,33 @@ func validDeviceID(device string) bool {
 	if device == "" {
 		return true // the required/not-allowed rules in Create already ruled on this
 	}
-	if len(device) > MaxDeviceIDLen {
+	return printableWithin(device, MaxDeviceIDLen)
+}
+
+// MaxTokenNameLen bounds a token's display name, the same cap
+// MaxDeviceIDLen puts on its device scope.
+const MaxTokenNameLen = 64
+
+// validTokenName applies validDeviceID's rules to a token's name, which
+// reaches the same terminals and browsers. Empty stays allowed, as it
+// always has been: a name is a label, not a scope.
+func validTokenName(name string) bool {
+	return printableWithin(name, MaxTokenNameLen)
+}
+
+// printableWithin is the check validDeviceID and validTokenName share:
+// at most maxBytes of valid UTF-8, with no control or Unicode formatting
+// characters.
+func printableWithin(s string, maxBytes int) bool {
+	if len(s) > maxBytes {
 		return false
 	}
-	for _, r := range device {
+	for _, r := range s {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError {
 			return false
 		}
 	}
-	return utf8.ValidString(device)
+	return utf8.ValidString(s)
 }
 
 // Create generates a new token named name, of kind kind, and persists
@@ -289,13 +312,18 @@ func validDeviceID(device string) bool {
 // kind must be one of the kinds this store was opened with
 // (TokenOptions.Kinds); anything else is ErrTokenKindInvalid. device
 // scopes an ingest token to one device and must be empty for any other
-// kind -- see Token.Device.
+// kind -- see Token.Device. name is trimmed and held to the same length
+// and character rules as device (ErrTokenNameInvalid).
 func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) {
 	if !s.Persisted() {
 		return "", nil, ErrTokenNotPersisted
 	}
 	if !s.kinds[kind] {
 		return "", nil, ErrTokenKindInvalid
+	}
+	name = strings.TrimSpace(name)
+	if !validTokenName(name) {
+		return "", nil, ErrTokenNameInvalid
 	}
 	device = strings.TrimSpace(device)
 	if kind == TokenKindIngest && device == "" {
@@ -318,7 +346,7 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 
 	t := &Token{
 		ID:          newID(),
-		Name:        strings.TrimSpace(name),
+		Name:        name,
 		Kind:        kind,
 		Device:      device,
 		HashedValue: hash,

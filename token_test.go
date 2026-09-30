@@ -354,6 +354,39 @@ func TestIngestTokenRequiresADevice(t *testing.T) {
 	}
 }
 
+// TestTokenNameIsBoundedLikeTheDevice: a token's name reaches the same
+// token list, audit trail and log lines its device id does, so it gets
+// the same cap and the same refusal of control characters.
+func TestTokenNameIsBoundedLikeTheDevice(t *testing.T) {
+	s := newTestTokenStore(t)
+	now := time.Now()
+
+	longest := strings.Repeat("n", MaxTokenNameLen)
+	_, tok, err := s.Create("  "+longest+"  ", TokenKindAPI, "", nil, now)
+	if err != nil {
+		t.Fatalf("Create with a %d-character name: %v", MaxTokenNameLen, err)
+	}
+	if tok.Name != longest {
+		t.Errorf("Name = %q, want it trimmed to the %d-character name", tok.Name, MaxTokenNameLen)
+	}
+	if _, _, err := s.Create("", TokenKindAPI, "", nil, now); err != nil {
+		t.Errorf("Create with an empty name: %v, want it still allowed", err)
+	}
+
+	for why, bad := range map[string]string{
+		"is too long":             longest + "n",
+		"has a control character": "ci\x1b[2Kadmin",
+		"has a bidi override":     "ci‮gnp.exe",
+	} {
+		if _, _, err := s.Create(bad, TokenKindAPI, "", nil, now); err != ErrTokenNameInvalid {
+			t.Errorf("Create with a name that %s: err = %v, want ErrTokenNameInvalid", why, err)
+		}
+	}
+	if n := len(s.List()); n != 2 {
+		t.Errorf("store holds %d tokens, want the 2 accepted ones", n)
+	}
+}
+
 // TestUnknownKindOnDiskCannotAuthenticateButStaysRevocable covers a
 // token written by some other build, or hand-edited. It must not
 // authenticate -- guessing that an unrecognised kind meant a registered
