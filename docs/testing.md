@@ -12,10 +12,50 @@ has to meet.
 | Licence gate | `go-licenses` against `supply-chain/licence-policy.yml` | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
+| HTTP contract | `gate/contract_test.go` against `docs/api/auth.yaml` | `test:go` |
+| Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag | `lint:apidiff` |
 
 There is no frontend, no shipped image and no live-stack e2e stage here
 (unlike birdcage/mikroview): gauntlet ships a tag, not a running service,
 and every behaviour it has is reachable from a Go test.
+
+## Compatibility is checked, not reviewed
+
+ADR-0002 promises additive-only change from v0.1.0. Two checks hold
+that line (#22):
+
+- **HTTP contract.** `docs/api/auth.yaml` (OpenAPI 3.1) describes every
+  route `gate.Routes` serves. `TestContractEveryRoute` drives each route
+  through its success path and the refusals a test can reach, and
+  validates every request and response against the document with
+  `kin-openapi` (test scope only). An undocumented status fails, and each
+  documented success or redirect status must be seen at least once. JSON
+  response bodies are closed in the document, so a field the handler
+  drops, renames or adds without the document fails.
+  `TestContractRoutesMatchDocument` compares the patterns `routes.go`
+  registers (read from source, confirmed against the live mux) with the
+  document's operations, both ways. To add a route or field: change the
+  handler and the document in the same commit.
+- **Go API.** `scripts/apidiff.sh [BASE_REF]` compares the module's
+  exported API with the newest `v*` tag reachable from `HEAD` (or
+  `BASE_REF`), using `golang.org/x/exp/cmd/apidiff` via `go run` at a
+  pinned pseudo-version, never in `go.mod`. Internal packages are
+  skipped. A major-version bump in `VERSION` is the only way past an
+  incompatible change.
+
+What each check fails on:
+
+| Change | Caught by |
+| --- | --- |
+| Removed or renamed exported identifier, changed signature, removed struct field | `scripts/apidiff.sh` |
+| Removed route | `TestContractRoutesMatchDocument` (route no longer served) and `TestContractEveryRoute` (the route no longer answers as documented) |
+| Changed response field (renamed, removed, retyped) | `TestContractEveryRoute` |
+| New status code the document lacks | `TestContractEveryRoute` |
+| Added identifier, route or response field, with the document updated | passes both |
+
+Renaming a field in the document along with the handler passes the
+contract test, so a removal or rename in `docs/api/auth.yaml` itself is
+a review point: ADR-0002 allows it only across a major version.
 
 ## Coverage is a ratchet, not a target
 

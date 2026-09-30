@@ -59,6 +59,7 @@ go build ./... && go vet ./... && go test ./... -race -coverprofile=coverage.out
 python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
 scripts/licence-check.sh
+scripts/apidiff.sh             # exported API vs the last v* tag
 govulncheck ./...
 gitleaks detect --no-banner
 python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"
