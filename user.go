@@ -18,7 +18,10 @@
 // lists (LocalPassword, HasActiveTOTP, HasSecondFactor) are below.
 package gauntlet
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Role is an account's privilege tier.
 type Role string
@@ -159,6 +162,20 @@ type User struct {
 	// before the blanking. Unexported, so it never reaches JSON; it says
 	// that a secret exists, never what it is.
 	totpSecretBlanked bool
+}
+
+// clone deep-copies the account, including the slices a plain struct
+// copy would share -- what Store.mutate changes and may throw away.
+func (u *User) clone() *User {
+	cp := *u
+	cp.RecoveryCodes = slices.Clone(u.RecoveryCodes)
+	if u.Passkeys != nil {
+		cp.Passkeys = make([]Passkey, len(u.Passkeys))
+		for i := range u.Passkeys {
+			cp.Passkeys[i] = u.Passkeys[i].clone()
+		}
+	}
+	return &cp
 }
 
 // LocalPassword reports whether this account has a real, user-chosen

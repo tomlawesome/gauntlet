@@ -1,0 +1,201 @@
+// The save-conflict replay loop Store and TokenStore share (#21).
+//
+// Every write to either store is a whole-document rewrite: the process
+// holds the document in memory, changes it, and saves it with "I expect
+// version V". When another process wrote in between (a CLI command
+// against a live server), the save is refused with persist.ErrConflict.
+// The loop below answers that by reloading the fresh document, running
+// the same change against it, and saving again -- what a database does
+// with a version column -- so no write is ever silently discarded and
+// the caller never sees the conflict. Its predecessor,
+// persist.SaveWithRetry, saved the stale document on top instead.
+//
+// # Converting a method onto the loop
+//
+// Store.DeleteUser (store.go) and TokenStore.Create (token.go) are the
+// two converted templates; every other mutating method follows them:
+//
+//  1. Keep everything before the write lock as it is: argument checks,
+//     Persisted(), hashing, reloadIfStale(). None of it moves.
+//  2. Replace the block from s.mu.Lock() to the tryPersistLocked() call,
+//     including the rollback that follows it, with one call:
+//     s.mutate(func(st *storeState) error { ... }) (TokenStore: the
+//     same, with *tokenState). The op reads what it needs from st --
+//     never from s, and never from a *User or *Token pointer taken
+//     before the call -- decides, returns the method's sentinel errors
+//     (ErrUserNotFound, ErrCannotDeleteAdmin, ...) exactly where the
+//     old code did, and changes st.
+//  3. Results the method returns come out through variables captured
+//     by the closure, assigned as the op's last act: the op may run
+//     more than once and the final run overwrites the earlier ones, so
+//     assign, never append or accumulate. Take copies (cp := *u) inside
+//     the op; a pointer into st is owned by the state.
+//  4. Delete the hand-written rollback outright. A failed attempt's
+//     state is a copy the loop throws away, so there is nothing to
+//     undo, and the "prev..." locals that fed it go too.
+//  5. Return mutate's error as it is. The old "saving accounts: %w"
+//     wrapper goes: the loop already names the store and backend in
+//     every persistence failure, and op errors come back unwrapped, so
+//     errors.Is against the sentinels keeps working.
+//  6. A method whose write is bookkeeping only (LastLogin, LastUsedAt)
+//     uses mutateBestEffortLocked, which logs a failed save and keeps
+//     the change in memory, as persistLocked did.
+//
+// A method that already holds mu (createLocked, or a branch inside
+// Authenticate) calls mutateLocked instead of mutate; the op is the
+// same. Everything the op writes must be built from st and the method's
+// arguments: a value computed once outside and then modified inside the
+// op would be modified again on replay. Generating an ID or hash
+// outside the op is fine (it is the same on every run); appending to a
+// slice that lives outside the op is not.
+//
+// Methods judged not mechanical, for whoever converts the rest:
+//
+//   - Store.Authenticate: two writes with different guarantees on one
+//     path (the reset-code spend must fail loudly, the LastLogin bump
+//     is best-effort), and both live under a lock the method already
+//     holds after its unlocked hash check -- convert the spend with
+//     mutateLocked and the bump with mutateBestEffortLocked, leaving
+//     the granularity check where it is.
+//   - Store.FindOrCreateOIDCUser: same split as Authenticate (create
+//     fails loudly, the existing-account LastLogin is best-effort) plus
+//     uniqueUsernameLocked, which reads the index the op is given --
+//     it must read st, not s.
+//   - Store.createLocked and its guard: the guard (registration
+//     open/closed, single admin) must run inside the op, against st,
+//     since a replay may find that the fresh document already has an
+//     admin.
+//   - Store.GenerateRecoveryCodesIfAbsent: reloads twice and decides
+//     between two outcomes; the decision moves inside the op, and the
+//     codes are generated once before it (their hashes are what the op
+//     writes, the same on every run).
+//   - Store.TransferAdmin: touches two accounts and re-checks the
+//     single-admin invariant; the check belongs in the op, against st.
+//
+// Once every method is converted, tryPersistLocked and persistLocked on
+// both stores go, Options.Log's comment about overwritten writes goes
+// with them, and reloadIfStale's "saves over this on its next write"
+// remark stops being true: a write that meets a refused document now
+// fails instead.
+package gauntlet
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/tomlawesome/gauntlet/persist"
+)
+
+// ErrSaveConflict is returned by a write that could not be saved after
+// maxSaveAttempts tries, each refused because another process wrote in
+// between. Nothing was written and the in-memory state is unchanged;
+// the caller may simply try again. Reaching it takes a writer that
+// never stops -- a runaway script -- rather than one CLI command against
+// a live server, which the first replay absorbs.
+var ErrSaveConflict = errors.New("gauntlet: the store kept changing under this write; nothing was saved")
+
+// maxSaveAttempts bounds how many times one write is replayed against a
+// freshly loaded document before it gives up with ErrSaveConflict.
+const maxSaveAttempts = 5
+
+// document is what the replay loop needs to know about one store: how
+// to copy its state, turn it into the persisted bytes, and turn a
+// freshly loaded document back into state. S is the store's state type
+// (storeState, tokenState).
+type document[S any] struct {
+	backend persist.Backend
+	// what names the document in error text: "accounts", "API tokens".
+	what string
+	// clone deep-copies a state so the loop can change the copy and
+	// throw it away on failure.
+	clone func(*S) *S
+	// encode is the state as it is saved.
+	encode func(*S) ([]byte, error)
+	// decode builds a state from a freshly loaded document, applying
+	// the same checks the store applies when it opens (checkAdmins for
+	// accounts). A document that fails them fails the write.
+	decode func([]byte) (*S, error)
+	// empty is the state of a backend whose document has been removed
+	// since this process loaded it.
+	empty func() *S
+}
+
+// replay runs op against a copy of cur and saves the result, reloading
+// and re-running op on a save conflict, up to maxSaveAttempts times. It
+// returns the state to install and the version it was saved as; on any
+// error cur is untouched and nothing was saved. An error from op comes
+// back as is; every persistence failure is wrapped, so a store can wrap
+// it again in its own words.
+//
+// The caller holds the store's write lock throughout, as tryPersistLocked
+// did: the version it saves with is the one the store holds, and nothing
+// else may move it between the copy and the swap.
+func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64, error) {
+	next := d.clone(cur)
+	if err := op(next); err != nil {
+		return nil, 0, err
+	}
+	if d.backend == nil {
+		return next, version, nil // persistence not configured: memory only
+	}
+
+	for attempt := 1; ; attempt++ {
+		data, err := d.encode(next)
+		if err != nil {
+			return nil, 0, fmt.Errorf("encoding %s for persistence failed: %w", d.what, err)
+		}
+		saved, err := d.save(data, version)
+		if err == nil {
+			return next, saved, nil
+		}
+		if !errors.Is(err, persist.ErrConflict) {
+			return nil, 0, fmt.Errorf("writing %s to %s failed: %w", d.what, d.backend.Describe(), err)
+		}
+		if attempt == maxSaveAttempts {
+			return nil, 0, fmt.Errorf("writing %s to %s after %d attempts: %w", d.what, d.backend.Describe(), attempt, ErrSaveConflict)
+		}
+
+		// Another process wrote first. Its document is now the truth:
+		// load it, apply this change to it, and try again with its
+		// version. A document this process would refuse to open is
+		// refused here too, loudly -- writing on top of it is exactly
+		// what this loop exists to stop.
+		fresh, freshVersion, err := d.load()
+		if err != nil {
+			return nil, 0, err
+		}
+		if err := op(fresh); err != nil {
+			return nil, 0, err
+		}
+		next, version = fresh, freshVersion
+	}
+}
+
+// save is one Save call under saveTimeout.
+func (d document[S]) save(data []byte, version int64) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+	defer cancel()
+	return d.backend.Save(ctx, data, version)
+}
+
+// load reads the document another process just wrote and turns it into
+// a state, under reloadTimeout. A document that has been removed loads
+// as the empty state at version 0, so the retried save creates it.
+func (d document[S]) load() (*S, int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), reloadTimeout)
+	defer cancel()
+	snap, err := d.backend.Load(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("reloading %s from %s after a conflicting write failed: %w", d.what, d.backend.Describe(), err)
+	}
+	if !snap.Exists {
+		return d.empty(), 0, nil
+	}
+	fresh, err := d.decode(snap.Payload)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s in %s were changed by another process to a document this store cannot apply, so this change was not saved: %w",
+			d.what, d.backend.Describe(), err)
+	}
+	return fresh, snap.Version, nil
+}

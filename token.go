@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -164,9 +165,24 @@ type TokenStore struct {
 	backend persist.Backend
 	log     *slog.Logger
 	// version is the backend's token for the document as of the last
-	// load or save -- see persist.SaveWithRetry.
+	// load or save -- what mutate saves with, so a write from another
+	// process is noticed rather than written over.
 	version int64
-	byID    map[string]*Token
+	// tokenState is the tokens document as this process holds it,
+	// guarded by mu. Embedded so the fields read as s.byID; a write
+	// changes a copy and swaps it in whole -- see mutate.
+	tokenState
+	// kinds is the registered-kind set from TokenOptions.Kinds,
+	// resolved once at OpenTokenStore and never mutated afterwards --
+	// safe to read without mu.
+	kinds map[TokenKind]bool
+}
+
+// tokenState is the in-memory index over the tokens document. It is
+// what a write changes, as a whole -- see TokenStore.mutate -- and what
+// OpenTokenStore builds on a load.
+type tokenState struct {
+	byID map[string]*Token
 	// byHash maps a token's SHA-256 hash straight to its ID, so
 	// Authenticate is an O(1) map lookup rather than scanning every
 	// token -- possible only because, unlike Argon2id password hashes,
@@ -175,10 +191,121 @@ type TokenStore struct {
 	// (below) is never entered here, so it can never be found by any
 	// raw value at all.
 	byHash map[string]string
-	// kinds is the registered-kind set from TokenOptions.Kinds,
-	// resolved once at OpenTokenStore and never mutated afterwards --
-	// safe to read without mu.
-	kinds map[TokenKind]bool
+}
+
+// clone deep-copies the state, so a change to the copy can be thrown
+// away without having touched the original. Token holds no slices, so
+// a struct copy of each one is a full copy.
+func (st *tokenState) clone() *tokenState {
+	cp := &tokenState{
+		byID:   make(map[string]*Token, len(st.byID)),
+		byHash: make(map[string]string, len(st.byHash)),
+	}
+	for id, t := range st.byID {
+		tc := *t
+		cp.byID[id] = &tc
+	}
+	maps.Copy(cp.byHash, st.byHash)
+	return cp
+}
+
+// tokens is the tokens in document order -- see tokenOlder.
+func (st *tokenState) tokens() []*Token {
+	list := make([]*Token, 0, len(st.byID))
+	for _, t := range st.byID {
+		list = append(list, t)
+	}
+	sort.Slice(list, func(i, j int) bool { return tokenOlder(list[i], list[j]) })
+	return list
+}
+
+// encodeTokens is the state as the document is saved.
+func encodeTokens(st *tokenState) ([]byte, error) {
+	return json.MarshalIndent(st.tokens(), "", "  ")
+}
+
+// indexTokens builds the state for a document's token list, leaving a
+// token of an unregistered kind out of the hash index (see
+// OpenTokenStore) and warning about it. Shared by OpenTokenStore and
+// the conflict replay in mutate, so the two can't diverge on what
+// loading means.
+func (s *TokenStore) indexTokens(list []*Token) *tokenState {
+	st := &tokenState{
+		byID:   make(map[string]*Token, len(list)),
+		byHash: make(map[string]string, len(list)),
+	}
+	for _, t := range list {
+		if t == nil { // see Store.applyLoaded's identical guard for why this is needed
+			continue
+		}
+		st.byID[t.ID] = t
+		if !s.kinds[t.Kind] {
+			if s.log != nil {
+				s.log.Warn(fmt.Sprintf("token %q has unregistered kind %q -- it will not authenticate; revoke and reissue it", t.Name, t.Kind))
+			}
+			continue
+		}
+		st.byHash[t.HashedValue] = t.ID
+	}
+	return st
+}
+
+// decodeTokens is the document as it is opened.
+func (s *TokenStore) decodeTokens(data []byte) (*tokenState, error) {
+	var list []*Token
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil, err
+	}
+	return s.indexTokens(list), nil
+}
+
+// tokens is the replay loop's view of this store -- see mutate.go.
+func (s *TokenStore) tokens() document[tokenState] {
+	return document[tokenState]{
+		backend: s.backend,
+		what:    "API tokens",
+		clone:   (*tokenState).clone,
+		encode:  encodeTokens,
+		decode:  s.decodeTokens,
+		empty:   func() *tokenState { return s.indexTokens(nil) },
+	}
+}
+
+// mutate applies op to the tokens and saves the result, taking the
+// write lock for the whole of it -- Store.mutate's contract exactly,
+// including the reload-and-replay on a conflicting write from another
+// process, which this store did not do before #21.
+func (s *TokenStore) mutate(op func(*tokenState) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mutateLocked(op)
+}
+
+// mutateLocked is mutate for a caller that already holds mu.
+func (s *TokenStore) mutateLocked(op func(*tokenState) error) error {
+	next, version, err := s.tokens().replay(&s.tokenState, s.version, op)
+	if err != nil {
+		return err
+	}
+	s.tokenState = *next
+	s.version = version
+	return nil
+}
+
+// mutateBestEffortLocked is mutateLocked for a write not worth failing
+// the caller over -- Authenticate's LastUsedAt bump. See
+// Store.mutateBestEffortLocked.
+func (s *TokenStore) mutateBestEffortLocked(op func(*tokenState) error) {
+	err := s.mutateLocked(op)
+	if err == nil {
+		return
+	}
+	if opErr := op(&s.tokenState); opErr != nil {
+		return
+	}
+	if s.log != nil {
+		s.log.Error(fmt.Sprintf("%v -- this change exists only in memory and will be lost on restart", err))
+	}
 }
 
 // OpenTokenStore returns a TokenStore persisting through b. A nil b
@@ -212,29 +339,16 @@ func OpenTokenStore(b persist.Backend, opts TokenOptions) (*TokenStore, error) {
 	s := &TokenStore{
 		backend: b,
 		log:     opts.Log,
-		byID:    make(map[string]*Token),
-		byHash:  make(map[string]string),
 		kinds:   kinds,
 	}
+	s.tokenState = *s.indexTokens(nil)
 
 	version, existed, err := persist.Open(context.Background(), b, "the API tokens store", func(data []byte) error {
-		var list []*Token
-		if err := json.Unmarshal(data, &list); err != nil {
+		st, err := s.decodeTokens(data)
+		if err != nil {
 			return err
 		}
-		for _, t := range list {
-			if t == nil { // see Store.applyLoaded's identical guard for why this is needed
-				continue
-			}
-			s.byID[t.ID] = t
-			if !s.kinds[t.Kind] {
-				if s.log != nil {
-					s.log.Warn(fmt.Sprintf("token %q has unregistered kind %q -- it will not authenticate; revoke and reissue it", t.Name, t.Kind))
-				}
-				continue
-			}
-			s.byHash[t.HashedValue] = t.ID
-		}
+		s.tokenState = *st
 		return nil
 	})
 	if err != nil {
@@ -341,35 +455,38 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 	raw = newID()
 	hash := hashTokenValue(raw)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	t := &Token{
-		ID:          newID(),
-		Name:        name,
-		Kind:        kind,
-		Device:      device,
-		HashedValue: hash,
-		CreatedAt:   now,
+	// A token that only exists in memory must not be handed to the
+	// caller: the raw value is shown exactly once, here, so a restart
+	// before the next good write would leave the caller holding a value
+	// that authenticates against nothing. mutate installs the token
+	// only once it is saved, and may run this op again against a
+	// freshly loaded document if another process wrote first, so the
+	// token is built inside it from the arguments alone and the result
+	// is set last.
+	id := newID()
+	var created Token
+	err = s.mutate(func(st *tokenState) error {
+		t := &Token{
+			ID:          id,
+			Name:        name,
+			Kind:        kind,
+			Device:      device,
+			HashedValue: hash,
+			CreatedAt:   now,
+		}
+		if creator != nil {
+			t.CreatedBy = creator.ID
+			t.CreatedByUsername = creator.Username
+		}
+		st.byID[t.ID] = t
+		st.byHash[hash] = t.ID
+		created = *t
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
 	}
-	if creator != nil {
-		t.CreatedBy = creator.ID
-		t.CreatedByUsername = creator.Username
-	}
-	s.byID[t.ID] = t
-	s.byHash[hash] = t.ID
-	if err := s.tryPersistLocked(); err != nil {
-		// A token that only exists in memory must not be handed to the
-		// caller: the raw value is shown exactly once, here, so a
-		// restart before the next good write would leave the caller
-		// holding a value that authenticates against nothing.
-		delete(s.byID, t.ID)
-		delete(s.byHash, hash)
-		return "", nil, fmt.Errorf("saving API tokens: %w", err)
-	}
-
-	cp := *t
-	return raw, &cp, nil
+	return raw, &created, nil
 }
 
 // lastUsedGranularity is how stale a token's persisted LastUsedAt may
@@ -539,29 +656,27 @@ func (s *TokenStore) ByKind(kind TokenKind) []*Token {
 }
 
 // tryPersistLocked is persistLocked's error-returning half, for the
-// callers (Create, Revoke, RevokeAllCreatedBy) that issue or revoke a
-// token and so must not let the caller believe a write happened when it
-// didn't. Authenticate's LastUsedAt update keeps using persistLocked
-// below, which keeps the swallow-and-log behaviour: that field is a
-// display convenience, not worth failing an otherwise-valid
-// authentication over.
+// callers (Revoke, RevokeAllCreatedBy) that revoke a token and so must
+// not let the caller believe a write happened when it didn't.
+// Authenticate's LastUsedAt update keeps using persistLocked below,
+// which keeps the swallow-and-log behaviour: that field is a display
+// convenience, not worth failing an otherwise-valid authentication
+// over.
+//
+// Being replaced by mutate (#21), which reloads and replays the change
+// on a conflict instead of writing on top; Create is converted, the
+// rest follow. See mutate.go.
 func (s *TokenStore) tryPersistLocked() error {
 	if s.backend == nil {
 		return nil
 	}
-	list := make([]*Token, 0, len(s.byID))
-	for _, t := range s.byID {
-		list = append(list, t)
-	}
-	sort.Slice(list, func(i, j int) bool { return tokenOlder(list[i], list[j]) })
-
-	data, err := json.MarshalIndent(list, "", "  ")
+	data, err := encodeTokens(&s.tokenState)
 	if err != nil {
 		return fmt.Errorf("encoding API tokens for persistence failed: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
 	defer cancel()
-	version, conflicted, err := persist.SaveWithRetry(ctx, s.backend, data, s.version)
+	version, conflicted, err := persist.SaveWithRetry(ctx, s.backend, data, s.version) //nolint:staticcheck // goes with this function once every write is on mutate (#21)
 	if err != nil {
 		return fmt.Errorf("writing API tokens to %s failed: %w", s.backend.Describe(), err)
 	}

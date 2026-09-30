@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -100,6 +101,16 @@ type Passkey struct {
 	// LastUsedAt is when this credential last completed a login -- zero
 	// until the first one.
 	LastUsedAt time.Time `json:"lastUsedAt,omitzero"`
+}
+
+// clone copies the credential with its own byte and string slices, so
+// a change to the copy cannot reach the original -- see User.clone.
+func (p Passkey) clone() Passkey {
+	cp := p
+	cp.ID = slices.Clone(p.ID)
+	cp.PublicKey = slices.Clone(p.PublicKey)
+	cp.Transports = slices.Clone(p.Transports)
+	return cp
 }
 
 // PasskeyFlags mirrors the four authenticator flags a WebAuthn
