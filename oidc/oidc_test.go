@@ -288,6 +288,26 @@ func TestVerifyIDTokenRejectsWrongIssuer(t *testing.T) {
 	}
 }
 
+// A token without a subject is a token without an identity: go-oidc
+// lets it through, so gauntlet has to refuse it itself, or every user of
+// such a provider would land on the one account keyed on (issuer, "").
+func TestVerifyIDTokenRejectsEmptySubject(t *testing.T) {
+	fp := testutil.NewFakeProvider(t)
+	c := testClient(t, fp)
+
+	claims := fp.DefaultClaims("test-client", "nonce-1")
+	claims.Subject = ""
+	fp.NextIDToken = fp.SignRS256(t, claims)
+
+	tok, err := c.Exchange(context.Background(), "any-code", "any-verifier")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if _, err := c.VerifyIDToken(context.Background(), tok); !errors.Is(err, ErrNoSubject) {
+		t.Fatalf("VerifyIDToken on a token with an empty sub: got %v, want ErrNoSubject", err)
+	}
+}
+
 // TestHTTPTimeoutBoundsAHungProvider proves the timeout wiring (New's
 // defaultHTTPTimeout, reapplied in Exchange/VerifyIDToken via
 // oidc.ClientContext) actually takes effect end to end, not just that the

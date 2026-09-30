@@ -217,6 +217,10 @@ func (c *Client) Exchange(ctx context.Context, code, codeVerifier string) (*oaut
 // not a normal failure mode.
 var ErrNoIDToken = fmt.Errorf("oidc: token response contained no id_token")
 
+// ErrNoSubject is returned by VerifyIDToken for a token whose `sub`
+// claim is empty: there is no identity to key an account on.
+var ErrNoSubject = fmt.Errorf("oidc: id_token has no subject")
+
 // VerifyIDToken extracts and cryptographically verifies tok's ID token
 // (signature against the provider's JWKS, issuer, audience, and expiry --
 // see New's SupportedSigningAlgs for the accepted algorithm allowlist)
@@ -237,6 +241,13 @@ func (c *Client) VerifyIDToken(ctx context.Context, tok *oauth2.Token) (*Identit
 	idToken, err := c.verifier.Verify(ctx, raw)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: verifying id_token: %w", err)
+	}
+	// (issuer, subject) is the account's identity key, and go-oidc does
+	// not insist on `sub` although OpenID Connect Core does. Without
+	// this every user of a provider that omits it would resolve to one
+	// account -- the first of them.
+	if idToken.Subject == "" {
+		return nil, ErrNoSubject
 	}
 
 	var claims struct {
