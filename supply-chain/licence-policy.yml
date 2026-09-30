@@ -16,7 +16,9 @@
 # Apache-2.0 are listed ahead of need, for the three modules the owner has
 # already approved for G2/G5 (AGENTS.md): golang.org/x/crypto (BSD-3-Clause),
 # golang.org/x/oauth2 (BSD-3-Clause), github.com/coreos/go-oidc/v3
-# (Apache-2.0).
+# (Apache-2.0). MIT is listed too, as in birdcage's policy: permissive
+# and compatible with this module's own Apache-2.0, though no module in
+# go.mod carries it today.
 allow-licenses:
   - BSD-3-Clause
   - Apache-2.0
