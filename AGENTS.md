@@ -51,6 +51,7 @@ is not approved; it waits for G8. Anything else goes to the owner first.
 ## Checks
 
 ```
+gofmt -l .                     # must print nothing
 go build ./... && go vet ./... && go test ./... -race -coverprofile=coverage.out
 python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
