@@ -152,6 +152,13 @@ type User struct {
 	// (passkey/, G8) is not part of this module in v0.1.0; this package
 	// only stores what it would produce.
 	Passkeys []Passkey `json:"passkeys,omitempty"`
+
+	// totpSecretBlanked is set only on a copy Store.List returns, and
+	// only when List blanked a TOTPSecret that was there, so
+	// HasActiveTOTP on that copy gives the answer it would have given
+	// before the blanking. Unexported, so it never reaches JSON; it says
+	// that a secret exists, never what it is.
+	totpSecretBlanked bool
 }
 
 // LocalPassword reports whether this account has a real, user-chosen
@@ -163,8 +170,12 @@ func (u *User) LocalPassword() bool { return u.HasLocalPassword }
 // generated-but-never-confirmed secret (TOTPSecret set, TOTPConfirmedAt
 // zero) is mid-setup, not something that should ever gate a sign-in --
 // see TOTPConfirmedAt's doc comment.
+//
+// It answers the same on a Store.List copy, whose TOTPSecret is blanked,
+// as on the account itself -- see totpSecretBlanked.
 func (u *User) HasActiveTOTP() bool {
-	return u.TOTPSecret != "" && !u.TOTPConfirmedAt.IsZero()
+	hasSecret := u.TOTPSecret != "" || u.totpSecretBlanked
+	return hasSecret && !u.TOTPConfirmedAt.IsZero()
 }
 
 // HasSecondFactor reports whether u has any active second factor at

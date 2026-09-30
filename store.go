@@ -1287,7 +1287,10 @@ func (s *Store) List() []User {
 		// the actual shared secret, good for minting valid codes
 		// indefinitely, not just checking one. RecoveryCodes are hashes
 		// only, same category as ResetCodeHash above. Neither belongs
-		// in an admin-facing account list.
+		// in an admin-facing account list. HasActiveTOTP still answers
+		// truly on the copy (see User.totpSecretBlanked), so a caller
+		// showing who has an authenticator app needs no extra Get.
+		cp.totpSecretBlanked = u.TOTPSecret != ""
 		cp.TOTPSecret = ""
 		cp.RecoveryCodes = nil
 		// Passkeys carries each credential's PublicKey -- not a secret

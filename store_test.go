@@ -18,6 +18,7 @@ package gauntlet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -312,6 +313,51 @@ func TestListNeverIncludesPasswordHashes(t *testing.T) {
 	}
 	if list[0].Username != "admin" || list[1].Username != "viewer" {
 		t.Errorf("expected alphabetical order, got %s, %s", list[0].Username, list[1].Username)
+	}
+}
+
+// TestListAnswersHasActiveTOTPWithoutTheSecret: List blanks TOTPSecret,
+// but an admin's account list still has to show who has an active
+// authenticator app. HasActiveTOTP on a listed copy must give the same
+// answer as on Get's copy -- for an active factor, a pending one and
+// none -- without the secret itself leaving List, in Go or in JSON.
+func TestListAnswersHasActiveTOTPWithoutTheSecret(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	active, _ := s.Register("active", "password123", now)
+	pending, _ := s.CreateUser("pending", "password123", RoleUser, now)
+	none, _ := s.CreateUser("none", "password123", RoleUser, now)
+	setTOTPForTest(t, s, active.ID, testTOTPSecret, now, 0)
+	setTOTPForTest(t, s, pending.ID, testTOTPSecret, time.Time{}, 0)
+
+	want := map[string]bool{active.ID: true, pending.ID: false, none.ID: false}
+	for _, u := range s.List() {
+		if u.TOTPSecret != "" {
+			t.Errorf("List returned %s's TOTP secret", u.Username)
+		}
+		if got := u.HasActiveTOTP(); got != want[u.ID] {
+			t.Errorf("listed %s: HasActiveTOTP = %v, want %v", u.Username, got, want[u.ID])
+		}
+		if full, _ := s.Get(u.ID); full.HasActiveTOTP() != want[u.ID] {
+			t.Errorf("Get %s: HasActiveTOTP = %v, want %v", u.Username, full.HasActiveTOTP(), want[u.ID])
+		}
+		data, err := json.Marshal(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), testTOTPSecret) {
+			t.Errorf("listed %s serialises its TOTP secret: %s", u.Username, data)
+		}
+	}
+
+	// A factor cleared after listing reads as gone on a fresh list.
+	if err := s.ClearTOTP(active.ID); err != nil {
+		t.Fatalf("ClearTOTP: %v", err)
+	}
+	for _, u := range s.List() {
+		if u.ID == active.ID && u.HasActiveTOTP() {
+			t.Error("listed account still reports an active factor after ClearTOTP")
+		}
 	}
 }
 
