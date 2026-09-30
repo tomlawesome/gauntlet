@@ -12,9 +12,10 @@ import (
 )
 
 // TestMikroviewUsersJSONFixtureRoundTripsByteIdentical is gauntlet issue
-// #3's (G2) and #5's (G4) done-when: a copy of a mikroview
-// users.json-shaped fixture, with every field populated including every
-// second-factor kind, loads, saves and reloads byte-identical.
+// #3's (G2) and #5's (G4) done-when: a mikroview users.json-shaped
+// fixture, built here rather than copied from mikroview, with every field
+// populated including every second-factor kind, loads, saves and reloads
+// byte-identical.
 //
 // The fixture is built from gauntlet's own User/RecoveryCode/Passkey
 // types -- copied field-for-field, JSON tag-for-tag, from mikroview's

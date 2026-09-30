@@ -104,6 +104,9 @@ func NormaliseRecoveryCode(typed string) string {
 // clear -- grouped for display -- exactly once. The caller must show
 // them to the user immediately and must never itself persist the
 // returned strings; only the hashes this writes to the store survive.
+//
+// now is unused: a recovery code records no issue time. It stays so the
+// signature matches mikroview's and gauntlet v0.1.0's.
 func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, error) {
 	if !s.Persisted() {
 		return nil, ErrNotPersisted
@@ -172,6 +175,8 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 // alreadyIssued case is answered first, under the read lock, so it
 // costs no hashing at all; only a call that loses a race to a
 // concurrent first enrolment hashes ten codes and throws them away.
+//
+// now is unused, as in GenerateRecoveryCodes.
 func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (codes []string, alreadyIssued bool, err error) {
 	if !s.Persisted() {
 		return nil, false, ErrNotPersisted

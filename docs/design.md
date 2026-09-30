@@ -232,6 +232,27 @@ type AccountLockouts interface {                                    // *Store im
 
 func ValidateUsername(username string) error       // 1–64 runes, no control/format chars
 func ValidateLocalUsername(username string) error  // additionally: no "@"
+
+// Second-factor and code helpers, for apps that render enrolment or check a code themselves.
+func GenerateTOTPSecret() ([]byte, error)
+func EncodeTOTPSecret(secret []byte) string
+func DecodeTOTPSecret(s string) ([]byte, error)
+func TOTPEnrollmentURI(productName, username string, secret []byte) string
+func GenerateTOTPCode(secret []byte, counter uint64) string
+func VerifyTOTP(encodedSecret, code string, now time.Time, lastUsedCounter uint64) (matchedCounter uint64, ok bool)
+func FormatRecoveryCode(code string) string; func NormaliseRecoveryCode(typed string) string
+func FormatResetCode(code string) string;    func NormaliseResetCode(typed string) string
+
+const MaxDeviceIDLen = 64; const MaxTokenNameLen = 64
+const ResetCodeTTL = 24 * time.Hour
+
+// Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
+// ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
+// ErrPasswordTooShort, ErrInvalidRole, ErrRegistrationClosed, ErrNoAdmin, ErrSingleAdmin,
+// ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
+// ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
+// ErrPasskeyLimitReached, ErrPasskeyNotFound, ErrTokenNotFound, ErrTokenKindInvalid,
+// ErrTokenNameInvalid, ErrTokenDeviceInvalid/Required/NotAllowed, ErrLimiterConfig.
 ```
 
 Reasons for the three *new* items:
