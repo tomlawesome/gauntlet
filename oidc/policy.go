@@ -241,7 +241,11 @@ func IsMultiTenantIssuer(issuer string) bool {
 			return false
 		}
 	}
-	prefixes, known := multiTenantIssuers[strings.ToLower(u.Hostname())]
+	// "accounts.google.com." is the same host as "accounts.google.com"
+	// to DNS and to TLS, but not to a map lookup: without the trim a
+	// trailing root dot would slip a listed provider past this check.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	prefixes, known := multiTenantIssuers[host]
 	if !known {
 		return false
 	}
