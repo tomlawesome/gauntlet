@@ -27,8 +27,13 @@ default:
   # caches live under the project dir (GOMODCACHE/GOCACHE below) so one
   # cache entry carries them between jobs and pipelines; the key turns
   # over when a dependency or a tool version changes.
+  # Protected refs get their own cache. A merge-request pipeline can
+  # write anything into .gocache/, and a push pipeline on dev carries
+  # the protected variables in every job's environment, so the two must
+  # never share a cache entry.
   cache:
     key:
+      prefix: $CI_COMMIT_REF_PROTECTED
       files:
         - go.sum
         - .gitlab-ci.yml
