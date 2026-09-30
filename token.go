@@ -462,6 +462,18 @@ func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error) {
 	return len(removed), nil
 }
 
+// tokenOlder is the one order List, ByKind and the saved document use:
+// oldest first, then by ID. The ID breaks ties between tokens created in
+// the same instant, which would otherwise come out in map-iteration order
+// -- different on every call, so a list that reshuffles on refresh and a
+// document whose bytes change on every save.
+func tokenOlder(a, b *Token) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
+}
+
 // List returns every token's metadata, oldest first -- HashedValue is
 // always zeroed out (never the raw value either, since this store never
 // retains it past Create's return) so a list response can never leak
@@ -475,7 +487,7 @@ func (s *TokenStore) List() []Token {
 		cp.HashedValue = ""
 		out = append(out, cp)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool { return tokenOlder(&out[i], &out[j]) })
 	return out
 }
 
@@ -494,7 +506,7 @@ func (s *TokenStore) ByKind(kind TokenKind) []*Token {
 		cp.HashedValue = ""
 		out = append(out, &cp)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool { return tokenOlder(out[i], out[j]) })
 	return out
 }
 
@@ -513,7 +525,7 @@ func (s *TokenStore) tryPersistLocked() error {
 	for _, t := range s.byID {
 		list = append(list, t)
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
+	sort.Slice(list, func(i, j int) bool { return tokenOlder(list[i], list[j]) })
 
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {

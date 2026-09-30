@@ -16,6 +16,8 @@ package gauntlet
 
 import (
 	"context"
+	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -585,5 +587,61 @@ func TestRevokeAllCreatedByLeavesTokensWorkingWhenPersistFails(t *testing.T) {
 	}
 	if _, ok := s.Authenticate(raw, TokenKindAPI, time.Now()); !ok {
 		t.Error("expected alice's token to still authenticate after a failed persist")
+	}
+}
+
+// TestTokenOrderIsDeterministicOnEqualCreatedAt: tokens created in the
+// same instant (a script issuing several at once, or a clock with coarse
+// resolution) must list, and persist, in one fixed order. Map iteration
+// is randomised, so without a tie-breaker the order changes from call to
+// call -- a list that reshuffles on refresh, and a document whose bytes
+// differ on every save though nothing in it changed.
+func TestTokenOrderIsDeterministicOnEqualCreatedAt(t *testing.T) {
+	m := persist.NewMemory()
+	s, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := 0; i < 8; i++ {
+		if _, _, err := s.Create("same-instant", TokenKindAPI, "", nil, now); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	ids := func(list []Token) string {
+		out := make([]string, len(list))
+		for i, tok := range list {
+			out[i] = tok.ID
+		}
+		if !sort.StringsAreSorted(out) {
+			t.Errorf("order on equal CreatedAt is not by ID: %v", out)
+		}
+		return strings.Join(out, ",")
+	}
+	want := ids(s.List())
+	for i := 0; i < 20; i++ {
+		if got := ids(s.List()); got != want {
+			t.Fatalf("List order changed between calls:\nfirst %s\nlater %s", want, got)
+		}
+		var byKind []Token
+		for _, tok := range s.ByKind(TokenKindAPI) {
+			byKind = append(byKind, *tok)
+		}
+		if got := ids(byKind); got != want {
+			t.Fatalf("ByKind order differs from List:\nList   %s\nByKind %s", want, got)
+		}
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved []Token
+	if err := json.Unmarshal(snap.Payload, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(saved); got != want {
+		t.Errorf("persisted order differs from List:\nList  %s\nsaved %s", want, got)
 	}
 }
