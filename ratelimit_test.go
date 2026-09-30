@@ -1,4 +1,8 @@
-// Ported from mikroview's internal/auth/ratelimit_test.go, unchanged.
+// Ported from mikroview's internal/auth/ratelimit_test.go. Adapted:
+// gauntlet's NewLoginLimiter returns an error (ErrLimiterConfig), so the
+// two constructor tests at the top are new and the ported tests build
+// their limiter through mustNewLoginLimiter. Tests for the per-account
+// counters (#19) are in account_limiter_test.go.
 package gauntlet
 
 import (
