@@ -28,10 +28,10 @@ GitLab-first and the mirror lags by days (owner, 2026-09-27).
 ## Delivery host
 
 GitLab-first: `gitlab.tomlawson.io/ai/gauntlet` (project id 56), default
-branch `dev`. v0.1.0 is released on GitLab only, so integration is tested
-with mikroview and then birdcage before anything is public; the GitHub
-mirror arrives with v0.2.0 (#17, owner 2026-09-27) -- no mirror, no GitHub
-issues or pull requests before that.
+branch `dev`. The public GitHub mirror, `github.com/tomlawesome/gauntlet`,
+is created at v0.1.0 so birdcage can `go get` the tag by its module path
+(#17, owner 2026-09-29, replacing 2026-09-27's "mirror at v0.2.0"). GitHub
+is the mirror only: no GitHub issues or pull requests.
 
 ## Closing issues from commits
 

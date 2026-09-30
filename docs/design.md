@@ -645,7 +645,8 @@ once G4 is tagged.
   change-password door, token dispatch, OIDC callback (fake provider) and
   CSRF.
 - **G7 Tag v0.1.0** (owner, 2026-09-26: the first release is v0.1.0, not v1.0.0). *Done when:* `CHANGELOG.md` lists G1-G6 and
-  birdcage can `go get` the tag.
+  birdcage can `go get` the tag through the GitHub mirror (#17; owner,
+  2026-09-29).
 - **B1 Storage backend and migration.** `0025_auth_store`,
   `store.NewAuthBackend`, `VersionReader`. *Done when:* the persist
   contract test (ported from mikroview `persist/contract_test.go`)
@@ -685,6 +686,9 @@ removes it before login rather than in B6.
   primary under `ai/`, GitHub mirror, as birdcage), default branch `dev`,
   with the layout in §1. Recommendation: same protection rules and CI
   hosts as birdcage; no releases from GitHub.
+  **Owner decision, 2026-09-29:** the mirror is created at v0.1.0 (#17),
+  not v0.2.0 as decided 2026-09-27, so birdcage fetches the tag by its
+  module path.
 - **Licence.** A real decision: mikroview is AGPL-3.0-only and birdcage
   is under the Birdcage Noncommercial Licence 1.0. A copyleft or
   noncommercial licence on the library would put conditions on whichever
