@@ -152,6 +152,14 @@ test:go:
   # The shared cache is handed to tester rather than moved, so the job
   # keeps it; tester writes the profile to its own directory, and root
   # copies it back for the artifact.
+  #
+  # The copy sits in the same script item as `go test` and runs whatever
+  # the tests returned: a later item never runs once one fails, and
+  # `artifacts.when: always` cannot upload a coverage.out that was never
+  # copied out (refs #24). `|| rc=$?` keeps a failure from ending the
+  # shell under `set -e` before the copy; the item then fails with the
+  # tests' own exit code. It must not `exit 0` on success -- all items
+  # share one shell, so that would skip the coverage lines below.
   script:
     - |
       set -eu
@@ -159,14 +167,18 @@ test:go:
       mkdir -p .gocache
       chown -R tester:tester .gocache
       install -d -o tester -g tester /tmp/gotest
-    - >-
-      su tester -c "cd '$CI_PROJECT_DIR' &&
-      HOME=/home/tester
-      GOCACHE='$GOCACHE'
-      GOMODCACHE='$GOMODCACHE'
-      GOFLAGS='$GOFLAGS'
-      go test ./... -race -coverprofile=/tmp/gotest/coverage.out"
-    - cp /tmp/gotest/coverage.out coverage.out
+    - |
+      rc=0
+      su tester -c "cd '$CI_PROJECT_DIR' && \
+        HOME=/home/tester \
+        GOCACHE='$GOCACHE' \
+        GOMODCACHE='$GOMODCACHE' \
+        GOFLAGS='$GOFLAGS' \
+        go test ./... -race -coverprofile=/tmp/gotest/coverage.out" || rc=$?
+      if [ -f /tmp/gotest/coverage.out ]; then
+        cp /tmp/gotest/coverage.out coverage.out
+      fi
+      [ "$rc" -eq 0 ] || exit "$rc"
     - go tool cover -func=coverage.out | tail -1
     - python3 scripts/coverage-floor.py coverage.out
   coverage: '/total:\s+\(statements\)\s+([\d.]+)%/'

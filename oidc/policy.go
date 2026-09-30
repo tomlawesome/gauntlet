@@ -33,8 +33,9 @@ const defaultGroupsClaim = "groups"
 // is set adds a condition, and all set conditions must hold.
 type Policy struct {
 	// AllowedGroups permits an identity carrying at least one of these in
-	// its groups claim. Sugar over RequiredClaims[GroupsClaim] -- see
-	// Permit.
+	// its groups claim (GroupsClaim). Permit checks it on its own, with
+	// its own refusal messages; it is not folded into RequiredClaims, so
+	// setting both on the same claim means both must hold.
 	AllowedGroups []string
 	// GroupsClaim is where to read groups from; defaults to "groups".
 	GroupsClaim string

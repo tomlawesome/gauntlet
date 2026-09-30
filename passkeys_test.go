@@ -126,6 +126,37 @@ func TestAddPasskeyRefusesAnEleventhCredential(t *testing.T) {
 	}
 }
 
+// TestAddPasskeyAtTheLimitReportsADuplicateAsDuplicate pins current
+// behaviour where both refusals apply: an account already at
+// maxPasskeysPerAccount is shown one of its own credentials again.
+// AddPasskey checks the duplicate first (its doc comment says so), so
+// the caller hears "already registered", not "remove one first" --
+// advice that would be wrong for a key the account already holds.
+func TestAddPasskeyAtTheLimitReportsADuplicateAsDuplicate(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password123", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxPasskeysPerAccount; i++ {
+		if _, err := s.AddPasskey(u.ID, testPasskey(byte(i), "")); err != nil {
+			t.Fatalf("AddPasskey #%d: %v", i, err)
+		}
+	}
+
+	_, err = s.AddPasskey(u.ID, testPasskey(3, "again"))
+	if !errors.Is(err, ErrPasskeyDuplicate) {
+		t.Errorf("AddPasskey of a held credential at the limit = %v, want %v", err, ErrPasskeyDuplicate)
+	}
+	if errors.Is(err, ErrPasskeyLimitReached) {
+		t.Errorf("AddPasskey of a held credential at the limit also matched %v", ErrPasskeyLimitReached)
+	}
+	stored, _ := s.Get(u.ID)
+	if len(stored.Passkeys) != maxPasskeysPerAccount {
+		t.Errorf("stored count after refusal = %d, want %d", len(stored.Passkeys), maxPasskeysPerAccount)
+	}
+}
+
 func TestAddPasskeyUnknownUserReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
 	if _, err := s.AddPasskey("no-such-user", testPasskey(1, "")); !errors.Is(err, ErrUserNotFound) {
