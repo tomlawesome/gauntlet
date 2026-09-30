@@ -83,6 +83,17 @@ func isSafeMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
 }
 
+// csrfOK requires the CSRF header on an unsafe method, writing the 403
+// itself when it is missing -- the one check Protect makes in both its
+// undecided and active states.
+func (g *Gate) csrfOK(w http.ResponseWriter, r *http.Request) bool {
+	if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
+		http.Error(w, "missing required header", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 const bearerPrefix = "Bearer "
 
 // bearerToken extracts the raw token value from an Authorization: Bearer
@@ -240,8 +251,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 				http.Error(w, "setup required", http.StatusServiceUnavailable)
 				return
 			}
-			if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
-				http.Error(w, "missing required header", http.StatusForbidden)
+			if !g.csrfOK(w, r) {
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -260,8 +270,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			return
 		}
 
-		if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
-			http.Error(w, "missing required header", http.StatusForbidden)
+		if !g.csrfOK(w, r) {
 			return
 		}
 		if g.isExempt(path) {
