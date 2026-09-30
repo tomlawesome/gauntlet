@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-30
+
+First release: the shared login library for birdcage and mikroview --
+local accounts and roles, sessions, API tokens, TOTP with recovery and
+reset codes, passkey storage, OIDC with a self-hosted-only policy, the
+HTTP middleware in `gate/`, and the encrypted file backend in `persist/`
+(G1-G6 of docs/design.md §5). Audited before release (#16); the GitHub
+mirror `github.com/tomlawesome/gauntlet` carries the tag (#17).
+
 ### Added
 
 - Repository skeleton: licence, agent and contributor docs, the design
