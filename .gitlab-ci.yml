@@ -209,4 +209,9 @@ sync:mirror-to-github:
     - test -s ~/.ssh/known_hosts
     - export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
     - git remote add github git@github.com:tomlawesome/gauntlet.git 2>/dev/null || git remote set-url github git@github.com:tomlawesome/gauntlet.git
-    - git push github "HEAD:$MIRROR_REF"
+    # Push the ref by name, not HEAD. The runner checks out a detached
+    # commit, and a release tag is an annotated object pointing at one:
+    # `HEAD:refs/tags/v0.1.0` would land on GitHub as a bare tag with the
+    # release note gone. Fetch the ref first so it exists locally.
+    - git fetch --no-tags origin "+$MIRROR_REF:$MIRROR_REF"
+    - git push github "$MIRROR_REF:$MIRROR_REF"
