@@ -167,13 +167,30 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 // the freshly minted set, in clear, exactly once, only when
 // alreadyIssued is false.
 //
-// Ten codes are still hashed unconditionally before the lock is taken,
-// the same trade GenerateRecoveryCodes makes and for the same reason --
-// here that work is simply thrown away, uncommitted, on the
-// alreadyIssued path.
+// The ten codes are hashed before the write lock is taken, the same
+// trade GenerateRecoveryCodes makes and for the same reason. The usual
+// alreadyIssued case is answered first, under the read lock, so it
+// costs no hashing at all; only a call that loses a race to a
+// concurrent first enrolment hashes ten codes and throws them away.
 func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (codes []string, alreadyIssued bool, err error) {
 	if !s.Persisted() {
 		return nil, false, ErrNotPersisted
+	}
+
+	s.reloadIfStale()
+
+	// A fast path, not the correctness boundary: the same check is made
+	// again below with the write lock held, which is what stops two
+	// concurrent first enrolments both minting.
+	s.mu.RLock()
+	u, ok := s.byID[userID]
+	has := ok && len(u.RecoveryCodes) > 0
+	s.mu.RUnlock()
+	if !ok {
+		return nil, false, ErrUserNotFound
+	}
+	if has {
+		return nil, true, nil
 	}
 
 	clear := make([]string, recoveryCodeCount)
@@ -193,7 +210,7 @@ func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (cod
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	u, ok := s.byID[userID]
+	u, ok = s.byID[userID]
 	if !ok {
 		return nil, false, ErrUserNotFound
 	}
