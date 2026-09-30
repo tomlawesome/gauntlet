@@ -778,10 +778,27 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	}
 	s.reloadIfStale()
 
+	key := oidcKey{issuer: issuer, subject: subject}
+
+	// The unmatchable hash is ~100ms of Argon2id, so it is made before
+	// the write lock, as createLocked and LinkOIDCIdentity make theirs --
+	// but only when this identity looks new. Most calls are a returning
+	// sign-in that would throw it away, and a wasted hash on every SSO
+	// login is a different cost from LinkOIDCIdentity's one on a rare
+	// operation.
+	s.mu.RLock()
+	_, known := s.byID[s.oidcIndex[key]]
+	s.mu.RUnlock()
+	var unmatchable string
+	if !known {
+		if unmatchable, err = unmatchablePasswordHash(); err != nil {
+			return nil, false, err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := oidcKey{issuer: issuer, subject: subject}
 	if id, ok := s.oidcIndex[key]; ok {
 		if u, ok := s.byID[id]; ok {
 			// LastLogin only -- a missed update here costs nothing
@@ -795,9 +812,13 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 		}
 	}
 
-	unmatchable, err := unmatchablePasswordHash()
-	if err != nil {
-		return nil, false, err
+	if unmatchable == "" {
+		// The identity's account was deleted between the read above
+		// and this lock -- rare enough that hashing under the lock here
+		// is cheaper than making every sign-in pay for the hash.
+		if unmatchable, err = unmatchablePasswordHash(); err != nil {
+			return nil, false, err
+		}
 	}
 
 	role := RoleUser
