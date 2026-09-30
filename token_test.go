@@ -16,6 +16,8 @@ package gauntlet
 
 import (
 	"context"
+	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -352,6 +354,72 @@ func TestIngestTokenRequiresADevice(t *testing.T) {
 	}
 }
 
+// TestValidDeviceID pins the device-scope check on its own: an IPv6
+// literal with a zone (the longest real discovered id) and non-ASCII
+// operator names pass; anything over MaxDeviceIDLen bytes, or carrying
+// a control or formatting character, or not valid UTF-8, does not.
+func TestValidDeviceID(t *testing.T) {
+	for _, ok := range []string{
+		"",
+		"router-1",
+		"192.0.2.1",
+		"fe80::1ff:fe23:4567:890a%eth0",
+		"büro-gateway",
+		strings.Repeat("d", MaxDeviceIDLen),
+	} {
+		if !validDeviceID(ok) {
+			t.Errorf("validDeviceID(%q) = false, want true", ok)
+		}
+	}
+	for why, bad := range map[string]string{
+		"one byte over the limit":        strings.Repeat("d", MaxDeviceIDLen+1),
+		"multi-byte text over the limit": strings.Repeat("ü", MaxDeviceIDLen/2+1),
+		"an ANSI escape":                 "router\x1b[2K",
+		"a newline":                      "router-1\nrouter-2",
+		"a DEL":                          "router\x7f",
+		"a bidi override":                "router‮1",
+		"a zero-width space":             "router​1",
+		"invalid UTF-8":                  "router\xff",
+	} {
+		if validDeviceID(bad) {
+			t.Errorf("validDeviceID accepted a device id with %s: %q", why, bad)
+		}
+	}
+}
+
+// TestTokenNameIsBoundedLikeTheDevice: a token's name reaches the same
+// token list, audit trail and log lines its device id does, so it gets
+// the same cap and the same refusal of control characters.
+func TestTokenNameIsBoundedLikeTheDevice(t *testing.T) {
+	s := newTestTokenStore(t)
+	now := time.Now()
+
+	longest := strings.Repeat("n", MaxTokenNameLen)
+	_, tok, err := s.Create("  "+longest+"  ", TokenKindAPI, "", nil, now)
+	if err != nil {
+		t.Fatalf("Create with a %d-character name: %v", MaxTokenNameLen, err)
+	}
+	if tok.Name != longest {
+		t.Errorf("Name = %q, want it trimmed to the %d-character name", tok.Name, MaxTokenNameLen)
+	}
+	if _, _, err := s.Create("", TokenKindAPI, "", nil, now); err != nil {
+		t.Errorf("Create with an empty name: %v, want it still allowed", err)
+	}
+
+	for why, bad := range map[string]string{
+		"is too long":             longest + "n",
+		"has a control character": "ci\x1b[2Kadmin",
+		"has a bidi override":     "ci‮gnp.exe",
+	} {
+		if _, _, err := s.Create(bad, TokenKindAPI, "", nil, now); err != ErrTokenNameInvalid {
+			t.Errorf("Create with a name that %s: err = %v, want ErrTokenNameInvalid", why, err)
+		}
+	}
+	if n := len(s.List()); n != 2 {
+		t.Errorf("store holds %d tokens, want the 2 accepted ones", n)
+	}
+}
+
 // TestUnknownKindOnDiskCannotAuthenticateButStaysRevocable covers a
 // token written by some other build, or hand-edited. It must not
 // authenticate -- guessing that an unrecognised kind meant a registered
@@ -585,5 +653,61 @@ func TestRevokeAllCreatedByLeavesTokensWorkingWhenPersistFails(t *testing.T) {
 	}
 	if _, ok := s.Authenticate(raw, TokenKindAPI, time.Now()); !ok {
 		t.Error("expected alice's token to still authenticate after a failed persist")
+	}
+}
+
+// TestTokenOrderIsDeterministicOnEqualCreatedAt: tokens created in the
+// same instant (a script issuing several at once, or a clock with coarse
+// resolution) must list, and persist, in one fixed order. Map iteration
+// is randomised, so without a tie-breaker the order changes from call to
+// call -- a list that reshuffles on refresh, and a document whose bytes
+// differ on every save though nothing in it changed.
+func TestTokenOrderIsDeterministicOnEqualCreatedAt(t *testing.T) {
+	m := persist.NewMemory()
+	s, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := 0; i < 8; i++ {
+		if _, _, err := s.Create("same-instant", TokenKindAPI, "", nil, now); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	ids := func(list []Token) string {
+		out := make([]string, len(list))
+		for i, tok := range list {
+			out[i] = tok.ID
+		}
+		if !sort.StringsAreSorted(out) {
+			t.Errorf("order on equal CreatedAt is not by ID: %v", out)
+		}
+		return strings.Join(out, ",")
+	}
+	want := ids(s.List())
+	for i := 0; i < 20; i++ {
+		if got := ids(s.List()); got != want {
+			t.Fatalf("List order changed between calls:\nfirst %s\nlater %s", want, got)
+		}
+		var byKind []Token
+		for _, tok := range s.ByKind(TokenKindAPI) {
+			byKind = append(byKind, *tok)
+		}
+		if got := ids(byKind); got != want {
+			t.Fatalf("ByKind order differs from List:\nList   %s\nByKind %s", want, got)
+		}
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved []Token
+	if err := json.Unmarshal(snap.Payload, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(saved); got != want {
+		t.Errorf("persisted order differs from List:\nList  %s\nsaved %s", want, got)
 	}
 }

@@ -167,13 +167,30 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 // the freshly minted set, in clear, exactly once, only when
 // alreadyIssued is false.
 //
-// Ten codes are still hashed unconditionally before the lock is taken,
-// the same trade GenerateRecoveryCodes makes and for the same reason --
-// here that work is simply thrown away, uncommitted, on the
-// alreadyIssued path.
+// The ten codes are hashed before the write lock is taken, the same
+// trade GenerateRecoveryCodes makes and for the same reason. The usual
+// alreadyIssued case is answered first, under the read lock, so it
+// costs no hashing at all; only a call that loses a race to a
+// concurrent first enrolment hashes ten codes and throws them away.
 func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (codes []string, alreadyIssued bool, err error) {
 	if !s.Persisted() {
 		return nil, false, ErrNotPersisted
+	}
+
+	s.reloadIfStale()
+
+	// A fast path, not the correctness boundary: the same check is made
+	// again below with the write lock held, which is what stops two
+	// concurrent first enrolments both minting.
+	s.mu.RLock()
+	u, ok := s.byID[userID]
+	has := ok && len(u.RecoveryCodes) > 0
+	s.mu.RUnlock()
+	if !ok {
+		return nil, false, ErrUserNotFound
+	}
+	if has {
+		return nil, true, nil
 	}
 
 	clear := make([]string, recoveryCodeCount)
@@ -193,7 +210,7 @@ func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (cod
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	u, ok := s.byID[userID]
+	u, ok = s.byID[userID]
 	if !ok {
 		return nil, false, ErrUserNotFound
 	}
@@ -226,26 +243,57 @@ func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (cod
 // Every unused code is checked even after a match is found, rather than
 // stopping at the first: the time a check takes should not tell an
 // observer which of the ten codes (by position) just matched.
+//
+// Those checks are up to ten Argon2id comparisons, so they run against a
+// snapshot taken under the read lock, not under the write lock -- same
+// reasoning as Authenticate. The write lock is taken only to spend the
+// matched code, and re-checks it first: a concurrent burn of the same
+// code, or a fresh set replacing this one, must win over a match made
+// against the snapshot.
 func (s *Store) BurnRecoveryCode(userID, code string, now time.Time) (bool, error) {
 	normalised := NormaliseRecoveryCode(code)
 
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	s.mu.RLock()
 	u, ok := s.byID[userID]
+	var snapshot []RecoveryCode
+	if ok {
+		snapshot = append(snapshot, u.RecoveryCodes...)
+	}
+	s.mu.RUnlock()
 	if !ok {
 		return false, ErrUserNotFound
 	}
 
-	matchIdx := -1
-	for i := range u.RecoveryCodes {
-		rc := &u.RecoveryCodes[i]
+	matchHash := ""
+	for _, rc := range snapshot {
 		if !rc.UsedAt.IsZero() {
 			continue
 		}
 		if VerifyPassword(normalised, rc.Hash) {
+			matchHash = rc.Hash
+		}
+	}
+	if matchHash == "" {
+		return false, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Re-fetched by ID for the reason Authenticate gives: a reload may
+	// have replaced the whole map since the read lock was released. The
+	// code is found again by its hash, not its position, since the set
+	// itself may have been replaced; each hash carries its own salt, so
+	// no two codes share one.
+	u, ok = s.byID[userID]
+	if !ok {
+		return false, ErrUserNotFound
+	}
+	matchIdx := -1
+	for i, rc := range u.RecoveryCodes {
+		if rc.Hash == matchHash && rc.UsedAt.IsZero() {
 			matchIdx = i
 		}
 	}
@@ -253,14 +301,20 @@ func (s *Store) BurnRecoveryCode(userID, code string, now time.Time) (bool, erro
 		return false, nil
 	}
 
-	prevUsedAt := u.RecoveryCodes[matchIdx].UsedAt
-	u.RecoveryCodes[matchIdx].UsedAt = now
+	// A new slice rather than an in-place edit: Get and every other
+	// reader hand out shallow copies of the User, which share this
+	// slice's backing array, and a caller reading one of those must not
+	// see a field change under it.
+	prevCodes := u.RecoveryCodes
+	spent := append([]RecoveryCode(nil), prevCodes...)
+	spent[matchIdx].UsedAt = now
+	u.RecoveryCodes = spent
 	if err := s.tryPersistLocked(); err != nil {
 		// A spend that only lands in memory is undone by a restart, and
 		// the code is live again for whoever presented it -- refuse the
 		// login rather than honour a spend nothing recorded, the same
 		// stance Authenticate's reset-code path takes.
-		u.RecoveryCodes[matchIdx].UsedAt = prevUsedAt
+		u.RecoveryCodes = prevCodes
 		return false, fmt.Errorf("saving accounts: %w", err)
 	}
 	return true, nil

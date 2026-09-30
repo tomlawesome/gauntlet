@@ -18,6 +18,7 @@ package gauntlet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -169,6 +170,59 @@ func TestAuthenticateUpdatesLastLogin(t *testing.T) {
 	}
 }
 
+// TestAuthenticateSavesLastLoginAtMostHourly: moving LastLogin is not
+// worth a whole-document save on every login. It is saved when the
+// saved value is more than lastLoginGranularity old, and otherwise kept
+// in memory -- where Get still sees it -- until the next save of any
+// kind. The third login checks the comparison is against the saved
+// value, not the in-memory one: logins a minute apart must not push the
+// next save back for ever.
+func TestAuthenticateSavesLastLoginAtMostHourly(t *testing.T) {
+	b := &countingBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	start := time.Now().UTC().Truncate(time.Millisecond)
+
+	login := func(at time.Time) {
+		t.Helper()
+		if _, err := s.Authenticate("alice", "password123", at); err != nil {
+			t.Fatalf("Authenticate at %v: %v", at, err)
+		}
+	}
+
+	before := b.saves.Load()
+	login(start)
+	if got := b.saves.Load() - before; got != 1 {
+		t.Fatalf("first login caused %d saves, want 1", got)
+	}
+	login(start.Add(time.Minute))
+	if got := b.saves.Load() - before; got != 1 {
+		t.Errorf("two logins a minute apart caused %d saves, want 1", got)
+	}
+	if u, _ := s.Get(id); !u.LastLogin.Equal(start.Add(time.Minute)) {
+		t.Errorf("LastLogin = %v in memory, want the second login's %v", u.LastLogin, start.Add(time.Minute))
+	}
+
+	// Half an hour on: still within the hour of the saved value.
+	login(start.Add(lastLoginGranularity/2 + time.Minute))
+	if got := b.saves.Load() - before; got != 1 {
+		t.Errorf("a login within the hour caused %d saves in all, want 1", got)
+	}
+	// Another half hour: only half an hour since the last login, but
+	// more than an hour since the saved one.
+	later := start.Add(lastLoginGranularity + time.Minute)
+	login(later)
+	if got := b.saves.Load() - before; got != 2 {
+		t.Errorf("a login %v after the saved one caused %d saves in all, want 2", lastLoginGranularity+time.Minute, got)
+	}
+	reopened, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := reopened.Get(id); !u.LastLogin.Equal(later) {
+		t.Errorf("saved LastLogin = %v, want %v", u.LastLogin, later)
+	}
+}
+
 func TestSetPasswordChangesCredentials(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "old-password", time.Now())
@@ -259,6 +313,51 @@ func TestListNeverIncludesPasswordHashes(t *testing.T) {
 	}
 	if list[0].Username != "admin" || list[1].Username != "viewer" {
 		t.Errorf("expected alphabetical order, got %s, %s", list[0].Username, list[1].Username)
+	}
+}
+
+// TestListAnswersHasActiveTOTPWithoutTheSecret: List blanks TOTPSecret,
+// but an admin's account list still has to show who has an active
+// authenticator app. HasActiveTOTP on a listed copy must give the same
+// answer as on Get's copy -- for an active factor, a pending one and
+// none -- without the secret itself leaving List, in Go or in JSON.
+func TestListAnswersHasActiveTOTPWithoutTheSecret(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	active, _ := s.Register("active", "password123", now)
+	pending, _ := s.CreateUser("pending", "password123", RoleUser, now)
+	none, _ := s.CreateUser("none", "password123", RoleUser, now)
+	setTOTPForTest(t, s, active.ID, testTOTPSecret, now, 0)
+	setTOTPForTest(t, s, pending.ID, testTOTPSecret, time.Time{}, 0)
+
+	want := map[string]bool{active.ID: true, pending.ID: false, none.ID: false}
+	for _, u := range s.List() {
+		if u.TOTPSecret != "" {
+			t.Errorf("List returned %s's TOTP secret", u.Username)
+		}
+		if got := u.HasActiveTOTP(); got != want[u.ID] {
+			t.Errorf("listed %s: HasActiveTOTP = %v, want %v", u.Username, got, want[u.ID])
+		}
+		if full, _ := s.Get(u.ID); full.HasActiveTOTP() != want[u.ID] {
+			t.Errorf("Get %s: HasActiveTOTP = %v, want %v", u.Username, full.HasActiveTOTP(), want[u.ID])
+		}
+		data, err := json.Marshal(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), testTOTPSecret) {
+			t.Errorf("listed %s serialises its TOTP secret: %s", u.Username, data)
+		}
+	}
+
+	// A factor cleared after listing reads as gone on a fresh list.
+	if err := s.ClearTOTP(active.ID); err != nil {
+		t.Fatalf("ClearTOTP: %v", err)
+	}
+	for _, u := range s.List() {
+		if u.ID == active.ID && u.HasActiveTOTP() {
+			t.Error("listed account still reports an active factor after ClearTOTP")
+		}
 	}
 }
 
@@ -355,6 +454,23 @@ func TestOpenSkipsNilArrayElements(t *testing.T) {
 	}
 	if u, ok := s.ByUsername("admin"); !ok || u.ID != "u1" {
 		t.Errorf("expected the real user's data to be intact, got %+v, %v", u, ok)
+	}
+}
+
+// TestOpenCountsOnlyRealAccountsWhenRefusingNoAdmin: a document of only
+// `null` entries is still refused -- something wrote a non-empty list,
+// so it is not a fresh install -- but the message must not call a null
+// an account, or an operator goes looking for one that isn't there.
+func TestOpenCountsOnlyRealAccountsWhenRefusingNoAdmin(t *testing.T) {
+	m := persist.NewMemory()
+	primeMemory(t, m, `{"users":[null]}`)
+
+	_, err := OpenStore(m, Options{})
+	if !errors.Is(err, errNoAdmin) {
+		t.Fatalf("OpenStore = %v, want the no-admin refusal", err)
+	}
+	if want := "found 0 accounts and 1 null entries"; !strings.Contains(err.Error(), want) {
+		t.Errorf("refusal message %q does not contain %q", err.Error(), want)
 	}
 }
 

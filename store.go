@@ -124,10 +124,19 @@ type storeFile struct {
 // could ever create a new one. Loading such a document anyway would mean
 // a server that answers 403 on every admin route forever, with a backup
 // the only way back -- refusing it at startup says so up front instead.
+//
+// A `null` entry (see applyLoaded) is not an account and is not counted
+// as one in the message, but a document made only of them is still
+// refused: something wrote a non-empty list there, and reading it as a
+// fresh install would reopen registration on the strength of it.
 func (f storeFile) checkAdmins() error {
-	admins := 0
+	admins, accounts := 0, 0
 	for _, u := range f.Users {
-		if u != nil && u.Role == RoleAdmin {
+		if u == nil {
+			continue
+		}
+		accounts++
+		if u.Role == RoleAdmin {
 			admins++
 		}
 	}
@@ -135,7 +144,10 @@ func (f storeFile) checkAdmins() error {
 		return fmt.Errorf("%w (found %d)", errMultipleAdmins, admins)
 	}
 	if admins == 0 && len(f.Users) > 0 {
-		return fmt.Errorf("%w (found %d)", errNoAdmin, len(f.Users))
+		if nulls := len(f.Users) - accounts; nulls > 0 {
+			return fmt.Errorf("%w (found %d accounts and %d null entries)", errNoAdmin, accounts, nulls)
+		}
+		return fmt.Errorf("%w (found %d)", errNoAdmin, accounts)
 	}
 	return nil
 }
@@ -189,6 +201,12 @@ type Store struct {
 	// through mu like byID/byName/version above.
 	refusedVersion    int64
 	hasRefusedVersion bool
+
+	// lastLoginSaved is each account's LastLogin as of the last load or
+	// save, by ID, guarded by mu -- what Authenticate measures staleness
+	// against (see lastLoginGranularity), since the in-memory value may
+	// be ahead of it.
+	lastLoginSaved map[string]time.Time
 }
 
 // reloadTimeout bounds one staleness check against the backend. Long
@@ -269,6 +287,7 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 	s.byID = make(map[string]*User, len(file.Users))
 	s.byName = make(map[string]string, len(file.Users))
 	s.oidcIndex = make(map[oidcKey]string, len(file.Users))
+	s.lastLoginSaved = make(map[string]time.Time, len(file.Users))
 	for _, u := range file.Users {
 		// A JSON array containing `null` unmarshals successfully into a
 		// nil *User -- valid JSON, so the error check above doesn't
@@ -278,6 +297,7 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 		}
 		s.byID[u.ID] = u
 		s.byName[strings.ToLower(u.Username)] = u.ID
+		s.lastLoginSaved[u.ID] = u.LastLogin
 		if u.OIDCIssuer != "" || u.OIDCSubject != "" {
 			s.oidcIndex[oidcKey{issuer: u.OIDCIssuer, subject: u.OIDCSubject}] = u.ID
 		}
@@ -766,10 +786,27 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	}
 	s.reloadIfStale()
 
+	key := oidcKey{issuer: issuer, subject: subject}
+
+	// The unmatchable hash is ~100ms of Argon2id, so it is made before
+	// the write lock, as createLocked and LinkOIDCIdentity make theirs --
+	// but only when this identity looks new. Most calls are a returning
+	// sign-in that would throw it away, and a wasted hash on every SSO
+	// login is a different cost from LinkOIDCIdentity's one on a rare
+	// operation.
+	s.mu.RLock()
+	_, known := s.byID[s.oidcIndex[key]]
+	s.mu.RUnlock()
+	var unmatchable string
+	if !known {
+		if unmatchable, err = unmatchablePasswordHash(); err != nil {
+			return nil, false, err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := oidcKey{issuer: issuer, subject: subject}
 	if id, ok := s.oidcIndex[key]; ok {
 		if u, ok := s.byID[id]; ok {
 			// LastLogin only -- a missed update here costs nothing
@@ -783,9 +820,13 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 		}
 	}
 
-	unmatchable, err := unmatchablePasswordHash()
-	if err != nil {
-		return nil, false, err
+	if unmatchable == "" {
+		// The identity's account was deleted between the read above
+		// and this lock -- rare enough that hashing under the lock here
+		// is cheaper than making every sign-in pay for the hash.
+		if unmatchable, err = unmatchablePasswordHash(); err != nil {
+			return nil, false, err
+		}
 	}
 
 	role := RoleUser
@@ -850,13 +891,19 @@ func (s *Store) uniqueUsernameLocked(hint, issuer, subject string) string {
 	// the shortest length is exceptionally unlikely on its own; growing
 	// further makes it vanishingly so without ever depending on
 	// randomness for reproducibility.
-	for n := 8; n <= len(full); n += 8 {
-		candidate := "oidc-" + full[:n]
+	//
+	// Nothing validates the name after this returns, so every candidate
+	// has to fit maxUsernameLength itself: "oidc-" plus all 64 hex digits
+	// would not, so the slice stops at 56. Both forms are ASCII, so bytes
+	// and runes count the same.
+	const prefix = "oidc-"
+	for n := 8; n <= len(full) && len(prefix)+n <= maxUsernameLength; n += 8 {
+		candidate := prefix + full[:n]
 		if _, taken := s.byName[strings.ToLower(candidate)]; !taken {
 			return candidate
 		}
 	}
-	return "oidc-" + newID() // practically unreachable
+	return prefix + newID() // practically unreachable; 37 characters
 }
 
 // unmatchablePasswordHash produces a real, freshly generated Argon2id
@@ -1020,6 +1067,14 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 	return nil
 }
 
+// lastLoginGranularity is how stale an account's saved LastLogin may
+// become before a login is worth a whole-document save -- the rule
+// lastUsedGranularity (token.go) applies to a token's LastUsedAt, for
+// the same reason: an hour is far finer than the question the field
+// answers ("is this account still in use?"), and without it every
+// login rewrites every account.
+const lastLoginGranularity = time.Hour
+
 // Authenticate verifies username/password and, on success, records
 // LastLogin and returns a copy of the user. Always runs a password
 // comparison (against dummyHash if the username doesn't exist) so a
@@ -1107,8 +1162,15 @@ func (s *Store) Authenticate(username, password string, now time.Time) (*User, e
 		cp := *u
 		return &cp, nil
 	}
+	// Saved only once the saved value is more than lastLoginGranularity
+	// old; otherwise held in memory, where Get and List see it, until
+	// the next save of any kind carries it. Compared against the saved
+	// value rather than u.LastLogin, which every login moves: against
+	// that, logins less than an hour apart would never save again.
 	u.LastLogin = now
-	s.persistLocked()
+	if now.Sub(s.lastLoginSaved[id]) >= lastLoginGranularity {
+		s.persistLocked()
+	}
 	cp := *u
 	return &cp, nil
 }
@@ -1225,7 +1287,10 @@ func (s *Store) List() []User {
 		// the actual shared secret, good for minting valid codes
 		// indefinitely, not just checking one. RecoveryCodes are hashes
 		// only, same category as ResetCodeHash above. Neither belongs
-		// in an admin-facing account list.
+		// in an admin-facing account list. HasActiveTOTP still answers
+		// truly on the copy (see User.totpSecretBlanked), so a caller
+		// showing who has an authenticator app needs no extra Get.
+		cp.totpSecretBlanked = u.TOTPSecret != ""
 		cp.TOTPSecret = ""
 		cp.RecoveryCodes = nil
 		// Passkeys carries each credential's PublicKey -- not a secret
@@ -1281,6 +1346,13 @@ func (s *Store) tryPersistLocked() error {
 			"was pending (%s); this change was applied on top", s.backend.Describe()))
 	}
 	s.version = version
+	if s.lastLoginSaved == nil {
+		s.lastLoginSaved = make(map[string]time.Time, len(list))
+	}
+	clear(s.lastLoginSaved)
+	for _, u := range list {
+		s.lastLoginSaved[u.ID] = u.LastLogin
+	}
 	return nil
 }
 

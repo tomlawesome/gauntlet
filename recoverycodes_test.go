@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -271,6 +272,88 @@ func TestBurnRecoveryCodeLeavesCodeUnspentWhenPersistFails(t *testing.T) {
 	got, _ := s.Get(u.ID)
 	if !got.RecoveryCodes[0].UsedAt.IsZero() {
 		t.Error("the code is marked used in memory even though the write failed")
+	}
+}
+
+// TestBurnRecoveryCodeDoesNotWriteIntoAnEarlierGetsCopy: Get returns a
+// shallow copy, so its RecoveryCodes shares a backing array with the
+// store's own record unless a write replaces the slice rather than
+// editing it in place. Under -race, reading UsedAt from that copy while a
+// burn lands is reported as a data race if the burn writes in place.
+func TestBurnRecoveryCodeDoesNotWriteIntoAnEarlierGetsCopy(t *testing.T) {
+	s, id := newRecoveryTestStore(t)
+	codes, err := s.GenerateRecoveryCodes(id, time.Now())
+	if err != nil {
+		t.Fatalf("GenerateRecoveryCodes: %v", err)
+	}
+	before, _ := s.Get(id)
+
+	ready, stop := make(chan struct{}), make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		close(ready)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for _, rc := range before.RecoveryCodes {
+				_ = rc.UsedAt.IsZero()
+			}
+		}
+	}()
+	<-ready
+	ok, err := s.BurnRecoveryCode(id, codes[0], time.Now())
+	close(stop)
+	wg.Wait()
+	if err != nil || !ok {
+		t.Fatalf("BurnRecoveryCode: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+	if !before.RecoveryCodes[0].UsedAt.IsZero() {
+		t.Error("a copy taken before the burn now shows the code as used")
+	}
+	if after, _ := s.Get(id); after.RecoveryCodes[0].UsedAt.IsZero() {
+		t.Error("the store does not show the burned code as used")
+	}
+}
+
+// TestConcurrentBurnsOfOneCodeSucceedOnce: the Argon2id checks run
+// without the write lock, so two submissions of the same code can both
+// match; only the one that re-checks under the lock first may spend it.
+func TestConcurrentBurnsOfOneCodeSucceedOnce(t *testing.T) {
+	s, id := newRecoveryTestStore(t)
+	codes, err := s.GenerateRecoveryCodes(id, time.Now())
+	if err != nil {
+		t.Fatalf("GenerateRecoveryCodes: %v", err)
+	}
+
+	const attempts = 4
+	results := make(chan bool, attempts)
+	var wg sync.WaitGroup
+	for range attempts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := s.BurnRecoveryCode(id, codes[0], time.Now())
+			if err != nil {
+				t.Errorf("BurnRecoveryCode: %v", err)
+			}
+			results <- ok
+		}()
+	}
+	wg.Wait()
+	close(results)
+	wins := 0
+	for ok := range results {
+		if ok {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("%d concurrent burns of one code succeeded, want exactly 1", wins)
 	}
 }
 
