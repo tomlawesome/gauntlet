@@ -40,20 +40,11 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 	}
 
 	now := g.now()
-	// Same per-account password re-check bucket (ReserveRecheck) and reasoning as
-	// handleTOTPDelete: a caller who already holds a session is exactly
-	// the position a stolen-cookie attacker is in, so this cannot be
-	// left as an unthrottled password oracle behind a cookie.
-	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+	// Password-gated and throttled by recheckPassword.
+	current, ok := g.recheckPassword(w, user, req.Password, "incorrect password", now)
+	if !ok {
 		return
 	}
-	current, err := g.deps.Users.Authenticate(user.Username, req.Password, now)
-	if err != nil {
-		writeUnauthorized(w, "incorrect password")
-		return
-	}
-	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 	// Re-checked against the freshly authenticated copy, not the context
 	// snapshot -- same reasoning handleTOTPConfirm's header comment gives
