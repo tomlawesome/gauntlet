@@ -850,13 +850,19 @@ func (s *Store) uniqueUsernameLocked(hint, issuer, subject string) string {
 	// the shortest length is exceptionally unlikely on its own; growing
 	// further makes it vanishingly so without ever depending on
 	// randomness for reproducibility.
-	for n := 8; n <= len(full); n += 8 {
-		candidate := "oidc-" + full[:n]
+	//
+	// Nothing validates the name after this returns, so every candidate
+	// has to fit maxUsernameLength itself: "oidc-" plus all 64 hex digits
+	// would not, so the slice stops at 56. Both forms are ASCII, so bytes
+	// and runes count the same.
+	const prefix = "oidc-"
+	for n := 8; n <= len(full) && len(prefix)+n <= maxUsernameLength; n += 8 {
+		candidate := prefix + full[:n]
 		if _, taken := s.byName[strings.ToLower(candidate)]; !taken {
 			return candidate
 		}
 	}
-	return "oidc-" + newID() // practically unreachable
+	return prefix + newID() // practically unreachable; 37 characters
 }
 
 // unmatchablePasswordHash produces a real, freshly generated Argon2id

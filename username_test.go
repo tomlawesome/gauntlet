@@ -4,9 +4,12 @@
 package gauntlet
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestValidateUsernameRejectsHostileInput(t *testing.T) {
@@ -122,5 +125,48 @@ func TestOIDCProvisioningKeepsAUsableHint(t *testing.T) {
 	}
 	if u.Username != "tom@example.com" {
 		t.Errorf("username = %q, want the hint preserved", u.Username)
+	}
+}
+
+// TestOIDCFallbackUsernameAlwaysValidates drives uniqueUsernameLocked
+// down its fallback chain: a 64-character hint (the longest a username
+// may be) already taken, and every shorter hash-derived name taken too.
+// Whatever it lands on is written to the store without further checks,
+// so it has to pass ValidateUsername and fit maxUsernameLength -- the
+// longest hash-derived candidate, "oidc-" plus all 64 hex digits, does
+// not.
+func TestOIDCFallbackUsernameAlwaysValidates(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	hint := strings.Repeat("a", maxUsernameLength)
+
+	first, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", hint, now)
+	if err != nil {
+		t.Fatalf("FindOrCreateOIDCUser: %v", err)
+	}
+	if first.Username != hint {
+		t.Fatalf("username = %q, want the 64-character hint kept", first.Username)
+	}
+
+	// Occupy every hash-derived name the second identity could get
+	// before the longest one.
+	sum := sha256.Sum256([]byte("https://idp.example" + "\x00" + "subject-2"))
+	full := hex.EncodeToString(sum[:])
+	s.mu.Lock()
+	for n := 8; len("oidc-")+n <= maxUsernameLength; n += 8 {
+		s.byName["oidc-"+full[:n]] = "someone-else"
+	}
+	s.mu.Unlock()
+
+	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-2", hint, now)
+	if err != nil {
+		t.Fatalf("FindOrCreateOIDCUser: %v", err)
+	}
+	if !created {
+		t.Fatal("expected a new account")
+	}
+	if err := ValidateUsername(u.Username); err != nil {
+		t.Errorf("fallback username %q (%d characters) does not validate: %v",
+			u.Username, utf8.RuneCountInString(u.Username), err)
 	}
 }
