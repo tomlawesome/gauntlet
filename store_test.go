@@ -358,6 +358,23 @@ func TestOpenSkipsNilArrayElements(t *testing.T) {
 	}
 }
 
+// TestOpenCountsOnlyRealAccountsWhenRefusingNoAdmin: a document of only
+// `null` entries is still refused -- something wrote a non-empty list,
+// so it is not a fresh install -- but the message must not call a null
+// an account, or an operator goes looking for one that isn't there.
+func TestOpenCountsOnlyRealAccountsWhenRefusingNoAdmin(t *testing.T) {
+	m := persist.NewMemory()
+	primeMemory(t, m, `{"users":[null]}`)
+
+	_, err := OpenStore(m, Options{})
+	if !errors.Is(err, errNoAdmin) {
+		t.Fatalf("OpenStore = %v, want the no-admin refusal", err)
+	}
+	if want := "found 0 accounts and 1 null entries"; !strings.Contains(err.Error(), want) {
+		t.Errorf("refusal message %q does not contain %q", err.Error(), want)
+	}
+}
+
 // Same bug, reached through the other code path that parses a
 // storeFile: reloadIfStale, which a live server calls on every read once
 // a separate process (a CLI recovery tool) has touched the backend.

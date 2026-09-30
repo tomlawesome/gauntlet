@@ -124,10 +124,19 @@ type storeFile struct {
 // could ever create a new one. Loading such a document anyway would mean
 // a server that answers 403 on every admin route forever, with a backup
 // the only way back -- refusing it at startup says so up front instead.
+//
+// A `null` entry (see applyLoaded) is not an account and is not counted
+// as one in the message, but a document made only of them is still
+// refused: something wrote a non-empty list there, and reading it as a
+// fresh install would reopen registration on the strength of it.
 func (f storeFile) checkAdmins() error {
-	admins := 0
+	admins, accounts := 0, 0
 	for _, u := range f.Users {
-		if u != nil && u.Role == RoleAdmin {
+		if u == nil {
+			continue
+		}
+		accounts++
+		if u.Role == RoleAdmin {
 			admins++
 		}
 	}
@@ -135,7 +144,10 @@ func (f storeFile) checkAdmins() error {
 		return fmt.Errorf("%w (found %d)", errMultipleAdmins, admins)
 	}
 	if admins == 0 && len(f.Users) > 0 {
-		return fmt.Errorf("%w (found %d)", errNoAdmin, len(f.Users))
+		if nulls := len(f.Users) - accounts; nulls > 0 {
+			return fmt.Errorf("%w (found %d accounts and %d null entries)", errNoAdmin, accounts, nulls)
+		}
+		return fmt.Errorf("%w (found %d)", errNoAdmin, accounts)
 	}
 	return nil
 }
