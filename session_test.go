@@ -170,3 +170,42 @@ func TestSessionNegativeMaxLifetimeMeansNoCeiling(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionCreateSweepsExpiredEntries: a session whose cookie is never
+// presented again is only ever evicted by a sweep, so without one the
+// map grows for the life of the process.
+func TestSessionCreateSweepsExpiredEntries(t *testing.T) {
+	s := NewSessionStore(time.Minute, 0)
+	t0 := time.Now()
+	for i := 0; i < minSessionSweep-1; i++ {
+		s.Create("user-1", t0)
+	}
+	// Past their ttl, and the login that brings the map to the sweep
+	// size: the sweep runs here.
+	s.Create("user-1", t0.Add(2*time.Minute))
+
+	s.mu.Lock()
+	n := len(s.sessions)
+	s.mu.Unlock()
+	if n != 1 {
+		t.Errorf("%d sessions held after every earlier one expired, want 1", n)
+	}
+}
+
+// The ceiling counts too: a session still inside its sliding ttl but
+// past maxLifetime is dead to Validate, so the sweep drops it as well.
+func TestSessionSweepHonoursTheCeiling(t *testing.T) {
+	s := NewSessionStore(time.Hour, 10*time.Minute)
+	t0 := time.Now()
+	for i := 0; i < minSessionSweep-1; i++ {
+		s.Create("user-1", t0)
+	}
+	s.Create("user-1", t0.Add(11*time.Minute))
+
+	s.mu.Lock()
+	n := len(s.sessions)
+	s.mu.Unlock()
+	if n != 1 {
+		t.Errorf("%d sessions held after every earlier one passed the ceiling, want 1", n)
+	}
+}

@@ -13,8 +13,8 @@
 //   - TOTPEnrollmentURI takes a productName parameter instead of
 //     mikroview's hard-coded "MikroView" label. docs/design.md §1.5
 //     calls this out explicitly as a string that "must not leak into
-//     birdcage" -- gate.Config gains ProductName for exactly this call,
-//     a later slice (G6).
+//     birdcage" -- gate.Config.ProductName exists for exactly this
+//     call.
 //   - VerifyAndRecordTOTP is the only login-time entry point; mikroview's
 //     separate RecordTOTPCounter (call VerifyTOTP, then record what
 //     matched, as two store calls) is not carried over. mikroview added
@@ -414,6 +414,15 @@ func (s *Store) VerifyAndRecordTOTP(userID, code string, now time.Time) (ok bool
 	u, found := s.byID[userID]
 	if !found {
 		return false, ErrUserNotFound
+	}
+	// Only a confirmed secret is a factor. A pending one (set by
+	// SetPendingTOTPSecret, never confirmed) is mid-setup, and an
+	// account that reaches this step through another factor -- a
+	// passkey -- must not be let in by a code from it: whoever started
+	// that enrolment and stopped would hold a working second factor the
+	// account owner never activated.
+	if !u.HasActiveTOTP() {
+		return false, nil
 	}
 
 	matched, matchedOK := VerifyTOTP(u.TOTPSecret, code, now, u.TOTPLastCounter)

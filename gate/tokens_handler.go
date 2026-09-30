@@ -56,7 +56,10 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		switch err {
 		case gauntlet.ErrTokenNotPersisted:
-			status = http.StatusServiceUnavailable
+			// The message gateErrorMessages carries for this says what
+			// to do about it; the generic one below does not.
+			g.writeAuthError(w, r, err, http.StatusServiceUnavailable)
+			return
 		case gauntlet.ErrTokenKindInvalid, gauntlet.ErrTokenDeviceRequired,
 			gauntlet.ErrTokenDeviceNotAllowed, gauntlet.ErrTokenDeviceInvalid:
 			// The caller's request is wrong, not the deployment's state,

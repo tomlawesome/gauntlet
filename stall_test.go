@@ -175,3 +175,93 @@ func TestStalledBackendStillServesFromMemory(t *testing.T) {
 		t.Errorf("login failed against a stalled backend: %v -- the operator cannot sign in to diagnose the outage", err)
 	}
 }
+
+// stallingSaveBackend is the write-side twin of stallingBackend: Load
+// answers, Save hangs until the caller's own context ends it.
+type stallingSaveBackend struct {
+	mu      sync.Mutex
+	payload []byte
+	version int64
+	armed   bool
+}
+
+func (b *stallingSaveBackend) Load(ctx context.Context) (persist.Snapshot, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return persist.Snapshot{Payload: b.payload, Version: b.version, Exists: b.version != 0}, nil
+}
+
+func (b *stallingSaveBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
+	b.mu.Lock()
+	armed := b.armed
+	b.mu.Unlock()
+	if armed {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.payload = append([]byte(nil), payload...)
+	b.version++
+	return b.version, nil
+}
+
+func (b *stallingSaveBackend) Close() error     { return nil }
+func (b *stallingSaveBackend) Describe() string { return "stalling-save test backend" }
+
+// TestStalledSaveReturnsAndRollsBack: a save runs under the store's
+// write lock, so a backend that hangs mid-save used to hold every
+// login and every signed-in request until a restart. With saveTimeout
+// the write fails instead, the caller rolls its change back, and the
+// store goes on serving what it has.
+func TestStalledSaveReturnsAndRollsBack(t *testing.T) {
+	restore := saveTimeout
+	saveTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { saveTimeout = restore })
+
+	b := &stallingSaveBackend{}
+	s, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register("admin", "old-password", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	tb := &stallingSaveBackend{}
+	tokens, err := OpenTokenStore(tb, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sb := range []*stallingSaveBackend{b, tb} {
+		sb.mu.Lock()
+		sb.armed = true
+		sb.mu.Unlock()
+	}
+
+	done := make(chan error, 2)
+	go func() { done <- s.SetPassword("admin", "new-password", time.Now()) }()
+	go func() {
+		_, _, err := tokens.Create("cron", TokenKindAPI, "", nil, time.Now())
+		done <- err
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Error("a save against a stalled backend reported success")
+			}
+		case <-time.After(20 * saveTimeout):
+			t.Fatal("a save against a stalled backend never returned -- the store lock is held until restart")
+		}
+	}
+
+	// Rolled back: the old password still works, and a read does not
+	// block behind the stalled write.
+	if _, err := s.Authenticate("admin", "old-password", time.Now()); err != nil {
+		t.Errorf("old password after a failed save: %v, want it still to work", err)
+	}
+	if n := len(tokens.List()); n != 0 {
+		t.Errorf("%d tokens listed after a failed save, want 0", n)
+	}
+}

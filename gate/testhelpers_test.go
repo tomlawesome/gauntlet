@@ -30,6 +30,20 @@ const testProductName = "Gate Test Suite"
 // failed OIDC callback redirects to with ?ssoError=.
 const testLoginPath = "/login"
 
+// mustNewLoginLimiter is every fixture's way to build a limiter: the
+// thresholds and windows below are all fixed, known-good literals, so a
+// config error here would be a mistake in the test itself, not something
+// worth a table of its own the way NewLoginLimiter's own refusal is
+// tested in the root package.
+func mustNewLoginLimiter(t *testing.T, threshold int, window time.Duration) *gauntlet.LoginLimiter {
+	t.Helper()
+	l, err := gauntlet.NewLoginLimiter(threshold, window)
+	if err != nil {
+		t.Fatalf("NewLoginLimiter: %v", err)
+	}
+	return l
+}
+
 // newTestGate builds a Gate over fresh, empty, in-memory stores --
 // gauntlet ships no file backend for tests to open against (persist.
 // Memory is the one persist.Backend this module carries; see
@@ -46,7 +60,7 @@ func newTestGate(t *testing.T) *Gate {
 		t.Fatalf("OpenTokenStore: %v", err)
 	}
 	sessions := gauntlet.NewSessionStore(24*time.Hour, 0)
-	limiter := gauntlet.NewLoginLimiter(5, 5*time.Minute)
+	limiter := mustNewLoginLimiter(t, 5, 5*time.Minute)
 
 	g, err := New(Config{
 		CookieName:      testCookieName,

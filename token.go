@@ -519,7 +519,9 @@ func (s *TokenStore) tryPersistLocked() error {
 	if err != nil {
 		return fmt.Errorf("encoding API tokens for persistence failed: %w", err)
 	}
-	version, conflicted, err := persist.SaveWithRetry(context.Background(), s.backend, data, s.version)
+	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+	defer cancel()
+	version, conflicted, err := persist.SaveWithRetry(ctx, s.backend, data, s.version)
 	if err != nil {
 		return fmt.Errorf("writing API tokens to %s failed: %w", s.backend.Describe(), err)
 	}

@@ -2,7 +2,6 @@ package gate
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/tomlawesome/gauntlet"
 )
@@ -10,16 +9,6 @@ import (
 type changePasswordRequest struct {
 	CurrentPassword string `json:"currentPassword"`
 	NewPassword     string `json:"newPassword"`
-}
-
-// passwordRecheckLimiterKey is the bucket for re-verifying a signed-in
-// caller's own current password -- kept separate from login's own
-// buckets (loginLimiterKeys) for the reason mikroview's own comment on
-// this gives: gauntlet allows exactly one admin, so spending login's
-// allowance on a run of typos here could leave nobody able to sign back
-// in.
-func passwordRecheckLimiterKey(username string) string {
-	return "password-recheck:" + strings.ToLower(username)
 }
 
 // handleChangePassword lets a signed-in caller change their own
@@ -48,12 +37,10 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	// After an admin reset there is no current password to supply -- see
 	// mikroview's own handleAuthChangePassword for the full reasoning.
-	// gauntlet's admin-reset flow (IssueResetCode) is not in this stage,
-	// but MustChangePassword itself is a plain User field a hand-built
-	// fixture or a later stage can already set, so the skip is kept.
+	// An admin reset (POST /api/auth/users/{id}/reset-password, which
+	// calls IssueResetCode) is what sets MustChangePassword.
 	if !user.MustChangePassword {
-		userKey := passwordRecheckLimiterKey(user.Username)
-		if !g.deps.Limiter.Reserve(userKey, now) {
+		if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
 			http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 			return
 		}
@@ -61,7 +48,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			writeUnauthorized(w, "current password is incorrect")
 			return
 		}
-		g.deps.Limiter.Release(userKey, now)
+		g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 		if req.NewPassword == req.CurrentPassword {
 			http.Error(w, "the new password is the same as the current one", http.StatusBadRequest)

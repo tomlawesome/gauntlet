@@ -5,7 +5,10 @@
 package gate
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"github.com/tomlawesome/gauntlet/persist"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +52,7 @@ func totpBobID(t *testing.T, g *Gate) string {
 
 func totpEnrol(t *testing.T, client *http.Client, ts *httptest.Server) totpEnrolResponse {
 	t.Helper()
-	resp := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", nil)
+	resp := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: totpBobPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -234,11 +237,37 @@ func TestTOTPEnrolConflictWhenAlreadyActive(t *testing.T) {
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	totpEnrolAndConfirm(t, bob, ts)
 
-	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/enrol", nil)
+	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: totpBobPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("enrolling again while active got %d, want 409", resp.StatusCode)
 	}
+}
+
+// A session alone must not be enough to start enrolment: that is the
+// position a stolen cookie puts an attacker in, and a factor planted from
+// it locks the real owner out at their next login. The password is the
+// one thing the cookie does not carry.
+func TestTOTPEnrolRequiresPassword(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+
+	for name, body := range map[string]any{
+		"wrong password": totpEnrolRequest{Password: "not-bobs-password"},
+		"no password":    totpEnrolRequest{},
+	} {
+		resp := postJSON(t, bob, ts.URL+"/api/auth/totp/enrol", body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: enrol got %d, want 401", name, resp.StatusCode)
+		}
+	}
+	if u, ok := g.deps.Users.Get(totpBobID(t, g)); !ok || u.TOTPSecret != "" {
+		t.Fatal("a refused enrolment left a pending secret on the account")
+	}
+	// The right password still works, so the check is a check and not a
+	// broken route.
+	totpEnrol(t, bob, ts)
 }
 
 func TestTOTPConfirmRejectsBadCode(t *testing.T) {
@@ -271,11 +300,11 @@ func TestTOTPConfirmAgainAfterAlreadyConfirmedRefused(t *testing.T) {
 }
 
 // TestTOTPDeleteRateLimited proves DELETE /api/auth/totp's password
-// re-check is throttled on passwordRecheckLimiterKey, not an unbounded
+// re-check is throttled on the per-account re-check bucket, not an unbounded
 // oracle behind a stolen session cookie.
 func TestTOTPDeleteRateLimited(t *testing.T) {
 	g, ts, _ := totpFixture(t)
-	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	totpEnrolAndConfirm(t, bob, ts)
 
@@ -443,4 +472,76 @@ func totpListedHasTOTP(t *testing.T, admin *http.Client, ts *httptest.Server, us
 	}
 	t.Fatalf("no row for %q in the user list", username)
 	return false
+}
+
+// budgetBackend saves normally until armed, then fails every save. It
+// lets a test make the second of two saves in one request fail.
+type budgetBackend struct {
+	inner persist.Backend
+	left  int // saves allowed once armed; -1 = unarmed
+}
+
+func (b *budgetBackend) Load(ctx context.Context) (persist.Snapshot, error) {
+	return b.inner.Load(ctx)
+}
+
+func (b *budgetBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
+	if b.left >= 0 {
+		if b.left == 0 {
+			return 0, errors.New("budget backend: save refused")
+		}
+		b.left--
+	}
+	return b.inner.Save(ctx, payload, expect)
+}
+
+func (b *budgetBackend) Close() error     { return b.inner.Close() }
+func (b *budgetBackend) Describe() string { return "budget test backend" }
+
+// TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail: the
+// factor is committed by ConfirmTOTP's own save, so a session from
+// before it must end even when the recovery-code save that follows
+// fails -- otherwise a session stolen before 2FA was on keeps working
+// against an account that now claims to require it.
+func TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail(t *testing.T) {
+	g := newTestGate(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Users = users
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
+		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
+
+	deviceA := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	deviceB := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	enrolled := totpEnrol(t, deviceA, ts)
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+
+	// One save left: ConfirmTOTP lands, the recovery-code save does not.
+	backend.left = 1
+	resp := postJSON(t, deviceA, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500", resp.StatusCode)
+	}
+	if u, ok := g.deps.Users.Get(totpBobID(t, g)); !ok || !u.HasActiveTOTP() {
+		t.Fatal("the fixture did not leave the factor active; the test proves nothing")
+	}
+
+	r, err := deviceB.Get(ts.URL + "/api/protected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("deviceB's pre-factor session got %d after the factor was confirmed, want 401", r.StatusCode)
+	}
 }

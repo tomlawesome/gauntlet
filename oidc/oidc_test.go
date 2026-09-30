@@ -3,6 +3,7 @@ package oidc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -112,6 +113,32 @@ func TestNewFailsClosedOnUnreachableProvider(t *testing.T) {
 		HTTPTimeout:  time.Second,
 	}); err == nil {
 		t.Fatal("New succeeded against a provider with no discovery document")
+	}
+}
+
+// TestNewRefusesMultiTenantIssuer proves New enforces the same
+// self-hosted-only policy AllowIssuer does, rather than relying entirely
+// on callers to check first -- docs/design.md §4 promises multi-tenant
+// issuers are refused at startup, not just discoverable-but-rejected
+// later. The context deadline means this test hangs instead of passing
+// if the check were missing: New would otherwise go on to dial the real
+// accounts.google.com/login.microsoftonline.com discovery endpoint.
+func TestNewRefusesMultiTenantIssuer(t *testing.T) {
+	for _, issuer := range []string{
+		"https://accounts.google.com",
+		"https://login.microsoftonline.com/common/v2.0",
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, err := New(ctx, Config{
+			IssuerURL:    issuer,
+			ClientID:     "test-client",
+			ClientSecret: "test-secret",
+			RedirectURL:  "https://app.example/callback",
+		})
+		cancel()
+		if !errors.Is(err, ErrMultiTenantIssuer) {
+			t.Errorf("New(%q) error = %v, want errors.Is(err, ErrMultiTenantIssuer)", issuer, err)
+		}
 	}
 }
 
@@ -261,6 +288,26 @@ func TestVerifyIDTokenRejectsWrongIssuer(t *testing.T) {
 	}
 }
 
+// A token without a subject is a token without an identity: go-oidc
+// lets it through, so gauntlet has to refuse it itself, or every user of
+// such a provider would land on the one account keyed on (issuer, "").
+func TestVerifyIDTokenRejectsEmptySubject(t *testing.T) {
+	fp := testutil.NewFakeProvider(t)
+	c := testClient(t, fp)
+
+	claims := fp.DefaultClaims("test-client", "nonce-1")
+	claims.Subject = ""
+	fp.NextIDToken = fp.SignRS256(t, claims)
+
+	tok, err := c.Exchange(context.Background(), "any-code", "any-verifier")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if _, err := c.VerifyIDToken(context.Background(), tok); !errors.Is(err, ErrNoSubject) {
+		t.Fatalf("VerifyIDToken on a token with an empty sub: got %v, want ErrNoSubject", err)
+	}
+}
+
 // TestHTTPTimeoutBoundsAHungProvider proves the timeout wiring (New's
 // defaultHTTPTimeout, reapplied in Exchange/VerifyIDToken via
 // oidc.ClientContext) actually takes effect end to end, not just that the
@@ -301,14 +348,101 @@ func TestHTTPTimeoutBoundsAHungProvider(t *testing.T) {
 	}
 }
 
+// TestHTTPTimeoutBoundsAHungDiscoveryRequest is TestHTTPTimeoutBoundsAHungProvider's
+// sibling for New's own discovery fetch (the .well-known document), the
+// first of the three call sites defaultHTTPTimeout's doc comment names.
+// A provider that accepts the connection but never answers discovery
+// must fail New within the configured timeout, not hang whatever called
+// New (an application's own startup) indefinitely.
+func TestHTTPTimeoutBoundsAHungDiscoveryRequest(t *testing.T) {
+	fp := testutil.NewFakeProvider(t)
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	fp.Server.Config.Handler = wrapHangPath(fp.Server.Config.Handler, hang, "/.well-known/openid-configuration")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := New(context.Background(), Config{
+			IssuerURL:    fp.Issuer(),
+			ClientID:     "test-client",
+			ClientSecret: "test-secret",
+			RedirectURL:  "https://gauntlet.example/api/auth/oidc/callback",
+			HTTPTimeout:  100 * time.Millisecond,
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("New against a hung discovery endpoint returned no error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("New did not respect HTTPTimeout -- still blocked well past it")
+	}
+}
+
+// TestHTTPTimeoutBoundsAHungJWKSFetch is the third call site: go-oidc
+// fetches the provider's JWKS lazily, on first Verify, rather than
+// during discovery (VerifyIDToken's own doc comment) -- so this hangs
+// /jwks specifically, only once a token is ready to verify, and checks
+// VerifyIDToken itself respects the timeout rather than New having
+// already forced a fetch.
+func TestHTTPTimeoutBoundsAHungJWKSFetch(t *testing.T) {
+	fp := testutil.NewFakeProvider(t)
+	c, err := New(context.Background(), Config{
+		IssuerURL:    fp.Issuer(),
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		RedirectURL:  "https://gauntlet.example/api/auth/oidc/callback",
+		HTTPTimeout:  100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	claims := fp.DefaultClaims("test-client", "nonce-1")
+	fp.NextIDToken = fp.SignRS256(t, claims)
+	tok, err := c.Exchange(context.Background(), "any-code", "any-verifier")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	fp.Server.Config.Handler = wrapHangPath(fp.Server.Config.Handler, hang, "/jwks")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.VerifyIDToken(context.Background(), tok)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("VerifyIDToken against a hung /jwks endpoint returned no error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("VerifyIDToken did not respect HTTPTimeout -- still blocked well past it")
+	}
+}
+
 // wrapHang makes every /token request block until hang is closed,
 // simulating a provider that's up (accepts the connection) but never
 // responds -- the scenario an HTTP client Timeout guards against, as
 // opposed to a connection-refused/DNS failure that fails fast on its own
 // regardless of any timeout setting.
 func wrapHang(next http.Handler, hang chan struct{}) http.Handler {
+	return wrapHangPath(next, hang, "/token")
+}
+
+// wrapHangPath generalizes wrapHang to an arbitrary path, so the
+// discovery- and JWKS-timeout tests above can hang their own endpoint
+// instead of /token.
+func wrapHangPath(next http.Handler, hang chan struct{}, path string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/token" {
+		if r.URL.Path == path {
 			<-hang
 		}
 		next.ServeHTTP(w, r)

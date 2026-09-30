@@ -213,6 +213,10 @@ func TestIsMultiTenantIssuer(t *testing.T) {
 		"accounts.google.com",
 		"login.microsoftonline.com/common/v2.0",
 		"  appleid.apple.com  ",
+		// A trailing root dot names the same host to DNS and TLS; it must
+		// not name a different one to this check.
+		"https://accounts.google.com./",
+		"https://login.microsoftonline.com./common/v2.0",
 	}
 	for _, issuer := range multiTenant {
 		if !IsMultiTenantIssuer(issuer) {

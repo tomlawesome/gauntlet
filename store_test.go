@@ -402,10 +402,15 @@ func TestOpenReadsNewObjectFormat(t *testing.T) {
 // "role" key can now only have been hand-edited, so the empty Role is
 // loaded as-is and rank() denies it every gate -- not even viewer.
 // Silently promoting an unassigned role to RoleUser is the wrong
-// direction for a value nobody legitimately wrote.
+// direction for a value nobody legitimately wrote. The fixture also
+// carries an admin account, otherwise OpenStore would refuse the whole
+// document for a different reason (no admin) before the roleless
+// account is even considered.
 func TestOpenLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 	m := persist.NewMemory()
-	data := `{"users":[{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"}]}`
+	data := `{"users":[` +
+		`{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"},` +
+		`{"id":"u2","username":"admin","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"}]}`
 	primeMemory(t, m, data)
 
 	s, err := OpenStore(m, Options{})
@@ -428,7 +433,10 @@ func TestOpenLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 
 // TestReloadIfStaleLeavesAnEmptyRoleFailingClosed is the same behaviour
 // reached through reloadIfStale, which a live server calls on every read
-// once a separate process has touched the backend.
+// once a separate process has touched the backend. The fixture also
+// carries an admin account, otherwise reloadIfStale would refuse the
+// whole document for a different reason (no admin) before the roleless
+// account is even considered.
 func TestReloadIfStaleLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 	m := persist.NewMemory()
 
@@ -437,7 +445,9 @@ func TestReloadIfStaleLeavesAnEmptyRoleFailingClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data := `{"users":[{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"}]}`
+	data := `{"users":[` +
+		`{"id":"u1","username":"someone","passwordHash":"$argon2id$fake","createdAt":"2026-01-01T00:00:00Z"},` +
+		`{"id":"u2","username":"admin","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"}]}`
 	if _, err := m.Save(context.Background(), []byte(data), 0); err != nil {
 		t.Fatal(err)
 	}
@@ -802,5 +812,69 @@ func TestAuthenticateUnknownUserStillRunsTheHash(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("unknown-user Authenticate never finished once a slot was free")
+	}
+}
+
+// TestWritesPickUpAnotherProcessesAccountFirst covers the three write
+// paths that did not reload before saving. A whole-document save is
+// built from what this process holds; a store that has not refreshed
+// since a CLI tool (a second process) added an account writes that
+// account away again. Every other write method reloads first, so these
+// must too.
+func TestWritesPickUpAnotherProcessesAccountFirst(t *testing.T) {
+	cases := []struct {
+		name  string
+		write func(t *testing.T, server *Store)
+	}{
+		{"CreateUser", func(t *testing.T, server *Store) {
+			if _, err := server.CreateUser("dave", "password789", RoleUser, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SetPassword", func(t *testing.T, server *Store) {
+			if err := server.SetPassword("admin", "new-password", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"TransferAdmin", func(t *testing.T, server *Store) {
+			if _, _, err := server.TransferAdmin("bob", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := persist.NewMemory()
+			server, err := OpenStore(m, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = server.Register("admin", "password123", time.Now())
+			if _, err := server.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+
+			// A second, independent Store against the same backend --
+			// standing in for a CLI tool's own separate process.
+			cli, err := OpenStore(m, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := cli.CreateUser("carol", "password456", RoleUser, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.write(t, server)
+
+			// Read what is on disk through a fresh store, not the one
+			// that just wrote: the question is what survived the save.
+			after, err := OpenStore(m, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := after.ByUsername("carol"); !ok {
+				t.Errorf("%s wrote over the account another process had just added", tc.name)
+			}
+		})
 	}
 }

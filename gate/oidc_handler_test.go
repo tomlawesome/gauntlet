@@ -169,6 +169,63 @@ func TestOIDCCallbackPolicyRefusal(t *testing.T) {
 	}
 }
 
+// TestOIDCCallbackPolicyRefusalOnReturningUser covers the other half of
+// docs/design.md's "re-checked on every login": TestOIDCCallbackPolicyRefusal
+// above only exercises a refusal on first provisioning. Here the same
+// identity signs in successfully once, then has its access revoked at
+// the IdP (modelled by tightening the policy in place), and must be
+// refused on its very next sign-in -- not grandfathered in because an
+// account already exists for it.
+func TestOIDCCallbackPolicyRefusalOnReturningUser(t *testing.T) {
+	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+
+	fs1, err := oidc.NewFlowState(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs1.Nonce))
+	req1 := oidcCallbackRequest(t, g, ts, fs1, "state="+fs1.State+"&code=test-code")
+	resp1, err := noRedirectClient().Do(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp1.Body.Close() }()
+	if resp1.StatusCode != http.StatusFound || resp1.Header.Get("Location") != "/" {
+		t.Fatalf("first login: status=%d location=%q, want 302 to /", resp1.StatusCode, resp1.Header.Get("Location"))
+	}
+	if g.deps.Users.Count() != 1 {
+		t.Fatalf("expected exactly one provisioned account after the first login, got %d", g.deps.Users.Count())
+	}
+
+	// The policy tightens after that first, successful login -- standing
+	// in for the person's access being revoked at the IdP. DefaultClaims'
+	// email (person@example.com) is not on this allowlist.
+	g.deps.OIDCPolicy = oidc.Policy{AllowedEmails: []string{"someone-else@example.com"}}
+
+	fs2, err := oidc.NewFlowState(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs2.Nonce))
+	req2 := oidcCallbackRequest(t, g, ts, fs2, "state="+fs2.State+"&code=test-code")
+	resp2, err := noRedirectClient().Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if loc := resp2.Header.Get("Location"); loc != testLoginPath+"?ssoError=not_permitted" {
+		t.Errorf("returning user's second login: redirect location = %q, want the not_permitted ssoError", loc)
+	}
+	for _, c := range resp2.Cookies() {
+		if c.Name == testCookieName {
+			t.Error("a policy-refused login for a returning user must not set a session cookie")
+		}
+	}
+	if g.deps.Users.Count() != 1 {
+		t.Error("a policy refusal on a returning user must not provision another account")
+	}
+}
+
 func TestOIDCCallbackProviderErrorRefused(t *testing.T) {
 	g, ts, _ := newOIDCTestGate(t, oidc.Policy{})
 	fs, err := oidc.NewFlowState(time.Now())
@@ -652,9 +709,11 @@ func TestOIDCCallbackUsesEmailWhenPreferredUsernameEmpty(t *testing.T) {
 
 // TestAllowIssuerRefusesKnownMultiTenantProviders is a sanity check on
 // the fail-closed startup call an application wiring Deps.OIDC is
-// expected to make (oidc.AllowIssuer, docs/design.md §1.4/§4) -- the
-// enforcement itself lives in the oidc package's own, more exhaustive
-// tests; this pins that gate's own docs are backed by a real assertion.
+// expected to make (oidc.AllowIssuer, docs/design.md §1.4/§4) --
+// belt-and-braces over oidc.New's own enforcement of the same policy.
+// The enforcement itself lives in the oidc package's own, more
+// exhaustive tests; this pins that gate's own docs are backed by a real
+// assertion.
 func TestAllowIssuerRefusesKnownMultiTenantProviders(t *testing.T) {
 	if err := oidc.AllowIssuer("https://accounts.google.com"); err == nil {
 		t.Error("expected a known multi-tenant issuer to be refused")

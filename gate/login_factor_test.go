@@ -273,7 +273,7 @@ func TestLoginFactorAccountLostFactorMidFlow(t *testing.T) {
 // request (and release the IP reservation this attempt claimed).
 func TestLoginUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
 	g := newTestGate(t)
-	g.deps.Limiter = gauntlet.NewLoginLimiter(5, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 5, time.Minute)
 	g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
 	ts := newTestServer(t, g)
 	registerAdmin(t, ts, "admin", "password123")
@@ -322,7 +322,7 @@ func TestLoginUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
 // it, even from a source address that has never made a single request.
 func TestLoginFactorUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
 	g, ts, admin := totpFixture(t)
-	g.deps.Limiter = gauntlet.NewLoginLimiter(5, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 5, time.Minute)
 	var testIP string
 	g.cfg.ClientIP = func(r *http.Request) string { return testIP }
 	_ = admin

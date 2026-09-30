@@ -87,6 +87,32 @@ func TestSaveWithRetryNonConflictErrorPropagates(t *testing.T) {
 	}
 }
 
+// A conflict SaveWithRetry cannot even inspect -- reloading itself
+// fails -- must surface that reload error, not the original conflict.
+func TestSaveWithRetryReloadFailureAfterConflictPropagates(t *testing.T) {
+	b := &conflictThenBrokenBackend{loadErr: errors.New("reload on fire")}
+	_, conflicted, err := SaveWithRetry(context.Background(), b, []byte(`{}`), 1)
+	if err == nil || err.Error() != "reload on fire" {
+		t.Fatalf("err = %v, want the reload's own error", err)
+	}
+	if !conflicted {
+		t.Error("conflicted = false, want true: a conflict was seen before the reload failed")
+	}
+}
+
+// A conflict that reloads cleanly but whose retried Save then fails for
+// an unrelated reason (not another conflict) must surface that error too.
+func TestSaveWithRetryRetriedSaveFailurePropagates(t *testing.T) {
+	b := &conflictThenBrokenBackend{saveErr: errors.New("retried write on fire")}
+	_, conflicted, err := SaveWithRetry(context.Background(), b, []byte(`{}`), 1)
+	if err == nil || err.Error() != "retried write on fire" {
+		t.Fatalf("err = %v, want the retried save's own error", err)
+	}
+	if !conflicted {
+		t.Error("conflicted = false, want true: a conflict was seen before the retried save failed")
+	}
+}
+
 func TestLoadDocumentNilBackend(t *testing.T) {
 	data, version, err := LoadDocument(context.Background(), nil)
 	if err != nil || data != nil || version != 0 {
@@ -127,3 +153,33 @@ func (f *failingBackend) Save(ctx context.Context, payload []byte, expect int64)
 }
 func (f *failingBackend) Close() error     { return nil }
 func (f *failingBackend) Describe() string { return "failing test backend" }
+
+// conflictThenBrokenBackend returns ErrConflict from its first Save (so
+// SaveWithRetry always takes the reload-and-retry path), then breaks in
+// whichever of Load or the retried Save the test configures.
+type conflictThenBrokenBackend struct {
+	saved   bool
+	loadErr error
+	saveErr error
+}
+
+func (b *conflictThenBrokenBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
+	if !b.saved {
+		b.saved = true
+		return 0, ErrConflict
+	}
+	if b.saveErr != nil {
+		return 0, b.saveErr
+	}
+	return 2, nil
+}
+
+func (b *conflictThenBrokenBackend) Load(ctx context.Context) (Snapshot, error) {
+	if b.loadErr != nil {
+		return Snapshot{}, b.loadErr
+	}
+	return Snapshot{Payload: []byte(`{}`), Version: 1, Exists: true}, nil
+}
+
+func (b *conflictThenBrokenBackend) Close() error     { return nil }
+func (b *conflictThenBrokenBackend) Describe() string { return "conflict-then-broken test backend" }

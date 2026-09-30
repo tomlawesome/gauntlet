@@ -46,11 +46,10 @@ type Config struct {
 	// docs/design.md §1.6 for why mikroview keeps this on and birdcage
 	// is recommended to.
 	//
-	// The enrolment routes this door expects an account to be able to
-	// reach while stuck at it (mikroview's secondFactorEnrolPaths) don't
-	// exist in this stage -- see protect.go's "G6 stage 2" TODO. Setting
-	// this true before that stage lands is a real lockout for any local
-	// account without a factor already on its document.
+	// An account stuck at the door can still reach the enrolment
+	// routes (protect.go's secondFactorEnrolPaths), so turning this on
+	// is not a lockout for a local account without a factor: it is sent
+	// to enrol one.
 	RequireSecondFactor bool
 	// ProductName names the deployment in TOTP enrolment URIs and
 	// passkey display names (docs/design.md §1.5's last paragraph).
@@ -88,9 +87,10 @@ type Deps struct {
 	Sessions *gauntlet.SessionStore
 	Tokens   *gauntlet.TokenStore
 	Limiter  *gauntlet.LoginLimiter
-	// OIDC being nil means SSO is off -- unused in this stage; the OIDC
-	// routes are not registered by Routes yet (docs/design.md §1.5,
-	// route table).
+	// OIDC being nil means SSO is off: Routes still registers the
+	// /api/auth/oidc/* routes, which then answer 404 (docs/design.md
+	// §1.5). OIDCState is required whenever OIDC is set -- New refuses
+	// the pair otherwise.
 	OIDC       *oidc.Client
 	OIDCState  *oidc.StateCodec
 	OIDCPolicy oidc.Policy
@@ -150,6 +150,11 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	}
 	if deps.Limiter == nil {
 		return nil, fmt.Errorf("%w: Deps.Limiter", errMissingDep)
+	}
+	// SSO on means the flow cookie gets sealed on the first click; a nil
+	// codec there is a panic on that request, not here.
+	if deps.OIDC != nil && deps.OIDCState == nil {
+		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

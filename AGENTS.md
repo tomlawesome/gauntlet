@@ -11,10 +11,12 @@ fix lands once instead of being copied between the two. See
 [docs/design.md](docs/design.md) and
 [docs/adr/0001-shared-auth-module.md](docs/adr/0001-shared-auth-module.md).
 
-**Belongs in the apps, not here:** any concrete storage backend (a file,
-a database table -- each app supplies its own `persist.Backend`), the
-WebAuthn ceremony (`passkey/`, deferred to G8), and anything that reaches
-back into birdcage's or mikroview's own types.
+**Belongs in the apps, not here:** a database-table backend (each app
+supplies its own `persist.Backend`), the WebAuthn ceremony (`passkey/`,
+deferred to G8), and anything that reaches back into birdcage's or
+mikroview's own types. File storage is the one exception: the encrypted
+file backend (`persist.EncryptedFileBackend`) lives here (#18) as the
+documented default; finding and reading the key file stays with the app.
 
 **Mikroview's auth code is the reference this module is read against**,
 continuously, until mikroview actually moves onto it (birdcage ADR-0005
@@ -26,8 +28,10 @@ GitLab-first and the mirror lags by days (owner, 2026-09-27).
 ## Delivery host
 
 GitLab-first: `gitlab.tomlawson.io/ai/gauntlet` (project id 56), default
-branch `dev`. A GitHub mirror is created only once v0.1.0 tags (owner,
-2026-09-26) -- no mirror, no GitHub issues or pull requests before that.
+branch `dev`. The public GitHub mirror, `github.com/tomlawesome/gauntlet`,
+is created at v0.1.0 so birdcage can `go get` the tag by its module path
+(#17, owner 2026-09-29, replacing 2026-09-27's "mirror at v0.2.0"). GitHub
+is the mirror only: no GitHub issues or pull requests.
 
 ## Closing issues from commits
 

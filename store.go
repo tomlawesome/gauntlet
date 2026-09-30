@@ -74,6 +74,16 @@ var (
 	// ErrNoAdmin is returned by TransferAdmin when no account holds the
 	// role -- nothing to transfer.
 	ErrNoAdmin = errors.New("gauntlet: this deployment has no admin account")
+
+	// errMultipleAdmins is the decode error for an accounts document
+	// holding more than one admin. No write in this package produces
+	// one (see CreateUser and TransferAdmin), so it can only come from a
+	// hand edit or a foreign writer, and it is refused the way an
+	// unparseable document is.
+	errMultipleAdmins = errors.New("more than one account holds the admin role; this package allows exactly one")
+	// errNoAdmin is the decode error for an accounts document that holds
+	// accounts but none of them is the admin. See checkAdmins.
+	errNoAdmin = errors.New("accounts document holds accounts but no admin")
 	// ErrOIDCAlreadyLinked is returned by LinkOIDCIdentity when the
 	// account is already connected to a different (issuer, subject).
 	ErrOIDCAlreadyLinked = errors.New("gauntlet: account is already connected to an SSO identity")
@@ -103,6 +113,31 @@ type oidcKey struct {
 // storeFile is the on-disk shape: an object wrapping the user list.
 type storeFile struct {
 	Users []*User `json:"users"`
+}
+
+// checkAdmins refuses a document with more than one admin, and refuses
+// one that holds accounts but none of them admin. An empty document (no
+// users at all) is fine -- that's a deployment before Register. But once
+// accounts exist, losing the admin is a one-way door: Register is closed
+// as soon as Count()>0, CreateUser refuses RoleAdmin, and TransferAdmin
+// needs a current admin to transfer from, so nothing in this package
+// could ever create a new one. Loading such a document anyway would mean
+// a server that answers 403 on every admin route forever, with a backup
+// the only way back -- refusing it at startup says so up front instead.
+func (f storeFile) checkAdmins() error {
+	admins := 0
+	for _, u := range f.Users {
+		if u != nil && u.Role == RoleAdmin {
+			admins++
+		}
+	}
+	if admins > 1 {
+		return fmt.Errorf("%w (found %d)", errMultipleAdmins, admins)
+	}
+	if admins == 0 && len(f.Users) > 0 {
+		return fmt.Errorf("%w (found %d)", errNoAdmin, len(f.Users))
+	}
+	return nil
 }
 
 // Options configures OpenStore.
@@ -144,6 +179,16 @@ type Store struct {
 	// hold a lock the reload itself needs to take. See reloadIfStale.
 	reloadMu       sync.Mutex
 	reloadInFlight chan struct{}
+
+	// refusedVersion is the last document version reloadIfStale refused
+	// to apply (see checkAdmins), so a refused document is logged once
+	// rather than on every request until someone fixes it, and so
+	// registrationOpenGuard can keep registration closed while it holds.
+	// Only reloadIfStale writes it, and only one of those runs at a time,
+	// but registrationOpenGuard now reads it too, so both sides go
+	// through mu like byID/byName/version above.
+	refusedVersion    int64
+	hasRefusedVersion bool
 }
 
 // reloadTimeout bounds one staleness check against the backend. Long
@@ -155,6 +200,24 @@ type Store struct {
 // A var, not a const, only so tests can shorten it. Nothing outside
 // tests assigns to it.
 var reloadTimeout = 5 * time.Second
+
+// saveTimeout is the write-side counterpart: it bounds one save in
+// tryPersistLocked (Store and TokenStore alike), which runs while the
+// store's write lock is held. Without it a backend that stops answering
+// mid-save would hold that lock, and with it every login and every
+// signed-in request, until the process was restarted. A save that
+// overruns fails like any other save failure: the caller rolls its
+// change back and reports the error.
+//
+// That protection only reaches a backend that honours ctx. The shipped
+// file backends (persist/file.go's Save, and EncryptedFileBackend on top
+// of it) call plain os.ReadFile/CreateTemp/Write/Sync/Rename, and wait on
+// the lock file before any of them -- none of which take a context or
+// can be interrupted by one -- so on a hung mount the deadline never
+// fires. reloadTimeout has the same limit on the read side.
+//
+// A var, not a const, only so tests can shorten it.
+var saveTimeout = 5 * time.Second
 
 // OpenStore returns a Store persisting through b. A nil b gives a usable
 // but unpersisted store -- see Store's doc comment.
@@ -178,6 +241,9 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
 		var file storeFile
 		if err := json.Unmarshal(data, &file); err != nil {
+			return err
+		}
+		if err := file.checkAdmins(); err != nil {
 			return err
 		}
 		// version isn't in scope yet here -- persist.Open hasn't
@@ -217,6 +283,10 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 		}
 	}
 	s.version = version
+	// A refusal only holds while the refused document is still the one
+	// on disk: this document was just accepted, so any earlier refusal
+	// no longer describes what's out there.
+	s.refusedVersion, s.hasRefusedVersion = 0, false
 }
 
 // reloadIfStale re-reads the document if the backend has moved on since
@@ -275,8 +345,9 @@ func (s *Store) reloadIfStale() {
 		}
 		s.mu.RLock()
 		stale := version != s.version
+		refused := s.hasRefusedVersion && version == s.refusedVersion
 		s.mu.RUnlock()
-		if !stale {
+		if !stale || refused {
 			return
 		}
 	}
@@ -297,12 +368,30 @@ func (s *Store) reloadIfStale() {
 	if err != nil || !snap.Exists {
 		return
 	}
-	if snap.Version == beforeLoad {
+	s.mu.RLock()
+	alreadyRefused := s.hasRefusedVersion && snap.Version == s.refusedVersion
+	s.mu.RUnlock()
+	if snap.Version == beforeLoad || alreadyRefused {
 		return
 	}
 
 	var file storeFile
 	if err := json.Unmarshal(snap.Payload, &file); err != nil {
+		return
+	}
+	// Unlike a transient read failure, this is a document someone wrote:
+	// keep serving what is in memory, and say why once. A server with its
+	// own live accounts saves over this on its next write; one that opened
+	// on an empty backend has none to save, so registrationOpenGuard keeps
+	// registration closed instead of treating Count() == 0 as a fresh
+	// install.
+	if err := file.checkAdmins(); err != nil {
+		s.mu.Lock()
+		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
+		s.mu.Unlock()
+		if s.log != nil {
+			s.log.Error(fmt.Sprintf("accounts store (%s) was changed by another process and is not being applied: %v", s.backend.Describe(), err))
+		}
 		return
 	}
 
@@ -378,8 +467,14 @@ func (s *Store) Register(username, password string, now time.Time) (*User, error
 // account may exist yet. Re-read from the live store with the write
 // lock held (see createLocked), which is what makes "exactly one
 // account can ever be self-registered" actually hold under concurrency.
+//
+// hasRefusedVersion also closes it: a document with accounts exists on
+// disk even though this process refused to apply it (see reloadIfStale),
+// so a store that opened on an empty backend must not read its own
+// empty Count() as a fresh install and create a second admin on top of
+// the one the operator already has.
 func registrationOpenGuard(s *Store) error {
-	if len(s.byID) > 0 {
+	if len(s.byID) > 0 || s.hasRefusedVersion {
 		return ErrRegistrationClosed
 	}
 	return nil
@@ -409,6 +504,10 @@ func (s *Store) CreateUser(username, password string, role Role, now time.Time) 
 	if role != RoleUser && role != RoleViewer {
 		return nil, ErrInvalidRole
 	}
+	// Same as Register: a whole-document save is built from what this
+	// process holds, so pick up another process's writes first or the
+	// save writes over them.
+	s.reloadIfStale()
 	return s.createLocked(username, password, role, now, nil)
 }
 
@@ -473,6 +572,10 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 // admin beforehand, is the check-then-act race behind the Appsmith
 // duplicate-admin and open-webui zero-admin bugs.
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) {
+	// Like every other write here: the save below is a whole-document
+	// rewrite of what this process holds.
+	s.reloadIfStale()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -855,6 +958,8 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 	prevTOTPLastCounter := u.TOTPLastCounter
 	prevRecoveryCodes := u.RecoveryCodes
 	prevPasskeys := u.Passkeys
+	prevResetHash, prevResetExpiresAt := u.ResetCodeHash, u.ResetCodeExpiresAt
+	prevMustChange := u.MustChangePassword
 	_, hadIndexEntry := s.oidcIndex[key]
 
 	u.OIDCIssuer = issuer
@@ -869,6 +974,15 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 		u.TOTPLastCounter = 0
 		u.RecoveryCodes = nil
 		u.Passkeys = nil
+		// An outstanding admin reset dies with the password it was a
+		// stand-in for: Authenticate treats a live code as the
+		// password, so left here it would keep a local way in open for
+		// up to 24 hours after the account became SSO-only, and the
+		// forced-change flag would then door an account with nothing
+		// to change.
+		u.ResetCodeHash = ""
+		u.ResetCodeExpiresAt = time.Time{}
+		u.MustChangePassword = false
 	}
 	// Invalidates every session issued before this point, including in
 	// another process -- the account's credentials just changed
@@ -894,6 +1008,8 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 		u.TOTPLastCounter = prevTOTPLastCounter
 		u.RecoveryCodes = prevRecoveryCodes
 		u.Passkeys = prevPasskeys
+		u.ResetCodeHash, u.ResetCodeExpiresAt = prevResetHash, prevResetExpiresAt
+		u.MustChangePassword = prevMustChange
 		if hadIndexEntry {
 			s.oidcIndex[key] = userID
 		} else {
@@ -1042,6 +1158,10 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		return err
 	}
 
+	// After the hash, before the lock, like every other write here: the
+	// save below is a whole-document rewrite of what this process holds.
+	s.reloadIfStale()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, ok := s.byID[s.byName[strings.ToLower(username)]]
@@ -1113,7 +1233,7 @@ func (s *Store) List() []User {
 		// an admin-facing account list has no business serializing,
 		// same stance as the three fields above. Blanked wholesale
 		// rather than per-field: a caller that needs a count must call
-		// a dedicated accessor (a later slice) instead of reading
+		// a dedicated accessor instead of reading
 		// len(this copy's Passkeys), which always reads zero now.
 		cp.Passkeys = nil
 		out = append(out, cp)
@@ -1145,7 +1265,9 @@ func (s *Store) tryPersistLocked() error {
 		return fmt.Errorf("encoding accounts for persistence failed: %w", err)
 	}
 
-	version, conflicted, err := persist.SaveWithRetry(context.Background(), s.backend, data, s.version)
+	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+	defer cancel()
+	version, conflicted, err := persist.SaveWithRetry(ctx, s.backend, data, s.version)
 	if err != nil {
 		return fmt.Errorf("writing accounts to %s failed: %w", s.backend.Describe(), err)
 	}

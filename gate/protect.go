@@ -301,8 +301,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// The !user.MustChangePassword guard is what stops this door and
 		// the one above deadlocking each other: MustChangePassword's own
 		// gate lets exactly one path through while it is set --
-		// changePasswordPath -- and that path is not (and, absent
-		// enrolment routes in this stage, cannot yet be) exempted from
+		// changePasswordPath -- and that path is not exempted from
 		// this one below. Without the guard, a reset-code account with
 		// no second factor would fall through to this gate on its one
 		// admitted path and be refused that too: 403 on the only route

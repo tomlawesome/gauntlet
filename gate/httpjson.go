@@ -75,8 +75,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // listed here -- including a genuinely unexpected error -- falls back to
 // a generic message via writeAuthError, never echoed verbatim to the
 // client, only logged server-side. Mirrors mikroview's own
-// authErrorMessages (auth.go), narrowed to the errors this stage's
-// handlers can actually produce.
+// authErrorMessages (auth.go), narrowed to the errors gate's handlers
+// can actually produce.
 var gateErrorMessages = map[error]string{
 	gauntlet.ErrRegistrationClosed:    "registration is closed -- an account already exists",
 	gauntlet.ErrNotPersisted:          "this deployment has no persistent storage configured -- an administrator needs to set one up before an account can be created",

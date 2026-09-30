@@ -55,6 +55,29 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var req totpEnrolRequest
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// The password is re-checked here for the same reason handleTOTPDelete
+	// re-checks it: the caller holds a session, which is exactly what a
+	// stolen cookie gives an attacker. Planting a factor the account's
+	// owner never sees locks them out at their next login, so it needs
+	// the one thing a cookie does not carry. Same per-account bucket, so
+	// this cannot become a password oracle behind a cookie either.
+	now := g.now()
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
+	if _, err := g.deps.Users.Authenticate(user.Username, req.Password, now); err != nil {
+		writeUnauthorized(w, "incorrect password")
+		return
+	}
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
+
 	secret, err := gauntlet.GenerateTOTPSecret()
 	if err != nil {
 		g.logError("generating TOTP secret for " + user.Username + ": " + err.Error())
@@ -147,6 +170,14 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The factor is committed from here on, so every other session ends
+	// here too -- before the recovery codes, whose failure below must
+	// not leave a session from before the factor alive against an
+	// account that now requires it.
+	g.deps.Sessions.RevokeAllForUser(user.ID)
+	sess := g.deps.Sessions.Create(user.ID, now)
+	g.setSessionCookie(w, sess.ID)
+
 	// Mint-if-absent, atomically under the store's lock: a snapshot
 	// taken before this call and a separate unconditional
 	// GenerateRecoveryCodes would leave a window where two concurrent
@@ -172,16 +203,16 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		detail += "; recovery codes issued"
 	}
 
-	g.deps.Sessions.RevokeAllForUser(user.ID)
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
-
 	g.audit(user.Username, "account.totp_enabled", user.Username, detail)
 
 	writeJSON(w, http.StatusOK, totpConfirmResponse{Enabled: true, RecoveryCodes: codes, AlreadyIssued: alreadyIssued})
 }
 
 type totpDeleteRequest struct {
+	Password string `json:"password"`
+}
+
+type totpEnrolRequest struct {
 	Password string `json:"password"`
 }
 
@@ -203,15 +234,14 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := g.now()
-	// Rate-limited on passwordRecheckLimiterKey, same bucket and
+	// Rate-limited on the per-account password re-check bucket (ReserveRecheck), same bucket and
 	// reasoning as handleChangePassword's current-password check: a
 	// guess at a live credential, made by a caller who -- unlike an
 	// ordinary login attempt -- already holds a session, which is
 	// exactly the position a stolen-cookie attacker is in. Without this,
 	// "turn off 2FA" would be an unthrottled password oracle sitting
 	// behind nothing but a cookie.
-	userKey := passwordRecheckLimiterKey(user.Username)
-	if !g.deps.Limiter.Reserve(userKey, now) {
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
@@ -219,7 +249,7 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		writeUnauthorized(w, "incorrect password")
 		return
 	}
-	g.deps.Limiter.Release(userKey, now)
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 	if err := g.deps.Users.ClearTOTP(user.ID); err != nil {
 		g.writeAuthError(w, r, err, http.StatusInternalServerError)

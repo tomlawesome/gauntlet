@@ -49,9 +49,11 @@ Runnable, checked examples for the entry points above, plus
 [pkg.go.dev](https://pkg.go.dev/github.com/tomlawesome/gauntlet) once
 this module is published there.
 
-The HTTP layer that wires these into a `net/http` middleware
-(`gauntlet/gate`) is still being built (#7); until it lands, an app calls
-`Store`, `SessionStore` and `TokenStore` directly, as the examples do.
+The HTTP layer that wires these into a `net/http` middleware is
+`gauntlet/gate`: `New` builds it, `Protect` is the middleware, and
+`Routes` serves mikroview's `/api/auth/*` and `/api/tokens` routes. See
+`go doc github.com/tomlawesome/gauntlet/gate` and
+[docs/design.md](docs/design.md) §1.5.
 
 ## Licence
 

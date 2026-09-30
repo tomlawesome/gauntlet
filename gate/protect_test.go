@@ -259,7 +259,7 @@ func TestLoginRejectsUnknownUsernameWithIdenticalBody(t *testing.T) {
 
 func TestLoginRateLimited(t *testing.T) {
 	g := newTestGate(t)
-	g.deps.Limiter = gauntlet.NewLoginLimiter(2, time.Minute)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	ts := newTestServer(t, g)
 
 	registerAdmin(t, ts, "admin", "password123")
@@ -271,6 +271,27 @@ func TestLoginRateLimited(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("expected 429 after exceeding the rate limit, got %d (even with the correct password)", resp.StatusCode)
+	}
+}
+
+// TestLoginLockoutSurvivesALimiterRestart: the lockout is written to the
+// account (#19), so a fresh limiter -- what a restarted process has --
+// still refuses the account, even with the right password.
+func TestLoginLockoutSurvivesALimiterRestart(t *testing.T) {
+	g := newTestGate(t)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
+	ts := newTestServer(t, g)
+
+	registerAdmin(t, ts, "admin", "password123")
+	for i := 0; i < 2; i++ {
+		_ = postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "wrong"}).Body.Close()
+	}
+
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
+	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected the persisted lockout to refuse the account after a restart, got %d", resp.StatusCode)
 	}
 }
 
@@ -447,5 +468,29 @@ func TestRequireSecondFactorOffAllowsAccountWithNone(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected RequireSecondFactor=false to let the account through, got %d", resp.StatusCode)
+	}
+}
+
+// TestAuthSessionEmitsFalseBooleans: mikroview's frontend reads
+// hasLocalPassword and its siblings as answers, so a false one has to
+// be on the wire as false, not left out.
+func TestAuthSessionEmitsFalseBooleans(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password123")
+
+	resp, err := client.Get(ts.URL + "/api/auth/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"hasLocalPassword", "ssoConnected", "mustChangePassword", "mustEnrolSecondFactor", "hasTOTP"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("session response is missing %q; a false value must still be emitted", key)
+		}
 	}
 }

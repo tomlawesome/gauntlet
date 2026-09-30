@@ -116,7 +116,11 @@ func ExampleOpenTokenStore() {
 // Both reach the same threshold-driven lock-out.
 func ExampleNewLoginLimiter() {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	limiter := gauntlet.NewLoginLimiter(2, time.Minute)
+	limiter, err := gauntlet.NewLoginLimiter(2, time.Minute)
+	if err != nil {
+		fmt.Println("new limiter:", err)
+		return
+	}
 
 	limiter.Reserve("alice", now) // attempt 1: comparison fails, stays counted
 	limiter.Reserve("alice", now) // attempt 2: comparison fails, stays counted
