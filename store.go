@@ -201,6 +201,12 @@ type Store struct {
 	// through mu like byID/byName/version above.
 	refusedVersion    int64
 	hasRefusedVersion bool
+
+	// lastLoginSaved is each account's LastLogin as of the last load or
+	// save, by ID, guarded by mu -- what Authenticate measures staleness
+	// against (see lastLoginGranularity), since the in-memory value may
+	// be ahead of it.
+	lastLoginSaved map[string]time.Time
 }
 
 // reloadTimeout bounds one staleness check against the backend. Long
@@ -281,6 +287,7 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 	s.byID = make(map[string]*User, len(file.Users))
 	s.byName = make(map[string]string, len(file.Users))
 	s.oidcIndex = make(map[oidcKey]string, len(file.Users))
+	s.lastLoginSaved = make(map[string]time.Time, len(file.Users))
 	for _, u := range file.Users {
 		// A JSON array containing `null` unmarshals successfully into a
 		// nil *User -- valid JSON, so the error check above doesn't
@@ -290,6 +297,7 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 		}
 		s.byID[u.ID] = u
 		s.byName[strings.ToLower(u.Username)] = u.ID
+		s.lastLoginSaved[u.ID] = u.LastLogin
 		if u.OIDCIssuer != "" || u.OIDCSubject != "" {
 			s.oidcIndex[oidcKey{issuer: u.OIDCIssuer, subject: u.OIDCSubject}] = u.ID
 		}
@@ -1059,6 +1067,14 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 	return nil
 }
 
+// lastLoginGranularity is how stale an account's saved LastLogin may
+// become before a login is worth a whole-document save -- the rule
+// lastUsedGranularity (token.go) applies to a token's LastUsedAt, for
+// the same reason: an hour is far finer than the question the field
+// answers ("is this account still in use?"), and without it every
+// login rewrites every account.
+const lastLoginGranularity = time.Hour
+
 // Authenticate verifies username/password and, on success, records
 // LastLogin and returns a copy of the user. Always runs a password
 // comparison (against dummyHash if the username doesn't exist) so a
@@ -1146,8 +1162,15 @@ func (s *Store) Authenticate(username, password string, now time.Time) (*User, e
 		cp := *u
 		return &cp, nil
 	}
+	// Saved only once the saved value is more than lastLoginGranularity
+	// old; otherwise held in memory, where Get and List see it, until
+	// the next save of any kind carries it. Compared against the saved
+	// value rather than u.LastLogin, which every login moves: against
+	// that, logins less than an hour apart would never save again.
 	u.LastLogin = now
-	s.persistLocked()
+	if now.Sub(s.lastLoginSaved[id]) >= lastLoginGranularity {
+		s.persistLocked()
+	}
 	cp := *u
 	return &cp, nil
 }
@@ -1320,6 +1343,13 @@ func (s *Store) tryPersistLocked() error {
 			"was pending (%s); this change was applied on top", s.backend.Describe()))
 	}
 	s.version = version
+	if s.lastLoginSaved == nil {
+		s.lastLoginSaved = make(map[string]time.Time, len(list))
+	}
+	clear(s.lastLoginSaved)
+	for _, u := range list {
+		s.lastLoginSaved[u.ID] = u.LastLogin
+	}
 	return nil
 }
 

@@ -169,6 +169,59 @@ func TestAuthenticateUpdatesLastLogin(t *testing.T) {
 	}
 }
 
+// TestAuthenticateSavesLastLoginAtMostHourly: moving LastLogin is not
+// worth a whole-document save on every login. It is saved when the
+// saved value is more than lastLoginGranularity old, and otherwise kept
+// in memory -- where Get still sees it -- until the next save of any
+// kind. The third login checks the comparison is against the saved
+// value, not the in-memory one: logins a minute apart must not push the
+// next save back for ever.
+func TestAuthenticateSavesLastLoginAtMostHourly(t *testing.T) {
+	b := &countingBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	start := time.Now().UTC().Truncate(time.Millisecond)
+
+	login := func(at time.Time) {
+		t.Helper()
+		if _, err := s.Authenticate("alice", "password123", at); err != nil {
+			t.Fatalf("Authenticate at %v: %v", at, err)
+		}
+	}
+
+	before := b.saves.Load()
+	login(start)
+	if got := b.saves.Load() - before; got != 1 {
+		t.Fatalf("first login caused %d saves, want 1", got)
+	}
+	login(start.Add(time.Minute))
+	if got := b.saves.Load() - before; got != 1 {
+		t.Errorf("two logins a minute apart caused %d saves, want 1", got)
+	}
+	if u, _ := s.Get(id); !u.LastLogin.Equal(start.Add(time.Minute)) {
+		t.Errorf("LastLogin = %v in memory, want the second login's %v", u.LastLogin, start.Add(time.Minute))
+	}
+
+	// Half an hour on: still within the hour of the saved value.
+	login(start.Add(lastLoginGranularity/2 + time.Minute))
+	if got := b.saves.Load() - before; got != 1 {
+		t.Errorf("a login within the hour caused %d saves in all, want 1", got)
+	}
+	// Another half hour: only half an hour since the last login, but
+	// more than an hour since the saved one.
+	later := start.Add(lastLoginGranularity + time.Minute)
+	login(later)
+	if got := b.saves.Load() - before; got != 2 {
+		t.Errorf("a login %v after the saved one caused %d saves in all, want 2", lastLoginGranularity+time.Minute, got)
+	}
+	reopened, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := reopened.Get(id); !u.LastLogin.Equal(later) {
+		t.Errorf("saved LastLogin = %v, want %v", u.LastLogin, later)
+	}
+}
+
 func TestSetPasswordChangesCredentials(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "old-password", time.Now())
