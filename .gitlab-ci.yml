@@ -126,8 +126,31 @@ test:go:
   image: $GOLANG_IMAGE
   <<: [*gate, *git_safe]
   timeout: 15m
+  # Run the suite as a NON-ROOT user, as birdcage#93 does. persist's
+  # permission tests (unreadable or unwritable store files) skip
+  # themselves as uid 0 -- correctly, because root ignores the mode bits
+  # they set -- and this image runs as root, so until 2026-09-30 those
+  # error paths ran only on workstations and CI read persist 2.3 points
+  # below the local figure, under its floor (refs #16).
+  #
+  # The shared cache is handed to tester rather than moved, so the job
+  # keeps it; tester writes the profile to its own directory, and root
+  # copies it back for the artifact.
   script:
-    - go test ./... -race -coverprofile=coverage.out
+    - |
+      set -eu
+      useradd --create-home --uid 1001 tester
+      mkdir -p .gocache
+      chown -R tester:tester .gocache
+      install -d -o tester -g tester /tmp/gotest
+    - >-
+      su tester -c "cd '$CI_PROJECT_DIR' &&
+      HOME=/home/tester
+      GOCACHE='$GOCACHE'
+      GOMODCACHE='$GOMODCACHE'
+      GOFLAGS='$GOFLAGS'
+      go test ./... -race -coverprofile=/tmp/gotest/coverage.out"
+    - cp /tmp/gotest/coverage.out coverage.out
     - go tool cover -func=coverage.out | tail -1
     - python3 scripts/coverage-floor.py coverage.out
   coverage: '/total:\s+\(statements\)\s+([\d.]+)%/'
