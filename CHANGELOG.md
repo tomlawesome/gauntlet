@@ -103,6 +103,26 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `POST /api/auth/totp/enrol` now takes `{"password": ...}` and
+  re-checks it on the same per-account bucket as `totp/delete`: a
+  session alone -- what a stolen cookie gives an attacker -- could
+  previously plant an authenticator secret and take the only copy of
+  the recovery codes, locking the real owner out at their next login.
+  Mikroview's enrol screen must send the password when it moves onto
+  gauntlet (#1202); its delete screen already does.
+- `oidc.VerifyIDToken` refuses an ID token with an empty `sub`
+  (`ErrNoSubject`): go-oidc does not insist on it, and every user of a
+  provider that omitted it would have resolved to the one account keyed
+  on `(issuer, "")`.
+- `oidc.IsMultiTenantIssuer` recognises a listed public provider written
+  with a trailing root dot (`https://accounts.google.com./`), which DNS
+  and TLS treat as the same host; before, that spelling passed the
+  startup refusal.
+- CI: protected refs get their own dependency and build cache
+  (`cache:key:prefix: $CI_COMMIT_REF_PROTECTED`), so a merge-request
+  pipeline can no longer seed the cache a `dev` pipeline -- which
+  carries the protected mirror key in its environment -- builds its
+  tools from.
 - `LoginLimiter` keeps a real account's counter apart from the capped
   map of addresses and unknown names (#19): keyed by account ID, never
   evicted, so no flood of made-up names can reset it; and a login
