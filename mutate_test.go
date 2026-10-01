@@ -502,30 +502,128 @@ func TestMutateBestEffortKeepsTheChangeInMemoryAndLogs(t *testing.T) {
 	}
 }
 
+// TestMutateInstallsTheFreshDocumentAnOpRefuses: the other process
+// deletes bob and adds carol before this store's own deletion of bob
+// saves. The replay finds no bob, so the write fails as it should --
+// but the document it was refused against is what is out there now,
+// and the store takes it: carol is in memory and the version matches
+// the backend's, rather than memory still holding a bob the document
+// has not had for some time.
+func TestMutateInstallsTheFreshDocumentAnOpRefuses(t *testing.T) {
+	m := persist.NewMemory()
+	b := &otherProcessBackend{Memory: m}
+	s, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := OpenStore(m, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.beforeSave = func() {
+		if _, err := other.DeleteUser(bob.ID); err != nil {
+			t.Errorf("the other process's DeleteUser: %v", err)
+		}
+		if _, err := other.CreateUser("carol", "password789", RoleUser, time.Now()); err != nil {
+			t.Errorf("the other process's CreateUser: %v", err)
+		}
+	}
+
+	if _, err := s.DeleteUser(bob.ID); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("DeleteUser of an account another process deleted first = %v, want ErrUserNotFound", err)
+	}
+	if storeHas(s, "bob") {
+		t.Error("bob is still in memory after the replay found him gone")
+	}
+	if !storeHas(s, "carol") {
+		t.Error("carol, in the document the replay was refused against, is missing from memory")
+	}
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	version := s.version
+	s.mu.RUnlock()
+	if version != snap.Version {
+		t.Errorf("store holds version %d after taking the fresh document, backend is at %d", version, snap.Version)
+	}
+}
+
+// TestTokenStoreReloadsBeforeAuthenticate: a token revoked through the
+// CLI (a second store on the same document) stops authenticating on
+// the running server at once -- with no write of the server's involved,
+// since a token used in the last hour has nothing to save. Before #21
+// the server kept accepting it until a restart.
+func TestTokenStoreReloadsBeforeAuthenticate(t *testing.T) {
+	m := persist.NewMemory()
+	server, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	raw, tok, err := server.Create("a", TokenKindAPI, "", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := server.Authenticate(raw, TokenKindAPI, now); !ok {
+		t.Fatal("the token does not authenticate before the revoke")
+	}
+	if err := cli.Revoke(tok.ID); err != nil {
+		t.Fatalf("the CLI's Revoke: %v", err)
+	}
+
+	if _, ok := server.Authenticate(raw, TokenKindAPI, now.Add(time.Minute)); ok {
+		t.Error("a token revoked by another process still authenticates on the running server")
+	}
+	if n := len(server.List()); n != 0 {
+		t.Errorf("List() = %d tokens after another process revoked the only one, want 0", n)
+	}
+}
+
 // TestTokenStoreReloadsOnAConflictingWrite: two TokenStores on one
 // document, as a CLI and a live server would be. Before #21 the token
 // store never reloaded, so the second store's Create saved its stale
-// document on top and the first store's token was gone. Now the second
-// store loads the fresh document, adds its token to that, and both
-// tokens authenticate from a store opened afterwards.
+// document on top and the first store's token was gone. The reload
+// before the write now catches most of that; here the first store's
+// Create is slipped in after that reload, so the second store's save
+// is refused, and it must load the fresh document, add its token to
+// that, and save -- both tokens authenticate from a store opened
+// afterwards.
 func TestTokenStoreReloadsOnAConflictingWrite(t *testing.T) {
 	m := persist.NewMemory()
+	b := &otherProcessBackend{Memory: m}
 	first, err := OpenTokenStore(m, TokenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := OpenTokenStore(m, TokenOptions{})
+	second, err := OpenTokenStore(b, TokenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rawA, _, err := first.Create("a", TokenKindAPI, "", nil, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	var rawA string
+	b.beforeSave = func() {
+		raw, _, err := first.Create("a", TokenKindAPI, "", nil, time.Now())
+		if err != nil {
+			t.Errorf("the other process's Create: %v", err)
+		}
+		rawA = raw
 	}
 	rawB, _, err := second.Create("b", TokenKindAPI, "", nil, time.Now())
 	if err != nil {
-		t.Fatalf("Create on a stale store: %v", err)
+		t.Fatalf("Create across a conflicting write: %v", err)
 	}
 
 	if n := len(second.List()); n != 2 {

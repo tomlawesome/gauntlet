@@ -176,6 +176,12 @@ type TokenStore struct {
 	// resolved once at OpenTokenStore and never mutated afterwards --
 	// safe to read without mu.
 	kinds map[TokenKind]bool
+
+	// reloadInFlight is non-nil while one caller is checking the
+	// backend for staleness -- see reloadIfStale, and Store's field of
+	// the same name for why it is not guarded by mu.
+	reloadMu       sync.Mutex
+	reloadInFlight chan struct{}
 }
 
 // tokenState is the in-memory index over the tokens document. It is
@@ -280,23 +286,26 @@ func (s *TokenStore) mutate(op func(*tokenState) error) error {
 	return s.mutateLocked(op)
 }
 
-// mutateLocked is mutate for a caller that already holds mu.
+// mutateLocked is mutate for a caller that already holds mu. As
+// Store.mutateLocked, it installs the fresh document op refused on a
+// replay as well as the saved one: a token revoked by another process
+// is gone from this store the moment a write here meets that revoke.
 func (s *TokenStore) mutateLocked(op func(*tokenState) error) error {
 	next, version, err := s.tokens().replay(&s.tokenState, s.version, op)
+	if next != nil {
+		s.tokenState = *next
+		s.version = version
+	}
 	if errors.Is(err, errNoChange) {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	s.tokenState = *next
-	s.version = version
-	return nil
+	return err
 }
 
 // mutateBestEffortLocked is mutateLocked for a write not worth failing
 // the caller over -- Authenticate's LastUsedAt bump. See
-// Store.mutateBestEffortLocked.
+// Store.mutateBestEffortLocked, including why re-running op on the
+// live state is safe when op is what failed.
 func (s *TokenStore) mutateBestEffortLocked(op func(*tokenState) error) {
 	err := s.mutateLocked(op)
 	if err == nil {
@@ -365,6 +374,83 @@ func OpenTokenStore(b persist.Backend, opts TokenOptions) (*TokenStore, error) {
 // Persisted reports whether this store can actually survive a restart.
 func (s *TokenStore) Persisted() bool {
 	return s.backend != nil
+}
+
+// reloadIfStale re-reads the tokens document if the backend has moved
+// on since this store last loaded or saved it -- Store.reloadIfStale
+// for tokens, called before every read, write and Authenticate for the
+// same reason: a token revoked through the CLI must stop working on the
+// running server then, not at its next restart (which, before #21, is
+// when it did) and not at the next write that happens to conflict.
+//
+// The same three bounds apply: a deadline (reloadTimeout), one check
+// in flight at a time with later callers joining it, and the cheap
+// Version question first where the backend can answer it. Every
+// failure is silent and keeps what is in memory. The one thing Store's
+// version has that this one does not is the refused-document
+// bookkeeping: there is no admin rule for tokens, so a document that
+// decodes is applied, and one that does not is kept out silently, as
+// Store does for an unparseable one.
+func (s *TokenStore) reloadIfStale() {
+	if s.backend == nil {
+		return
+	}
+
+	s.reloadMu.Lock()
+	if inFlight := s.reloadInFlight; inFlight != nil {
+		s.reloadMu.Unlock()
+		<-inFlight
+		return
+	}
+	done := make(chan struct{})
+	s.reloadInFlight = done
+	s.reloadMu.Unlock()
+	defer func() {
+		s.reloadMu.Lock()
+		s.reloadInFlight = nil
+		s.reloadMu.Unlock()
+		close(done)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), reloadTimeout)
+	defer cancel()
+
+	if vr, ok := s.backend.(persist.VersionReader); ok {
+		version, exists, err := vr.Version(ctx)
+		if err != nil || !exists {
+			return
+		}
+		s.mu.RLock()
+		stale := version != s.version
+		s.mu.RUnlock()
+		if !stale {
+			return
+		}
+	}
+
+	// See Store.reloadIfStale: the version captured before the unlocked
+	// read is compared again under the write lock, so a write that
+	// landed in between is not reverted by a snapshot read before it.
+	s.mu.RLock()
+	beforeLoad := s.version
+	s.mu.RUnlock()
+
+	snap, err := s.backend.Load(ctx)
+	if err != nil || !snap.Exists || snap.Version == beforeLoad {
+		return
+	}
+	st, err := s.decodeTokens(snap.Payload)
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.version != beforeLoad {
+		return
+	}
+	s.tokenState = *st
+	s.version = snap.Version
 }
 
 // hashTokenValue is the one place a raw token value is ever hashed --
@@ -456,6 +542,9 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 	// already uses for its own unguessable IDs (see id.go).
 	raw = newID()
 	hash := hashTokenValue(raw)
+	// Picking up another process's writes first avoids most save
+	// conflicts; correctness does not depend on it -- see mutate.
+	s.reloadIfStale()
 
 	// A token that only exists in memory must not be handed to the
 	// caller: the raw value is shown exactly once, here, so a restart
@@ -516,6 +605,9 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 		return nil, false
 	}
 	hash := hashTokenValue(raw)
+	// Before the lookup, so a token revoked through the CLI is gone
+	// from this store's index by the time it is looked up.
+	s.reloadIfStale()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -563,6 +655,7 @@ func (s *TokenStore) Revoke(id string) error {
 	// before the next good write would let the raw value authenticate
 	// again with nobody the wiser. mutate installs it only once it is
 	// saved.
+	s.reloadIfStale()
 	return s.mutate(func(st *tokenState) error {
 		t, ok := st.byID[id]
 		if !ok {
@@ -590,6 +683,7 @@ func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error) {
 	if userID == "" {
 		return 0, nil
 	}
+	s.reloadIfStale()
 	// Counted inside the op, against the document being saved: a replay
 	// after another process issued or revoked one of this account's
 	// tokens must take what is there then.
@@ -632,6 +726,7 @@ func tokenOlder(a, b *Token) bool {
 // retains it past Create's return) so a list response can never leak
 // anything an attacker could use to authenticate.
 func (s *TokenStore) List() []Token {
+	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]Token, 0, len(s.byID))
@@ -648,6 +743,7 @@ func (s *TokenStore) List() []Token {
 // copy-and-zero-hash contract List uses, so a caller holding the result
 // can never use it to authenticate.
 func (s *TokenStore) ByKind(kind TokenKind) []*Token {
+	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []*Token

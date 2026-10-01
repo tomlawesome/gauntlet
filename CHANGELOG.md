@@ -12,7 +12,15 @@ All notable changes to this project are documented in this file.
   the first, and the first change was gone with only a log line to say
   so. Now the second write loads what the first saved, makes its own
   change again on top of that, and saves the result, so both changes
-  survive. `TokenStore` gets the same protection; it had none.
+  survive. `TokenStore` gets the same protection; it had none. It also
+  now re-reads its document before every read, write and
+  `Authenticate` when another process has changed it, as `Store`
+  always has: a token revoked through the CLI stops working on the
+  running server at once, where before it worked until a restart.
+- A login or token use whose last-seen timestamp was being saved as
+  another process deleted that account or revoked that token is
+  refused: the store takes the document the other process wrote
+  instead of keeping the account or token in memory as valid.
 - After five conflicting writes in a row -- a script writing in a loop,
   not an ordinary CLI command -- a write gives up with the new
   `ErrSaveConflict` and changes nothing; the caller can try again.

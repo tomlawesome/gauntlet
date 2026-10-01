@@ -243,6 +243,112 @@ func TestFindOrCreateOIDCUserFindsTheAccountAnotherProcessProvisioned(t *testing
 	}
 }
 
+// TestAuthenticateRefusesAnAccountAnotherProcessDeletedMidLogin: bob's
+// password checks out, and the LastLogin bump is about to be saved
+// when another process deletes bob. That bump is best-effort, and
+// before this fix a failed one was re-applied to memory -- memory that
+// still held bob -- and the login succeeded on an account the document
+// no longer had. The store must take the fresh document instead and
+// refuse the login.
+func TestAuthenticateRefusesAnAccountAnotherProcessDeletedMidLogin(t *testing.T) {
+	var bobID string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		now := time.Now()
+		if _, err := s.Register("alice", "password123", now); err != nil {
+			t.Fatal(err)
+		}
+		bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bobID = bob.ID
+	})
+	b.beforeSave = func() {
+		if _, err := other.DeleteUser(bobID); err != nil {
+			t.Errorf("the other process's DeleteUser: %v", err)
+		}
+	}
+
+	if _, err := s.Authenticate("bob", "password456", time.Now()); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Authenticate as an account another process deleted = %v, want ErrInvalidCredentials", err)
+	}
+	if storeHas(s, "bob") {
+		t.Error("bob is still in memory after the document without him was loaded")
+	}
+}
+
+// TestTokenAuthenticateRefusesATokenAnotherProcessRevokedMidUse is the
+// same for API tokens, where it matters most: the LastUsedAt bump is
+// about to be saved when the CLI revokes the token. The server must
+// not hand back the revoked token as valid from its stale memory.
+func TestTokenAuthenticateRefusesATokenAnotherProcessRevokedMidUse(t *testing.T) {
+	m := persist.NewMemory()
+	b := &otherProcessBackend{Memory: m}
+	server, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, tok, err := server.Create("a", TokenKindAPI, "", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.beforeSave = func() {
+		if err := cli.Revoke(tok.ID); err != nil {
+			t.Errorf("the CLI's Revoke: %v", err)
+		}
+	}
+
+	if got, ok := server.Authenticate(raw, TokenKindAPI, time.Now()); ok {
+		t.Fatalf("Authenticate = %+v, true for a token another process revoked while its use was being recorded", got)
+	}
+	if n := len(server.List()); n != 0 {
+		t.Errorf("List() = %d tokens after the revoke was met, want 0", n)
+	}
+}
+
+// TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted:
+// the identity's account is deleted by another process while this
+// sign-in's LastLogin bump is being saved. The deleted account must not
+// be handed back; the store takes the fresh document and, finding no
+// account for the identity, provisions one as a first sign-in would.
+func TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted(t *testing.T) {
+	var oldID string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		now := time.Now()
+		if _, err := s.Register("alice", "password123", now); err != nil {
+			t.Fatal(err)
+		}
+		u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldID = u.ID
+	})
+	b.beforeSave = func() {
+		if _, err := other.DeleteUser(oldID); err != nil {
+			t.Errorf("the other process's DeleteUser: %v", err)
+		}
+	}
+
+	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", time.Now().Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("FindOrCreateOIDCUser across a conflicting delete: %v", err)
+	}
+	if u.ID == oldID {
+		t.Fatal("signed in to the account another process deleted")
+	}
+	if !created || u.Role != RoleUser {
+		t.Errorf("created %v, role %q; want a freshly provisioned ordinary user", created, u.Role)
+	}
+	if n := reopenAccounts(t, b).Count(); n != 2 {
+		t.Errorf("saved document holds %d accounts, want 2 (alice and the new one)", n)
+	}
+}
+
 // TestAuthenticateRedecidesTheResetCodeOnReplay: bob signs in with an
 // admin-issued reset code, and the code checks out against what this
 // process holds. Before the spend is saved, bob sets a new password

@@ -342,21 +342,27 @@ func (s *Store) mutate(op func(*storeState) error) error {
 }
 
 // mutateLocked is mutate for a caller that already holds mu.
+//
+// Two outcomes install a state: the saved one, and the fresh document
+// op refused on a replay (see document.replay) -- the account op was to
+// change is gone from what another process wrote, and this store takes
+// that document rather than keep answering from memory that still has
+// the account. The caller then re-reads the state and finds what the op
+// found.
 func (s *Store) mutateLocked(op func(*storeState) error) error {
 	next, version, err := s.accounts().replay(&s.storeState, s.version, op)
+	if next != nil {
+		next.recordSaved()
+		s.storeState = *next
+		s.version = version
+		// The document out there is now one this process holds: an
+		// earlier refusal no longer describes it (same as applyLoaded).
+		s.refusedVersion, s.hasRefusedVersion = 0, false
+	}
 	if errors.Is(err, errNoChange) {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	next.recordSaved()
-	s.storeState = *next
-	s.version = version
-	// The document out there is now this process's own: an earlier
-	// refusal no longer describes it (same as applyLoaded).
-	s.refusedVersion, s.hasRefusedVersion = 0, false
-	return nil
+	return err
 }
 
 // mutateBestEffortLocked is mutateLocked for a write not worth failing
@@ -373,7 +379,9 @@ func (s *Store) mutateBestEffortLocked(op func(*storeState) error) {
 	}
 	// op is replayable: running it on the live state applies the change
 	// this process could not save. If op is what failed, it fails here
-	// the same way and changes nothing.
+	// the same way and changes nothing -- including when it refused a
+	// freshly loaded document, since mutateLocked installed that
+	// document, so the live state is the one op refused.
 	if opErr := op(&s.storeState); opErr != nil {
 		return
 	}

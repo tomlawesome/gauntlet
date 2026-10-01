@@ -41,7 +41,11 @@
 //     errors.Is against the sentinels keeps working.
 //  6. A method whose write is bookkeeping only (LastLogin, LastUsedAt)
 //     uses mutateBestEffortLocked, which logs a failed save and keeps
-//     the change in memory, as the old persistLocked did.
+//     the change in memory, as the old persistLocked did. When the op
+//     itself refuses the freshly loaded document -- the account or
+//     token is gone from what another process wrote -- the store takes
+//     that document instead, so the method's re-read of the state
+//     afterwards finds what the op found (Authenticate: not found).
 //  7. Where the old code returned early without saving because there
 //     was nothing to do (a value already set, a code already spent),
 //     the op returns errNoChange: mutate saves nothing and returns nil,
@@ -157,6 +161,14 @@ type document[S any] struct {
 // back as is; every persistence failure is wrapped, so a store can wrap
 // it again in its own words.
 //
+// One error carries a state with it: when op refuses a freshly loaded
+// document (the account or token it was to change is gone from it),
+// the state returned is that document as loaded, untouched, with its
+// version. Nothing was saved, but it is what is out there, and the
+// caller installs it so the store does not go on answering from the
+// stale memory op was first run against. Every other error returns a
+// nil state.
+//
 // The caller holds the store's write lock throughout, as the old
 // tryPersistLocked did: the version it saves with is the one the store holds, and nothing
 // else may move it between the copy and the swap.
@@ -199,10 +211,15 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 		if err != nil {
 			return nil, 0, err
 		}
-		if err := op(fresh); err != nil {
-			return nil, 0, err
+		// op runs on a copy so that, if it refuses, the document as
+		// loaded can be handed back untouched (see above): an op that
+		// changes the state before deciding to fail must not leave
+		// those changes in what the caller installs.
+		next = d.clone(fresh)
+		if err := op(next); err != nil {
+			return fresh, freshVersion, err
 		}
-		next, version = fresh, freshVersion
+		version = freshVersion
 	}
 }
 
