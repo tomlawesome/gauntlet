@@ -572,3 +572,62 @@ func TestVerifyAndRecordTOTPRechecksTheCodeOnReplay(t *testing.T) {
 		t.Error("VerifyAndRecordTOTP = true for a code another process had already recorded: one code won two logins")
 	}
 }
+
+// removedAfterVersionBackend is a persist.Memory whose document is gone
+// once the store has checked its version: a file moved aside between the
+// staleness check and the write.
+type removedAfterVersionBackend struct {
+	*persist.Memory
+	removed bool
+}
+
+func (b *removedAfterVersionBackend) Version(ctx context.Context) (int64, bool, error) {
+	v, exists, err := b.Memory.Version(ctx)
+	b.removed = true
+	return v, exists, err
+}
+
+func (b *removedAfterVersionBackend) Load(ctx context.Context) (persist.Snapshot, error) {
+	if b.removed {
+		return persist.Snapshot{}, nil
+	}
+	return b.Memory.Load(ctx)
+}
+
+// TestNothingToChangeAgainstARemovedDocumentIsAnError: the store has a
+// saved document, decides a revoke has nothing to do, and then finds the
+// document gone when it checks that decision. It cannot know what the
+// document held, so it must report the removal rather than (0, nil).
+func TestNothingToChangeAgainstARemovedDocumentIsAnError(t *testing.T) {
+	m := persist.NewMemory()
+	seed, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := &User{ID: "alice-id", Username: "alice"}
+	if _, _, err := seed.Create("alice's", TokenKindAPI, "", alice, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b := &removedAfterVersionBackend{Memory: m}
+	server, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := server.RevokeAllCreatedBy("bob-id")
+	if !errors.Is(err, ErrDocumentRemoved) {
+		t.Fatalf("RevokeAllCreatedBy = (%d, %v), want ErrDocumentRemoved: the decision was never checked against a document", n, err)
+	}
+}
+
+// TestNothingToChangeOnANeverSavedStoreIsFine: a store that has never
+// written anything finds no document, and that is not a removal.
+func TestNothingToChangeOnANeverSavedStoreIsFine(t *testing.T) {
+	server, err := OpenTokenStore(persist.NewMemory(), TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := server.RevokeAllCreatedBy("nobody"); n != 0 || err != nil {
+		t.Fatalf("RevokeAllCreatedBy on an empty store = (%d, %v), want (0, nil)", n, err)
+	}
+}

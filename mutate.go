@@ -202,11 +202,14 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 	// "Nothing to change" saves nothing, so no version check would ever
 	// catch it being decided on stale memory -- a token another process
 	// issued after this store last reloaded, missed by a revoke. Decide
-	// again against the document as it is now; a removed document holds
-	// nothing that could overturn the decision.
+	// again against the document as it is now. A store that has never
+	// saved (version 0) finds no document and that is fine: nothing is
+	// out there to overturn the decision. One that has saved and now
+	// finds none must say so, as the save loop below does -- "nothing to
+	// revoke" was never checked against the live document.
 	if opErr != nil {
 		fresh, freshVersion, err := d.load(ctx)
-		if errors.Is(err, ErrDocumentRemoved) {
+		if errors.Is(err, ErrDocumentRemoved) && version == 0 {
 			return nil, 0, errNoChange
 		}
 		if err != nil {
