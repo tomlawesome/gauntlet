@@ -93,6 +93,10 @@ All notable changes to this project are documented in this file.
     login now checks a fixed few sessions instead.
   - Each CI job keeps its own cache, so the lint jobs running side by
     side no longer overwrite each other's and every job starts warm.
+  - A login lockout that could not be saved is saved again by a later
+    refused attempt on that account (at most every 30 seconds), so a
+    backend that recovers inside the lockout ends up holding it and a
+    restart no longer lets more guesses through.
   - Internal tidying in `gate` with no change on the wire, plus test and
     documentation fixes.
 

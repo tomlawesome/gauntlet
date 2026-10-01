@@ -268,3 +268,93 @@ func TestEvictionPressureIsLoggedOncePerWindow(t *testing.T) {
 		t.Errorf("expected a second line once the window had passed, got %d", n)
 	}
 }
+
+// flakySaveBackend fails every Save while fail is set, for a backend
+// that is down for a while and then recovers. It counts every Save it
+// is asked for, failed or not.
+type flakySaveBackend struct {
+	*persist.Memory
+	fail  atomic.Bool
+	saves atomic.Int64
+}
+
+func (b *flakySaveBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
+	b.saves.Add(1)
+	if b.fail.Load() {
+		return 0, errTestBackendUnavailable
+	}
+	return b.Memory.Save(ctx, payload, expect)
+}
+
+// A lockout whose save failed is not forgotten: it stays enforced in
+// memory, and a later refused attempt while it is in force saves it
+// again, so a restart after the backend recovers is still locked out.
+// Retries are spaced out, so a broken backend is not asked to save on
+// every refused guess.
+func TestUnsavedLockoutIsSavedOnALaterAttempt(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := mustNewLoginLimiter(t, 3, time.Minute)
+
+	b.fail.Store(true)
+	for i := range 3 {
+		if !l.ReserveAccount(s, id, now) {
+			t.Fatalf("attempt %d refused under the threshold", i+1)
+		}
+	}
+	if got := s.LoginLockedUntil(id); !got.IsZero() {
+		t.Fatalf("test setup: the lockout was recorded (%v) although every save failed", got)
+	}
+	if l.ReserveAccount(s, id, now.Add(time.Second)) {
+		t.Fatal("an unsaved lockout was not enforced in memory")
+	}
+
+	b.fail.Store(false)
+	if l.ReserveAccount(s, id, now.Add(time.Second+lockoutRetryInterval)) {
+		t.Fatal("the retry let an attempt through a live lockout")
+	}
+	if got, want := s.LoginLockedUntil(id), now.Add(time.Minute); !got.Equal(want) {
+		t.Fatalf("expected the retried lockout on the record, until %v; got %v", want, got)
+	}
+
+	restarted, err := OpenStore(b.Memory, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustNewLoginLimiter(t, 3, time.Minute).ReserveAccount(restarted, id, now.Add(30*time.Second)) {
+		t.Fatal("a restart after the backend recovered lifted the lockout")
+	}
+}
+
+// While the backend stays down, a stream of refused guesses is not a
+// stream of save attempts: at most one per lockoutRetryInterval.
+func TestUnsavedLockoutRetriesAreSpacedOut(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := mustNewLoginLimiter(t, 3, time.Hour)
+
+	b.fail.Store(true)
+	for range 3 {
+		l.ReserveAccount(s, id, now)
+	}
+	start := b.saves.Load()
+	for i := range 1000 {
+		l.ReserveAccount(s, id, now.Add(time.Duration(i)*time.Millisecond))
+	}
+	if got := b.saves.Load() - start; got != 0 {
+		t.Fatalf("expected no retry within a second of the failed save, got %d saves", got)
+	}
+	later := now.Add(lockoutRetryInterval)
+	for i := range 1000 {
+		l.ReserveAccount(s, id, later.Add(time.Duration(i)*time.Millisecond))
+	}
+	if got := b.saves.Load() - start; got != 1 {
+		t.Fatalf("expected one retry once lockoutRetryInterval had passed, got %d saves", got)
+	}
+	l.ReserveAccount(s, id, later.Add(lockoutRetryInterval))
+	if got := b.saves.Load() - start; got != 2 {
+		t.Fatalf("expected a second retry one interval after the first, got %d saves", got)
+	}
+}
