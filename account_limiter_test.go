@@ -461,3 +461,50 @@ func TestLockoutFromBeforeAPasswordChangeIsCleared(t *testing.T) {
 		t.Errorf("expected the stale lockout cleared from the record, got %v", got)
 	}
 }
+
+// A password change dated in the future -- a clock stepped back since
+// (NTP, a VM restored from a snapshot), or another process whose clock
+// runs ahead -- does not switch the account's limit off. Taken at face
+// value it would drop every guess as "made before the change" on every
+// call, and end any lockout already on the record. Until the clock
+// reaches it, it is ignored: the limit fails closed, as the session
+// check in gate does on the same skew.
+func TestFuturePasswordChangeDoesNotTurnTheLimitOff(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	future := now.Add(10 * time.Minute)
+
+	t.Run("guesses still count", func(t *testing.T) {
+		s, id := openLockoutStore(t, persist.NewMemory())
+		if err := s.SetPassword("alice", "a-brand-new-password", future); err != nil {
+			t.Fatal(err)
+		}
+		l := mustNewLoginLimiter(t, 3, time.Hour)
+		let := 0
+		for i := range 100 {
+			if l.ReserveAccount(s, id, now.Add(time.Duration(i)*time.Second)) {
+				let++
+			}
+		}
+		if let != 3 {
+			t.Errorf("%d of 100 guesses let through, want 3", let)
+		}
+		if s.LoginLockedUntil(id).IsZero() {
+			t.Error("no lockout on the record after 100 guesses")
+		}
+	})
+
+	t.Run("a lockout on the record stays", func(t *testing.T) {
+		s, id := openLockoutStore(t, persist.NewMemory())
+		if err := s.SetPassword("alice", "a-brand-new-password", future); err != nil {
+			t.Fatal(err)
+		}
+		// A lockout saved afterwards, by a process whose clock is right.
+		if err := s.SetLoginLockedUntil(id, now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		l := mustNewLoginLimiter(t, 3, time.Hour)
+		if l.ReserveAccount(s, id, now.Add(time.Second)) {
+			t.Error("a future PasswordChangedAt ended the lockout on the record")
+		}
+	})
+}

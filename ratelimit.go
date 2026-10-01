@@ -284,6 +284,16 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 	if lockouts != nil {
 		persisted, changed = readLockout(lockouts, accountID)
 	}
+	// A change dated after now is a clock that stepped back since, or a
+	// process whose clock runs ahead. Taken as it is, every guess would
+	// be "before the change" on every call and the limit would be off
+	// until the clock caught up; clamping it to now does the same for
+	// the guesses in this second. Ignored instead, until now reaches it:
+	// the limit fails closed, as gate's session check does on the same
+	// skew.
+	if changed.After(now) {
+		changed = time.Time{}
+	}
 	wasPersisted := !persisted.IsZero()
 	// The lockout counts the guesses in the window before its end. If
 	// that window began before the password changed, they were guesses
