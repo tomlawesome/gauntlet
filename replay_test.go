@@ -536,3 +536,39 @@ func TestRevokeAllCreatedByFindsATokenThisStoreHadNotLoaded(t *testing.T) {
 		t.Error("bob's token still authenticates after his tokens were revoked")
 	}
 }
+
+// TestVerifyAndRecordTOTPRechecksTheCodeOnReplay: the same code is
+// submitted to two processes at once. This store matches it against
+// memory, but the other process records it first. The replay must
+// check the code again against the counter the other process saved and
+// refuse it, not let one code win two logins.
+func TestVerifyAndRecordTOTPRechecksTheCodeOnReplay(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	secret, err := GenerateTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+		setTOTPForTest(t, s, id, EncodeTOTPSecret(secret), now, 30)
+	})
+	code := GenerateTOTPCode(secret, totpCounter(now, totpStep)+1)
+	b.beforeSave = func() {
+		if ok, err := other.VerifyAndRecordTOTP(id, code, now); err != nil || !ok {
+			t.Errorf("the other process's VerifyAndRecordTOTP = %v, %v; want true", ok, err)
+		}
+	}
+
+	ok, err := s.VerifyAndRecordTOTP(id, code, now)
+	if err != nil {
+		t.Fatalf("VerifyAndRecordTOTP across a conflicting write: %v", err)
+	}
+	if ok {
+		t.Error("VerifyAndRecordTOTP = true for a code another process had already recorded: one code won two logins")
+	}
+}
