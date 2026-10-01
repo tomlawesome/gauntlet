@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/argon2"
+
+	"github.com/tomlawesome/gauntlet/internal/hashcost"
 )
 
 // Argon2id parameters for a small self-hosted service -- RFC 9106 §4's
@@ -85,14 +87,25 @@ func HashPassword(password string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("generate salt: %w", err)
 	}
+	memory, iterations, threads := newHashCost()
 	release := acquireHashSlot()
-	hash := argon2.IDKey([]byte(password), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+	hash := argon2.IDKey([]byte(password), salt, iterations, memory, threads, argon2KeyLen)
 	release()
 	return fmt.Sprintf("argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, argon2Memory, argon2Time, argon2Threads,
+		argon2.Version, memory, iterations, threads,
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(hash),
 	), nil
+}
+
+// newHashCost is the cost HashPassword gives a new hash: the constants
+// above, except in this module's own tests, which switch to a cheap one
+// (internal/hashcost) that no production binary can.
+func newHashCost() (memory, iterations uint32, threads uint8) {
+	if hashcost.Cheap() {
+		return hashcost.Memory, hashcost.Time, hashcost.Threads
+	}
+	return argon2Memory, argon2Time, argon2Threads
 }
 
 func mustHashPassword(password string) string {

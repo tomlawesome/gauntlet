@@ -35,6 +35,8 @@
 # Re-measured on G4 (issue #5, second-factor data and stdlib flows): the
 # root package at 95.4%; 95.0% once merged with G3, still at the 95 floor.
 # G6 stage 1 (issue #7): gate is new, at 91.2%.
+# internal/hashcost is new with #24, at 75.0%: the one statement no
+# test can reach is its refusal outside a test binary.
 
 floors:
   persist: 90
@@ -43,3 +45,4 @@ floors:
   internal/testutil: 0
   internal/evict: 100
   gate: 91
+  internal/hashcost: 75

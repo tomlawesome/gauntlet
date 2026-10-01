@@ -3,9 +3,34 @@
 package gauntlet
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/argon2"
 )
+
+// Every other test here hashes at the cheap test cost (TestMain); this
+// one runs the real one and checks the hash records it, so the
+// production parameters are pinned by a test, not just by the
+// constants.
+func TestHashPasswordUsesTheProductionCost(t *testing.T) {
+	useProductionHashCost(t)
+	hash, err := HashPassword("correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	want := fmt.Sprintf("argon2id$v=%d$m=65536,t=3,p=4$", argon2.Version)
+	if !strings.HasPrefix(hash, want) {
+		t.Errorf("hash = %q, want it to start %q", hash, want)
+	}
+	if !VerifyPassword("correct-horse-battery-staple", hash) {
+		t.Error("expected the production-cost hash to verify")
+	}
+	if dk := DefaultKDFParams(); dk.Memory != 65536 || dk.Time != 3 || dk.Threads != 4 {
+		t.Errorf("DefaultKDFParams() = %+v, want the same 64 MiB, 3 passes, 4 threads", dk)
+	}
+}
 
 func TestHashAndVerifyPasswordRoundTrip(t *testing.T) {
 	hash, err := HashPassword("correct-horse-battery-staple")

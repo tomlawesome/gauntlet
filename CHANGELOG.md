@@ -88,6 +88,21 @@ All notable changes to this project are documented in this file.
     `GenerateRecoveryCodesIfAbsent` skips the hashing entirely when the
     account already has codes. `BurnRecoveryCode` no longer changes a
     copy another caller is reading.
+  - Clearing out expired sessions no longer pauses every login and
+    session check while a large session store is walked in one go; each
+    login now checks a fixed few sessions instead.
+  - Each CI job keeps its own cache, so the lint jobs running side by
+    side no longer overwrite each other's and every job starts warm.
+  - A login lockout that could not be saved is saved again by a later
+    refused attempt on that account (at most every 30 seconds), so a
+    backend that recovers inside the lockout ends up holding it and a
+    restart no longer lets more guesses through.
+  - Setting a new password (`SetPassword`) or issuing a reset code
+    (`IssueResetCode`) ends any login lockout on the account, so its
+    owner can sign in with the new password or the code at once. The
+    limiter stops counting guesses made before the change. Linking the
+    admin to SSO, whose password keeps working, leaves its lockout in
+    place.
   - Internal tidying in `gate` with no change on the wire, plus test and
     documentation fixes.
 

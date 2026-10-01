@@ -53,18 +53,33 @@ type SessionStore struct {
 	// tests want -- they construct a store to exercise one behaviour and
 	// have no interest in wall-clock ageing.
 	maxLifetime time.Duration
-	// nextSweep is the map size at which Create next drops every
-	// expired entry. Validate evicts an expired session only when that
-	// exact ID is presented again, so a login whose cookie is never
-	// used again -- a script that signs in per poll, a browser that
-	// never comes back -- would otherwise stay in the map for the life
-	// of the process. Sweeping at a size that doubles each time keeps
-	// the cost amortised at O(1) per Create.
-	nextSweep int
+	// order holds every session ID in the order the sweep reaches them:
+	// Create appends, and each Create checks the first few (see
+	// sweepBatch), dropping a dead one and moving a live one to the back.
+	// Validate evicts an expired session only when that exact ID is
+	// presented again, so a login whose cookie is never used again -- a
+	// script that signs in per poll, a browser that never comes back --
+	// would otherwise stay in the map for the life of the process.
+	//
+	// The sweep used to walk the whole map in one Create whenever its
+	// size doubled, holding the lock throughout: cheap on average, but
+	// with a large map that one call stalled every Validate and Create
+	// behind it (#24). Checking a fixed few per Create spreads the same
+	// walk evenly instead. A revoked or already-evicted ID is simply
+	// dropped when the sweep reaches it, so Revoke and RevokeAllForUser
+	// need not touch order at all.
+	order idQueue
+	// sweepVisits counts the entries the sweep has checked, so tests can
+	// see how much work one call did without timing it.
+	sweepVisits int
 }
 
-// minSessionSweep is the smallest map size at which Create sweeps.
-const minSessionSweep = 1024
+// sweepBatch is how many entries of order each Create checks. It must
+// be above 1: every Create adds an entry, so checking only one would
+// never catch up. With 4, a dead session is dropped within a quarter as
+// many Creates as the store holds, so under steady logins the map holds
+// about a third more than its live sessions.
+const sweepBatch = 4
 
 // NewSessionStore builds a store with sliding expiry ttl, capped at
 // maxLifetime from each session's IssuedAt however often it is used. A
@@ -74,7 +89,7 @@ func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore {
 	if maxLifetime < 0 {
 		maxLifetime = 0
 	}
-	return &SessionStore{sessions: make(map[string]Session), ttl: ttl, maxLifetime: maxLifetime, nextSweep: minSessionSweep}
+	return &SessionStore{sessions: make(map[string]Session), ttl: ttl, maxLifetime: maxLifetime}
 }
 
 // Create starts a new session for userID.
@@ -83,24 +98,79 @@ func (s *SessionStore) Create(userID string, now time.Time) Session {
 	defer s.mu.Unlock()
 	sess := Session{ID: newID(), UserID: userID, IssuedAt: now, ExpiresAt: now.Add(s.ttl)}
 	s.sessions[sess.ID] = sess
-	if len(s.sessions) >= s.nextSweep {
-		s.sweepExpiredLocked(now)
-		s.nextSweep = max(2*len(s.sessions), minSessionSweep)
-	}
+	s.order.push(sess.ID)
+	s.sweepLocked(now)
 	return sess
 }
 
-// sweepExpiredLocked drops every session Validate would refuse at now.
-func (s *SessionStore) sweepExpiredLocked(now time.Time) {
-	for id, sess := range s.sessions {
-		if now.After(sess.ExpiresAt) {
+// sweepLocked checks the next sweepBatch entries of order: an ID no
+// longer in the map, or a session Validate would refuse at now, is
+// dropped; a live one goes to the back of order.
+func (s *SessionStore) sweepLocked(now time.Time) {
+	for range sweepBatch {
+		id, ok := s.order.pop()
+		if !ok {
+			return
+		}
+		s.sweepVisits++
+		sess, ok := s.sessions[id]
+		if !ok {
+			continue
+		}
+		if s.expired(sess, now) {
 			delete(s.sessions, id)
 			continue
 		}
-		if deadline, capped := s.deadline(sess); capped && now.After(deadline) {
-			delete(s.sessions, id)
-		}
+		s.order.push(id)
 	}
+}
+
+// idQueue is a first-in, first-out queue of session IDs kept in
+// fixed-size blocks. A plain slice used as a queue would copy every ID
+// it holds each time it outgrew its array -- the same whole-store pause
+// under the lock the incremental sweep exists to avoid, only smaller.
+// Here growing allocates one block, and the list of blocks it extends
+// holds one pointer per idBlock IDs.
+type idQueue struct {
+	blocks [][]string // blocks[0][head:] is the front; only the last is part-filled
+	head   int
+	n      int
+}
+
+const idBlock = 1024
+
+func (q *idQueue) push(id string) {
+	if len(q.blocks) == 0 || len(q.blocks[len(q.blocks)-1]) == idBlock {
+		q.blocks = append(q.blocks, make([]string, 0, idBlock))
+	}
+	last := len(q.blocks) - 1
+	q.blocks[last] = append(q.blocks[last], id)
+	q.n++
+}
+
+func (q *idQueue) pop() (string, bool) {
+	if q.n == 0 {
+		return "", false
+	}
+	id := q.blocks[0][q.head]
+	q.blocks[0][q.head] = ""
+	q.head++
+	q.n--
+	if q.head == idBlock {
+		q.blocks[0] = nil
+		q.blocks = q.blocks[1:]
+		q.head = 0
+	}
+	return id, true
+}
+
+// expired reports whether Validate would refuse sess at now.
+func (s *SessionStore) expired(sess Session, now time.Time) bool {
+	if now.After(sess.ExpiresAt) {
+		return true
+	}
+	deadline, capped := s.deadline(sess)
+	return capped && now.After(deadline)
 }
 
 // Validate reports whether id is a live session, extending its expiry
