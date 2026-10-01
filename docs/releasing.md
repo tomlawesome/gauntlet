@@ -7,11 +7,15 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    ordinary merge request to `dev`. A release is also gated on its
    release audit (the `security` issue for the version) being closed with
    evidence.
-2. Once that merges, open the `dev` pipeline and press **release:version**.
-   It refuses if the tag already exists, then **release:gitlab** creates
-   the annotated tag `v<VERSION>` and the GitLab release at that commit.
-   `release-cli` acts as whoever pressed the button, and `v*` tags are
-   protected, so only the owner can cut one.
+2. Once that merges, open the **latest** `dev` pipeline (an older,
+   already-finished pipeline will be rejected) and press
+   **release:version**. It refuses if the tag already exists, if VERSION
+   is not a plain semantic version, if VERSION does not sort above every
+   tag already cut, or if the commit is not the current tip of `dev`.
+   Then **release:gitlab** creates the annotated tag `v<VERSION>` and the
+   GitLab release at that commit. `release-cli` acts as whoever pressed
+   the button, and `v*` tags are protected, so only the owner can cut
+   one.
 3. The tag's own pipeline runs `sync:mirror-to-github`, which pushes the
    tag object to `github.com/tomlawesome/gauntlet`. Check it arrived:
    `gh api repos/tomlawesome/gauntlet/git/ref/tags/v<VERSION>` should

@@ -221,6 +221,12 @@ test:go:
 # whoever pressed the button, and `v*` tags are protected, so only the
 # owner can actually cut one (#17). The tag's own pipeline runs the sync
 # job below, which carries the tag object to the GitHub mirror.
+#
+# release:version also rejects a VERSION that isn't a strict semantic
+# version, one that doesn't sort above every tag already cut, and a
+# commit that isn't the current tip of dev -- an old pipeline's button
+# must not tag a commit dev has moved past (refs #26). The checks are in
+# scripts/release-version-check.sh so they can be tested offline.
 release:version:
   stage: release
   image: $ALPINE_IMAGE
@@ -240,16 +246,9 @@ release:version:
     - |
       set -eu
       version="$(tr -d '[:space:]' < VERSION)"
-      case "$version" in
-        [0-9]*.[0-9]*.[0-9]*) ;;
-        *) echo "VERSION holds '$version', not a semantic version"; exit 1 ;;
-      esac
-      tag="v$version"
-      if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
-        echo "$tag already exists -- bump VERSION before cutting another release."
-        exit 1
-      fi
-      echo "RELEASE_TAG=$tag" > release.env
+      remote_tags="$(git ls-remote --tags origin)"
+      dev_sha="$(git ls-remote origin refs/heads/dev | cut -f1)"
+      scripts/release-version-check.sh "$version" "$remote_tags" "$dev_sha" "$CI_COMMIT_SHA" > release.env
       cat release.env
   artifacts:
     reports:
