@@ -68,6 +68,8 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		switch err {
 		case gauntlet.ErrUsernameTaken:
 			status = http.StatusConflict
+		case gauntlet.ErrNotPersisted:
+			status = http.StatusServiceUnavailable
 		case gauntlet.ErrPasswordTooShort, gauntlet.ErrSingleAdmin, gauntlet.ErrInvalidRole,
 			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
 			status = http.StatusBadRequest

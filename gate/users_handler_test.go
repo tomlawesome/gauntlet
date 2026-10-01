@@ -3,9 +3,11 @@
 package gate
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -300,5 +302,35 @@ func TestCreateAdminRoleRequestGetsSpecificMessage(t *testing.T) {
 	}
 	if _, ok := g.deps.Users.ByUsername("second"); ok {
 		t.Error("a refused admin-role request created the account anyway")
+	}
+}
+
+// TestCreateUserWithoutStorageSaysWhatToDo: with no persistent storage
+// the admin create-account route answers 503 with the same message
+// register gives, not a 500 (#25). The handler is called directly: a
+// store with no backend can never hold the admin account Protect and
+// RequireRole would need to let the request through.
+func TestCreateUserWithoutStorageSaysWhatToDo(t *testing.T) {
+	g := newTestGate(t)
+	users, err := gauntlet.OpenStore(nil, gauntlet.Options{})
+	if err != nil {
+		t.Fatalf("OpenStore(nil): %v", err)
+	}
+	g.deps.Users = users
+
+	b, err := json.Marshal(createUserRequest{Username: "operator", Password: "password456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/users", bytes.NewReader(b))
+	req = req.WithContext(withUser(req.Context(), &gauntlet.User{ID: "admin-id", Username: "admin", Role: gauntlet.RoleAdmin}))
+	rec := httptest.NewRecorder()
+	g.handleCreateUser(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with no account storage, got %d", rec.Code)
+	}
+	if got, want := strings.TrimSpace(rec.Body.String()), gateErrorMessages[gauntlet.ErrNotPersisted]; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
