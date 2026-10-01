@@ -1,9 +1,6 @@
 package gauntlet
 
-import (
-	"fmt"
-	"time"
-)
+import "time"
 
 // AccountLockouts is where a LoginLimiter keeps an account's login
 // lockout so it survives a restart. *Store implements it, on the
@@ -28,24 +25,20 @@ func (s *Store) LoginLockedUntil(accountID string) time.Time {
 	return time.Time{}
 }
 
-// SetLoginLockedUntil implements AccountLockouts. A failed save puts the
-// old value back and returns the error, like every other write here.
+// SetLoginLockedUntil implements AccountLockouts. A lockout that cannot
+// be saved is not recorded and the error is returned, like every other
+// write here.
 func (s *Store) SetLoginLockedUntil(accountID string, until time.Time) error {
 	s.reloadIfStale()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.byID[accountID]
-	if !ok {
-		return ErrUserNotFound
-	}
-	if u.LoginLockedUntil.Equal(until) {
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[accountID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		if u.LoginLockedUntil.Equal(until) {
+			return errNoChange
+		}
+		u.LoginLockedUntil = until
 		return nil
-	}
-	prev := u.LoginLockedUntil
-	u.LoginLockedUntil = until
-	if err := s.tryPersistLocked(); err != nil {
-		u.LoginLockedUntil = prev
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+	})
 }
