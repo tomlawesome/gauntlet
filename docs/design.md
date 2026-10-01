@@ -252,7 +252,11 @@ const ResetCodeTTL = 24 * time.Hour
 // ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
 // ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
 // ErrPasskeyLimitReached, ErrPasskeyNotFound, ErrTokenNotFound, ErrTokenKindInvalid,
-// ErrTokenNameInvalid, ErrTokenDeviceInvalid/Required/NotAllowed, ErrLimiterConfig.
+// ErrTokenNameInvalid, ErrTokenDeviceInvalid/Required/NotAllowed, ErrLimiterConfig,
+// ErrSaveConflict (a write kept losing a race with another save; nothing
+// was written, so the caller can just try again), ErrDocumentRemoved (the
+// backend's file is gone since this process loaded it; restore the file,
+// or restart the process to start afresh).
 ```
 
 Reasons for the three *new* items:
