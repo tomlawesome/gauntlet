@@ -2,7 +2,8 @@
 
 **Status:** Accepted
 **Date:** 2026-09-30
-**Amended:** 2026-10-01 -- decision 1, stored-document versions (#29)
+**Amended:** 2026-10-01 -- decision 1, stored-document versions (#29);
+decision 5, ASVS moved out of v0.2.0 (#31)
 **Relates to:** [ADR-0001](0001-shared-auth-module.md), #22 (CI compatibility
 checks), #23 (Problem Details errors), mikroview #1202
 
@@ -49,8 +50,10 @@ house rule (2026-09-30).
 4. **v1.0.0 is tagged only once mikroview and birdcage both run on
    gauntlet.** Until then v0.x means the promise above is kept by
    intent and CI, not yet proven by two consumers.
-5. **Timing.** OpenAPI, `apidiff` and ASVS land in v0.2.0; the frontends
-   cannot tell. The error format switches to Problem Details only when
+5. **Timing.** OpenAPI and `apidiff` land in v0.2.0; the frontends
+   cannot tell. Measuring the security requirements against ASVS comes
+   in a later release, not v0.2.0 (owner, 2026-10-01): the mapping is
+   #33, in v0.3.0. The error format switches to Problem Details only when
    mikroview's frontend moves onto gauntlet (#23, with mikroview #1202),
    because it changes what that frontend parses today.
 
@@ -59,11 +62,14 @@ house rule (2026-09-30).
 - A bump to a new gauntlet tag in either app is expected to be a
   version-number change and a green pipeline, nothing else. The bump
   merge request in each app is the proof; a red one is a gauntlet bug.
-- `docs/design.md` §1.5's gate route list becomes a pointer to the
+- `docs/design.md` §1.5's gate route list is now a pointer to the
   OpenAPI document (`docs/api/auth.yaml`), not a second copy of it.
-- Two new tool-scope dependencies (`apidiff`, an OpenAPI validator) need
-  the owner's approval per AGENTS.md before #22 starts; neither enters
-  the library's own dependency graph.
+- Two tool-scope dependencies, `apidiff` (CI only) and the
+  `kin-openapi` validator (tests only), were approved by the owner on
+  2026-09-30 and shipped with #22; neither enters the library's own
+  dependency graph.
+- Until #33 lands, nothing checks the security requirements against
+  ASVS; decision 1's ASVS line is the target, not yet a measurement.
 - Path versioning (`/api/auth/v2/...`) is not adopted: the routes are an
   embedded surface behind each app's own frontend, and the additive rule
   makes a second path prefix unnecessary until a major version.
