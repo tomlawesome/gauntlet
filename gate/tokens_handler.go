@@ -61,7 +61,8 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 			g.writeAuthError(w, r, err, http.StatusServiceUnavailable)
 			return
 		case gauntlet.ErrTokenKindInvalid, gauntlet.ErrTokenDeviceRequired,
-			gauntlet.ErrTokenDeviceNotAllowed, gauntlet.ErrTokenDeviceInvalid:
+			gauntlet.ErrTokenDeviceNotAllowed, gauntlet.ErrTokenDeviceInvalid,
+			gauntlet.ErrTokenNameInvalid:
 			// The caller's request is wrong, not the deployment's state,
 			// and the message is safe to hand back: it names a field,
 			// not anything about existing tokens.

@@ -25,7 +25,7 @@ stages:
 default:
   tags: [light]
   interruptible: true
-  # Every job starts in a fresh container, and four of the five build a
+  # Every job starts in a fresh container, and five of the six build a
   # pinned tool from source on top of fetching the module graph. Both
   # caches live under the project dir (GOMODCACHE/GOCACHE below) so one
   # cache entry carries them between jobs and pipelines; the key turns
@@ -118,6 +118,22 @@ lint:vulncheck:
   script:
     - go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
     - govulncheck ./...
+
+# The exported Go API against the last release tag (ADR-0002, #22):
+# fails on a removed or renamed identifier, passes on additions. apidiff
+# runs through `go run` at a pinned pseudo-version inside the script, so
+# it never enters go.mod; scripts/apidiff.sh runs the same check locally.
+# Full history and the tags are fetched so the base tag is there to diff.
+lint:apidiff:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - git fetch --tags --force --quiet origin
+    - scripts/apidiff.sh
 
 # gitleaks is a Go module, so it installs the same way golangci-lint and
 # govulncheck do above -- no separate image or Docker Hub pull needed.

@@ -137,6 +137,31 @@ func TestCreateTokenRejectsAnUnscopedIngestToken(t *testing.T) {
 	}
 }
 
+// TestCreateTokenRejectsATooLongName: a name over MaxTokenNameLen is the
+// caller's mistake, so it is a 400 naming the limit, not a 500 (#25).
+func TestCreateTokenRejectsATooLongName(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	adminClient := registerAdmin(t, ts, "admin", "password123")
+
+	name := strings.Repeat("n", gauntlet.MaxTokenNameLen+1)
+	resp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: name})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a %d-character token name, got %d", len(name), resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(body)), gauntlet.ErrTokenNameInvalid.Error(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	if len(g.deps.Tokens.List()) != 0 {
+		t.Error("a refused token was created anyway")
+	}
+}
+
 // TestCreateTokenWithoutStorageSaysWhatToDo: the 503 for a token store
 // with no backend carries gateErrorMessages' entry for it, which names
 // the fix, not the generic text every other unmapped error gets.
