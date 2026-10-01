@@ -91,6 +91,7 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrTokenDeviceRequired:   gauntlet.ErrTokenDeviceRequired.Error(),
 	gauntlet.ErrTokenDeviceNotAllowed: gauntlet.ErrTokenDeviceNotAllowed.Error(),
 	gauntlet.ErrTokenDeviceInvalid:    gauntlet.ErrTokenDeviceInvalid.Error(),
+	gauntlet.ErrTokenNameInvalid:      gauntlet.ErrTokenNameInvalid.Error(),
 	gauntlet.ErrUserNotFound:          "no such user",
 	gauntlet.ErrSingleAdmin:           "this deployment allows only one admin account -- transfer the admin role to this user first",
 	gauntlet.ErrCannotDeleteAdmin:     "the admin account cannot be deleted -- transfer the admin role to another account first",

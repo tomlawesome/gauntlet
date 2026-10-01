@@ -53,8 +53,8 @@ house rule (2026-09-30).
 - A bump to a new gauntlet tag in either app is expected to be a
   version-number change and a green pipeline, nothing else. The bump
   merge request in each app is the proof; a red one is a gauntlet bug.
-- `docs/design.md` §4's route table becomes a pointer to the OpenAPI
-  document, not a second copy of it.
+- `docs/design.md` §1.5's gate route list becomes a pointer to the
+  OpenAPI document (`docs/api/auth.yaml`), not a second copy of it.
 - Two new tool-scope dependencies (`apidiff`, an OpenAPI validator) need
   the owner's approval per AGENTS.md before #22 starts; neither enters
   the library's own dependency graph.

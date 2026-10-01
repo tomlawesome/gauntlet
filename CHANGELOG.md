@@ -4,7 +4,53 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `docs/api/auth.yaml` (OpenAPI 3.1) describes every route `gate.Routes`
+  serves -- each request body, response body and status -- as the one
+  copy a frontend can build against (ADR-0002, #22). `docs/design.md`
+  §1.5 now points at it instead of listing the routes by hand.
+- Compatibility is checked in CI, not by review (#22). A contract test
+  drives every gate route and fails on a request, response or status the
+  document does not describe, or on a route that exists on one side
+  only. The `lint:apidiff` job (`scripts/apidiff.sh`) fails a merge
+  request that removes, renames or changes an exported Go identifier
+  since the last release tag, unless `VERSION` bumps the major version;
+  additions pass. Neither tool enters the library's own dependencies.
+- `TokenStore.Create` refuses a token name over 64 bytes
+  (`MaxTokenNameLen`) or carrying control or formatting characters, with
+  the new `ErrTokenNameInvalid`, the same rule the device id already
+  had (#24). An empty name is still allowed.
+
+### Changed
+
+- Smaller fixes from the v0.1.0 audit (#24):
+  - `User.HasActiveTOTP` now answers correctly on the copies
+    `Store.List` returns; it read false for every listed account.
+  - A password login saves `LastLogin` at most once an hour. The value
+    in memory is always current; a crash can lose up to an hour of it.
+  - `TokenStore.List`, `ByKind` and the saved document order tokens
+    created in the same instant by ID, so the list no longer reshuffles
+    on refresh.
+  - `OpenStore`'s "no admin" refusal counts empty (null) entries
+    separately from real accounts in its message.
+  - A generated SSO username always fits the username length limit.
+  - Less password hashing under the accounts store's lock: a new SSO
+    account, burning a recovery code and `GenerateRecoveryCodesIfAbsent`
+    no longer stall other logins while they hash, and
+    `GenerateRecoveryCodesIfAbsent` skips the hashing entirely when the
+    account already has codes. `BurnRecoveryCode` no longer changes a
+    copy another caller is reading.
+  - Internal tidying in `gate` with no change on the wire, plus test and
+    documentation fixes.
+
+### Fixed
+
+- `POST /api/tokens` with a name the token store refuses answers 400
+  with the reason, instead of 500 "unable to create token" (#25).
+- `POST /api/auth/users` answers 503 with the same "no persistent
+  storage" message as register when the deployment has no storage set
+  up, instead of 500 (#25).
 
 ## [0.1.0] - 2026-09-30
 
