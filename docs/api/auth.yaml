@@ -952,6 +952,12 @@ paths:
             text/plain:
               schema:
                 $ref: "#/components/schemas/TextError"
+        "500":
+          description: The revoke could not be saved, so the token still works; try again.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
         "503":
           $ref: "#/components/responses/SetupRequired"
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 func TestTokensCreateRequiresAdmin(t *testing.T) {
@@ -186,5 +187,38 @@ func TestCreateTokenWithoutStorageSaysWhatToDo(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(string(body)), gateErrorMessages[gauntlet.ErrTokenNotPersisted]; got != want {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// TestRevokeTokenStorageFailureIsNotReportedAsGone: a revoke whose save
+// fails leaves the token working, so answering 404 ("already revoked")
+// would tell an admin revoking a leaked token that it is dead when it
+// is not. The refusal must be a 5xx the document describes.
+func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
+	c := newContractChecker(t)
+	g := newTestGate(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	tokens, err := gauntlet.OpenTokenStore(backend, gauntlet.TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Tokens = tokens
+	registerUserDirect(t, g, "admin", "password123")
+	raw, tok, err := tokens.Create("leaked", gauntlet.TokenKindAPI, "", nil, nowUTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Handle(gauntlet.TokenKindAPI, kindEchoHandler("/api/readonly"))
+	ts := newTestServer(t, g)
+	admin := c.client()
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{Username: "admin", Password: "password123"}}, 200, nil)
+
+	backend.left = 0
+	c.do(admin, ts.URL, call{method: "DELETE", path: "/api/tokens/" + tok.ID}, http.StatusInternalServerError, nil)
+
+	resp := bearerRequest(t, ts.URL, "/api/readonly", raw)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the token stopped working although its revoke was refused: got %d, want 200", resp.StatusCode)
 	}
 }
