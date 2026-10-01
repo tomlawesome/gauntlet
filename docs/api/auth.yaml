@@ -40,9 +40,11 @@ info:
     session cookie" issue a fresh one; logout clears it.
 
     **Errors.** Every error body is `text/plain` holding one human-readable
-    line, except the one `application/json` body `DELETE
-    /api/auth/users/{id}` returns when the account was deleted but its
-    tokens could not be revoked. A frontend must branch on the status code
+    line, except two `application/json` bodies for a step that half
+    succeeded: `DELETE /api/auth/users/{id}` when the account was deleted
+    but its tokens could not be revoked, and `POST /api/auth/totp/confirm`
+    when the authenticator is now active but recovery codes could not be
+    generated. A frontend must branch on the status code
     and the `X-Auth-Gate` header, never on the message text. The switch to
     RFC 9457 Problem Details is #23 and is not in this version.
 
