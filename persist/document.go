@@ -21,6 +21,13 @@ import (
 // against the reloaded document, which a whole-document API cannot
 // express. That limitation is real and is documented rather than
 // papered over.
+//
+// Deprecated: gauntlet's stores now reload the fresh document and
+// re-apply the change on a conflict instead of writing on top (Store and
+// TokenStore's mutate, #21), so nothing in this module calls this any
+// more. It stays, unchanged, for a caller that already depends on it
+// (ADR-0002: additive only). New code should replay its change against
+// the reloaded document rather than save on top of it.
 func SaveWithRetry(ctx context.Context, b Backend, payload []byte, current int64) (version int64, conflicted bool, err error) {
 	if b == nil {
 		return current, false, nil // persistence not configured

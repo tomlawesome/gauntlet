@@ -24,6 +24,53 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- A write from the CLI and one from the running server at the same
+  moment no longer lose one of them (issue #21). Before, the second
+  save to land wrote its whole accounts or tokens document on top of
+  the first, and the first change was gone with only a log line to say
+  so. Now the second write loads what the first saved, makes its own
+  change again on top of that, and saves the result, so both changes
+  survive. `TokenStore` gets the same protection; it had none. It also
+  now re-reads its document before every read, write and
+  `Authenticate` when another process has changed it, as `Store`
+  always has: a token revoked through the CLI stops working on the
+  running server at once, where before it worked until a restart.
+- A login or token use whose last-seen timestamp was being saved as
+  another process deleted that account or revoked that token is
+  refused: the store takes the document the other process wrote
+  instead of keeping the account or token in memory as valid.
+- After five conflicting writes in a row -- a script writing in a loop,
+  not an ordinary CLI command -- a write gives up with the new
+  `ErrSaveConflict` and changes nothing; the caller can try again. The
+  whole write, retries and reloads included, is held to one five-second
+  limit (the limit one save had before), since it runs while every
+  login and signed-in request on that store waits.
+  Checks such as "registration is still open", "one admin only",
+  "username free" and "recovery codes already issued" are made again
+  against the document another process saved, so a retried write never
+  breaks them.
+- A write that meets an accounts document this store refuses to load
+  (two admins, say) now fails instead of saving over it. One that finds
+  the document removed from under it -- a file deleted or moved aside
+  while the process ran -- fails with the new `ErrDocumentRemoved`
+  instead of recreating the file from that one write, which for an
+  accounts file could mean a file with no admin that the next start
+  refuses. The single-admin rule is checked on every save as well as
+  every load, so no write can produce such a file.
+- `VerifyAndRecordTOTP` and `RecordPasskeyAssertionIfFresh` report a
+  code or assertion as accepted only when the counter that stops it
+  being used again was saved. Before, a matching TOTP code was
+  accepted even when that save failed (mikroview's stance), which
+  left the same code good for a second login; now it is refused with
+  the error, the stance reset codes and recovery codes already take.
+  A caller that granted the login on `ok` despite an error no longer
+  sees that combination.
+- Persistence errors from store writes no longer carry the
+  `saving accounts:` / `saving API tokens:` prefix; they name the store
+  and backend themselves, and `errors.Is` against the package's errors
+  works as before.
+- `persist.SaveWithRetry` is deprecated and no longer used by the
+  stores; it stays exported for compatibility.
 - Smaller fixes from the v0.1.0 audit (#24):
   - `User.HasActiveTOTP` now answers correctly on the copies
     `Store.List` returns; it read false for every listed account.

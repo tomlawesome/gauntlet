@@ -184,13 +184,12 @@ func TestLinkOIDCIdentityClearsAPendingEnrolmentToo(t *testing.T) {
 	}
 	// A pending (unconfirmed) secret, set directly -- the real entry
 	// point (SetPendingTOTPSecret) is a later slice.
-	s.mu.Lock()
-	s.byID[bob.ID].TOTPSecret = testTOTPSecret
-	if err := s.tryPersistLocked(); err != nil {
-		s.mu.Unlock()
+	if err := s.mutate(func(st *storeState) error {
+		st.byID[bob.ID].TOTPSecret = testTOTPSecret
+		return nil
+	}); err != nil {
 		t.Fatalf("persisting pending secret fixture: %v", err)
 	}
-	s.mu.Unlock()
 
 	if err := s.LinkOIDCIdentity(bob.ID, "https://idp.example", "sub-1", now); err != nil {
 		t.Fatalf("LinkOIDCIdentity: %v", err)

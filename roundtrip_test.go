@@ -56,7 +56,7 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	}
 
 	// fixture.Users is already in the username-sorted order
-	// tryPersistLocked writes ("admin" < "bob" < "carol@example.com" <
+	// mutate writes ("admin" < "bob" < "carol@example.com" <
 	// "legacy"), so a correct load-then-save is a no-op on the bytes.
 	fixture := storeFile{
 		Users: []*User{
@@ -146,12 +146,9 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	}
 
 	// Save: the same whole-document rewrite every real mutation goes
-	// through (tryPersistLocked), with no data actually changed here.
-	s1.mu.Lock()
-	saveErr := s1.tryPersistLocked()
-	s1.mu.Unlock()
-	if saveErr != nil {
-		t.Fatalf("tryPersistLocked: %v", saveErr)
+	// through (mutate), with no data actually changed here.
+	if err := s1.mutate(func(*storeState) error { return nil }); err != nil {
+		t.Fatalf("mutate: %v", err)
 	}
 
 	snap, err := m.Load(context.Background())

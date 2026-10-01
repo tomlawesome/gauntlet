@@ -14,7 +14,6 @@ package gauntlet
 
 import (
 	"crypto/rand"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -130,24 +129,22 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return nil, ErrUserNotFound
-	}
-
-	prevCodes := u.RecoveryCodes
-	u.RecoveryCodes = hashed
-	if err := s.tryPersistLocked(); err != nil {
-		// A set that only exists in memory must not be reported as
-		// issued: the caller is about to show these to the user as
-		// their only way back in, and a restart before the next good
-		// write would revert to whatever set (if any) existed before,
-		// leaving the shown codes unable to verify against anything.
-		u.RecoveryCodes = prevCodes
-		return nil, fmt.Errorf("saving accounts: %w", err)
+	// A set that only exists in memory must not be reported as issued:
+	// the caller is about to show these to the user as their only way
+	// back in, and a restart before the next good write would revert to
+	// whatever set (if any) existed before, leaving the shown codes
+	// unable to verify against anything. mutate installs the set only
+	// once it is saved.
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.RecoveryCodes = hashed
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return clear, nil
 }
@@ -212,25 +209,30 @@ func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (cod
 
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok = s.byID[userID]
-	if !ok {
-		return nil, false, ErrUserNotFound
+	// The decision is made again inside the op, against the document
+	// being saved: a replay after another process minted a set -- the
+	// same person's other tab, through a CLI or a second server -- must
+	// find that set and leave it alone, not replace codes its user has
+	// already been shown.
+	var issued bool
+	err = s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		if len(u.RecoveryCodes) > 0 {
+			issued = true
+			return errNoChange
+		}
+		issued = false
+		u.RecoveryCodes = hashed
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
 	}
-
-	if len(u.RecoveryCodes) > 0 {
+	if issued {
 		return nil, true, nil
-	}
-
-	u.RecoveryCodes = hashed
-	if err := s.tryPersistLocked(); err != nil {
-		// See GenerateRecoveryCodes' identical restore-on-failure
-		// comment: a set that only exists in memory must not be
-		// reported as issued.
-		u.RecoveryCodes = nil
-		return nil, false, fmt.Errorf("saving accounts: %w", err)
 	}
 	return clear, false, nil
 }
@@ -284,43 +286,41 @@ func (s *Store) BurnRecoveryCode(userID, code string, now time.Time) (bool, erro
 		return false, nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Re-fetched by ID for the reason Authenticate gives: a reload may
-	// have replaced the whole map since the read lock was released. The
-	// code is found again by its hash, not its position, since the set
-	// itself may have been replaced; each hash carries its own salt, so
-	// no two codes share one.
-	u, ok = s.byID[userID]
-	if !ok {
-		return false, ErrUserNotFound
-	}
-	matchIdx := -1
-	for i, rc := range u.RecoveryCodes {
-		if rc.Hash == matchHash && rc.UsedAt.IsZero() {
-			matchIdx = i
+	// The spend is decided inside the op, against the document being
+	// saved, and the code found there by its hash, not its position:
+	// a concurrent burn of the same code (in this process or, on a
+	// replay, another one), or a fresh set replacing this one, must win
+	// over a match made against the snapshot. Each hash carries its own
+	// salt, so no two codes share one.
+	//
+	// A spend that only lands in memory is undone by a restart, and the
+	// code is live again for whoever presented it -- so a spend that
+	// cannot be saved refuses the login, the same stance Authenticate's
+	// reset-code path takes. mutate installs it only once it is saved.
+	var burned bool
+	err := s.mutate(func(st *storeState) error {
+		burned = false
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
 		}
+		matchIdx := -1
+		for i, rc := range u.RecoveryCodes {
+			if rc.Hash == matchHash && rc.UsedAt.IsZero() {
+				matchIdx = i
+			}
+		}
+		if matchIdx == -1 {
+			return errNoChange
+		}
+		// In place: the account the op is handed is mutate's deep copy,
+		// so no reader's copy of the User shares this slice.
+		u.RecoveryCodes[matchIdx].UsedAt = now
+		burned = true
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	if matchIdx == -1 {
-		return false, nil
-	}
-
-	// A new slice rather than an in-place edit: Get and every other
-	// reader hand out shallow copies of the User, which share this
-	// slice's backing array, and a caller reading one of those must not
-	// see a field change under it.
-	prevCodes := u.RecoveryCodes
-	spent := append([]RecoveryCode(nil), prevCodes...)
-	spent[matchIdx].UsedAt = now
-	u.RecoveryCodes = spent
-	if err := s.tryPersistLocked(); err != nil {
-		// A spend that only lands in memory is undone by a restart, and
-		// the code is live again for whoever presented it -- refuse the
-		// login rather than honour a spend nothing recorded, the same
-		// stance Authenticate's reset-code path takes.
-		u.RecoveryCodes = prevCodes
-		return false, fmt.Errorf("saving accounts: %w", err)
-	}
-	return true, nil
+	return burned, nil
 }

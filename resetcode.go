@@ -15,7 +15,6 @@ package gauntlet
 import (
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -163,47 +162,36 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return nil, "", ErrUserNotFound
-	}
-	if !u.HasLocalPassword {
-		return nil, "", ErrNoLocalPassword
-	}
-
-	prevHash := u.PasswordHash
-	prevResetHash := u.ResetCodeHash
-	prevResetExpiresAt := u.ResetCodeExpiresAt
-	prevMustChange := u.MustChangePassword
-	prevPasswordChangedAt := u.PasswordChangedAt
-
-	u.PasswordHash = unmatchable
-	u.ResetCodeHash = codeHash
-	u.ResetCodeExpiresAt = now.Add(ResetCodeTTL)
-	u.MustChangePassword = true
-	u.PasswordChangedAt = now
-	if err := s.tryPersistLocked(); err != nil {
-		// The old password must still work and no code must be live: a
-		// reset that only exists in memory but is reported as issued
-		// would leave the admin reading out a code that a restart
-		// before the next good write silently un-issues, while the
-		// account's real credential is the one this rolled back to.
-		u.PasswordHash = prevHash
-		u.ResetCodeHash = prevResetHash
-		u.ResetCodeExpiresAt = prevResetExpiresAt
-		u.MustChangePassword = prevMustChange
-		u.PasswordChangedAt = prevPasswordChangedAt
-		return nil, "", fmt.Errorf("saving accounts: %w", err)
+	// The old password must still work and no code must be live unless
+	// the reset is saved: a reset that only exists in memory but is
+	// reported as issued would leave the admin reading out a code that
+	// a restart before the next good write silently un-issues. mutate
+	// installs it only once it is saved.
+	var issued User
+	err = s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		if !u.HasLocalPassword {
+			return ErrNoLocalPassword
+		}
+		u.PasswordHash = unmatchable
+		u.ResetCodeHash = codeHash
+		u.ResetCodeExpiresAt = now.Add(ResetCodeTTL)
+		u.MustChangePassword = true
+		u.PasswordChangedAt = now
+		issued = *u
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
 	}
 
-	cp := *u
 	// The copy handed back is for the caller's audit entry and response
 	// envelope, neither of which has any business with a credential
 	// verifier -- the same blanking List does.
-	cp.PasswordHash = ""
-	cp.ResetCodeHash = ""
-	return &cp, FormatResetCode(code), nil
+	issued.PasswordHash = ""
+	issued.ResetCodeHash = ""
+	return &issued, FormatResetCode(code), nil
 }

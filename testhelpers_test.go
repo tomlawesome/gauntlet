@@ -80,19 +80,20 @@ func (b *saveBudgetBackend) Describe() string { return "save-budget test backend
 // enrolment methods.
 func setSecondFactorForTest(t *testing.T, s *Store, userID string, now time.Time) {
 	t.Helper()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.byID[userID]
-	if !ok {
-		t.Fatalf("setSecondFactorForTest: no such user %q", userID)
-	}
-	u.TOTPSecret = testTOTPSecret
-	u.TOTPConfirmedAt = now
-	u.TOTPLastCounter = 42
-	u.RecoveryCodes = []RecoveryCode{{Hash: "fake-recovery-hash-1"}, {Hash: "fake-recovery-hash-2"}}
-	u.Passkeys = []Passkey{{ID: []byte("test-credential-1"), PublicKey: []byte("test-public-key-1"), Name: "YubiKey", CreatedAt: now}}
-	if err := s.tryPersistLocked(); err != nil {
-		t.Fatalf("setSecondFactorForTest: persisting fixture: %v", err)
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.TOTPSecret = testTOTPSecret
+		u.TOTPConfirmedAt = now
+		u.TOTPLastCounter = 42
+		u.RecoveryCodes = []RecoveryCode{{Hash: "fake-recovery-hash-1"}, {Hash: "fake-recovery-hash-2"}}
+		u.Passkeys = []Passkey{{ID: []byte("test-credential-1"), PublicKey: []byte("test-public-key-1"), Name: "YubiKey", CreatedAt: now}}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setSecondFactorForTest: persisting fixture for %q: %v", userID, err)
 	}
 }
 

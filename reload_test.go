@@ -83,7 +83,7 @@ func (b *reloadRaceBackend) Describe() string { return "reload-race test backend
 //  3. The gate is released, letting the blocked reloadIfStale proceed
 //     with the pre-write snapshot it already captured.
 //
-// The write is done by hand (s.mu.Lock/persistLocked) rather than
+// The write is done by hand (s.mu.Lock/mutateLocked) rather than
 // through a store method, which would itself call reloadIfStale first
 // and join the very reload this test is holding blocked -- deadlocking
 // on the gate this goroutine hasn't released yet. Every real write
@@ -115,21 +115,25 @@ func TestReloadIfStaleDoesNotRevertAConcurrentWrite(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	s.mu.Lock()
-	stored, ok := s.byID[u.ID]
-	if !ok {
-		s.mu.Unlock()
-		t.Fatal("account vanished")
-	}
-	stored.TOTPSecret = "JBSWY3DPEHPK3PXP"
-	s.persistLocked()
+	err = s.mutateLocked(func(st *storeState) error {
+		stored, ok := st.byID[u.ID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		stored.TOTPSecret = "JBSWY3DPEHPK3PXP"
+		return nil
+	})
 	s.mu.Unlock()
+	if err != nil {
+		t.Fatalf("the concurrent write: %v", err)
+	}
 
 	close(backend.gate)
 	<-reloadDone
 
 	// Read straight off s.byID under the store's own lock, not through
 	// Get: Get calls reloadIfStale itself, and the backend's stored
-	// bytes are the fresh, correct ones by now (persistLocked above
+	// bytes are the fresh, correct ones by now (mutateLocked above
 	// wrote them) -- a second reload triggered from Get would pull
 	// those in and quietly repair exactly the corruption this test
 	// exists to catch, passing either way.

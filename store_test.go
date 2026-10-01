@@ -498,7 +498,7 @@ func TestReloadIfStaleSkipsNilArrayElements(t *testing.T) {
 func TestOpenReadsNewObjectFormat(t *testing.T) {
 	m := persist.NewMemory()
 	// Round-trip through the store's own writer -- the true contract is
-	// "whatever Store.persistLocked writes, OpenStore can read back."
+	// "whatever Store.mutate writes, OpenStore can read back."
 	s1, _ := OpenStore(m, Options{})
 	if _, err := s1.Register("admin", "password123", time.Now()); err != nil {
 		t.Fatal(err)
@@ -831,17 +831,18 @@ func TestRoleAtLeastStacksTheThreeTiers(t *testing.T) {
 // User.HasActiveTOTP predicate, which is in scope now.
 func setTOTPForTest(t *testing.T, s *Store, userID, secret string, confirmedAt time.Time, counter uint64) {
 	t.Helper()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.byID[userID]
-	if !ok {
-		t.Fatalf("setTOTPForTest: no such user %q", userID)
-	}
-	u.TOTPSecret = secret
-	u.TOTPConfirmedAt = confirmedAt
-	u.TOTPLastCounter = counter
-	if err := s.tryPersistLocked(); err != nil {
-		t.Fatalf("setTOTPForTest: persisting fixture: %v", err)
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.TOTPSecret = secret
+		u.TOTPConfirmedAt = confirmedAt
+		u.TOTPLastCounter = counter
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setTOTPForTest: persisting fixture for %q: %v", userID, err)
 	}
 }
 

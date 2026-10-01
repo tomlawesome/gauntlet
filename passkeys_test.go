@@ -633,8 +633,8 @@ func TestPasskeyWritesLeaveStateWhenPersistFails(t *testing.T) {
 
 	if accepted, err := s.RecordPasskeyAssertionIfFresh(u.ID, []byte{1}, 99, now.Add(time.Hour)); err == nil {
 		t.Fatal("RecordPasskeyAssertionIfFresh against a backend that cannot save = nil error, want one")
-	} else if !accepted {
-		t.Error("RecordPasskeyAssertionIfFresh reported the assertion as stale, even though the failure was persistence, not freshness")
+	} else if accepted {
+		t.Error("RecordPasskeyAssertionIfFresh reported the assertion as accepted, even though its record was never saved -- see VerifyAndRecordTOTP's contract")
 	}
 	if got, _ := s.Get(u.ID); got.Passkeys[0].SignCount != 0 || !got.Passkeys[0].LastUsedAt.IsZero() {
 		t.Errorf("RecordPasskeyAssertionIfFresh's in-memory state changed even though the write failed: %+v", got.Passkeys[0])

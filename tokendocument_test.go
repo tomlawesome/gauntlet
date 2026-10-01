@@ -33,7 +33,7 @@ func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	)
 	const droplistPull TokenKind = "droplist-pull"
 
-	// Already in the CreatedAt-ascending order tryPersistLocked writes,
+	// Already in the CreatedAt-ascending order mutate writes,
 	// so a correct load-then-save is a no-op on the bytes.
 	fixture := []*Token{
 		{
@@ -91,11 +91,8 @@ func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	// changed rather than the original fixture. This is also what
 	// proves the unregistered row survives a save rather than being
 	// pruned from the document.
-	s1.mu.Lock()
-	saveErr := s1.tryPersistLocked()
-	s1.mu.Unlock()
-	if saveErr != nil {
-		t.Fatalf("tryPersistLocked: %v", saveErr)
+	if err := s1.mutate(func(*tokenState) error { return nil }); err != nil {
+		t.Fatalf("mutate: %v", err)
 	}
 
 	snap, err := m.Load(context.Background())
