@@ -664,7 +664,11 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          $ref: "#/components/responses/SetupRequired"
+          description: Setup required (no account exists yet), or the deployment has no persistent storage configured.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
 
   /api/auth/users/{id}:
     delete:
@@ -861,7 +865,7 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Must not be empty.
+                  description: Must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
                 kind:
                   type: string
                   description: "`api` (read-only; the default when empty or absent) or `ingest`."

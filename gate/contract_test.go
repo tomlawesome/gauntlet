@@ -292,7 +292,29 @@ func TestContractEveryRoute(t *testing.T) {
 	c := newContractChecker(t)
 	contractLocalAccounts(t, c)
 	contractSSO(t, c)
+	contractNoStorage(t, c)
 	c.requireEveryOperationDriven()
+}
+
+// contractNoStorage covers the 503 an admin gets creating an account
+// when the store has no persistent storage. A store with no backend can
+// never hold the admin account Protect and RequireRole need, so the
+// handler is mounted on its own with the admin already in the request's
+// context; the traffic is still checked against the document.
+func contractNoStorage(t *testing.T, c *contractChecker) {
+	g := newTestGate(t)
+	users, err := gauntlet.OpenStore(nil, gauntlet.Options{})
+	if err != nil {
+		t.Fatalf("OpenStore(nil): %v", err)
+	}
+	g.deps.Users = users
+	admin := &gauntlet.User{ID: "admin-id", Username: "admin", Role: gauntlet.RoleAdmin}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.handleCreateUser(w, r.WithContext(withUser(r.Context(), admin)))
+	}))
+	t.Cleanup(ts.Close)
+
+	c.do(c.client(), ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "operator", Password: "contract-operator-password"}}, 503, nil)
 }
 
 func contractLocalAccounts(t *testing.T, c *contractChecker) {
@@ -415,6 +437,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	var created tokenResponse
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "grafana"}}, 201, &created)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: ""}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: strings.Repeat("n", gauntlet.MaxTokenNameLen+1)}}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "sensor", Kind: "ingest", Device: "sensor-1"}}, 201, nil)
 	c.do(admin, u, call{method: "GET", path: "/api/tokens"}, 200, nil)
 	c.do(bob, u, call{method: "GET", path: "/api/tokens"}, 401, nil)
