@@ -416,6 +416,8 @@ paths:
             text/plain:
               schema:
                 $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           description: |
             `text/plain` when the app could not be activated; details are in

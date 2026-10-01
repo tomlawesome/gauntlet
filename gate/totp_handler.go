@@ -153,11 +153,21 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Throttled on the per-account re-check bucket, reserve-then-release
+	// as recheckPassword does: this route asks only for the session
+	// cookie, so without it a stolen cookie could guess the six digits
+	// without limit while the owner's enrolment is pending -- and a hit
+	// signs the owner out and hands over the recovery codes.
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
 	matched, ok := gauntlet.VerifyTOTP(current.TOTPSecret, req.Code, now, current.TOTPLastCounter)
 	if !ok {
 		http.Error(w, "that code didn't match -- check your authenticator app's clock and try again", http.StatusBadRequest)
 		return
 	}
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 	if err := g.deps.Users.ConfirmTOTP(user.ID, now, matched); err != nil {
 		status := http.StatusInternalServerError

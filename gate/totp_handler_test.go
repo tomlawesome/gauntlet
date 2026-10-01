@@ -313,6 +313,33 @@ func TestTOTPConfirmAgainAfterAlreadyConfirmedRefused(t *testing.T) {
 	}
 }
 
+// TestTOTPConfirmRateLimited proves POST /api/auth/totp/confirm counts
+// wrong codes on the per-account re-check bucket: a session cookie
+// alone must not buy unlimited guesses at a pending enrolment's code.
+func TestTOTPConfirmRateLimited(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	enrolled := totpEnrol(t, bob, ts)
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		_ = postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: "000000x"}).Body.Close()
+	}
+	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected 429 after exceeding the rate limit, got %d (even with the correct code)", resp.StatusCode)
+	}
+	if u, ok := g.deps.Users.Get(totpBobID(t, g)); !ok || u.HasActiveTOTP() {
+		t.Error("a refused confirm must leave the factor pending, not active")
+	}
+}
+
 // TestTOTPDeleteRateLimited proves DELETE /api/auth/totp's password
 // re-check is throttled on the per-account re-check bucket, not an unbounded
 // oracle behind a stolen session cookie.
