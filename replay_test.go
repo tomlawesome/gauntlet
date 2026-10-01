@@ -477,3 +477,62 @@ func TestAuthenticateRedecidesTheResetCodeOnReplay(t *testing.T) {
 		t.Errorf("bob's new password does not work after the replay: %v", err)
 	}
 }
+
+// lateWriteBackend is a persist.Memory whose next version check
+// answers with the version as it stood, and only then lets afterVersion
+// write: a reloadIfStale that read the version just before the CLI's
+// write landed, and so did not reload.
+type lateWriteBackend struct {
+	*persist.Memory
+	afterVersion func()
+}
+
+func (b *lateWriteBackend) Version(ctx context.Context) (int64, bool, error) {
+	v, exists, err := b.Memory.Version(ctx)
+	if f := b.afterVersion; f != nil {
+		b.afterVersion = nil
+		f()
+	}
+	return v, exists, err
+}
+
+// TestRevokeAllCreatedByFindsATokenThisStoreHadNotLoaded: the CLI
+// creates a token for bob after this store's staleness check, so memory
+// has no token of bob's and the op finds nothing to revoke. That
+// decision was made on stale memory; the store must check it against
+// the document as it is now and revoke the token, not report (0, nil)
+// while it keeps authenticating.
+func TestRevokeAllCreatedByFindsATokenThisStoreHadNotLoaded(t *testing.T) {
+	m := persist.NewMemory()
+	b := &lateWriteBackend{Memory: m}
+	server, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob := &User{ID: "bob-id", Username: "bob"}
+	var raw string
+	b.afterVersion = func() {
+		if raw, _, err = cli.Create("bob's", TokenKindAPI, "", bob, time.Now()); err != nil {
+			t.Errorf("the CLI's Create: %v", err)
+		}
+	}
+
+	n, err := server.RevokeAllCreatedBy(bob.ID)
+	if err != nil {
+		t.Fatalf("RevokeAllCreatedBy: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("RevokeAllCreatedBy = %d, want 1: the CLI's token for bob was missed", n)
+	}
+	reopened, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Authenticate(raw, TokenKindAPI, time.Now()); ok {
+		t.Error("bob's token still authenticates after his tokens were revoked")
+	}
+}
