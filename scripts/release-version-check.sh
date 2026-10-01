@@ -34,8 +34,10 @@ remote_tags="$2"
 dev_sha="$3"
 commit_sha="$4"
 
-# 1. Strict semantic version: exactly three numeric, dot-separated parts.
-if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+# 1. Strict semantic version: exactly three numeric, dot-separated parts,
+#    none with a leading zero ("02.1.0" is not a version Go will fetch).
+num='(0|[1-9][0-9]*)'
+if ! [[ "$version" =~ ^${num}\.${num}\.${num}$ ]]; then
   echo "VERSION holds '$version', not a semantic version (X.Y.Z)" >&2
   exit 1
 fi

@@ -37,11 +37,15 @@ assert_pass() {
   echo "ok: $desc"
 }
 
-# Non-semantic VERSION is rejected (finding 1).
+# Non-semantic VERSION is rejected.
 assert_fail "non-semantic VERSION rejected" \
   "0.2.0.1" "$TAGS_V020" "$DEV_SHA" "$DEV_SHA"
 
-# A VERSION below an existing tag is rejected (finding 2).
+# A zero-padded part is not a version Go will fetch.
+assert_fail "zero-padded VERSION rejected" \
+  "02.1.0" "$TAGS_V020" "$DEV_SHA" "$DEV_SHA"
+
+# A VERSION below an existing tag is rejected.
 assert_fail "out-of-order VERSION rejected" \
   "0.1.1" "$TAGS_V020" "$DEV_SHA" "$DEV_SHA"
 
@@ -49,7 +53,7 @@ assert_fail "out-of-order VERSION rejected" \
 assert_fail "existing tag rejected" \
   "0.2.0" "$TAGS_V020" "$DEV_SHA" "$DEV_SHA"
 
-# A commit that is not the tip of dev is rejected (finding 3).
+# A commit that is not the tip of dev is rejected.
 assert_fail "non-tip commit rejected" \
   "0.2.1" "$TAGS_V020" "$DEV_SHA" "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"
 
