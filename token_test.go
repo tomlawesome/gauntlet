@@ -711,3 +711,41 @@ func TestTokenOrderIsDeterministicOnEqualCreatedAt(t *testing.T) {
 		t.Errorf("persisted order differs from List:\nList  %s\nsaved %s", want, got)
 	}
 }
+
+// TestFrequentlyUsedTokenKeepsSavingLastUsedAt: a token used every
+// minute for three hours must have a saved LastUsedAt within the hour of
+// its last use. Measured against the in-memory value, which every use
+// moves, the hour never elapsed and the first use was the only one
+// saved -- a busy token looked idle after a restart.
+func TestFrequentlyUsedTokenKeepsSavingLastUsedAt(t *testing.T) {
+	m := persist.NewMemory()
+	s, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Truncate(time.Second)
+	raw, tok, err := s.Create("poller", TokenKindAPI, "", nil, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last time.Time
+	for i := 0; i <= 180; i++ {
+		last = start.Add(time.Duration(i) * time.Minute)
+		if _, ok := s.Authenticate(raw, TokenKindAPI, last); !ok {
+			t.Fatalf("Authenticate at minute %d failed", i)
+		}
+	}
+
+	reopened, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := reopened.List()
+	if len(list) != 1 || list[0].ID != tok.ID {
+		t.Fatalf("reopened store lists %+v, want the one token", list)
+	}
+	got := list[0]
+	if last.Sub(got.LastUsedAt) > lastUsedGranularity {
+		t.Errorf("saved LastUsedAt = %v, last use %v: more than %v behind", got.LastUsedAt, last, lastUsedGranularity)
+	}
+}
