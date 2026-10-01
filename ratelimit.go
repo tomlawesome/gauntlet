@@ -323,6 +323,12 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 
 	l.mu.Lock()
 	if now.Before(persisted) {
+		// While a save of the clamped lockout is failing, the record
+		// still reads as far off, so every guess lands here: retry it
+		// once per lockoutRetryInterval, not per guess.
+		if p, ok := l.wantLockout[accountID]; clamped && ok && now.Before(p.retryAt) {
+			clamped = false
+		}
 		if clamped {
 			l.wantLockout[accountID] = pendingLockout{until: persisted, retryAt: now.Add(lockoutRetryInterval)}
 		}

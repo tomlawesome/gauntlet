@@ -359,6 +359,34 @@ func TestUnsavedLockoutRetriesAreSpacedOut(t *testing.T) {
 	}
 }
 
+// A stored lockout further out than one window is clamped and saved
+// back; while the backend is down that save is spaced out like any other
+// lockout retry, not tried again on every refused guess.
+func TestClampedLockoutRetriesAreSpacedOut(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := s.SetLoginLockedUntil(id, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+
+	b.fail.Store(true)
+	start := b.saves.Load()
+	for i := range 100 {
+		if l.ReserveAccount(s, id, now.Add(time.Duration(i)*100*time.Millisecond)) {
+			t.Fatal("a guess was let through a stored lockout")
+		}
+	}
+	if got := b.saves.Load() - start; got != 1 {
+		t.Fatalf("expected one save attempt within lockoutRetryInterval, got %d", got)
+	}
+	l.ReserveAccount(s, id, now.Add(lockoutRetryInterval))
+	if got := b.saves.Load() - start; got != 2 {
+		t.Fatalf("expected a retry once lockoutRetryInterval had passed, got %d save attempts", got)
+	}
+}
+
 // A new password -- set by its owner, by an admin through SetPassword,
 // or replaced by an admin's reset code -- ends any login lockout on the
 // account, in the record and in the limiter's own count: the guesses
