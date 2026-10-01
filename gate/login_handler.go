@@ -188,13 +188,18 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	// concurrent submissions of the same code can't both check against
 	// the same not-yet-advanced counter -- see VerifyAndRecordTOTP's own
 	// doc comment.
-	if matched, err := g.deps.Users.VerifyAndRecordTOTP(user.ID, req.Code, now); matched {
-		if err != nil {
-			// The replay guard failing to advance doesn't undo the fact
-			// that a correct, unreplayed code was just presented -- see
-			// VerifyAndRecordTOTP's own doc comment.
-			g.logWarn("advancing TOTP replay counter for " + user.Username + ": " + err.Error())
-		}
+	matched, err := g.deps.Users.VerifyAndRecordTOTP(user.ID, req.Code, now)
+	if err != nil {
+		// A code whose counter could not be saved is refused (ok is
+		// false), but that is the backend failing, not a wrong guess: it
+		// must not try the recovery codes, answer 401, or count toward
+		// a lockout that outlasts the outage.
+		g.releaseLogin(res, now)
+		g.logError("recording TOTP replay counter for " + user.Username + ": " + err.Error())
+		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		return
+	}
+	if matched {
 		g.completeLoginFactor(w, user, res, now)
 		return
 	}

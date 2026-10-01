@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // startTOTPLogin posts the password step for an account that holds an
@@ -401,5 +402,52 @@ func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
 
 	if successes != 1 {
 		t.Errorf("%d of %d concurrent submissions of the same code succeeded, want exactly 1", successes, attempts)
+	}
+}
+
+// budgetFixture is totpFixture over a backend a test can make refuse
+// every save (set left to 0; -1 lets them through again).
+func budgetFixture(t *testing.T) (*Gate, *httptest.Server, *http.Client, *budgetBackend) {
+	t.Helper()
+	g := newTestGate(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Users = users
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
+		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
+	return g, ts, admin, backend
+}
+
+// TestLoginFactorSaveFailureIsServerError: a correct code whose replay
+// counter cannot be saved is refused, but as the server's failure, not
+// a wrong guess -- 500, and the attempt handed back, so more tries than
+// the limit (5) during an outage do not lock the account once the
+// backend recovers.
+func TestLoginFactorSaveFailureIsServerError(t *testing.T) {
+	_, ts, _, backend := budgetFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	secret, _, confirmCounter := totpEnrolAndConfirm(t, bob, ts)
+	code := gauntlet.GenerateTOTPCode(secret, confirmCounter+1)
+
+	client := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	backend.left = 0
+	for i := range 6 {
+		resp := submitLoginFactor(t, client, ts, code)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("attempt %d with the counter save failing returned %d, want 500", i+1, resp.StatusCode)
+		}
+	}
+
+	backend.left = -1
+	resp := submitLoginFactor(t, client, ts, code)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("the same code once saves work again returned %d, want 200", resp.StatusCode)
 	}
 }
