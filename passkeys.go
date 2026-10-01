@@ -372,7 +372,7 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 		// again against the live state, as mutateBestEffortLocked does,
 		// and keep the change there if it is still 0-to-0.
 		if opErr := op(&s.storeState); opErr == nil && bestEffort {
-			if s.log != nil {
+			if s.log != nil && !errors.Is(err, ErrDocumentRemoved) { // reported once already
 				s.log.Error(fmt.Sprintf("%v -- this passkey's last-used time exists only in memory and will be lost on restart", err))
 			}
 			return true, nil

@@ -627,6 +627,56 @@ func TestTokenStoreLogsADocumentRemovalOncePerRemoval(t *testing.T) {
 	}
 }
 
+// TestBestEffortWritesStayQuietAfterARemoval: a login or token use
+// whose last-seen bump cannot be saved because the document is gone
+// adds nothing to the one removal line -- otherwise every sign-in for
+// as long as the file stays missing logs a fresh error.
+func TestBestEffortWritesStayQuietAfterARemoval(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	start := time.Now()
+
+	ab := &vanishingBackend{}
+	s, err := OpenStore(ab, Options{Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := s.Register("alice", "password123", start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, err := s.AddPasskey(alice.ID, testPasskey(1, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := &vanishingBackend{}
+	ts, err := OpenTokenStore(tb, TokenOptions{Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := ts.Create("a", TokenKindAPI, "", nil, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ab.gone, tb.gone = true, true
+	for i := 1; i <= 3; i++ {
+		now := start.Add(time.Duration(i) * 2 * time.Hour) // past each last-seen granularity
+		if _, err := s.Authenticate("alice", "password123", now); err != nil {
+			t.Fatalf("login %d after removal = %v", i, err)
+		}
+		if _, ok := ts.Authenticate(raw, TokenKindAPI, now); !ok {
+			t.Fatalf("token use %d after removal refused", i)
+		}
+		if ok, err := s.RecordPasskeyAssertionIfFresh(alice.ID, pk.ID, 0, now); !ok || err != nil {
+			t.Fatalf("passkey login %d after removal = %v, %v; want accepted", i, ok, err)
+		}
+	}
+	if n := strings.Count(logs.String(), "level=ERROR"); n != 2 {
+		t.Errorf("three logins, passkey logins and token uses after removing both files logged %d errors, want 2 (one per store); log = %q", n, logs.String())
+	}
+}
+
 // TestMutateWithoutABackendChangesMemoryOnly: a store opened with no
 // backend still applies the change -- there is nothing to save and
 // nothing to conflict with.

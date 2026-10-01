@@ -432,7 +432,9 @@ func (s *Store) mutateBestEffortLocked(op func(*storeState) error) {
 	if opErr := op(&s.storeState); opErr != nil {
 		return
 	}
-	if s.log != nil {
+	// A removed document has already been reported, once, by
+	// logRemovalLocked; a line per login on top of it is noise.
+	if s.log != nil && !errors.Is(err, ErrDocumentRemoved) {
 		s.log.Error(fmt.Sprintf("%v -- this change exists only in memory and will be lost on restart", err))
 	}
 }
