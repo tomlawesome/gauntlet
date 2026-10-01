@@ -28,15 +28,21 @@ default:
   # Every job starts in a fresh container, and five of the six build a
   # pinned tool from source on top of fetching the module graph. Both
   # caches live under the project dir (GOMODCACHE/GOCACHE below) so one
-  # cache entry carries them between jobs and pipelines; the key turns
-  # over when a dependency or a tool version changes.
+  # cache entry carries them between pipelines; the key turns over when
+  # a dependency or a tool version changes.
+  # Each job gets its own entry (CI_JOB_NAME_SLUG in the prefix). The
+  # lint jobs run at the same time and each builds a different tool, so
+  # with one shared entry the last job to finish overwrote the others'
+  # work and the cache took several pipelines to settle after every key
+  # change (refs #24). Per job, each entry holds exactly what that job
+  # builds and is warm from the next pipeline on.
   # Protected refs get their own cache. A merge-request pipeline can
   # write anything into .gocache/, and a push pipeline on dev carries
   # the protected variables in every job's environment, so the two must
   # never share a cache entry.
   cache:
     key:
-      prefix: $CI_COMMIT_REF_PROTECTED
+      prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
       files:
         - go.sum
         - .gitlab-ci.yml

@@ -41,6 +41,8 @@ All notable changes to this project are documented in this file.
     `GenerateRecoveryCodesIfAbsent` skips the hashing entirely when the
     account already has codes. `BurnRecoveryCode` no longer changes a
     copy another caller is reading.
+  - Each CI job keeps its own cache, so the lint jobs running side by
+    side no longer overwrite each other's and every job starts warm.
   - Internal tidying in `gate` with no change on the wire, plus test and
     documentation fixes.
 
