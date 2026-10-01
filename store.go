@@ -1472,6 +1472,9 @@ func (s *Store) List() []User {
 		// rather than per-field: a caller that needs a count must call
 		// a dedicated accessor instead of reading
 		// len(this copy's Passkeys), which always reads zero now.
+		// HasSecondFactor still answers truly on the copy (see
+		// User.passkeysBlanked).
+		cp.passkeysBlanked = len(u.Passkeys) > 0
 		cp.Passkeys = nil
 		out = append(out, cp)
 	}

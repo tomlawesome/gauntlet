@@ -164,6 +164,10 @@ type User struct {
 	// before the blanking. Unexported, so it never reaches JSON; it says
 	// that a secret exists, never what it is.
 	totpSecretBlanked bool
+	// passkeysBlanked is the same for Passkeys: set only on a List copy
+	// whose passkeys List removed, so HasSecondFactor on that copy still
+	// sees a passkey-only account as having a second factor.
+	passkeysBlanked bool
 }
 
 // clone deep-copies the account, including the slices a plain struct
@@ -204,5 +208,5 @@ func (u *User) HasActiveTOTP() bool {
 // only affects whether a passkey can complete a *login*, not whether the
 // account is considered to have a second factor at all.
 func (u *User) HasSecondFactor() bool {
-	return u.HasActiveTOTP() || len(u.Passkeys) > 0
+	return u.HasActiveTOTP() || len(u.Passkeys) > 0 || u.passkeysBlanked
 }

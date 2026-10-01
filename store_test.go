@@ -361,6 +361,34 @@ func TestListAnswersHasActiveTOTPWithoutTheSecret(t *testing.T) {
 	}
 }
 
+// TestListAnswersHasSecondFactorForPasskeyOnlyAccounts: List blanks
+// Passkeys, but an admin list or a second-factor check built from it
+// must still see a passkey-only account as having a second factor --
+// the same answer Get gives.
+func TestListAnswersHasSecondFactorForPasskeyOnlyAccounts(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	passkey, _ := s.Register("passkey", "password123", now)
+	none, _ := s.CreateUser("none", "password123", RoleUser, now)
+	if _, err := s.AddPasskey(passkey.ID, testPasskey(1, "")); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{passkey.ID: true, none.ID: false}
+	for _, u := range s.List() {
+		if u.Passkeys != nil {
+			t.Errorf("List returned %s's passkeys", u.Username)
+		}
+		full, _ := s.Get(u.ID)
+		if full.HasSecondFactor() != want[u.ID] {
+			t.Errorf("Get %s: HasSecondFactor = %v, want %v", u.Username, full.HasSecondFactor(), want[u.ID])
+		}
+		if got := u.HasSecondFactor(); got != full.HasSecondFactor() {
+			t.Errorf("listed %s: HasSecondFactor = %v, Get says %v", u.Username, got, full.HasSecondFactor())
+		}
+	}
+}
+
 func TestPersistenceRoundTrip(t *testing.T) {
 	m := persist.NewMemory()
 
