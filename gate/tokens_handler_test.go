@@ -41,6 +41,23 @@ func TestCreateTokenRejectsEmptyName(t *testing.T) {
 	}
 }
 
+// TestCreateTokenRejectsABlankName: the store trims the name, so one of
+// only spaces would otherwise be issued with no name at all.
+func TestCreateTokenRejectsABlankName(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "   "})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for a name of only spaces, got %d", resp.StatusCode)
+	}
+	if len(g.deps.Tokens.List()) != 0 {
+		t.Error("a refused token was created anyway")
+	}
+}
+
 func TestCreateTokenRejectsInvalidKind(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)

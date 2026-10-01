@@ -887,7 +887,7 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
+                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
                 kind:
                   type: string
                   description: "`api` (read-only; the default when empty or absent) or `ingest`."

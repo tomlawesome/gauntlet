@@ -3,6 +3,7 @@ package gate
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -42,7 +43,9 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if len(req.Name) == 0 {
+	// Trimmed first because the store trims it: a name of only spaces
+	// would pass an untrimmed check and be issued with no name at all.
+	if strings.TrimSpace(req.Name) == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
