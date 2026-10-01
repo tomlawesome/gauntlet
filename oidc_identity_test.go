@@ -12,12 +12,14 @@ import (
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
+// newTestOIDCStore holds the first admin already: SSO never creates the
+// first account (issue #37), so every provisioning test starts after it.
 func newTestOIDCStore(t *testing.T) *Store {
 	t.Helper()
-	return openTestStore(t)
+	return openTestStoreWithAdmin(t)
 }
 
-func TestFindOrCreateOIDCUserProvisionsFirstUserAsAdmin(t *testing.T) {
+func TestFindOrCreateOIDCUserProvisionsAnOrdinaryUser(t *testing.T) {
 	s := newTestOIDCStore(t)
 
 	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "alice", time.Now())
@@ -27,8 +29,8 @@ func TestFindOrCreateOIDCUserProvisionsFirstUserAsAdmin(t *testing.T) {
 	if !created {
 		t.Error("expected created=true for a brand-new identity")
 	}
-	if u.Role != RoleAdmin {
-		t.Errorf("Role = %q, want admin (first-ever account)", u.Role)
+	if u.Role != RoleUser {
+		t.Errorf("Role = %q, want user (never the admin: the first admin is local)", u.Role)
 	}
 	if u.OIDCIssuer != "https://idp.example" || u.OIDCSubject != "sub-1" {
 		t.Errorf("identity not recorded: %+v", u)
@@ -80,13 +82,13 @@ func TestFindOrCreateOIDCUserReusesExistingIdentity(t *testing.T) {
 	if !second.LastLogin.Equal(later) {
 		t.Errorf("LastLogin = %v, want %v (repeat login should update it)", second.LastLogin, later)
 	}
-	if s.Count() != 1 {
-		t.Errorf("Count() = %d, want 1 -- a repeat login must not create a second account", s.Count())
+	if s.Count() != 2 {
+		t.Errorf("Count() = %d, want 2 (the admin and this one) -- a repeat login must not create a second account", s.Count())
 	}
 }
 
 func TestFindOrCreateOIDCUserNeverAutoLinksByUsernameHint(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 
 	// A local password account already owns the username "alice".
@@ -116,7 +118,7 @@ func TestFindOrCreateOIDCUserNeverAutoLinksByUsernameHint(t *testing.T) {
 }
 
 func TestFindOrCreateOIDCUserSyntheticUsernameIsStableAcrossRetries(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 
 	if _, err := s.Register("bob", "password12345", now); err != nil {
@@ -154,7 +156,7 @@ func TestFindOrCreateOIDCUserEmptyHintGetsSyntheticUsername(t *testing.T) {
 }
 
 func TestFindOrCreateOIDCUserNotGatedByClosedLocalRegistration(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 
 	if _, err := s.Register("first-admin", "password12345", now); err != nil {
@@ -237,7 +239,7 @@ func TestByOIDCIdentityFindsProvisionedUser(t *testing.T) {
 }
 
 func TestLinkOIDCIdentityAttachesToExistingLocalUser(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 	u, err := s.Register("alice", "password12345", now)
 	if err != nil {
@@ -266,7 +268,7 @@ func TestLinkOIDCIdentityAttachesToExistingLocalUser(t *testing.T) {
 }
 
 func TestLinkOIDCIdentityIsIdempotentForSameUser(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 	u, err := s.Register("alice", "password12345", now)
 	if err != nil {
@@ -281,7 +283,7 @@ func TestLinkOIDCIdentityIsIdempotentForSameUser(t *testing.T) {
 }
 
 func TestLinkOIDCIdentityRefusesWhenTakenByDifferentUser(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 	a, err := s.Register("alice", "password12345", now)
 	if err != nil {
@@ -306,6 +308,9 @@ func TestOIDCIdentityPersistsAndReloadsAcrossStoreOpen(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	now := time.Now()
+	if _, err := s1.Register("setup-admin", "setup-admin-password", now); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
 	created, _, err := s1.FindOrCreateOIDCUser("https://idp.example", "sub-1", "alice", now)
 	if err != nil {
 		t.Fatalf("FindOrCreateOIDCUser: %v", err)

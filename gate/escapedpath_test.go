@@ -46,6 +46,7 @@ func newEscapedPathTestServer(t *testing.T, g *Gate) *httptest.Server {
 	})
 	appMux.Handle("/", g.Routes())
 	ts := httptest.NewServer(g.Protect(appMux))
+	testServerGates.Store(ts, g)
 	t.Cleanup(ts.Close)
 	return ts
 }

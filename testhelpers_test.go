@@ -26,6 +26,19 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+// openTestStoreWithAdmin is openTestStore plus the first admin,
+// "setup-admin", for tests about accounts that come after it -- SSO
+// provisioning in particular, which never creates the first account
+// (ErrSetupRequired).
+func openTestStoreWithAdmin(t *testing.T) *Store {
+	t.Helper()
+	s := openTestStore(t)
+	if _, err := s.Register("setup-admin", "setup-admin-password", time.Now()); err != nil {
+		t.Fatalf("registering the first admin: %v", err)
+	}
+	return s
+}
+
 // primeMemory writes data as m's initial document, as if an external
 // process -- or a hand-edited file -- had put it there before a Store
 // first opens against it. Mirrors mikroview's os.WriteFile-before-Open

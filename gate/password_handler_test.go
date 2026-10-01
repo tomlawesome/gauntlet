@@ -10,7 +10,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -116,10 +115,7 @@ func (b *lockedBuffer) String() string {
 func TestChangePasswordStoreFailureIsLogged(t *testing.T) {
 	g := newTestGate(t)
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
-	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	users := openTrackedStore(t, backend)
 	g.deps.Users = users
 	logs := &lockedBuffer{}
 	g.cfg.Log = slog.New(slog.NewTextHandler(logs, nil))

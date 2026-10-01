@@ -333,12 +333,13 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	}
 	c.do(anon, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"nobody", "x"}}, 503, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/users"}, 503, nil)
-	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: credentialsRequest{"admin", adminPass}, noCSRF: true}, 403, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, ""}, noCSRF: true}, 403, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: "not json", bad: true}, 400, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
 
 	admin := c.client()
-	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: credentialsRequest{"admin", adminPass}}, 201, nil)
-	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: credentialsRequest{"second", adminPass}}, 409, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, setupCodeFor(t, g)}}, 201, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"second", adminPass, ""}}, 409, nil)
 	c.do(admin, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
 	if !state.Authenticated || state.Role != "admin" || state.SignedInSince == "" {
 		t.Fatalf("admin session state = %+v", state)
@@ -509,12 +510,16 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
 	u := ts.URL
 
-	// The first sign-in ever is through SSO and becomes the admin.
+	// The first admin is local (newOIDCTestGate registered "setup-admin"
+	// with the setup code); the first SSO sign-in is an ordinary user.
 	first := c.client()
 	contractSSOSignIn(t, c, g, fp, first, u, "/api/auth/oidc/login", "/")
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"setup-admin", "setup-admin-password"}}, 200, nil)
 
 	c.do(c.client(), u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 401, nil)
-	c.do(first, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 201, nil)
+	c.do(first, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 403, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 201, nil)
 
 	// carol links her local account to a second identity.
 	carol := c.client()

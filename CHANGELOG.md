@@ -24,6 +24,27 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The first admin is created only with a one-time setup code the server
+  announces when it starts with no accounts (#37, ADR-0003; owner,
+  2026-10-01). An empty store is not only a fresh install -- a deleted
+  accounts file, a wrong path or a bad restore all start a server with
+  none -- and until now the first visitor took admin. The store makes an
+  80-bit code, keeps only its hash in memory, and hands it to the new
+  `Options.OnSetupCode` or, when that is nil, writes it as one `Warn`
+  line on `Options.Log`; `POST /api/auth/register` now needs it as
+  `setupCode` (`401` when wrong, counted against the address by the
+  login limiter, `429` at the limit) and checks it before hashing the
+  password. It is used up once any account exists and dies with the
+  process: a lost code means restart and read the log. SSO can no
+  longer create the first account: the two `/api/auth/oidc/*` routes
+  answer `503` "setup required" like everything else until the first
+  admin exists, and `FindOrCreateOIDCUser` refuses on an empty store
+  with the new `ErrSetupRequired`. The first admin is local and links
+  SSO afterwards. New: `Store.CheckSetupCode`, `ErrSetupCodeInvalid`,
+  `SetupCodeHandler` and its `SetupCodeFunc` adapter;
+  `Store.Register` is unchanged and is the host-side primitive gate
+  calls after the check. A frontend's first-run screen collects the
+  code and hides the SSO button while `setupRequired` is true.
 - Both stored documents now carry a top-level `version`, and the tokens
   document is an object, `{"version": 1, "tokens": [...]}`, instead of
   a bare list (#29, ADR-0002 decision 1). Documents written by v0.1.0

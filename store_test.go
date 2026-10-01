@@ -271,7 +271,7 @@ func TestSetPasswordLeavesTheOldPasswordWorkingWhenPersistFails(t *testing.T) {
 // with it -- otherwise the account holds a working password while still
 // reporting itself SSO-only.
 func TestSetPasswordMarksTheAccountAsHavingALocalPassword(t *testing.T) {
-	s := openTestStore(t)
+	s := openTestStoreWithAdmin(t)
 
 	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", "sso-user", time.Now())
 	if err != nil || !created {

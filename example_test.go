@@ -13,16 +13,23 @@ import (
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// ExampleOpenStore registers the first account (which always becomes
-// admin -- see Store.Register) over an in-memory backend, then
-// authenticates it once with the right password and once with a wrong
-// one.
+// ExampleOpenStore opens an empty store, which announces a one-time
+// setup code (through Options.OnSetupCode here; through Options.Log
+// when that is nil), checks the code the way a first-run screen's
+// handler would, registers the first account (which always becomes
+// admin -- see Store.Register), then authenticates it once with the
+// right password and once with a wrong one. The code itself is random,
+// so it is checked rather than printed.
 func ExampleOpenStore() {
-	store, err := gauntlet.OpenStore(persist.NewMemory(), gauntlet.Options{})
+	var setupCode string
+	store, err := gauntlet.OpenStore(persist.NewMemory(), gauntlet.Options{
+		OnSetupCode: gauntlet.SetupCodeFunc(func(code string) { setupCode = code }),
+	})
 	if err != nil {
 		fmt.Println("open:", err)
 		return
 	}
+	fmt.Println("setup code accepted:", store.CheckSetupCode(setupCode) == nil)
 
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	admin, err := store.Register("alice", "correct horse battery staple", now)
@@ -42,6 +49,7 @@ func ExampleOpenStore() {
 	fmt.Println("wrong password:", err == gauntlet.ErrInvalidCredentials)
 
 	// Output:
+	// setup code accepted: true
 	// role: admin
 	// authenticated
 	// wrong password: true

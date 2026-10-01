@@ -72,6 +72,7 @@ func TestExemptAddsBeyondBuiltInSet(t *testing.T) {
 	appMux.Handle("/", g.Routes())
 	ts := httptest.NewServer(g.Protect(appMux))
 	defer ts.Close()
+	testServerGates.Store(ts, g)
 
 	registerAdmin(t, ts, "admin", "password123")
 

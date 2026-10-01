@@ -81,7 +81,9 @@ func TestOpenRefusesADocumentWithNoAdmin(t *testing.T) {
 func TestReloadIfStaleIgnoresADocumentWithNoAdmin(t *testing.T) {
 	var logs bytes.Buffer
 	m := persist.NewMemory()
-	s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	// OnSetupCode keeps the empty store's setup-code line out of logs:
+	// this test counts lines about the refused document, nothing else.
+	s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil)), OnSetupCode: SetupCodeFunc(func(string) {})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,9 @@ func TestReloadIfStaleIgnoresADocumentWithNoAdmin(t *testing.T) {
 func TestReloadIfStaleIgnoresADocumentWithTwoAdmins(t *testing.T) {
 	var logs bytes.Buffer
 	m := persist.NewMemory()
-	s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	// OnSetupCode keeps the empty store's setup-code line out of logs:
+	// this test counts lines about the refused document, nothing else.
+	s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil)), OnSetupCode: SetupCodeFunc(func(string) {})})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -171,8 +171,9 @@ func intersects(got, allowed []string) bool {
 // only "this is a real account somewhere at this provider" -- which is
 // no restriction at all. Configuring one of these without a Policy is
 // refused at startup rather than warned about, because the resulting
-// deployment lets any account at that provider register itself as this
-// deployment's first user, i.e. as an admin.
+// deployment lets any account at that provider sign itself in as a
+// user here (the first account, the admin, is local since #37, but a
+// user account is still a way in).
 //
 // This list is a safety net over a general mechanism, not the mechanism
 // itself: Policy is provider-agnostic, and an unlisted public provider

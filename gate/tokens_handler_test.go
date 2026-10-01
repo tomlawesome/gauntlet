@@ -256,7 +256,7 @@ func TestContractTokenRegisteredKinds(t *testing.T) {
 	ts := newTestServer(t, g)
 	u := ts.URL
 	admin := c.client()
-	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: credentialsRequest{Username: "admin", Password: "contract-admin-password"}}, 201, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{Username: "admin", Password: "contract-admin-password", SetupCode: setupCodeFor(t, g)}}, 201, nil)
 
 	var created tokenResponse
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom)}}, 201, &created)

@@ -69,16 +69,16 @@ var exemptPaths = map[string]bool{
 // /api/auth/register creates the permanent admin), so widening it is a
 // decision for this package, not a per-application setting.
 //
-// The OIDC login/callback pair is included symmetrically with register:
-// so the very first-ever login can happen via SSO too (gauntlet.Store.
-// FindOrCreateOIDCUser makes the first OIDC user admin only when the
-// store is empty, docs/design.md §4).
+// The OIDC login/callback pair is not here: SSO never creates the first
+// account (gauntlet.ErrSetupRequired, issue #37, ADR-0003). The first
+// admin is a local account created with the setup code from the
+// server's log, and links SSO afterwards. Before #37 the pair was
+// exempt so the first-ever login could be through SSO; that made the
+// first visitor at the IdP the admin.
 var bootstrapExemptPaths = map[string]bool{
-	"/api/healthz":   true,
-	sessionPath:      true,
-	registerPath:     true,
-	oidcLoginPath:    true,
-	oidcCallbackPath: true,
+	"/api/healthz": true,
+	sessionPath:    true,
+	registerPath:   true,
 }
 
 // secondFactorEnrolPaths are the routes a session may still reach while

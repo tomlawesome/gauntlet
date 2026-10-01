@@ -24,7 +24,7 @@ import (
 // factor that is merely hidden from the predicate -- a pending secret,
 // an unspent recovery code -- still fails this.
 func TestLinkOIDCIdentityClearsEverySecondFactorForANonAdmin(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 	if _, err := s.Register("alice", "password12345", now); err != nil {
 		t.Fatalf("Register alice (the admin): %v", err)
@@ -75,7 +75,7 @@ func TestLinkOIDCIdentityClearsEverySecondFactorForANonAdmin(t *testing.T) {
 // stripped of its factor back to enrolment the moment its linked
 // session ended.
 func TestLinkOIDCIdentityKeepsTheAdminsSecondFactor(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 	admin, err := s.Register("alice", "password12345", now)
 	if err != nil {
@@ -173,7 +173,7 @@ func TestLinkOIDCIdentityRestoresTheSecondFactorWhenPersistFails(t *testing.T) {
 // a password to protect it, and a later confirmation would activate a
 // factor nobody linked.
 func TestLinkOIDCIdentityClearsAPendingEnrolmentToo(t *testing.T) {
-	s := newTestOIDCStore(t)
+	s := openTestStore(t)
 	now := time.Now()
 	if _, err := s.Register("alice", "password12345", now); err != nil {
 		t.Fatalf("Register alice (the admin): %v", err)

@@ -36,7 +36,10 @@ A minimal sketch:
 
 ```go
 store, err := gauntlet.OpenStore(myBackend, gauntlet.Options{Log: logger})
-// ...
+// An empty store logs a one-time setup code (or hands it to
+// Options.OnSetupCode); the first-run screen sends it with the
+// first account's credentials, and gate checks it before Register.
+err = store.CheckSetupCode(typedCode)
 admin, err := store.Register("alice", password, time.Now()) // first account -> admin
 user, err := store.Authenticate("alice", password, time.Now())
 ```

@@ -148,7 +148,7 @@ func TestRegisterRefusesAnEmailShapedUsername(t *testing.T) {
 	ts := newTestServer(t, g)
 
 	client := &http.Client{}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", credentialsRequest{Username: "tom@example.com", Password: "password123"})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "tom@example.com", Password: "password123", SetupCode: setupCodeFor(t, g)})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
