@@ -698,7 +698,8 @@ func (s *Store) CreateUser(username, password string, role Role, now time.Time) 
 }
 
 // DeleteUser removes an account by ID and returns it, so the caller can
-// clean up what belonged to it (sessions, API tokens).
+// clean up what belonged to it (sessions, API tokens). The returned copy
+// has its credentials blanked, as List's are.
 //
 // It refuses to delete the admin. This package holds exactly one admin,
 // and a deployment with none has no way to add accounts, manage tokens,
@@ -739,11 +740,15 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 		return nil, err
 	}
 
-	deleted.PasswordHash = ""
+	// Returned for the caller to log and clean up after; a log line is
+	// no place for the account's credentials. Blanking also stops the
+	// copy sharing slices with the record just removed.
+	deleted.blankCredentials()
 	return &deleted, nil
 }
 
-// TransferAdmin moves the admin role to toUsername, atomically.
+// TransferAdmin moves the admin role to toUsername, atomically, and
+// returns both accounts with their credentials blanked, as List's are.
 //
 // This is the only way to change who administers a deployment. There is
 // deliberately no separate promote or demote: either alone would leave
@@ -796,6 +801,10 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 	if err != nil {
 		return nil, nil, err
 	}
+	// Both copies are for the caller's audit trail, not for credentials
+	// -- and unblanked they would share slices with the live accounts.
+	fromCopy.blankCredentials()
+	toCopy.blankCredentials()
 	return &fromCopy, &toCopy, nil
 }
 
@@ -1448,34 +1457,10 @@ func (s *Store) List() []User {
 	defer s.mu.RUnlock()
 	out := make([]User, 0, len(s.byID))
 	for _, u := range s.byID {
+		// This list leaves the package on its way to an admin-facing
+		// API -- see User.blankCredentials.
 		cp := *u
-		cp.PasswordHash = ""
-		// The reset-code hash is a credential verifier too, and this
-		// list is the one that leaves the package on its way to an
-		// admin-facing API. Blanked for the same reason the password
-		// hash is, so neither can be serialized by accident.
-		cp.ResetCodeHash = ""
-		// TOTPSecret is worse than a verifier hash if it leaked -- it's
-		// the actual shared secret, good for minting valid codes
-		// indefinitely, not just checking one. RecoveryCodes are hashes
-		// only, same category as ResetCodeHash above. Neither belongs
-		// in an admin-facing account list. HasActiveTOTP still answers
-		// truly on the copy (see User.totpSecretBlanked), so a caller
-		// showing who has an authenticator app needs no extra Get.
-		cp.totpSecretBlanked = u.TOTPSecret != ""
-		cp.TOTPSecret = ""
-		cp.RecoveryCodes = nil
-		// Passkeys carries each credential's PublicKey -- not a secret
-		// the way a private key would be, but still credential material
-		// an admin-facing account list has no business serializing,
-		// same stance as the three fields above. Blanked wholesale
-		// rather than per-field: a caller that needs a count must call
-		// a dedicated accessor instead of reading
-		// len(this copy's Passkeys), which always reads zero now.
-		// HasSecondFactor still answers truly on the copy (see
-		// User.passkeysBlanked).
-		cp.passkeysBlanked = len(u.Passkeys) > 0
-		cp.Passkeys = nil
+		cp.blankCredentials()
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })

@@ -748,6 +748,86 @@ func TestDeleteUserUnknownIDReturnsNotFound(t *testing.T) {
 	}
 }
 
+// giveEveryCredential puts every credential-bearing field on userID's
+// account: a password (already there), an outstanding reset code, an
+// active TOTP secret, recovery codes and a passkey.
+func giveEveryCredential(t *testing.T, s *Store, userID string, now time.Time) {
+	t.Helper()
+	if _, _, err := s.IssueResetCode(userID, now); err != nil {
+		t.Fatalf("IssueResetCode: %v", err)
+	}
+	setTOTPForTest(t, s, userID, testTOTPSecret, now, 0)
+	if _, err := s.GenerateRecoveryCodes(userID, now); err != nil {
+		t.Fatalf("GenerateRecoveryCodes: %v", err)
+	}
+	if _, err := s.AddPasskey(userID, testPasskey(1, "")); err != nil {
+		t.Fatalf("AddPasskey: %v", err)
+	}
+}
+
+// requireNoCredentials fails if a copy a Store method handed back still
+// carries any credential, while HasActiveTOTP and HasSecondFactor give
+// the answers the stored account would.
+func requireNoCredentials(t *testing.T, what string, u *User) {
+	t.Helper()
+	for field, present := range map[string]bool{
+		"PasswordHash":  u.PasswordHash != "",
+		"ResetCodeHash": u.ResetCodeHash != "",
+		"TOTPSecret":    u.TOTPSecret != "",
+		"RecoveryCodes": u.RecoveryCodes != nil,
+		"Passkeys":      u.Passkeys != nil,
+	} {
+		if present {
+			t.Errorf("%s returned the account's %s", what, field)
+		}
+	}
+	if !u.HasActiveTOTP() || !u.HasSecondFactor() {
+		t.Errorf("%s: the copy no longer reports the account's second factor", what)
+	}
+}
+
+// TestDeleteUserReturnsNoCredentials: the deleted account is returned
+// for the caller to log and clean up after, so it must carry none of
+// the account's credentials.
+func TestDeleteUserReturnsNoCredentials(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	_, _ = s.Register("alice", "password123", now)
+	bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	giveEveryCredential(t, s, bob.ID, now)
+
+	deleted, err := s.DeleteUser(bob.ID)
+	if err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	requireNoCredentials(t, "DeleteUser", deleted)
+}
+
+// TestTransferAdminReturnsNoCredentials: both accounts TransferAdmin
+// hands back are for the caller's audit trail, so neither may carry
+// credentials.
+func TestTransferAdminReturnsNoCredentials(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	alice, _ := s.Register("alice", "password123", now)
+	bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	giveEveryCredential(t, s, alice.ID, now)
+	giveEveryCredential(t, s, bob.ID, now)
+
+	from, to, err := s.TransferAdmin("bob", now)
+	if err != nil {
+		t.Fatalf("TransferAdmin: %v", err)
+	}
+	requireNoCredentials(t, "TransferAdmin (from)", from)
+	requireNoCredentials(t, "TransferAdmin (to)", to)
+}
+
 // TestDeleteUserLeavesTheAccountInPlaceWhenPersistFails: a deletion that
 // cannot be saved must not remove the account from memory either, or a
 // restart before the next good write would bring it back while the
