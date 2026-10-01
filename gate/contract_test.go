@@ -319,6 +319,7 @@ func contractNoStorage(t *testing.T, c *contractChecker) {
 
 func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	g := newTestGate(t)
+	g.Handle(gauntlet.TokenKindAPI, testProtectedHandler())
 	ts := newTestServer(t, g)
 	u := ts.URL
 	const adminPass = "contract-admin-password"
@@ -361,13 +362,15 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", bobPass}}, 200, nil)
 	c.do(bob, u, call{method: "GET", path: "/api/auth/users"}, 403, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all", noCSRF: true}, 403, nil)
-	bobID, adminID := "", ""
+	bobID, adminID, vicID := "", "", ""
 	for _, s := range users {
 		switch s.Username {
 		case "bob":
 			bobID = s.ID
 		case "admin":
 			adminID = s.ID
+		case "vic":
+			vicID = s.ID
 		}
 	}
 
@@ -384,6 +387,25 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	var confirmed totpConfirmResponse
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, counter)}}, 200, &confirmed)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 409, nil)
+
+	// Confirming on an account that already holds recovery codes (as one
+	// with a passkey does) is the only answer carrying alreadyIssued. The
+	// document's closed bodies only catch a renamed optional field when
+	// the test makes the handler send it.
+	if _, err := g.deps.Users.GenerateRecoveryCodes(vicID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	vic := c.client()
+	c.do(vic, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"vic", bobPass}}, 200, nil)
+	c.do(vic, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 200, &enrolled)
+	if secret, err = gauntlet.DecodeTOTPSecret(enrolled.Secret); err != nil {
+		t.Fatal(err)
+	}
+	confirmed = totpConfirmResponse{}
+	c.do(vic, u, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, counter)}}, 200, &confirmed)
+	if !confirmed.AlreadyIssued {
+		t.Fatalf("confirming with recovery codes already held = %+v, want alreadyIssued", confirmed)
+	}
 
 	var codes recoveryCodesRegenerateResponse
 	c.do(bob, u, call{method: "POST", path: "/api/auth/recovery-codes", body: recoveryCodesRegenerateRequest{Password: bobPass}}, 200, &codes)
@@ -439,7 +461,19 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: ""}}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: strings.Repeat("n", gauntlet.MaxTokenNameLen+1)}}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "sensor", Kind: "ingest", Device: "sensor-1"}}, 201, nil)
-	c.do(admin, u, call{method: "GET", path: "/api/tokens"}, 200, nil)
+	// Used once, so the list carries lastUsedAt (see alreadyIssued above).
+	used := bearerRequest(t, u, "/api/protected", created.Value)
+	_ = used.Body.Close()
+	if used.StatusCode != http.StatusOK {
+		t.Fatalf("using the new token: status %d", used.StatusCode)
+	}
+	var listed struct {
+		Tokens []tokenResponse `json:"tokens"`
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/tokens"}, 200, &listed)
+	if i := slices.IndexFunc(listed.Tokens, func(tok tokenResponse) bool { return tok.ID == created.ID }); i < 0 || listed.Tokens[i].LastUsedAt.IsZero() {
+		t.Fatalf("listed tokens = %+v, want %s with lastUsedAt", listed.Tokens, created.ID)
+	}
 	c.do(bob, u, call{method: "GET", path: "/api/tokens"}, 401, nil)
 	c.do(admin, u, call{method: "DELETE", path: "/api/tokens/" + created.ID}, 200, nil)
 	c.do(admin, u, call{method: "DELETE", path: "/api/tokens/" + created.ID}, 404, nil)
