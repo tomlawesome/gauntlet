@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -824,6 +826,144 @@ func TestStoreStateCloneIsDeep(t *testing.T) {
 	}
 	if !orig.lastLoginSaved["u1"].Equal(now) {
 		t.Error("changing the clone's lastLoginSaved reached the original")
+	}
+}
+
+// timeType is skipped by the reference walk below: time.Time carries
+// a *Location, shared by design and never written through.
+var timeType = reflect.TypeOf(time.Time{})
+
+// fillReferences gives every slice, map and pointer reachable from v --
+// through struct fields, slice elements, map values and pointer
+// targets -- a non-empty value, so a clone that shares any of them can
+// be caught. An unexported reference field cannot be set from here and
+// is reported, so a future one is noticed rather than silently skipped.
+func fillReferences(t *testing.T, path string, v reflect.Value) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Struct:
+		if v.Type() == timeType {
+			return
+		}
+		for i := 0; i < v.NumField(); i++ {
+			f := v.Field(i)
+			name := path + "." + v.Type().Field(i).Name
+			if !f.CanSet() {
+				if hasReferences(f.Type()) {
+					t.Errorf("%s is unexported and holds a slice, map or pointer: this test cannot fill it, so clone's handling of it is unchecked", name)
+				}
+				continue
+			}
+			fillReferences(t, name, f)
+		}
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+		fillReferences(t, path+"[0]", v.Index(0))
+	case reflect.Map:
+		v.Set(reflect.MakeMap(v.Type()))
+		elem := reflect.New(v.Type().Elem()).Elem()
+		fillReferences(t, path+"[key]", elem)
+		v.SetMapIndex(reflect.Zero(v.Type().Key()), elem)
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+		fillReferences(t, "*"+path, v.Elem())
+	}
+}
+
+// hasReferences reports whether typ holds a slice, map or pointer
+// anywhere inside it (time.Time aside), so a struct copy of it would
+// share memory with the original.
+func hasReferences(typ reflect.Type) bool {
+	switch typ.Kind() {
+	case reflect.Slice, reflect.Map, reflect.Pointer:
+		return true
+	case reflect.Struct:
+		if typ == timeType {
+			return false
+		}
+		for i := 0; i < typ.NumField(); i++ {
+			if hasReferences(typ.Field(i).Type) {
+				return true
+			}
+		}
+	case reflect.Array:
+		return hasReferences(typ.Elem())
+	}
+	return false
+}
+
+// sharedReferences lists every slice, map or pointer found at the same
+// place in a and b that points at the same memory.
+func sharedReferences(path string, a, b reflect.Value) []string {
+	var shared []string
+	switch a.Kind() {
+	case reflect.Struct:
+		if a.Type() == timeType {
+			return nil
+		}
+		for i := 0; i < a.NumField(); i++ {
+			shared = append(shared, sharedReferences(path+"."+a.Type().Field(i).Name, a.Field(i), b.Field(i))...)
+		}
+	case reflect.Slice:
+		if a.Len() > 0 && b.Len() > 0 && a.UnsafePointer() == b.UnsafePointer() {
+			shared = append(shared, path)
+		}
+		for i := 0; i < min(a.Len(), b.Len()); i++ {
+			shared = append(shared, sharedReferences(fmt.Sprintf("%s[%d]", path, i), a.Index(i), b.Index(i))...)
+		}
+	case reflect.Map:
+		if !a.IsNil() && !b.IsNil() && a.UnsafePointer() == b.UnsafePointer() {
+			shared = append(shared, path)
+		}
+		for _, key := range a.MapKeys() {
+			if bv := b.MapIndex(key); bv.IsValid() {
+				shared = append(shared, sharedReferences(fmt.Sprintf("%s[%v]", path, key), a.MapIndex(key), bv)...)
+			}
+		}
+	case reflect.Pointer:
+		if !a.IsNil() && !b.IsNil() {
+			if a.UnsafePointer() == b.UnsafePointer() {
+				shared = append(shared, path)
+			} else {
+				shared = append(shared, sharedReferences("*"+path, a.Elem(), b.Elem())...)
+			}
+		}
+	}
+	return shared
+}
+
+// TestCloneSharesNothingByReflection walks every field of the types the
+// replay loop copies, rather than naming them by hand as
+// TestStoreStateCloneIsDeep does: a slice, map or pointer added to User
+// or Passkey that clone forgets fails here, and so does one added to
+// RecoveryCode or Token, which have no clone of their own because a
+// struct copy of them is a full copy -- true only while they hold no
+// references at all.
+func TestCloneSharesNothingByReflection(t *testing.T) {
+	for _, typ := range []reflect.Type{reflect.TypeOf(RecoveryCode{}), reflect.TypeOf(Token{})} {
+		if hasReferences(typ) {
+			t.Errorf("%s holds a slice, map or pointer: a struct copy of it is no longer a full copy, so User.clone or tokenState.clone must copy it by hand", typ)
+		}
+	}
+
+	var u User
+	fillReferences(t, "User", reflect.ValueOf(&u).Elem())
+	if shared := sharedReferences("User", reflect.ValueOf(&u).Elem(), reflect.ValueOf(u.clone()).Elem()); len(shared) > 0 {
+		t.Errorf("User.clone shares memory with the original at %v", shared)
+	}
+
+	var pk Passkey
+	fillReferences(t, "Passkey", reflect.ValueOf(&pk).Elem())
+	cp := pk.clone()
+	if shared := sharedReferences("Passkey", reflect.ValueOf(&pk).Elem(), reflect.ValueOf(&cp).Elem()); len(shared) > 0 {
+		t.Errorf("Passkey.clone shares memory with the original at %v", shared)
+	}
+
+	// The walk itself must see sharing when there is some, or a passing
+	// run above proves nothing: a plain struct copy shares every slice.
+	shallow := u
+	if shared := sharedReferences("User", reflect.ValueOf(&u).Elem(), reflect.ValueOf(&shallow).Elem()); len(shared) == 0 {
+		t.Error("the reference walk found nothing shared between a User and its struct copy, so it cannot catch a shallow clone")
 	}
 }
 
