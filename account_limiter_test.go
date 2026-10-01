@@ -358,3 +358,106 @@ func TestUnsavedLockoutRetriesAreSpacedOut(t *testing.T) {
 		t.Fatalf("expected a second retry one interval after the first, got %d saves", got)
 	}
 }
+
+// A new password -- set by its owner, by an admin through SetPassword,
+// or replaced by an admin's reset code -- ends any login lockout on the
+// account, in the record and in the limiter's own count: the guesses
+// were against the old password, and whoever holds the new one (or the
+// reset code) signs in at once.
+func TestPasswordChangeEndsTheLoginLockout(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	changes := map[string]func(t *testing.T, s *Store, id string, at time.Time) string{
+		"SetPassword": func(t *testing.T, s *Store, id string, at time.Time) string {
+			if err := s.SetPassword("alice", "a-brand-new-password", at); err != nil {
+				t.Fatal(err)
+			}
+			return "a-brand-new-password"
+		},
+		"IssueResetCode": func(t *testing.T, s *Store, id string, at time.Time) string {
+			_, code, err := s.IssueResetCode(id, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return code
+		},
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			s, id := openLockoutStore(t, persist.NewMemory())
+			l := mustNewLoginLimiter(t, 3, time.Hour)
+			for range 3 {
+				l.ReserveAccount(s, id, now)
+			}
+			if l.ReserveAccount(s, id, now.Add(time.Second)) {
+				t.Fatal("test setup: expected the account to be locked")
+			}
+			if s.LoginLockedUntil(id).IsZero() {
+				t.Fatal("test setup: expected the lockout on the record")
+			}
+
+			secret := change(t, s, id, now.Add(time.Minute))
+			if got := s.LoginLockedUntil(id); !got.IsZero() {
+				t.Errorf("the password change left the record locked until %v", got)
+			}
+			at := now.Add(2 * time.Minute)
+			if !l.ReserveAccount(s, id, at) {
+				t.Fatal("the limiter still refused the account after its password was changed")
+			}
+			if _, err := s.Authenticate("alice", secret, at); err != nil {
+				t.Fatalf("signing in with the new credential: %v", err)
+			}
+			l.ReleaseAccount(s, id, at)
+		})
+	}
+}
+
+// A lockout still waiting to be saved (its first save failed) belongs to
+// the old password too: a password change drops it, and no retry saves
+// it over the change afterwards.
+func TestPasswordChangeDropsAnUnsavedLockout(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := mustNewLoginLimiter(t, 3, time.Hour)
+
+	b.fail.Store(true)
+	for range 3 {
+		l.ReserveAccount(s, id, now)
+	}
+	b.fail.Store(false)
+	if err := s.SetPassword("alice", "a-brand-new-password", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !l.ReserveAccount(s, id, now.Add(time.Minute+lockoutRetryInterval)) {
+		t.Fatal("the limiter refused the account after its password was changed")
+	}
+	if got := s.LoginLockedUntil(id); !got.IsZero() {
+		t.Fatalf("a lockout from before the password change was saved after it, until %v", got)
+	}
+}
+
+// A lockout whose save lands just after a password change -- decided
+// before it, written after it -- is on the record but counts guesses at
+// the old password, so it is treated as ended and cleared.
+func TestLockoutFromBeforeAPasswordChangeIsCleared(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	window := time.Hour
+	l := mustNewLoginLimiter(t, 3, window)
+	for range 3 {
+		l.ReserveAccount(s, id, now)
+	}
+	if err := s.SetPassword("alice", "a-brand-new-password", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// The lockout's save landing after the change's write.
+	if err := s.SetLoginLockedUntil(id, now.Add(window)); err != nil {
+		t.Fatal(err)
+	}
+	if !l.ReserveAccount(s, id, now.Add(2*time.Minute)) {
+		t.Fatal("a lockout over guesses at the old password refused the account after the change")
+	}
+	if got := s.LoginLockedUntil(id); !got.IsZero() {
+		t.Errorf("expected the stale lockout cleared from the record, got %v", got)
+	}
+}

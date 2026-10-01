@@ -1425,6 +1425,11 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		u.ResetCodeHash = ""
 		u.ResetCodeExpiresAt = time.Time{}
 		u.MustChangePassword = false
+		// And it ends any login lockout: the guesses that caused it were
+		// at the old password, and whoever set the new one should be
+		// able to use it at once. The limiter drops its own count of
+		// those guesses by PasswordChangedAt (see lockoutRecord).
+		u.LoginLockedUntil = time.Time{}
 		return nil
 	})
 }

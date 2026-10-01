@@ -181,6 +181,11 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		u.ResetCodeExpiresAt = now.Add(ResetCodeTTL)
 		u.MustChangePassword = true
 		u.PasswordChangedAt = now
+		// The reset code is the account's password now, so a lockout
+		// earned by guessing at the old one ends here, as in
+		// SetPassword: otherwise the owner could not use the code until
+		// it ran out.
+		u.LoginLockedUntil = time.Time{}
 		issued = *u
 		return nil
 	})

@@ -97,6 +97,10 @@ All notable changes to this project are documented in this file.
     refused attempt on that account (at most every 30 seconds), so a
     backend that recovers inside the lockout ends up holding it and a
     restart no longer lets more guesses through.
+  - Setting a new password (`SetPassword`) or issuing a reset code
+    (`IssueResetCode`) ends any login lockout on the account, so its
+    owner can sign in with the new password or the code at once. The
+    limiter stops counting guesses made before the change.
   - Internal tidying in `gate` with no change on the wire, plus test and
     documentation fixes.
 

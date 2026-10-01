@@ -125,7 +125,8 @@ type User struct {
 	// when none is in force. Written by a LoginLimiter only as a lockout
 	// begins or clears, never per failed attempt (see ReserveAccount), so
 	// a lockout survives a restart without every wrong guess becoming a
-	// disk write.
+	// disk write. A new password (SetPassword, IssueResetCode) clears it
+	// in the same write.
 	LoginLockedUntil time.Time `json:"loginLockedUntil,omitzero"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery

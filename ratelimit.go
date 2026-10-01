@@ -192,11 +192,17 @@ func (l *LoginLimiter) pruneLocked(key string, now time.Time) []time.Time {
 
 // pruneIn is pruneLocked for either map.
 func (l *LoginLimiter) pruneIn(m map[string][]time.Time, key string, now time.Time) []time.Time {
+	return dropBefore(m, key, now.Add(-l.window))
+}
+
+// dropBefore drops key's attempts in m from before cutoff and returns
+// what remains, leaving no entry behind for a key with nothing left
+// (see pruneLocked).
+func dropBefore(m map[string][]time.Time, key string, cutoff time.Time) []time.Time {
 	entries, ok := m[key]
 	if !ok {
 		return nil
 	}
-	cutoff := now.Add(-l.window)
 	kept := entries[:0]
 	for _, t := range entries {
 		if !t.Before(cutoff) {
@@ -260,6 +266,13 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // the attempts that caused it. The first attempt after it ends clears
 // it. nil keeps the lockout in memory only.
 //
+// A password change ends the lockout: guesses at the old password stop
+// counting from the moment it changed. The store clears the record in
+// the same write (SetPassword, IssueResetCode); this limiter drops its
+// own count of those guesses, any lockout over them it has yet to save,
+// and one whose save landed just after the change. That takes lockouts
+// being the *Store itself (see lockoutRecorder).
+//
 // A lockout that cannot be saved is logged, and still enforced in
 // memory: the attempt it would refuse is refused either way. It is also
 // saved again, by a refused attempt on the account while it is in
@@ -267,11 +280,18 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // recovers inside the window ends up holding it, and a restart after
 // that is still locked out.
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool {
-	var persisted time.Time
+	var persisted, changed time.Time
 	if lockouts != nil {
-		persisted = lockouts.LoginLockedUntil(accountID)
+		persisted, changed = readLockout(lockouts, accountID)
 	}
 	wasPersisted := !persisted.IsZero()
+	// The lockout counts the guesses in the window before its end. If
+	// that window began before the password changed, they were guesses
+	// at the old password: the lockout has ended, and is cleared below
+	// like any other that has.
+	if wasPersisted && persisted.Add(-l.window).Before(changed) {
+		persisted = time.Time{}
+	}
 	// A lockout this limiter set never ends more than one window after
 	// the attempt that set it (below: entries[0].Add(l.window)). One
 	// further out than that is either a clock that was ahead when it was
@@ -296,7 +316,16 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		return false
 	}
 	key := loginBucket + accountID
-	entries := l.pruneIn(l.accounts, key, now)
+	cutoff := now.Add(-l.window)
+	if changed.After(cutoff) {
+		cutoff = changed // guesses at the old password do not count
+	}
+	entries := dropBefore(l.accounts, key, cutoff)
+	if p, ok := l.wantLockout[accountID]; ok && !p.until.IsZero() && p.until.Add(-l.window).Before(changed) {
+		// An unsaved lockout over guesses at the old password: dropped,
+		// so no retry saves it over the change.
+		delete(l.wantLockout, accountID)
+	}
 	if len(entries) >= l.threshold {
 		// Refused by the in-memory count. If the lockout that count
 		// stands for never reached the record, this is when it is tried
