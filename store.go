@@ -400,13 +400,15 @@ func (s *Store) mutateBestEffortLocked(op func(*storeState) error) {
 // tests assigns to it.
 var reloadTimeout = 5 * time.Second
 
-// saveTimeout is the write-side counterpart: it bounds each save the
-// replay loop makes (mutate.go, Store and TokenStore alike), which runs
+// saveTimeout is the write-side counterpart: it bounds one write as a
+// whole -- every save the replay loop makes for it and every reload
+// between them (mutate.go, Store and TokenStore alike) -- which runs
 // while the store's write lock is held. Without it a backend that stops
 // answering mid-save would hold that lock, and with it every login and
-// every signed-in request, until the process was restarted. A save that
-// overruns fails like any other save failure: nothing is changed and
-// the caller gets the error.
+// every signed-in request, until the process was restarted; and one
+// that merely answers slowly and conflicts every time would hold it for
+// five saves and four reloads. A write that overruns fails like any
+// other save failure: nothing is changed and the caller gets the error.
 //
 // That protection only reaches a backend that honours ctx. The shipped
 // file backends (persist/file.go's Save, and EncryptedFileBackend on top

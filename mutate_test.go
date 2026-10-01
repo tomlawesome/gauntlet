@@ -188,6 +188,97 @@ func TestMutateGivesUpAfterFiveConflictsAndChangesNothing(t *testing.T) {
 	}
 }
 
+// slowConflictingBackend answers every Save and Load after delay, and
+// refuses every Save with ErrConflict -- a slow backend another process
+// keeps writing to. With honourCtx it returns early when the caller's
+// context ends, as a database driver does; without it, it sleeps the
+// full delay regardless, as the file backends do.
+type slowConflictingBackend struct {
+	*persist.Memory
+	delay     time.Duration
+	honourCtx bool
+	saves     int
+}
+
+func (b *slowConflictingBackend) wait(ctx context.Context) error {
+	if !b.honourCtx {
+		time.Sleep(b.delay)
+		return nil
+	}
+	select {
+	case <-time.After(b.delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *slowConflictingBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
+	b.saves++
+	if err := b.wait(ctx); err != nil {
+		return 0, err
+	}
+	return 0, persist.ErrConflict
+}
+
+func (b *slowConflictingBackend) Load(ctx context.Context) (persist.Snapshot, error) {
+	if err := b.wait(ctx); err != nil {
+		return persist.Snapshot{}, err
+	}
+	return b.Memory.Load(ctx)
+}
+
+// TestMutateBoundsTheWholeWriteByOneDeadline: each save and each reload
+// used to get its own saveTimeout, so a slow backend that conflicted
+// every time held the write lock -- and with it every read and login --
+// for up to five saves and four reloads. The whole write now shares one
+// deadline: it fails after far fewer attempts than maxSaveAttempts, in
+// about saveTimeout, whether or not the backend honours the context.
+func TestMutateBoundsTheWholeWriteByOneDeadline(t *testing.T) {
+	restore := saveTimeout
+	saveTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { saveTimeout = restore })
+
+	for _, honourCtx := range []bool{true, false} {
+		m := persist.NewMemory()
+		plain, err := OpenStore(m, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := plain.Register("alice", "password123", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		b := &slowConflictingBackend{Memory: m, delay: 60 * time.Millisecond, honourCtx: honourCtx}
+		s, err := OpenStore(b, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		started := time.Now()
+		_, err = s.CreateUser("bob", "password456", RoleUser, time.Now())
+		elapsed := time.Since(started)
+		if err == nil {
+			t.Fatalf("honourCtx %v: a write against a backend that always conflicts succeeded", honourCtx)
+		}
+		if errors.Is(err, ErrSaveConflict) {
+			t.Errorf("honourCtx %v: the write ran all %d attempts (%v): %v", honourCtx, maxSaveAttempts, elapsed, err)
+		}
+		// Unbounded, this is five saves and four reloads at 60ms each.
+		// Within one 100ms deadline at most two saves fit (save, reload,
+		// save -- the last one an overrun of a backend that ignores
+		// ctx). The count is what is asserted, not the clock: a loaded
+		// host stretches every sleep, which can only make fewer saves
+		// fit, never more, where a wall-clock bound would flake.
+		t.Logf("honourCtx %v: %d saves in %v: %v", honourCtx, b.saves, elapsed, err)
+		if b.saves > 2 {
+			t.Errorf("honourCtx %v: saves = %d, want at most 2 within one deadline", honourCtx, b.saves)
+		}
+		if storeHas(s, "bob") {
+			t.Errorf("honourCtx %v: bob is in memory after a write that failed", honourCtx)
+		}
+	}
+}
+
 // TestMutateOpErrorChangesNothing: an op that changes the copy and then
 // fails leaves the store untouched and never reaches the backend -- the
 // copy is dropped, and there is no rollback to get wrong.

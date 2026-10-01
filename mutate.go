@@ -181,6 +181,14 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 		return next, version, nil // persistence not configured: memory only
 	}
 
+	// One deadline for the whole loop -- every save and every reload one
+	// write makes -- not one per call: the caller holds the store's
+	// write lock throughout, and a slow backend that conflicts on every
+	// attempt would otherwise hold it for maxSaveAttempts saves plus the
+	// reloads between them, blocking every read and login for that long.
+	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+	defer cancel()
+
 	for attempt := 1; ; attempt++ {
 		if d.check != nil {
 			if err := d.check(next); err != nil {
@@ -191,7 +199,7 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 		if err != nil {
 			return nil, 0, fmt.Errorf("encoding %s for persistence failed: %w", d.what, err)
 		}
-		saved, err := d.save(data, version)
+		saved, err := d.backend.Save(ctx, data, version)
 		if err == nil {
 			return next, saved, nil
 		}
@@ -201,13 +209,19 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 		if attempt == maxSaveAttempts {
 			return nil, 0, fmt.Errorf("writing %s to %s after %d attempts: %w", d.what, d.backend.Describe(), attempt, ErrSaveConflict)
 		}
+		// Checked here as well as inside each call, for a backend that
+		// does not honour ctx (the file backends; see saveTimeout): it
+		// can overrun one call, but not go round again.
+		if err := ctx.Err(); err != nil {
+			return nil, 0, fmt.Errorf("writing %s to %s ran out of time after %d attempts: %w", d.what, d.backend.Describe(), attempt, err)
+		}
 
 		// Another process wrote first. Its document is now the truth:
 		// load it, apply this change to it, and try again with its
 		// version. A document this process would refuse to open is
 		// refused here too, loudly -- writing on top of it is exactly
 		// what this loop exists to stop.
-		fresh, freshVersion, err := d.load()
+		fresh, freshVersion, err := d.load(ctx)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -223,21 +237,12 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 	}
 }
 
-// save is one Save call under saveTimeout.
-func (d document[S]) save(data []byte, version int64) (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
-	defer cancel()
-	return d.backend.Save(ctx, data, version)
-}
-
 // load reads the document another process just wrote and turns it into
-// a state, under reloadTimeout. A document that has been removed fails
-// the write with ErrDocumentRemoved: the store never recreates it from
-// memory (see ErrDocumentRemoved), and reloadIfStale keeps memory for
-// the same reason.
-func (d document[S]) load() (*S, int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), reloadTimeout)
-	defer cancel()
+// a state, under the loop's deadline. A document that has been removed
+// fails the write with ErrDocumentRemoved: the store never recreates it
+// from memory (see ErrDocumentRemoved), and reloadIfStale keeps memory
+// for the same reason.
+func (d document[S]) load(ctx context.Context) (*S, int64, error) {
 	snap, err := d.backend.Load(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reloading %s from %s after a conflicting write failed: %w", d.what, d.backend.Describe(), err)

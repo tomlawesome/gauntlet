@@ -23,7 +23,10 @@ All notable changes to this project are documented in this file.
   instead of keeping the account or token in memory as valid.
 - After five conflicting writes in a row -- a script writing in a loop,
   not an ordinary CLI command -- a write gives up with the new
-  `ErrSaveConflict` and changes nothing; the caller can try again.
+  `ErrSaveConflict` and changes nothing; the caller can try again. The
+  whole write, retries and reloads included, is held to one five-second
+  limit (the limit one save had before), since it runs while every
+  login and signed-in request on that store waits.
   Checks such as "registration is still open", "one admin only",
   "username free" and "recovery codes already issued" are made again
   against the document another process saved, so a retried write never
