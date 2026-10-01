@@ -5,144 +5,130 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// TestMikroviewUsersJSONFixtureRoundTripsByteIdentical is gauntlet issue
-// #3's (G2) and #5's (G4) done-when: a mikroview users.json-shaped
-// fixture, built here rather than copied from mikroview, with every field
-// populated including every second-factor kind, loads, saves and reloads
-// byte-identical.
+// accountsFixture is a version-1 accounts document, written out by hand
+// and frozen: it is the stored format as birdcage and mikroview hold it
+// on disk, not what this build's structs happen to produce. A renamed
+// or dropped JSON tag changes what loading it and saving it back
+// writes, so TestMikroviewUsersJSONFixtureRoundTripsByteIdentical fails
+// -- which a fixture marshalled from the structs themselves, as this
+// one was before #29, could never do. Change it only alongside a new
+// document version.
 //
-// The fixture is built from gauntlet's own User/RecoveryCode/Passkey
-// types -- copied field-for-field, JSON tag-for-tag, from mikroview's
-// internal/auth/store.go:81 (docs/design.md §1.3) -- never from real
-// user data. It covers every field category a whole-document store must
-// round-trip without dropping anything, per the design's Summary: an
-// admin with every second-factor field populated (TOTP, two recovery
-// codes, a passkey, and an outstanding admin-issued reset code -- data
-// shape only; a real account would not carry all of these live at
+// Mikroview users.json-shaped, never real user data: an admin with
+// every field populated, including every second-factor kind (TOTP, two
+// recovery codes, a passkey, an outstanding reset code, a lockout --
+// data shape only; a real account would not carry all of these live at
 // once), a plain local user, an SSO-linked account with no local
 // password, and a roleless legacy account (loads as-is; see
-// TestOpenLeavesAnEmptyRoleFailingClosed). Every password/code hash
-// below is produced by this package's own HashPassword on a fixed test
-// string -- a real Argon2id hash, but of a value invented for this
-// test, never a secret from anywhere real.
+// TestOpenLeavesAnEmptyRoleFailingClosed). The hashes are placeholders,
+// not hashes of anything: nothing here authenticates. Users are in the
+// username order a save writes them in.
+const accountsFixture = `{
+  "version": 1,
+  "users": [
+    {
+      "id": "admin-id-0001",
+      "username": "admin",
+      "passwordHash": "$argon2id$fixture-admin-password-hash",
+      "role": "admin",
+      "createdAt": "2026-01-02T03:04:05Z",
+      "lastLogin": "2026-01-02T04:04:05Z",
+      "passwordChangedAt": "2026-01-02T03:04:05Z",
+      "hasLocalPassword": true,
+      "roleChangedAt": "2026-01-02T03:05:05Z",
+      "resetCodeHash": "$argon2id$fixture-reset-code-hash",
+      "resetCodeExpiresAt": "2026-01-03T03:04:05Z",
+      "mustChangePassword": true,
+      "loginLockedUntil": "2026-01-02T03:19:05Z",
+      "totpSecret": "JBSWY3DPEHPK3PXP",
+      "totpConfirmedAt": "2026-01-02T03:04:05Z",
+      "totpLastCounter": 99,
+      "recoveryCodes": [
+        {
+          "hash": "fixture-recovery-hash-a"
+        },
+        {
+          "hash": "fixture-recovery-hash-b",
+          "usedAt": "2026-01-02T03:04:05Z"
+        }
+      ],
+      "passkeys": [
+        {
+          "id": "Zml4dHVyZS1jcmVkZW50aWFsLWlk",
+          "publicKey": "Zml4dHVyZS1wdWJsaWMta2V5LWJ5dGVz",
+          "signCount": 7,
+          "transports": [
+            "usb",
+            "nfc"
+          ],
+          "flags": {
+            "userPresent": true,
+            "userVerified": true,
+            "backupEligible": true,
+            "backupState": true
+          },
+          "rpId": "example.test",
+          "name": "YubiKey",
+          "createdAt": "2026-01-02T03:04:05Z",
+          "lastUsedAt": "2026-01-02T05:04:05Z"
+        }
+      ]
+    },
+    {
+      "id": "bob-id-0002",
+      "username": "bob",
+      "passwordHash": "$argon2id$fixture-bob-password-hash",
+      "role": "user",
+      "createdAt": "2026-01-02T03:04:05Z",
+      "hasLocalPassword": true
+    },
+    {
+      "id": "sso-id-0003",
+      "username": "carol@example.com",
+      "passwordHash": "$argon2id$fixture-unmatchable-hash",
+      "role": "viewer",
+      "createdAt": "2026-01-02T03:04:05Z",
+      "lastLogin": "2026-01-02T03:04:05Z",
+      "oidcIssuer": "https://idp.example",
+      "oidcSubject": "sub-carol",
+      "hasLocalPassword": false
+    },
+    {
+      "id": "roleless-id-0004",
+      "username": "legacy",
+      "passwordHash": "$argon2id$fixture-bob-password-hash",
+      "role": "",
+      "createdAt": "2026-01-02T03:04:05Z",
+      "hasLocalPassword": false
+    }
+  ]
+}`
+
+// TestMikroviewUsersJSONFixtureRoundTripsByteIdentical is gauntlet issue
+// #3's (G2) and #5's (G4) done-when, held to a frozen fixture since #29:
+// the accounts document above loads, saves and reloads byte-identical,
+// so no field is dropped or renamed on the way through.
 func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
-	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-
-	adminHash, err := HashPassword("fixture-admin-password-does-not-exist")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobHash, err := HashPassword("fixture-bob-password-does-not-exist")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Stands in for unmatchablePasswordHash's output on an SSO-only
-	// account -- a real hash of a value nobody will ever type.
-	ssoHash, err := HashPassword(newID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Stands in for IssueResetCode's ResetCodeHash -- a real Argon2id
-	// hash of a fixture code nobody will ever type.
-	resetHash, err := HashPassword("FIXTURERESETCODE0000")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// fixture.Users is already in the username-sorted order
-	// mutate writes ("admin" < "bob" < "carol@example.com" <
-	// "legacy"), so a correct load-then-save is a no-op on the bytes.
-	fixture := storeFile{
-		Users: []*User{
-			{
-				ID:                 "admin-id-0001",
-				Username:           "admin",
-				PasswordHash:       adminHash,
-				Role:               RoleAdmin,
-				CreatedAt:          now,
-				LastLogin:          now.Add(time.Hour),
-				PasswordChangedAt:  now,
-				HasLocalPassword:   true,
-				ResetCodeHash:      resetHash,
-				ResetCodeExpiresAt: now.Add(ResetCodeTTL),
-				MustChangePassword: true,
-				TOTPSecret:         "JBSWY3DPEHPK3PXP",
-				TOTPConfirmedAt:    now,
-				TOTPLastCounter:    99,
-				RecoveryCodes: []RecoveryCode{
-					{Hash: "fixture-recovery-hash-a"},
-					{Hash: "fixture-recovery-hash-b", UsedAt: now},
-				},
-				Passkeys: []Passkey{
-					{
-						ID:         []byte("fixture-credential-id"),
-						PublicKey:  []byte("fixture-public-key-bytes"),
-						SignCount:  7,
-						Transports: []string{"usb", "nfc"},
-						Flags: PasskeyFlags{
-							UserPresent:    true,
-							UserVerified:   true,
-							BackupEligible: true,
-							BackupState:    false,
-						},
-						RPID:       "example.test",
-						Name:       "YubiKey",
-						CreatedAt:  now,
-						LastUsedAt: now.Add(2 * time.Hour),
-					},
-				},
-			},
-			{
-				ID:               "bob-id-0002",
-				Username:         "bob",
-				PasswordHash:     bobHash,
-				Role:             RoleUser,
-				CreatedAt:        now,
-				HasLocalPassword: true,
-			},
-			{
-				ID:               "sso-id-0003",
-				Username:         "carol@example.com",
-				PasswordHash:     ssoHash,
-				Role:             RoleViewer,
-				CreatedAt:        now,
-				LastLogin:        now,
-				OIDCIssuer:       "https://idp.example",
-				OIDCSubject:      "sub-carol",
-				HasLocalPassword: false,
-			},
-			{
-				ID:           "roleless-id-0004",
-				Username:     "legacy",
-				PasswordHash: bobHash,
-				// Role deliberately empty: a hand-edited or pre-roles
-				// document, which must load as-is and fail closed.
-				CreatedAt: now,
-			},
-		},
-	}
-
-	original, err := json.MarshalIndent(fixture, "", "  ")
-	if err != nil {
-		t.Fatalf("marshalling fixture: %v", err)
-	}
+	assertFixtureCoversEveryField(t, accountsFixture,
+		reflect.TypeFor[storeFile](), reflect.TypeFor[User](), reflect.TypeFor[RecoveryCode](),
+		reflect.TypeFor[Passkey](), reflect.TypeFor[PasskeyFlags]())
 
 	m := persist.NewMemory()
-	primeMemory(t, m, string(original))
+	primeMemory(t, m, accountsFixture)
 
-	// Load.
 	s1, err := OpenStore(m, Options{})
 	if err != nil {
 		t.Fatalf("OpenStore (load): %v", err)
 	}
-	if s1.Count() != len(fixture.Users) {
-		t.Fatalf("Count() = %d, want %d", s1.Count(), len(fixture.Users))
+	if s1.Count() != 4 {
+		t.Fatalf("Count() = %d, want 4", s1.Count())
 	}
 
 	// Save: the same whole-document rewrite every real mutation goes
@@ -150,33 +136,72 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if err := s1.mutate(func(*storeState) error { return nil }); err != nil {
 		t.Fatalf("mutate: %v", err)
 	}
-
 	snap, err := m.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load after save: %v", err)
 	}
-	if !bytes.Equal(snap.Payload, original) {
-		t.Errorf("saved document differs from the original fixture:\n--- original ---\n%s\n--- saved ---\n%s",
-			original, snap.Payload)
+	if string(snap.Payload) != accountsFixture {
+		t.Errorf("saved document differs from the frozen fixture:\n--- fixture ---\n%s\n--- saved ---\n%s",
+			accountsFixture, snap.Payload)
 	}
 
-	// Reload: a second Store opened fresh against the now-saved document
-	// must see the identical set of accounts, field for field.
+	// Reload: a second Store opened fresh against the saved document
+	// saves it back unchanged too.
 	s2, err := OpenStore(m, Options{})
 	if err != nil {
 		t.Fatalf("OpenStore (reload): %v", err)
 	}
-	if s2.Count() != len(fixture.Users) {
-		t.Fatalf("reloaded Count() = %d, want %d", s2.Count(), len(fixture.Users))
+	resaved, err := encodeAccounts(&s2.storeState)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range fixture.Users {
-		got, ok := s2.Get(want.ID)
-		if !ok {
-			t.Errorf("reloaded store is missing user %q", want.ID)
-			continue
+	if !bytes.Equal(resaved, snap.Payload) {
+		t.Errorf("reloaded document differs from the saved one:\n--- saved ---\n%s\n--- reloaded ---\n%s",
+			snap.Payload, resaved)
+	}
+}
+
+// assertFixtureCoversEveryField fails unless every JSON field of every
+// type given appears somewhere in fixture -- so a field added to User
+// or Token without being added to its frozen fixture is caught here,
+// rather than going unchecked by the round trip.
+func assertFixtureCoversEveryField(t *testing.T, fixture string, types ...reflect.Type) {
+	t.Helper()
+	var doc any
+	if err := json.Unmarshal([]byte(fixture), &doc); err != nil {
+		t.Fatalf("fixture does not parse: %v", err)
+	}
+	seen := map[string]bool{}
+	var walk func(any)
+	walk = func(v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			for k, child := range v {
+				seen[k] = true
+				walk(child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+			}
 		}
-		if !reflect.DeepEqual(*got, *want) {
-			t.Errorf("reloaded user %q differs:\ngot  %+v\nwant %+v", want.ID, *got, *want)
+	}
+	walk(doc)
+
+	var missing []string
+	for _, typ := range types {
+		for f := range typ.Fields() {
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if !f.IsExported() || name == "" || name == "-" {
+				continue
+			}
+			if !seen[name] {
+				missing = append(missing, typ.Name()+"."+f.Name+" ("+name+")")
+			}
 		}
+	}
+	slices.Sort(missing)
+	if len(missing) > 0 {
+		t.Errorf("the frozen fixture does not populate: %s", strings.Join(missing, ", "))
 	}
 }

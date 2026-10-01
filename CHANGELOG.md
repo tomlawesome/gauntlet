@@ -24,6 +24,19 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Both stored documents now carry a top-level `version`, and the tokens
+  document is an object, `{"version": 1, "tokens": [...]}`, instead of
+  a bare list (#29, ADR-0002 decision 1). Documents written by v0.1.0
+  open unchanged, as version 1, and are written in the new shape on
+  their next save; v0.1.0 cannot open a tokens document once this
+  version has saved it, so keep a copy before upgrading if a rollback
+  is possible. A document with a version newer than the running build
+  reads is refused at startup with an error naming both versions, is
+  not applied (and is logged once) when it appears under a running
+  server, and is never saved over by a write -- so a rolled-back build
+  cannot load it and silently drop what only the newer build knows,
+  such as TOTP secrets or passkeys. There is no migration code yet; it
+  is added with the first format change that needs one.
 - A write from the CLI and one from the running server at the same
   moment no longer lose one of them (issue #21). Before, the second
   save to land wrote its whole accounts or tokens document on top of

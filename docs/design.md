@@ -22,8 +22,11 @@ Where this document says "mikroview does X", that is where it was seen.
   satisfy it with no adapter; logging is `*slog.Logger`, which is what
   mikroview's `logging.New` already returns; eviction is a pure function
   and goes in as `gauntlet/internal/evict`, not an interface.
-- The persisted documents are mikroview's, byte for byte: the same
-  `User` and `Token` JSON, the same whole-document shape. Because a
+- The persisted documents hold mikroview's `User` and `Token` JSON,
+  byte for byte, in the same whole-document shape, plus a top-level
+  `version` (#29, ADR-0002 decision 1): mikroview's documents load as
+  version 1 unchanged, and a document newer than the running build is
+  refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
   `User` must carry *every* field mikroview stores today -- including
   TOTP, recovery codes, reset codes and passkeys -- or mikroview's move
@@ -550,11 +553,15 @@ Rewritten route-by-route from the table in §2.1, as [ADR-0003](https://gitlab.t
 Not done in this work; recorded so the API above is checked against it.
 
 - `internal/auth` → `import auth "github.com/tomlawesome/gauntlet"`. The
-  document shapes (`storeFile{Users}` for accounts, `[]*Token` for
-  tokens; store names `auth` and `tokens` in `store_blob`, or
-  `users.json`/`tokens.json` files) are unchanged, so a copy of real
-  data loads without migration -- the acceptance test [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) assigns
-  to #1202.
+  document shapes (`{"users": [...]}` for accounts, a bare token list
+  for tokens; store names `auth` and `tokens` in `store_blob`, or
+  `users.json`/`tokens.json` files) are what gauntlet still reads as
+  version 1, so a copy of real data loads without migration -- the
+  acceptance test [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) assigns
+  to #1202. Gauntlet's first save adds `"version": 1` to both and
+  wraps the tokens list as `{"version": 1, "tokens": [...]}` (#29);
+  mikroview's own code cannot read that tokens document, so rolling
+  back past the move needs the copy taken before it.
 - `persist.Backend`: mikroview's file, Postgres and write-behind
   backends satisfy gauntlet's interface as they stand. One line:
   `ErrConflict = gpersist.ErrConflict`. Its own

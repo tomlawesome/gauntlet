@@ -111,9 +111,31 @@ type oidcKey struct {
 	subject string
 }
 
-// storeFile is the on-disk shape: an object wrapping the user list.
+// storeFile is the on-disk shape: an object wrapping the user list,
+// with the format version (accountsDocumentVersion) alongside it since
+// #29. A v0.1.0 document has no version; it reads as 0, loads as
+// version 1, and is written with the version on its next save.
 type storeFile struct {
-	Users []*User `json:"users"`
+	Version int     `json:"version"`
+	Users   []*User `json:"users"`
+}
+
+// parseAccounts parses a stored accounts document, refusing one newer
+// than this build reads (see checkDocumentVersion) before parsing the
+// rest of it.
+func parseAccounts(data []byte) (storeFile, error) {
+	version, err := documentVersion(data)
+	if err != nil {
+		return storeFile{}, err
+	}
+	if err := checkDocumentVersion("accounts", version, accountsDocumentVersion); err != nil {
+		return storeFile{}, err
+	}
+	var file storeFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return storeFile{}, err
+	}
+	return file, nil
 }
 
 // checkAdmins refuses a document with more than one admin, and refuses
@@ -196,7 +218,7 @@ type Store struct {
 	reloadInFlight chan struct{}
 
 	// refusedVersion is the last document version reloadIfStale refused
-	// to apply (see checkAdmins), so a refused document is logged once
+	// to apply (see checkAdmins and checkDocumentVersion), so a refused document is logged once
 	// rather than on every request until someone fixes it, and so
 	// registrationOpenGuard can keep registration closed while it holds.
 	// Only reloadIfStale writes it, and only one of those runs at a time,
@@ -291,14 +313,14 @@ func (st *storeState) recordSaved() {
 
 // encodeAccounts is the state as the document is saved.
 func encodeAccounts(st *storeState) ([]byte, error) {
-	return json.MarshalIndent(storeFile{Users: st.users()}, "", "  ")
+	return json.MarshalIndent(storeFile{Version: accountsDocumentVersion, Users: st.users()}, "", "  ")
 }
 
 // decodeAccounts is the document as it is opened: parsed and checked
-// (checkAdmins) before it becomes a state.
+// (parseAccounts, checkAdmins) before it becomes a state.
 func decodeAccounts(data []byte) (*storeState, error) {
-	var file storeFile
-	if err := json.Unmarshal(data, &file); err != nil {
+	file, err := parseAccounts(data)
+	if err != nil {
 		return nil, err
 	}
 	if err := file.checkAdmins(); err != nil {
@@ -438,8 +460,8 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	}
 
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
-		var file storeFile
-		if err := json.Unmarshal(data, &file); err != nil {
+		file, err := parseAccounts(data)
+		if err != nil {
 			return err
 		}
 		if err := file.checkAdmins(); err != nil {
@@ -558,18 +580,23 @@ func (s *Store) reloadIfStale() {
 		return
 	}
 
-	var file storeFile
-	if err := json.Unmarshal(snap.Payload, &file); err != nil {
+	// A document that does not parse is skipped silently, as a read
+	// failure is. One that parses but is refused -- newer than this
+	// build reads, or breaking the admin rule -- is different.
+	file, err := parseAccounts(snap.Payload)
+	if err == nil {
+		err = file.checkAdmins()
+	} else if !errors.Is(err, errNewerDocument) {
 		return
 	}
-	// Unlike a transient read failure, this is a document someone wrote:
-	// keep serving what is in memory, and say why once. Every write
-	// fails while it stands -- mutate meets the same refusal when its
-	// save conflicts and reloads, rather than writing over it -- and a
-	// store that opened on an empty backend also keeps registration
+	// Unlike a transient read failure, a refused document is one someone
+	// wrote: keep serving what is in memory, and say why once. Every
+	// write fails while it stands -- mutate meets the same refusal when
+	// its save conflicts and reloads, rather than writing over it -- and
+	// a store that opened on an empty backend also keeps registration
 	// closed (registrationOpenGuard) instead of treating Count() == 0 as
 	// a fresh install.
-	if err := file.checkAdmins(); err != nil {
+	if err != nil {
 		s.mu.Lock()
 		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
 		s.mu.Unlock()
