@@ -620,3 +620,66 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 		t.Error("linking the admin stopped its earlier wrong guesses counting once the lockout ended")
 	}
 }
+
+// AllowAfterReset (#32) passes the address limit only for an address
+// that filled before the account's password changed, only while the
+// record carries no lockout, and only for one sign-in per change.
+func TestAllowAfterResetConditions(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := mustNewLoginLimiter(t, 3, time.Minute)
+	const addr = "ip:192.0.2.1"
+
+	if l.AllowAfterReset(addr, s, id, start) {
+		t.Fatal("a pass with no password change since the address filled")
+	}
+	for range 2 {
+		l.Reserve(addr, start)
+	}
+	if err := s.SetPassword("alice", "new-password-placeholder", start.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	l.Reserve(addr, start.Add(2*time.Second)) // fills the address after the change
+	if l.AllowAfterReset(addr, s, id, start.Add(3*time.Second)) {
+		t.Error("a pass for an address that filled only after the change")
+	}
+
+	if err := s.SetPassword("alice", "newer-password-placeholder", start.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	now := start.Add(5 * time.Second)
+	if !l.AllowAfterReset(addr, s, id, now) {
+		t.Fatal("no pass for an address that filled before the change")
+	}
+	if l.AllowAfterReset("ip:192.0.2.2", s, id, now) {
+		t.Error("a pass for an address that never reached the limit")
+	}
+	if !l.AllowAfterReset(addr, s, id, now) {
+		t.Error("the pass ended before EndAfterReset")
+	}
+	l.EndAfterReset(addr, id)
+	if l.AllowAfterReset(addr, s, id, now) {
+		t.Error("the pass outlived EndAfterReset")
+	}
+
+	// A further change grants a fresh pass -- unless the record carries
+	// a lockout, which a real password change would have cleared.
+	if err := s.SetPassword("alice", "newest-password-placeholder", start.Add(6*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLoginLockedUntil(id, start.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if l.AllowAfterReset(addr, s, id, start.Add(7*time.Second)) {
+		t.Error("a pass while the record carries a lockout")
+	}
+	if err := s.SetLoginLockedUntil(id, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if !l.AllowAfterReset(addr, s, id, start.Add(7*time.Second)) {
+		t.Error("no fresh pass after a further password change")
+	}
+	if l.AllowAfterReset(addr, s, id, start.Add(2*time.Minute)) {
+		t.Error("a pass after the address's attempts left the window")
+	}
+}

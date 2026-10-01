@@ -169,6 +169,16 @@ All notable changes to this project are documented in this file.
 - `docs/api/auth.yaml` now says a token's kind is whatever the
   application registered (`api` and `ingest` by default), not only
   `api` or `ingest` (#26).
+- An account locked out by wrong passwords and then reset -- from the
+  command line (`SetPassword`) or with a reset code -- can sign in from
+  the address the wrong guesses came from straight away. Before, the
+  lockout ended but the per-address limit still answered 429 for up to
+  five minutes, which read as the reset having failed (#32). Only that
+  account gets past the address limit, only when the address reached it
+  before the reset, and only until its sign-in finishes (both steps, for
+  an account with a second factor) or a guess fails; other accounts
+  tried from that address are still refused. New
+  `LoginLimiter.AllowAfterReset` and `EndAfterReset` carry this.
 
 ## [0.1.0] - 2026-09-30
 
