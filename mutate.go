@@ -31,7 +31,12 @@
 //     by the closure, assigned as the op's last act: the op may run
 //     more than once and the final run overwrites the earlier ones, so
 //     assign, never append or accumulate. Take copies (cp := *u) inside
-//     the op; a pointer into st is owned by the state.
+//     the op; a pointer into st is owned by the state. And a captured
+//     result counts only when mutate returns nil: on an error, return
+//     the method's zero values, never the variable -- it may hold the
+//     answer of a first run against memory that a refused replay then
+//     threw away (VerifyAndRecordTOTP's ok). Resetting it at the start
+//     of the op does not cover that; the check after mutate does.
 //  4. Delete the hand-written rollback outright. A failed attempt's
 //     state is a copy the loop throws away, so there is nothing to
 //     undo, and the "prev..." locals that fed it go too.

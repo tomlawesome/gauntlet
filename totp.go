@@ -378,10 +378,19 @@ func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter
 // itself (its own doc comment: "any candidate counter <= lastUsedCounter
 // is skipped even when its code is correct") refuses the replay.
 //
-// ok reports whether code matched; err is only ever a persistence
-// failure on a match -- the code that just matched earned the login
-// regardless of whether the counter's advance made it to disk, the same
-// degraded-but-not-locked-out stance mikroview's RecordTOTPCounter took.
+// ok is true only when code matched and the counter's advance was
+// saved. A match whose advance could not be saved is refused -- ok
+// false, with the error -- rather than let in on the strength of the
+// match: the advance is what stops the same code winning a second
+// login, and one that lives nowhere (the failed attempt is dropped, not
+// kept in memory) leaves the code live for whoever else holds it. That
+// is the stance the reset-code login (Authenticate) and BurnRecoveryCode
+// take for their spends. It replaces mikroview's RecordTOTPCounter
+// stance, which granted the login and logged the failure: under the
+// replay loop a match can be made against memory the document has
+// moved past, so a result from a run that was not saved is not one to
+// trust. Nothing is lost by refusing -- the person enters the next code
+// once the backend answers again.
 func (s *Store) VerifyAndRecordTOTP(userID, code string, now time.Time) (ok bool, err error) {
 	if !s.Persisted() {
 		return false, ErrNotPersisted
@@ -415,7 +424,13 @@ func (s *Store) VerifyAndRecordTOTP(userID, code string, now time.Time) (ok bool
 		ok = true
 		return nil
 	})
-	return ok, err
+	if err != nil {
+		// ok may be true from a run the loop then threw away -- the
+		// first, against memory, before a replay was refused. A result
+		// is only the final run's when mutate returns nil.
+		return false, err
+	}
+	return ok, nil
 }
 
 // ClearTOTP removes userID's authenticator-app factor entirely: the

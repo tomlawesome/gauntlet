@@ -39,6 +39,14 @@ All notable changes to this project are documented in this file.
   accounts file could mean a file with no admin that the next start
   refuses. The single-admin rule is checked on every save as well as
   every load, so no write can produce such a file.
+- `VerifyAndRecordTOTP` and `RecordPasskeyAssertionIfFresh` report a
+  code or assertion as accepted only when the counter that stops it
+  being used again was saved. Before, a matching TOTP code was
+  accepted even when that save failed (mikroview's stance), which
+  left the same code good for a second login; now it is refused with
+  the error, the stance reset codes and recovery codes already take.
+  A caller that granted the login on `ok` despite an error no longer
+  sees that combination.
 - Persistence errors from store writes no longer carry the
   `saving accounts:` / `saving API tokens:` prefix; they name the store
   and backend themselves, and `errors.Is` against the package's errors

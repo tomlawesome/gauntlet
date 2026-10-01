@@ -349,7 +349,12 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 		accepted = true
 		return nil
 	})
-	return accepted, err
+	if err != nil {
+		// Same as VerifyAndRecordTOTP: accepted may be true from a run
+		// the loop threw away, so it counts only when mutate saved.
+		return false, err
+	}
+	return accepted, nil
 }
 
 // ClearPasskeys removes every passkey on userID's account in one write.

@@ -1,6 +1,7 @@
 package gauntlet
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -346,6 +347,92 @@ func TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted(t *te
 	}
 	if n := reopenAccounts(t, b).Count(); n != 2 {
 		t.Errorf("saved document holds %d accounts, want 2 (alice and the new one)", n)
+	}
+}
+
+// refuseNextSave makes the other process write a document this store
+// refuses (two admins) just before this store's next save, so the
+// replay is refused outright: the op's first run, against memory, is
+// the only one that happened, and its result was never saved.
+func refuseNextSave(t *testing.T, b *otherProcessBackend) {
+	t.Helper()
+	b.beforeSave = func() {
+		snap, err := b.Load(context.Background())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// b.Memory, not b: b's own Save is the one that runs this hook.
+		if _, err := b.Memory.Save(context.Background(), []byte(twoAdminsDocument), snap.Version); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// TestVerifyAndRecordTOTPRefusesAMatchItCouldNotRecord: the code
+// matches on the op's first run, against memory, and then the replay
+// is refused. ok was set true by that first run; it must not come
+// back true, since the counter advance it stands for was never saved
+// and the same code would win a second login. The handler trusts a
+// true ok even with an error (gate/login_handler.go), so the method is
+// where this has to hold.
+func TestVerifyAndRecordTOTPRefusesAMatchItCouldNotRecord(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	secret, err := GenerateTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	s, b, _ := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+		setTOTPForTest(t, s, id, EncodeTOTPSecret(secret), now, 30)
+	})
+	refuseNextSave(t, b)
+
+	code := GenerateTOTPCode(secret, totpCounter(now, totpStep)+1)
+	ok, err := s.VerifyAndRecordTOTP(id, code, now)
+	if err == nil {
+		t.Fatal("VerifyAndRecordTOTP whose replay was refused = nil error, want one")
+	}
+	if ok {
+		t.Error("VerifyAndRecordTOTP = true from a run that was never saved: the code is still live for a second login")
+	}
+	s.mu.RLock()
+	counter := s.byID[id].TOTPLastCounter
+	s.mu.RUnlock()
+	if counter != 30 {
+		t.Errorf("TOTPLastCounter = %d in memory after a refused write, want the stored 30", counter)
+	}
+}
+
+// TestRecordPasskeyAssertionIfFreshRefusesAnAssertionItCouldNotRecord
+// is the same for the passkey sign count: accepted is only the final,
+// saved run's answer.
+func TestRecordPasskeyAssertionIfFreshRefusesAnAssertionItCouldNotRecord(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	var id string
+	s, b, _ := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+		if _, err := s.AddPasskey(id, testPasskey(1, "keeper")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	refuseNextSave(t, b)
+
+	accepted, err := s.RecordPasskeyAssertionIfFresh(id, []byte{1}, 5, now)
+	if err == nil {
+		t.Fatal("RecordPasskeyAssertionIfFresh whose replay was refused = nil error, want one")
+	}
+	if accepted {
+		t.Error("RecordPasskeyAssertionIfFresh = true from a run that was never saved")
 	}
 }
 

@@ -671,8 +671,8 @@ func TestTOTPWritesLeaveStateWhenPersistFails(t *testing.T) {
 		if err == nil {
 			t.Fatal("VerifyAndRecordTOTP against a backend that cannot save = nil error, want one")
 		}
-		if !ok {
-			t.Error("VerifyAndRecordTOTP reported the code as not matching, even though the failure was persistence, not verification")
+		if ok {
+			t.Error("VerifyAndRecordTOTP reported the code as accepted, even though the counter's advance was never saved -- the code is still live for a second login")
 		}
 		got, _ := s.Get(id)
 		if got.TOTPLastCounter != 30 {
