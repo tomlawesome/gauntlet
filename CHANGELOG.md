@@ -44,7 +44,10 @@ All notable changes to this project are documented in this file.
   `ErrSaveConflict` and changes nothing; the caller can try again. The
   whole write, retries and reloads included, is held to one five-second
   limit (the limit one save had before), since it runs while every
-  login and signed-in request on that store waits.
+  login and signed-in request on that store waits. The shipped file
+  backends cannot be interrupted mid-call, so on a hung mount the
+  limit only stops another retry from starting, not a call already
+  in progress.
   Checks such as "registration is still open", "one admin only",
   "username free" and "recovery codes already issued" are made again
   against the document another process saved, so a retried write never
