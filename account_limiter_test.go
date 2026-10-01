@@ -527,17 +527,19 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	l := mustNewLoginLimiter(t, 3, time.Hour)
-	for range 3 {
-		l.ReserveAccount(s, id, now)
+	// Spread out, so the later two are still in the window when the
+	// lockout (one window after the first) ends.
+	for i := range 3 {
+		l.ReserveAccount(s, id, now.Add(time.Duration(i)*10*time.Minute))
 	}
-	if l.ReserveAccount(s, id, now.Add(time.Second)) {
+	if l.ReserveAccount(s, id, now.Add(20*time.Minute+time.Second)) {
 		t.Fatal("test setup: expected the account to be locked")
 	}
 
-	if err := s.LinkOIDCIdentity(id, "https://idp.example", "subject-1", now.Add(time.Minute)); err != nil {
+	if err := s.LinkOIDCIdentity(id, "https://idp.example", "subject-1", now.Add(50*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	at := now.Add(2 * time.Minute)
+	at := now.Add(51 * time.Minute)
 	if l.ReserveAccount(s, id, at) {
 		t.Error("linking the admin ended its lockout in the limiter")
 	}
@@ -546,5 +548,16 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	}
 	if s.LoginLockedUntil(id).IsZero() {
 		t.Error("linking the admin cleared the lockout on its record")
+	}
+
+	// Once the recorded lockout has ended, the guesses made before the
+	// link still count: one more fills the window again, and the next is
+	// refused, rather than the link buying three fresh guesses.
+	ended := now.Add(time.Hour + time.Second)
+	if !l.ReserveAccount(s, id, ended) {
+		t.Fatal("expected an attempt once the recorded lockout had ended")
+	}
+	if l.ReserveAccount(s, id, ended.Add(time.Second)) {
+		t.Error("linking the admin stopped its earlier wrong guesses counting once the lockout ended")
 	}
 }
