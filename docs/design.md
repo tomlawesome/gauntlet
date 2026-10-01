@@ -668,7 +668,14 @@ Unparseable accounts document → refuse to start. Unknown role → denied
 everything. Unknown token kind → never authenticates. Missing claim →
 refused. Backend write failure → in-memory change rolled back and the
 error returned (every mutating `Store` method in mikroview does this;
-the module's tests assert it per method).
+the module's tests assert it per method). Accounts or tokens file
+removed while the server runs → never recreated from memory, since
+moving it aside is how an operator resets; every write fails with
+`ErrDocumentRemoved`, reads carry on from memory, and the log shows one
+error per removal (`<store> store (<path>) has been removed since this
+process loaded it; writes are refused until it is restored or the
+process restarts`). The operator restores the file, or restarts to
+start afresh (#39).
 
 ## 5. Build plan
 

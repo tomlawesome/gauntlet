@@ -532,6 +532,101 @@ func (b *vanishingBackend) Save(ctx context.Context, payload []byte, expect int6
 func (b *vanishingBackend) Close() error     { return nil }
 func (b *vanishingBackend) Describe() string { return "vanishing test backend" }
 
+// removedLine is the part of the #39 log line both stores share.
+const removedLine = "has been removed since this process loaded it; writes are refused until it is restored or the process restarts"
+
+// TestStoreLogsADocumentRemovalOncePerRemoval (#39): writes against a
+// removed accounts document all fail, but the operator is told once,
+// at error level, what happened and what to do -- not once per write.
+// A restore followed by a second removal is a new removal, logged again.
+func TestStoreLogsADocumentRemovalOncePerRemoval(t *testing.T) {
+	var logs bytes.Buffer
+	b := &vanishingBackend{}
+	s, err := OpenStore(b, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	create := func(name string) error {
+		_, err := s.CreateUser(name, "password456", RoleUser, time.Now())
+		return err
+	}
+
+	b.gone = true
+	for _, name := range []string{"bob", "carol"} {
+		if err := create(name); !errors.Is(err, ErrDocumentRemoved) {
+			t.Fatalf("CreateUser(%s) after removal = %v, want ErrDocumentRemoved", name, err)
+		}
+	}
+	if n := strings.Count(logs.String(), removedLine); n != 1 {
+		t.Fatalf("removal logged %d times over two writes, want 1; log = %q", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "accounts store (vanishing test backend)") {
+		t.Errorf("removal line is not an error naming the accounts store and backend: %q", logs.String())
+	}
+
+	b.gone = false // restored
+	if err := create("dave"); err != nil {
+		t.Fatalf("CreateUser after the restore = %v", err)
+	}
+	b.gone = true // removed again
+	for _, name := range []string{"erin", "frank"} {
+		if err := create(name); !errors.Is(err, ErrDocumentRemoved) {
+			t.Fatalf("CreateUser(%s) after the second removal = %v, want ErrDocumentRemoved", name, err)
+		}
+	}
+	if n := strings.Count(logs.String(), removedLine); n != 2 {
+		t.Errorf("two removals logged %d times, want 2; log = %q", n, logs.String())
+	}
+}
+
+// TestTokenStoreLogsADocumentRemovalOncePerRemoval is the TokenStore
+// half of #39.
+func TestTokenStoreLogsADocumentRemovalOncePerRemoval(t *testing.T) {
+	var logs bytes.Buffer
+	b := &vanishingBackend{}
+	s, err := OpenTokenStore(b, TokenOptions{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := func(name string) error {
+		_, _, err := s.Create(name, TokenKindAPI, "", nil, time.Now())
+		return err
+	}
+	if err := create("a"); err != nil {
+		t.Fatal(err)
+	}
+
+	b.gone = true
+	for _, name := range []string{"b", "c"} {
+		if err := create(name); !errors.Is(err, ErrDocumentRemoved) {
+			t.Fatalf("Create(%s) after removal = %v, want ErrDocumentRemoved", name, err)
+		}
+	}
+	if n := strings.Count(logs.String(), removedLine); n != 1 {
+		t.Fatalf("removal logged %d times over two writes, want 1; log = %q", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "API tokens store (vanishing test backend)") {
+		t.Errorf("removal line is not an error naming the tokens store and backend: %q", logs.String())
+	}
+
+	b.gone = false
+	if err := create("d"); err != nil {
+		t.Fatalf("Create after the restore = %v", err)
+	}
+	b.gone = true
+	for _, name := range []string{"e", "f"} {
+		if err := create(name); !errors.Is(err, ErrDocumentRemoved) {
+			t.Fatalf("Create(%s) after the second removal = %v, want ErrDocumentRemoved", name, err)
+		}
+	}
+	if n := strings.Count(logs.String(), removedLine); n != 2 {
+		t.Errorf("two removals logged %d times, want 2; log = %q", n, logs.String())
+	}
+}
+
 // TestMutateWithoutABackendChangesMemoryOnly: a store opened with no
 // backend still applies the change -- there is nothing to save and
 // nothing to conflict with.

@@ -76,7 +76,11 @@ All notable changes to this project are documented in this file.
   instead of recreating the file from that one write, which for an
   accounts file could mean a file with no admin that the next start
   refuses. The single-admin rule is checked on every save as well as
-  every load, so no write can produce such a file.
+  every load, so no write can produce such a file. The first such
+  failure after each removal logs one error naming the store and file
+  and saying writes are refused until the file is restored or the
+  process restarts; reads carry on from memory (#39). To recover,
+  put the file back, or restart to start afresh.
 - `VerifyAndRecordTOTP` and `RecordPasskeyAssertionIfFresh` report a
   code or assertion as accepted only when the counter that stops it
   being used again was saved. Before, a matching TOTP code was
