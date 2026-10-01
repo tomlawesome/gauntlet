@@ -31,9 +31,10 @@ type loginReservation struct {
 // writes the 429 itself when it is neither. accountID is "" for a name
 // that matches no account.
 //
-// An account whose password was reset after its address reached the
-// limit gets past the address bucket until its sign-in finishes or a
-// guess fails (AllowAfterReset, #32); its own bucket still applies.
+// An account reset out of a lockout after its address reached the limit
+// gets past the address bucket, one attempt at a time, until its
+// sign-in finishes or a guess fails (AllowAfterReset, #32); its own
+// bucket still applies.
 func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, now time.Time) (loginReservation, bool) {
 	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID}
 	if accountID == "" {
@@ -51,6 +52,9 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 		}
 		if !ok && !res.afterReset {
 			g.deps.Limiter.Release(res.ipKey, now)
+		}
+		if !ok && res.afterReset {
+			g.deps.Limiter.ReleaseAfterReset(res.ipKey, accountID)
 		}
 	}
 	if !ok {
@@ -80,6 +84,16 @@ func (g *Gate) endAfterReset(res loginReservation) {
 	}
 }
 
+// releaseAfterReset hands the pass back when the attempt holding it
+// returns, whichever way: deferred straight after reserveLogin, so a
+// concurrent attempt is refused only while this one runs. After
+// endAfterReset it changes nothing.
+func (g *Gate) releaseAfterReset(res loginReservation) {
+	if res.afterReset {
+		g.deps.Limiter.ReleaseAfterReset(res.ipKey, res.accountID)
+	}
+}
+
 // handleLogin is rate-limited independently by account and by source
 // IP (gauntlet.LoginLimiter) -- see reserveLogin.
 func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +118,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer g.releaseAfterReset(res)
 
 	user, err := g.deps.Users.Authenticate(req.Username, req.Password, now)
 	if err != nil && !errors.Is(err, gauntlet.ErrInvalidCredentials) {
@@ -219,6 +234,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer g.releaseAfterReset(res)
 
 	// Verified and recorded in one call, under the store's lock, so two
 	// concurrent submissions of the same code can't both check against

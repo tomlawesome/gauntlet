@@ -174,11 +174,14 @@ All notable changes to this project are documented in this file.
   the address the wrong guesses came from straight away. Before, the
   lockout ended but the per-address limit still answered 429 for up to
   five minutes, which read as the reset having failed (#32). Only that
-  account gets past the address limit, only when the address reached it
-  before the reset, and only until its sign-in finishes (both steps, for
-  an account with a second factor) or a guess fails; other accounts
-  tried from that address are still refused. New
-  `LoginLimiter.AllowAfterReset` and `EndAfterReset` carry this.
+  account gets past the address limit, only when both the address and
+  the account itself reached their limits before the reset, one attempt
+  at a time, and only until its sign-in finishes (both steps, for an
+  account with a second factor) or a guess fails. Other accounts tried
+  from that address are still refused, and so is an account that was
+  never locked out and only changed its own password. New
+  `LoginLimiter.AllowAfterReset`, `ReleaseAfterReset` and
+  `EndAfterReset` carry this.
 
 ## [0.1.0] - 2026-09-30
 

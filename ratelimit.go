@@ -522,10 +522,12 @@ func (l *LoginLimiter) syncLockout(lockouts AccountLockouts, accountID string, n
 }
 
 // resetPass is one entry in LoginLimiter.resetPasses: the password
-// change a pass was handed out for, and whether it has been used up.
+// change a pass was handed out for, whether an attempt holds it now,
+// and whether it has been used up.
 type resetPass struct {
 	address   string
 	changedAt time.Time
+	held      bool
 	ended     bool
 }
 
@@ -544,11 +546,18 @@ func resetPassKey(addressKey, accountID string) string {
 // attacker nothing they did not already have, while refusing it reads to
 // the operator as the reset having failed. The pass therefore holds for
 // that one account only -- other accounts tried from the address stay
-// refused -- and only when at least the threshold's worth of the
-// address's attempts in the window predate the change. It lasts across
-// both steps of a sign-in with a second factor, until EndAfterReset:
-// called once a session is issued or on a wrong password or code. A
-// later password change grants a fresh one; the window ends it anyway.
+// refused -- and only when at least the threshold's worth of both the
+// address's attempts and the account's own in the window predate the
+// change: the change ended a lockout. An account changing its own
+// password while guesses at other names fill its address gets none.
+//
+// One attempt holds the pass at a time: AllowAfterReset hands it out
+// and refuses everyone else until the attempt hands it back
+// (ReleaseAfterReset) or uses it up (EndAfterReset, called once a
+// session is issued or on a wrong password or code), so a burst of
+// concurrent guesses gets one try, not one each. It lasts across both
+// steps of a sign-in with a second factor. A later reset out of a
+// lockout grants a fresh one; the window ends it anyway.
 //
 // The change is read from lockouts as ReserveAccount reads it, so it
 // takes lockouts being the *Store itself (see lockoutRecorder), and a
@@ -567,24 +576,66 @@ func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockou
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	before := 0
-	for _, t := range l.pruneLocked(addressKey, now) {
-		if t.Before(changed) {
-			before++
+	key := resetPassKey(addressKey, accountID)
+	// Checked before the counts: the account's first attempt under the
+	// pass drops its pre-change guesses (ReserveAccount), so the second
+	// step of a two-factor sign-in no longer sees the lockout it ended.
+	if p, ok := l.resetPasses[key]; ok && p.changedAt.Equal(changed) {
+		if p.changedAt.Before(now.Add(-l.window)) {
+			delete(l.resetPasses, key) // no attempt in the window predates it
+			return false
 		}
+		if p.ended || p.held {
+			return false
+		}
+		p.held = true
+		l.resetPasses[key] = p
+		return true
 	}
-	if before < l.threshold {
+	if countBefore(l.pruneLocked(addressKey, now), changed) < l.threshold {
 		return false
 	}
-	key := resetPassKey(addressKey, accountID)
-	if p, ok := l.resetPasses[key]; ok && p.changedAt.Equal(changed) {
-		return !p.ended
+	cutoff := now.Add(-l.window)
+	var own []time.Time
+	for _, t := range l.accounts[loginBucket+accountID] {
+		if !t.Before(cutoff) {
+			own = append(own, t)
+		}
+	}
+	if countBefore(own, changed) < l.threshold {
+		return false
 	}
 	// Rare -- a full address and a reset inside one window -- so the
 	// sweep runs here too, not only when the capped map is full.
 	l.pruneResetPassesLocked(now)
-	l.resetPasses[key] = resetPass{address: addressKey, changedAt: changed}
+	l.resetPasses[key] = resetPass{address: addressKey, changedAt: changed, held: true}
 	return true
+}
+
+// countBefore counts the attempts in entries made before t.
+func countBefore(entries []time.Time, t time.Time) int {
+	n := 0
+	for _, e := range entries {
+		if e.Before(t) {
+			n++
+		}
+	}
+	return n
+}
+
+// ReleaseAfterReset hands back the pass AllowAfterReset gave accountID
+// at addressKey, unused: the attempt holding it has finished without a
+// session or a wrong guess -- the password step of a two-factor sign-in,
+// a refusal by the account's own limit, a storage error. A no-op once
+// EndAfterReset has used the pass up.
+func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := resetPassKey(addressKey, accountID)
+	if p, ok := l.resetPasses[key]; ok {
+		p.held = false
+		l.resetPasses[key] = p
+	}
 }
 
 // EndAfterReset uses up the pass AllowAfterReset gave accountID at
@@ -595,7 +646,7 @@ func (l *LoginLimiter) EndAfterReset(addressKey, accountID string) {
 	defer l.mu.Unlock()
 	key := resetPassKey(addressKey, accountID)
 	if p, ok := l.resetPasses[key]; ok {
-		p.ended = true
+		p.held, p.ended = false, true
 		l.resetPasses[key] = p
 	}
 }

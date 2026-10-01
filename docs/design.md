@@ -238,6 +238,7 @@ func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only;
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
+func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
@@ -307,9 +308,12 @@ which ends its sessions but keeps its password, does not. The reset
 account also gets past the per-address limit (#32; owner, 2026-10-01:
 a reset needs the server's command line or an admin-issued code, so
 this gives an attacker nothing): only that account, only when the
-address reached the limit before the reset, and only until its sign-in
-issues a session or a password or code is wrong (`AllowAfterReset`,
-`EndAfterReset`). Other names tried from that address stay refused.
+address and the account itself both reached their limits before the
+reset -- the reset ended a lockout, so an account that only changed its
+own password gets nothing -- one attempt at a time, and only until its
+sign-in issues a session or a password or code is wrong
+(`AllowAfterReset`, `ReleaseAfterReset`, `EndAfterReset`). Other names
+tried from that address stay refused.
 Re-checking a signed-in caller's own password has its own per-account
 budget, memory only.
 

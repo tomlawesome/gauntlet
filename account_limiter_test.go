@@ -644,41 +644,65 @@ func TestAllowAfterResetConditions(t *testing.T) {
 		t.Error("a pass for an address that filled only after the change")
 	}
 
-	if err := s.SetPassword("alice", "newer-password-placeholder", start.Add(4*time.Second)); err != nil {
+	// The address is full from before the next change, but the account
+	// was never locked out: a change of its own password is not a reset
+	// that ended a lockout, and earns nothing.
+	if err := s.SetPassword("alice", "own-change-placeholder", start.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	now := start.Add(5 * time.Second)
+	if l.AllowAfterReset(addr, s, id, start.Add(5*time.Second)) {
+		t.Error("a pass for a password change on an account that was never locked out")
+	}
+
+	// Locked out, then reset: the pass.
+	for range 3 {
+		l.ReserveAccount(s, id, start.Add(6*time.Second))
+	}
+	if err := s.SetPassword("alice", "newer-password-placeholder", start.Add(7*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	now := start.Add(8 * time.Second)
 	if !l.AllowAfterReset(addr, s, id, now) {
-		t.Fatal("no pass for an address that filled before the change")
+		t.Fatal("no pass for an account reset out of a lockout at a full address")
 	}
 	if l.AllowAfterReset("ip:192.0.2.2", s, id, now) {
 		t.Error("a pass for an address that never reached the limit")
 	}
+
+	// One attempt holds the pass at a time: a second, concurrent one is
+	// refused until the first hands it back.
+	if l.AllowAfterReset(addr, s, id, now) {
+		t.Error("a second attempt got the pass while the first still held it")
+	}
+	l.ReleaseAfterReset(addr, id)
 	if !l.AllowAfterReset(addr, s, id, now) {
-		t.Error("the pass ended before EndAfterReset")
+		t.Error("the pass was not handed back by ReleaseAfterReset")
 	}
 	l.EndAfterReset(addr, id)
+	l.ReleaseAfterReset(addr, id)
 	if l.AllowAfterReset(addr, s, id, now) {
 		t.Error("the pass outlived EndAfterReset")
 	}
 
-	// A further change grants a fresh pass -- unless the record carries
-	// a lockout, which a real password change would have cleared.
-	if err := s.SetPassword("alice", "newest-password-placeholder", start.Add(6*time.Second)); err != nil {
+	// A further reset out of a lockout grants a fresh pass -- unless the
+	// record carries a lockout, which a real password change would have
+	// cleared.
+	if err := s.SetPassword("alice", "newest-password-placeholder", start.Add(9*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetLoginLockedUntil(id, start.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if l.AllowAfterReset(addr, s, id, start.Add(7*time.Second)) {
+	if l.AllowAfterReset(addr, s, id, start.Add(10*time.Second)) {
 		t.Error("a pass while the record carries a lockout")
 	}
 	if err := s.SetLoginLockedUntil(id, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	if !l.AllowAfterReset(addr, s, id, start.Add(7*time.Second)) {
-		t.Error("no fresh pass after a further password change")
+	if !l.AllowAfterReset(addr, s, id, start.Add(10*time.Second)) {
+		t.Error("no fresh pass after a further reset")
 	}
+	l.ReleaseAfterReset(addr, id)
 	if l.AllowAfterReset(addr, s, id, start.Add(2*time.Minute)) {
 		t.Error("a pass after the address's attempts left the window")
 	}

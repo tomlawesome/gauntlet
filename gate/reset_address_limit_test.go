@@ -139,3 +139,24 @@ func TestResetPassCoversTheSecondFactorStep(t *testing.T) {
 		t.Errorf("a second sign-in after the pass's session got %d, want 429", got)
 	}
 }
+
+// Only a reset that ends the account's own lockout earns the pass. An
+// account that was never locked out, changing its own password while
+// guesses at other names fill the shared address, stays behind the
+// address limit like everyone else there.
+func TestOwnPasswordChangeGetsNoAddressPass(t *testing.T) {
+	_, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	lockOutFromFixtureAddress(t, ts.URL, "nobody-placeholder")
+
+	const newPW = "changed-by-bob-placeholder"
+	resp := postJSON(t, bob, ts.URL+"/api/auth/password",
+		changePasswordRequest{CurrentPassword: totpBobPassword, NewPassword: newPW})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("changing bob's own password got %d, want 200", resp.StatusCode)
+	}
+	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusTooManyRequests {
+		t.Errorf("bob's login after changing his own password at a full address got %d, want 429", got)
+	}
+}
