@@ -282,7 +282,8 @@ survives a restart, but only as it begins and as it clears: one save per
 lockout episode, not one per wrong guess. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A new password or reset code ends the lockout, and
-guesses from before it stop counting (#24). Re-checking a signed-in
+guesses from before it stop counting (#24); linking the admin to SSO,
+which ends its sessions but keeps its password, does not. Re-checking a signed-in
 caller's own password has its own per-account budget, memory only.
 
 Not exported: `newID` (16 random bytes, hex) stays private; apps that

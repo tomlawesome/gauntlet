@@ -126,7 +126,8 @@ type User struct {
 	// begins or clears, never per failed attempt (see ReserveAccount), so
 	// a lockout survives a restart without every wrong guess becoming a
 	// disk write. A new password (SetPassword, IssueResetCode) clears it
-	// in the same write.
+	// in the same write; LinkOIDCIdentity, which bumps PasswordChangedAt
+	// but leaves the admin's password working, does not.
 	LoginLockedUntil time.Time `json:"loginLockedUntil,omitzero"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery

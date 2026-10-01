@@ -268,10 +268,13 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 //
 // A password change ends the lockout: guesses at the old password stop
 // counting from the moment it changed. The store clears the record in
-// the same write (SetPassword, IssueResetCode); this limiter drops its
-// own count of those guesses, any lockout over them it has yet to save,
-// and one whose save landed just after the change. That takes lockouts
-// being the *Store itself (see lockoutRecorder).
+// the same write (SetPassword, IssueResetCode); this limiter then drops
+// its own count of those guesses and any lockout over them it has yet
+// to save. That takes lockouts being the *Store itself (see
+// lockoutRecorder). Not every PasswordChangedAt bump is a password
+// change -- linking the admin to SSO bumps it and leaves the password
+// working -- so one counts only while the record carries no lockout:
+// the writes that change a password clear it, the link does not.
 //
 // A lockout that cannot be saved is logged, and still enforced in
 // memory: the attempt it would refuse is refused either way. It is also
@@ -295,12 +298,16 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		changed = time.Time{}
 	}
 	wasPersisted := !persisted.IsZero()
-	// The lockout counts the guesses in the window before its end. If
-	// that window began before the password changed, they were guesses
-	// at the old password: the lockout has ended, and is cleared below
-	// like any other that has.
-	if wasPersisted && persisted.Add(-l.window).Before(changed) {
-		persisted = time.Time{}
+	// A lockout on the record means PasswordChangedAt, whatever its
+	// date, was not a password change since that lockout began: a
+	// password change clears the lockout in the same write. The bump
+	// was something else that ends sessions -- linking the admin to SSO
+	// -- and the guesses it would drop were at a password that still
+	// works. A lockout saved just after a real change, decided just
+	// before it, looks the same and is honoured too: it fails closed,
+	// and a second change ends it.
+	if wasPersisted {
+		changed = time.Time{}
 	}
 	// A lockout this limiter set never ends more than one window after
 	// the attempt that set it (below: entries[0].Add(l.window)). One

@@ -44,12 +44,16 @@ func (s *Store) SetLoginLockedUntil(accountID string, until time.Time) error {
 }
 
 // lockoutRecorder is what *Store offers a LoginLimiter beyond
-// AccountLockouts: the lockout together with when the account's
-// password last changed, in one read. Guesses made before a password
-// change were at the old password, so the limiter stops counting them
-// (ReserveAccount). Unexported, so only *Store has it: a limiter given
-// any other AccountLockouts keeps counting those guesses until they
-// age out of the window, as before.
+// AccountLockouts: the lockout together with the account's
+// PasswordChangedAt, in one read. Guesses made before a password change
+// were at the old password, so the limiter stops counting them
+// (ReserveAccount). Not every bump is a password change: linking the
+// admin to SSO bumps it to end old sessions and keeps the password, so
+// the limiter takes a bump as one only while the record carries no
+// lockout -- SetPassword and IssueResetCode clear it in the same write,
+// LinkOIDCIdentity does not. Unexported, so only *Store has it: a
+// limiter given any other AccountLockouts keeps counting those guesses
+// until they age out of the window, as before.
 type lockoutRecorder interface {
 	lockoutRecord(accountID string) (lockedUntil, passwordChangedAt time.Time)
 }

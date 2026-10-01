@@ -100,7 +100,9 @@ All notable changes to this project are documented in this file.
   - Setting a new password (`SetPassword`) or issuing a reset code
     (`IssueResetCode`) ends any login lockout on the account, so its
     owner can sign in with the new password or the code at once. The
-    limiter stops counting guesses made before the change.
+    limiter stops counting guesses made before the change. Linking the
+    admin to SSO, whose password keeps working, leaves its lockout in
+    place.
   - Internal tidying in `gate` with no change on the wire, plus test and
     documentation fixes.
 

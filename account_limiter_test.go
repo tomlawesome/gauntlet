@@ -437,9 +437,12 @@ func TestPasswordChangeDropsAnUnsavedLockout(t *testing.T) {
 }
 
 // A lockout whose save lands just after a password change -- decided
-// before it, written after it -- is on the record but counts guesses at
-// the old password, so it is treated as ended and cleared.
-func TestLockoutFromBeforeAPasswordChangeIsCleared(t *testing.T) {
+// before it, written after it -- looks on the record exactly like a
+// lockout the admin kept through an SSO link (see
+// TestLinkingTheAdminKeepsItsLoginLockout), so it is honoured: the race
+// fails closed. A second change clears it, and this time the limiter's
+// count of the old guesses goes with it.
+func TestLockoutSavedJustAfterAPasswordChangeIsHonoured(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	window := time.Hour
@@ -454,11 +457,15 @@ func TestLockoutFromBeforeAPasswordChangeIsCleared(t *testing.T) {
 	if err := s.SetLoginLockedUntil(id, now.Add(window)); err != nil {
 		t.Fatal(err)
 	}
-	if !l.ReserveAccount(s, id, now.Add(2*time.Minute)) {
-		t.Fatal("a lockout over guesses at the old password refused the account after the change")
+	if l.ReserveAccount(s, id, now.Add(2*time.Minute)) {
+		t.Fatal("a lockout on the record was let through")
 	}
-	if got := s.LoginLockedUntil(id); !got.IsZero() {
-		t.Errorf("expected the stale lockout cleared from the record, got %v", got)
+
+	if err := s.SetPassword("alice", "another-new-password", now.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !l.ReserveAccount(s, id, now.Add(4*time.Minute)) {
+		t.Fatal("a second password change did not end the lockout")
 	}
 }
 
@@ -507,4 +514,37 @@ func TestFuturePasswordChangeDoesNotTurnTheLimitOff(t *testing.T) {
 			t.Error("a future PasswordChangedAt ended the lockout on the record")
 		}
 	})
+}
+
+// Linking the admin to an SSO identity bumps PasswordChangedAt, to end
+// the sessions issued before it, but the admin keeps its password: the
+// guesses that locked it out were at a password that still works. The
+// lockout stays, in this limiter and in a fresh one reading the record.
+func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	if u, _ := s.ByUsername("alice"); u.Role != RoleAdmin {
+		t.Fatal("test setup: expected alice to be the admin")
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := mustNewLoginLimiter(t, 3, time.Hour)
+	for range 3 {
+		l.ReserveAccount(s, id, now)
+	}
+	if l.ReserveAccount(s, id, now.Add(time.Second)) {
+		t.Fatal("test setup: expected the account to be locked")
+	}
+
+	if err := s.LinkOIDCIdentity(id, "https://idp.example", "subject-1", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	at := now.Add(2 * time.Minute)
+	if l.ReserveAccount(s, id, at) {
+		t.Error("linking the admin ended its lockout in the limiter")
+	}
+	if mustNewLoginLimiter(t, 3, time.Hour).ReserveAccount(s, id, at) {
+		t.Error("linking the admin ended the lockout on its record")
+	}
+	if s.LoginLockedUntil(id).IsZero() {
+		t.Error("linking the admin cleared the lockout on its record")
+	}
 }

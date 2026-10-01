@@ -1218,7 +1218,11 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 		// should have to come back through the IdP. True for the admin
 		// too, whose password survives: a second way into the account
 		// was just attached, and a session issued before that should be
-		// re-made through one of them.
+		// re-made through one of them. LoginLockedUntil is left as it
+		// is: the admin's password still works, so a lockout earned by
+		// guessing at it stands, and the limiter does not read this
+		// bump as a password change while it does (see
+		// lockoutRecorder).
 		u.PasswordChangedAt = now
 		st.oidcIndex[key] = userID
 		return nil
@@ -1428,7 +1432,9 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		// And it ends any login lockout: the guesses that caused it were
 		// at the old password, and whoever set the new one should be
 		// able to use it at once. The limiter drops its own count of
-		// those guesses by PasswordChangedAt (see lockoutRecord).
+		// those guesses by PasswordChangedAt, and takes this clear as
+		// what marks the bump as a password change (see
+		// lockoutRecorder).
 		u.LoginLockedUntil = time.Time{}
 		return nil
 	})
