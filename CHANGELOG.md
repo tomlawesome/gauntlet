@@ -4,7 +4,30 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- A write from the CLI and one from the running server at the same
+  moment no longer lose one of them (issue #21). Before, the second
+  save to land wrote its whole accounts or tokens document on top of
+  the first, and the first change was gone with only a log line to say
+  so. Now the second write loads what the first saved, makes its own
+  change again on top of that, and saves the result, so both changes
+  survive. `TokenStore` gets the same protection; it had none.
+- After five conflicting writes in a row -- a script writing in a loop,
+  not an ordinary CLI command -- a write gives up with the new
+  `ErrSaveConflict` and changes nothing; the caller can try again.
+  Checks such as "registration is still open", "one admin only",
+  "username free" and "recovery codes already issued" are made again
+  against the document another process saved, so a retried write never
+  breaks them.
+- A write that meets an accounts document this store refuses to load
+  (two admins, say) now fails instead of saving over it.
+- Persistence errors from store writes no longer carry the
+  `saving accounts:` / `saving API tokens:` prefix; they name the store
+  and backend themselves, and `errors.Is` against the package's errors
+  works as before.
+- `persist.SaveWithRetry` is deprecated and no longer used by the
+  stores; it stays exported for compatibility.
 
 ## [0.1.0] - 2026-09-30
 
