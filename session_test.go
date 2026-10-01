@@ -6,6 +6,7 @@
 package gauntlet
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -171,41 +172,166 @@ func TestSessionNegativeMaxLifetimeMeansNoCeiling(t *testing.T) {
 	}
 }
 
+// heldSessions is how many sessions s holds, expired or not.
+func heldSessions(s *SessionStore) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sessions)
+}
+
 // TestSessionCreateSweepsExpiredEntries: a session whose cookie is never
 // presented again is only ever evicted by a sweep, so without one the
 // map grows for the life of the process.
 func TestSessionCreateSweepsExpiredEntries(t *testing.T) {
+	const n = 1000
 	s := NewSessionStore(time.Minute, 0)
 	t0 := time.Now()
-	for i := 0; i < minSessionSweep-1; i++ {
+	for range n {
 		s.Create("user-1", t0)
 	}
-	// Past their ttl, and the login that brings the map to the sweep
-	// size: the sweep runs here.
-	s.Create("user-1", t0.Add(2*time.Minute))
-
-	s.mu.Lock()
-	n := len(s.sessions)
-	s.mu.Unlock()
-	if n != 1 {
-		t.Errorf("%d sessions held after every earlier one expired, want 1", n)
+	// Past their ttl. Each of these logins checks a few of the old
+	// sessions; n of them reach every one.
+	for range n {
+		s.Create("user-1", t0.Add(2*time.Minute))
+	}
+	if got := heldSessions(s); got != n {
+		t.Errorf("%d sessions held after the first %d expired, want the %d live ones", got, n, n)
 	}
 }
 
 // The ceiling counts too: a session still inside its sliding ttl but
 // past maxLifetime is dead to Validate, so the sweep drops it as well.
 func TestSessionSweepHonoursTheCeiling(t *testing.T) {
+	const n = 1000
 	s := NewSessionStore(time.Hour, 10*time.Minute)
 	t0 := time.Now()
-	for i := 0; i < minSessionSweep-1; i++ {
+	for range n {
 		s.Create("user-1", t0)
 	}
-	s.Create("user-1", t0.Add(11*time.Minute))
-
-	s.mu.Lock()
-	n := len(s.sessions)
-	s.mu.Unlock()
-	if n != 1 {
-		t.Errorf("%d sessions held after every earlier one passed the ceiling, want 1", n)
+	for range n {
+		s.Create("user-1", t0.Add(11*time.Minute))
 	}
+	if got := heldSessions(s); got != n {
+		t.Errorf("%d sessions held after the first %d passed the ceiling, want the %d live ones", got, n, n)
+	}
+}
+
+// A live session is never swept, however many times the sweep passes
+// it, and a renewed one is judged by its renewed expiry.
+func TestSessionSweepKeepsLiveSessions(t *testing.T) {
+	s := NewSessionStore(time.Minute, 0)
+	t0 := time.Now()
+	kept := s.Create("user-1", t0)
+	at := t0
+	for range 1000 {
+		at = at.Add(time.Second)
+		if _, ok := s.Validate(kept.ID, at); !ok {
+			t.Fatalf("live session rejected at %v", at.Sub(t0))
+		}
+		s.Create("user-2", at)
+	}
+	// The sweep trails the clock a little (see sweepBatch), so a few
+	// user-2 sessions past their ttl may still be held -- but nothing
+	// like the 1000 created, and the one kept alive by use is there.
+	if got := heldSessions(s); got > 2*61 {
+		t.Errorf("%d sessions held, want at most twice the 61 inside the last minute", got)
+	}
+	if _, ok := s.Validate(kept.ID, at); !ok {
+		t.Error("the session kept alive by use was swept")
+	}
+}
+
+// A revoked session leaves its ID in the sweep's queue; the sweep drops
+// it without touching the map, and the queue does not grow without
+// bound under login/logout churn.
+func TestSessionSweepDropsRevokedIDs(t *testing.T) {
+	s := NewSessionStore(time.Hour, 0)
+	t0 := time.Now()
+	for range 10000 {
+		sess := s.Create("user-1", t0)
+		s.Revoke(sess.ID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sessions) != 0 || s.order.n > sweepBatch {
+		t.Errorf("after 10000 login/logout pairs: %d sessions, %d queued IDs; want 0 and at most %d", len(s.sessions), s.order.n, sweepBatch)
+	}
+}
+
+// TestSessionSweepWorkPerCreateIsBounded is the reason for the
+// incremental sweep (#24): no single Create does more than a few
+// entries' worth of sweeping, however large the store, so a big store
+// cannot stall every other caller behind one login. The old sweep walked
+// the whole map on the Create that doubled it -- 131072 entries in one
+// call for this test -- and the count below makes that visible without
+// timing anything.
+func TestSessionSweepWorkPerCreateIsBounded(t *testing.T) {
+	const n = 1 << 16
+	s := NewSessionStore(time.Minute, 0)
+	t0 := time.Now()
+	for range n {
+		s.Create("user-1", t0)
+	}
+	later := t0.Add(2 * time.Minute)
+	most, total := 0, 0
+	for range n {
+		before := s.sweepVisits
+		s.Create("user-1", later)
+		visited := s.sweepVisits - before
+		total += visited
+		most = max(most, visited)
+	}
+	t.Logf("%d logins over %d expired sessions: at most %d entries checked in one Create, %d in all", n, n, most, total)
+	if most > sweepBatch {
+		t.Errorf("one Create checked %d entries, want at most %d", most, sweepBatch)
+	}
+	if got := heldSessions(s); got != n {
+		t.Errorf("%d sessions held, want the %d live ones", got, n)
+	}
+}
+
+// The sweep's queue keeps first-in, first-out order across its block
+// boundaries, including when it empties and fills again.
+func TestIDQueueIsFirstInFirstOut(t *testing.T) {
+	var q idQueue
+	pushed, popped := 0, 0
+	for _, batch := range []int{1, idBlock - 1, idBlock, 3*idBlock + 7, 5} {
+		for range batch {
+			q.push(strconv.Itoa(pushed))
+			pushed++
+		}
+		for {
+			id, ok := q.pop()
+			if !ok {
+				break
+			}
+			if want := strconv.Itoa(popped); id != want {
+				t.Fatalf("popped %q, want %q", id, want)
+			}
+			popped++
+		}
+	}
+	if popped != pushed {
+		t.Errorf("popped %d of %d pushed", popped, pushed)
+	}
+}
+
+// BenchmarkSessionCreate reports, besides ns/op, the most entries one
+// Create checked (max-visits/op): constant here, where the old sweep's
+// was the whole map on every doubling.
+func BenchmarkSessionCreate(b *testing.B) {
+	s := NewSessionStore(time.Minute, 0)
+	t0 := time.Now()
+	for range 1 << 16 {
+		s.Create("user-1", t0)
+	}
+	at := t0.Add(2 * time.Minute)
+	most := 0
+	b.ResetTimer()
+	for b.Loop() {
+		before := s.sweepVisits
+		s.Create("user-1", at)
+		most = max(most, s.sweepVisits-before)
+	}
+	b.ReportMetric(float64(most), "max-visits/op")
 }
