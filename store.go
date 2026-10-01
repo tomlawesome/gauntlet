@@ -316,9 +316,11 @@ func (s *Store) accounts() document[storeState] {
 		clone:   (*storeState).clone,
 		encode:  encodeAccounts,
 		decode:  decodeAccounts,
-		empty: func() *storeState {
-			st := indexUsers(storeFile{})
-			return &st
+		// The single-admin rule, checked on the way out as well as on
+		// the way in: an op that broke it would otherwise save a
+		// document the next OpenStore refuses.
+		check: func(st *storeState) error {
+			return storeFile{Users: st.users()}.checkAdmins()
 		},
 	}
 }

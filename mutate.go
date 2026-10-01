@@ -82,7 +82,10 @@
 // Every write on both stores is now on this loop, and the old save
 // helpers (tryPersistLocked, persistLocked) are gone. A write that meets
 // a document this store refuses (see reloadIfStale) fails instead of
-// saving over it.
+// saving over it; one that finds the document gone fails with
+// ErrDocumentRemoved instead of recreating it from memory; and a state
+// the accounts store would refuse to open (no admin) is stopped at the
+// save, whatever op produced it.
 package gauntlet
 
 import (
@@ -100,6 +103,17 @@ import (
 // never stops -- a runaway script -- rather than one CLI command against
 // a live server, which the first replay absorbs.
 var ErrSaveConflict = errors.New("gauntlet: the store kept changing under this write; nothing was saved")
+
+// ErrDocumentRemoved is returned by a write that found the document
+// this store loaded gone from the backend -- a file deleted or moved
+// aside while the process ran. Nothing was written and the in-memory
+// state is unchanged. The store does not recreate the document from
+// memory: a file that vanished mid-run is an operator at work (a
+// restore, a move-aside the startup error suggests), and a document
+// rebuilt from one process's memory would hold only what that process
+// knew -- for an accounts store, possibly no admin at all. Restore the
+// document, or restart the process to start afresh.
+var ErrDocumentRemoved = errors.New("gauntlet: the store's document has been removed since this process loaded it; nothing was saved")
 
 // errNoChange is what an op returns when the state it was given already
 // says what the call wanted -- a lockout already recorded, a code that
@@ -128,9 +142,12 @@ type document[S any] struct {
 	// the same checks the store applies when it opens (checkAdmins for
 	// accounts). A document that fails them fails the write.
 	decode func([]byte) (*S, error)
-	// empty is the state of a backend whose document has been removed
-	// since this process loaded it.
-	empty func() *S
+	// check, when non-nil, is run on every state about to be saved and
+	// refuses one this store would refuse to open -- the same check
+	// decode applies, turned on this process's own output. No op in
+	// this package should produce such a state; this is the line of
+	// defence for the one that does.
+	check func(*S) error
 }
 
 // replay runs op against a copy of cur and saves the result, reloading
@@ -153,6 +170,11 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 	}
 
 	for attempt := 1; ; attempt++ {
+		if d.check != nil {
+			if err := d.check(next); err != nil {
+				return nil, 0, fmt.Errorf("not saving %s to %s: this change would leave a document the store refuses to open: %w", d.what, d.backend.Describe(), err)
+			}
+		}
 		data, err := d.encode(next)
 		if err != nil {
 			return nil, 0, fmt.Errorf("encoding %s for persistence failed: %w", d.what, err)
@@ -192,8 +214,10 @@ func (d document[S]) save(data []byte, version int64) (int64, error) {
 }
 
 // load reads the document another process just wrote and turns it into
-// a state, under reloadTimeout. A document that has been removed loads
-// as the empty state at version 0, so the retried save creates it.
+// a state, under reloadTimeout. A document that has been removed fails
+// the write with ErrDocumentRemoved: the store never recreates it from
+// memory (see ErrDocumentRemoved), and reloadIfStale keeps memory for
+// the same reason.
 func (d document[S]) load() (*S, int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), reloadTimeout)
 	defer cancel()
@@ -202,7 +226,7 @@ func (d document[S]) load() (*S, int64, error) {
 		return nil, 0, fmt.Errorf("reloading %s from %s after a conflicting write failed: %w", d.what, d.backend.Describe(), err)
 	}
 	if !snap.Exists {
-		return d.empty(), 0, nil
+		return nil, 0, fmt.Errorf("%s in %s: %w", d.what, d.backend.Describe(), ErrDocumentRemoved)
 	}
 	fresh, err := d.decode(snap.Payload)
 	if err != nil {

@@ -268,11 +268,10 @@ func TestMutateRefusesToWriteOverADocumentItCannotApply(t *testing.T) {
 	}
 }
 
-// TestMutateTreatsARemovedDocumentAsEmpty: the document this store
-// loaded has since been removed (a deleted file). The retried write runs
-// against nothing, so a deletion finds no account, and the store is left
-// as it was rather than recreating the file from memory.
-func TestMutateTreatsARemovedDocumentAsEmpty(t *testing.T) {
+// openVanishingStore opens a Store over a vanishingBackend holding
+// alice (the admin) and bob, then removes the document from under it.
+func openVanishingStore(t *testing.T) (*Store, *vanishingBackend, *User) {
+	t.Helper()
 	b := &vanishingBackend{}
 	s, err := OpenStore(b, Options{})
 	if err != nil {
@@ -286,22 +285,135 @@ func TestMutateTreatsARemovedDocumentAsEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.gone = true
+	b.saves = 0
+	return s, b, bob
+}
 
-	if _, err := s.DeleteUser(bob.ID); !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("DeleteUser after the document vanished = %v, want ErrUserNotFound from the replay against an empty document", err)
+// TestMutateRefusesToWriteWhenTheDocumentHasBeenRemoved: the document
+// this store loaded has since been removed (a deleted file). Before,
+// the retried write ran against an empty document and recreated the
+// file from whatever this one write produced -- for CreateUser, a
+// document holding carol and no admin, which the next OpenStore
+// refuses. Now the write fails with ErrDocumentRemoved, nothing is
+// recreated, and memory is left as it was.
+func TestMutateRefusesToWriteWhenTheDocumentHasBeenRemoved(t *testing.T) {
+	s, b, bob := openVanishingStore(t)
+
+	if _, err := s.DeleteUser(bob.ID); !errors.Is(err, ErrDocumentRemoved) {
+		t.Fatalf("DeleteUser after the document vanished = %v, want ErrDocumentRemoved", err)
 	}
 	if !storeHas(s, "bob") {
 		t.Error("bob was removed from memory by a write that did not happen")
+	}
+	if _, err := s.CreateUser("carol", "password789", RoleUser, time.Now()); !errors.Is(err, ErrDocumentRemoved) {
+		t.Fatalf("CreateUser after the document vanished = %v, want ErrDocumentRemoved", err)
+	}
+	if storeHas(s, "carol") {
+		t.Error("carol is in memory after a write that was refused")
+	}
+	// One refused save per write, and never the second one -- with
+	// version 0 -- that would create the document again.
+	if !b.gone || b.saves != 2 {
+		t.Errorf("the document was recreated from one write (gone %v, saves %d): the next OpenStore would refuse it", b.gone, b.saves)
+	}
+}
+
+// TestFindOrCreateOIDCUserRefusesToBecomeTheAdminOfARemovedDocument:
+// alice is the admin, the document vanishes, and a new SSO identity
+// signs in. Replayed against an empty document, the new account would
+// be the first one and so the admin -- a document in which a stranger
+// holds the only admin role. The write must fail instead.
+func TestFindOrCreateOIDCUserRefusesToBecomeTheAdminOfARemovedDocument(t *testing.T) {
+	s, b, _ := openVanishingStore(t)
+
+	_, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "mallory", time.Now())
+	if !errors.Is(err, ErrDocumentRemoved) {
+		t.Fatalf("FindOrCreateOIDCUser after the document vanished = %v, want ErrDocumentRemoved", err)
+	}
+	if storeHas(s, "mallory") {
+		t.Error("the SSO account is in memory after a write that was refused")
+	}
+	if !b.gone {
+		t.Error("the document was recreated with the SSO account as its admin")
+	}
+}
+
+// TestTokenStoreRefusesToWriteWhenTheDocumentHasBeenRemoved is the
+// TokenStore half of the rule: a tokens document that vanished is not
+// recreated holding only this write's token.
+func TestTokenStoreRefusesToWriteWhenTheDocumentHasBeenRemoved(t *testing.T) {
+	b := &vanishingBackend{}
+	s, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Create("a", TokenKindAPI, "", nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.gone = true
+
+	raw, _, err := s.Create("b", TokenKindAPI, "", nil, time.Now())
+	if !errors.Is(err, ErrDocumentRemoved) {
+		t.Fatalf("Create after the document vanished = %v, want ErrDocumentRemoved", err)
+	}
+	if raw != "" {
+		t.Error("a raw token value was handed out for a token that was never saved")
+	}
+	if !b.gone {
+		t.Error("the tokens document was recreated holding only the new token")
+	}
+	if n := len(s.List()); n != 1 {
+		t.Errorf("List() = %d tokens after a refused write, want the 1 still in memory", n)
+	}
+}
+
+// TestMutateRefusesToSaveAStateItWouldRefuseToOpen: an op that leaves
+// the accounts with no admin -- no op in this package does, so this is
+// one written for the test -- is stopped at the save, before the
+// backend sees a document the next OpenStore would refuse.
+func TestMutateRefusesToSaveAStateItWouldRefuseToOpen(t *testing.T) {
+	b := &conflictingBackend{Memory: persist.NewMemory(), allow: 2}
+	s, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := s.Register("alice", "password123", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.saves = 0
+
+	err = s.mutate(func(st *storeState) error {
+		delete(st.byID, alice.ID)
+		delete(st.byName, "alice")
+		return nil
+	})
+	if !errors.Is(err, errNoAdmin) {
+		t.Fatalf("mutate removing the only admin = %v, want errNoAdmin", err)
+	}
+	if b.saves != 0 {
+		t.Errorf("saves = %d for a document with no admin, want 0", b.saves)
+	}
+	if !storeHas(s, "alice") {
+		t.Error("alice was removed from memory by a write that was refused")
+	}
+	if got := usernamesIn(t, b.Memory); strings.Join(got, ",") != "alice,bob" {
+		t.Errorf("saved document holds %v, want [alice bob]", got)
 	}
 }
 
 // vanishingBackend holds a document until gone is set, after which it
 // answers as a backend nothing has ever been written to: Load reports
-// no document and Save refuses any version but 0.
+// no document and Save refuses any version but 0 -- and would recreate
+// the document for one, which is what the store must never ask for.
 type vanishingBackend struct {
 	payload []byte
 	version int64
 	gone    bool
+	saves   int
 }
 
 func (b *vanishingBackend) Load(ctx context.Context) (persist.Snapshot, error) {
@@ -312,6 +424,7 @@ func (b *vanishingBackend) Load(ctx context.Context) (persist.Snapshot, error) {
 }
 
 func (b *vanishingBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
+	b.saves++
 	current := b.version
 	if b.gone {
 		current = 0
@@ -434,12 +547,16 @@ func TestTokenStoreReloadsOnAConflictingWrite(t *testing.T) {
 // TokenStore half of the five-attempts bound: the token the caller was
 // never handed must not be in memory either.
 func TestTokenStoreGivesUpAfterFiveConflictsAndChangesNothing(t *testing.T) {
-	b := &conflictingBackend{Memory: persist.NewMemory(), allow: 0}
+	b := &conflictingBackend{Memory: persist.NewMemory(), allow: 1} // the first token
 	s, err := OpenTokenStore(b, TokenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _, err := s.Create("a", TokenKindAPI, "", nil, time.Now())
+	if _, _, err := s.Create("a", TokenKindAPI, "", nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.saves = 0
+	raw, _, err := s.Create("b", TokenKindAPI, "", nil, time.Now())
 	if !errors.Is(err, ErrSaveConflict) {
 		t.Fatalf("Create against a backend that always conflicts = %v, want ErrSaveConflict", err)
 	}
@@ -449,8 +566,8 @@ func TestTokenStoreGivesUpAfterFiveConflictsAndChangesNothing(t *testing.T) {
 	if b.saves != maxSaveAttempts {
 		t.Errorf("saves = %d, want %d", b.saves, maxSaveAttempts)
 	}
-	if n := len(s.List()); n != 0 {
-		t.Errorf("List() = %d tokens after a write that was never saved, want 0", n)
+	if n := len(s.List()); n != 1 {
+		t.Errorf("List() = %d tokens after a write that was never saved, want the 1 that was", n)
 	}
 }
 

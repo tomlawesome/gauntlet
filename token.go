@@ -267,7 +267,6 @@ func (s *TokenStore) tokens() document[tokenState] {
 		clone:   (*tokenState).clone,
 		encode:  encodeTokens,
 		decode:  s.decodeTokens,
-		empty:   func() *tokenState { return s.indexTokens(nil) },
 	}
 }
 

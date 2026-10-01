@@ -21,7 +21,13 @@ All notable changes to this project are documented in this file.
   against the document another process saved, so a retried write never
   breaks them.
 - A write that meets an accounts document this store refuses to load
-  (two admins, say) now fails instead of saving over it.
+  (two admins, say) now fails instead of saving over it. One that finds
+  the document removed from under it -- a file deleted or moved aside
+  while the process ran -- fails with the new `ErrDocumentRemoved`
+  instead of recreating the file from that one write, which for an
+  accounts file could mean a file with no admin that the next start
+  refuses. The single-admin rule is checked on every save as well as
+  every load, so no write can produce such a file.
 - Persistence errors from store writes no longer carry the
   `saving accounts:` / `saving API tokens:` prefix; they name the store
   and backend themselves, and `errors.Is` against the package's errors
