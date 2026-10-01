@@ -56,11 +56,13 @@ func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 
 	fs, err := oidc.NewFlowState(g.now())
 	if err != nil {
+		g.logError("starting SSO login: " + err.Error())
 		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
 		return
 	}
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
+		g.logError("starting SSO login: " + err.Error())
 		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
 		return
 	}
@@ -110,6 +112,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
 	fs, err := oidc.NewFlowState(now)
 	if err != nil {
+		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
 		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
 		return
 	}
@@ -117,6 +120,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
+		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
 		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
 		return
 	}
