@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -82,6 +83,16 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := g.deps.Users.Authenticate(req.Username, req.Password, now)
+	if err != nil && !errors.Is(err, gauntlet.ErrInvalidCredentials) {
+		// Authenticate's only other error is a reset code's spend that
+		// could not be saved. Refused either way, but that is the
+		// backend failing, not a wrong credential: no 401, and no count
+		// toward a lockout that outlasts the outage.
+		g.releaseLogin(res, now)
+		g.logError("recording login for " + req.Username + ": " + err.Error())
+		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		return
+	}
 	if err != nil {
 		// Reservations stay claimed -- that is what counts the failure.
 		// Deliberately the same body and status for an unknown username,
