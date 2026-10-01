@@ -22,7 +22,11 @@ import (
 //
 // Asserting allocation rather than wall-clock keeps this meaningful on
 // a loaded CI machine.
+//
+// Run at the production cost (see TestMain): at the cheap test cost a
+// hash is too small for the ceiling below to catch one.
 func TestClosedRegistrationDoesNotHash(t *testing.T) {
+	useProductionHashCost(t)
 	s := openTestStore(t)
 	if _, err := s.Register("admin", "correct horse battery staple", time.Now()); err != nil {
 		t.Fatal(err)
