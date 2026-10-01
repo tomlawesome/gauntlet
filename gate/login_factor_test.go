@@ -451,3 +451,31 @@ func TestLoginFactorSaveFailureIsServerError(t *testing.T) {
 		t.Errorf("the same code once saves work again returned %d, want 200", resp.StatusCode)
 	}
 }
+
+// TestLoginFactorRecoveryCodeSaveFailureIsServerError: a valid recovery
+// code whose spend cannot be saved is refused, but as the server's
+// failure, not a wrong guess -- 500, and the attempt handed back, so
+// more tries than the limit (5) during an outage do not lock the
+// account once the backend recovers.
+func TestLoginFactorRecoveryCodeSaveFailureIsServerError(t *testing.T) {
+	_, ts, _, backend := budgetFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	_, codes, _ := totpEnrolAndConfirm(t, bob, ts)
+
+	client := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	backend.left = 0
+	for i := range 6 {
+		resp := submitLoginFactor(t, client, ts, codes[0])
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("attempt %d with the spend's save failing returned %d, want 500", i+1, resp.StatusCode)
+		}
+	}
+
+	backend.left = -1
+	resp := submitLoginFactor(t, client, ts, codes[0])
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("the same code once saves work again returned %d, want 200", resp.StatusCode)
+	}
+}

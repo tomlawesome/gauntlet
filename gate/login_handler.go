@@ -216,7 +216,13 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if burned, err := g.deps.Users.BurnRecoveryCode(user.ID, req.Code, now); err != nil {
+		// A wrong or used code is (false, nil); an error is a spend that
+		// could not be saved. Refused either way, but as the backend's
+		// failure, like the TOTP case above: no 401, no lockout count.
+		g.releaseLogin(res, now)
 		g.logError("recording spent recovery code for " + user.Username + ": " + err.Error())
+		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		return
 	} else if burned {
 		g.completeLoginFactor(w, user, res, now)
 		return
