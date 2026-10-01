@@ -5,8 +5,11 @@ package gate
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -166,6 +169,65 @@ func TestOIDCCallbackPolicyRefusal(t *testing.T) {
 	}
 	if g.deps.Users.Count() != 0 {
 		t.Error("an identity the policy refuses must not be provisioned an account")
+	}
+}
+
+// messageRecorder is a slog.Handler keeping each record's message as
+// gate wrote it. slog's own text and JSON handlers escape a message
+// themselves, so they cannot show whether gate did; a handler that
+// prints the message as-is (slog's default one, or an app's own) can.
+type messageRecorder struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (m *messageRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (m *messageRecorder) Handle(_ context.Context, r slog.Record) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.msgs = append(m.msgs, r.Message)
+	return nil
+}
+func (m *messageRecorder) WithAttrs([]slog.Attr) slog.Handler { return m }
+func (m *messageRecorder) WithGroup(string) slog.Handler      { return m }
+
+// TestOIDCCallbackPolicyRefusalLogEscapesSubject: the subject comes from
+// the identity provider, so a newline or terminal escape in it must
+// reach the log escaped -- otherwise it forges a second log line, or
+// runs escape codes in the terminal of whoever reads the log.
+func TestOIDCCallbackPolicyRefusalLogEscapesSubject(t *testing.T) {
+	g, ts, fp := newOIDCTestGate(t, oidc.Policy{AllowedEmails: []string{"someone-else@example.com"}})
+	logs := &messageRecorder{}
+	g.cfg.Log = slog.New(logs)
+	fs, err := oidc.NewFlowState(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := fp.DefaultClaims(oidcTestClientID, fs.Nonce)
+	claims.Subject = "x\nFORGED"
+	fp.NextIDToken = fp.SignRS256(t, claims)
+
+	req := oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code")
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	found := false
+	for _, msg := range logs.msgs {
+		if !strings.Contains(msg, "refused SSO login") {
+			continue
+		}
+		found = true
+		if strings.Contains(msg, "\n") || !strings.Contains(msg, `x\nFORGED`) {
+			t.Errorf("the subject reached the log unescaped: %q", msg)
+		}
+	}
+	if !found {
+		t.Fatalf("no refused-login line was logged; got %q", logs.msgs)
 	}
 }
 
