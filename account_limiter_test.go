@@ -387,6 +387,37 @@ func TestClampedLockoutRetriesAreSpacedOut(t *testing.T) {
 	}
 }
 
+// A successful login whose clear of the lockout fails to save does not
+// leave its owner locked out by the record for the rest of the window:
+// the next attempt is let through and the clear is saved again.
+func TestFailedLockoutClearDoesNotLockTheOwnerOut(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := mustNewLoginLimiter(t, 3, time.Hour)
+
+	l.ReserveAccount(s, id, now) // wrong
+	l.ReserveAccount(s, id, now) // wrong
+	if !l.ReserveAccount(s, id, now) {
+		t.Fatal("test setup: the third attempt was refused")
+	}
+	if s.LoginLockedUntil(id).IsZero() {
+		t.Fatal("test setup: expected the third attempt's lockout on the record")
+	}
+	b.fail.Store(true)
+	l.ReleaseAccount(s, id, now) // right, but the clear fails to save
+	b.fail.Store(false)
+
+	at := now.Add(time.Second)
+	if !l.ReserveAccount(s, id, at) {
+		t.Fatal("the owner stayed locked out after a clear that failed to save")
+	}
+	l.ReleaseAccount(s, id, at)
+	if got := s.LoginLockedUntil(id); !got.IsZero() {
+		t.Fatalf("expected the lockout cleared from the record, got %v", got)
+	}
+}
+
 // A new password -- set by its owner, by an admin through SetPassword,
 // or replaced by an admin's reset code -- ends any login lockout on the
 // account, in the record and in the limiter's own count: the guesses

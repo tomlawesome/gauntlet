@@ -322,6 +322,17 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 	}
 
 	l.mu.Lock()
+	// A clear whose save failed (see syncLockout): the owner signed in
+	// and ended the lockout still on the record, so it is not refused
+	// for; the clear is tried again below, once per lockoutRetryInterval.
+	var clearRetryAt time.Time
+	if p, ok := l.wantLockout[accountID]; ok && p.until.IsZero() && !p.retryAt.IsZero() {
+		if wasPersisted {
+			persisted, clamped, clearRetryAt = time.Time{}, false, p.retryAt
+		} else {
+			delete(l.wantLockout, accountID) // the record has nothing left to clear
+		}
+	}
 	if now.Before(persisted) {
 		// While a save of the clamped lockout is failing, the record
 		// still reads as far off, so every guess lands here: retry it
@@ -334,7 +345,7 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		}
 		l.mu.Unlock()
 		if clamped && lockouts != nil {
-			l.syncLockout(lockouts, accountID)
+			l.syncLockout(lockouts, accountID, now)
 		}
 		return false
 	}
@@ -362,7 +373,7 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		}
 		l.mu.Unlock()
 		if retry {
-			l.syncLockout(lockouts, accountID)
+			l.syncLockout(lockouts, accountID, now)
 		}
 		return false
 	}
@@ -379,15 +390,16 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		// out -- the moment the in-memory counter would admit one again.
 		l.wantLockout[accountID] = pendingLockout{until: entries[0].Add(l.window), retryAt: now.Add(lockoutRetryInterval)}
 		sync = lockouts != nil
-	case wasPersisted:
-		// A lockout on the record that has ended.
+	case wasPersisted && !now.Before(clearRetryAt):
+		// A lockout on the record that has ended, or one whose clear
+		// failed and is due to be tried again.
 		l.wantLockout[accountID] = pendingLockout{}
 		sync = lockouts != nil
 	}
 	l.mu.Unlock()
 
 	if sync {
-		l.syncLockout(lockouts, accountID)
+		l.syncLockout(lockouts, accountID, now)
 	}
 	return true
 }
@@ -412,7 +424,7 @@ func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string
 	l.mu.Unlock()
 
 	if clear {
-		l.syncLockout(lockouts, accountID)
+		l.syncLockout(lockouts, accountID, now)
 	}
 }
 
@@ -457,10 +469,13 @@ func (l *LoginLimiter) releaseIn(m map[string][]time.Time, key string, now time.
 // write goes last writes the latest decision.
 //
 // A lockout that fails to save stays in wantLockout for a refused
-// attempt to retry. A clear that fails is dropped: the record then
-// holds a lockout that has ended, and the next attempt on the account
-// clears it again (ReserveAccount's wasPersisted case).
-func (l *LoginLimiter) syncLockout(lockouts AccountLockouts, accountID string) {
+// attempt to retry. A clear that fails while the record's lockout has
+// yet to end stays too, with a retryAt: the owner has signed in, so the
+// next attempt is not refused for it and tries the clear again. Any
+// other failed clear is dropped: the record then holds a lockout that
+// has ended, and the next attempt clears it again (ReserveAccount's
+// wasPersisted case).
+func (l *LoginLimiter) syncLockout(lockouts AccountLockouts, accountID string, now time.Time) {
 	l.persistMu.Lock()
 	defer l.persistMu.Unlock()
 
@@ -483,9 +498,17 @@ func (l *LoginLimiter) syncLockout(lockouts AccountLockouts, accountID string) {
 		}
 	}
 
+	keepClear := err != nil && want.until.IsZero() && !errors.Is(err, ErrUserNotFound) &&
+		lockouts.LoginLockedUntil(accountID).After(now)
+
 	l.mu.Lock()
-	if cur, ok := l.wantLockout[accountID]; ok && cur.until.Equal(want.until) && !keep {
-		delete(l.wantLockout, accountID)
+	if cur, ok := l.wantLockout[accountID]; ok && cur.until.Equal(want.until) {
+		switch {
+		case keepClear:
+			l.wantLockout[accountID] = pendingLockout{retryAt: now.Add(lockoutRetryInterval)}
+		case !keep:
+			delete(l.wantLockout, accountID)
+		}
 	}
 	l.mu.Unlock()
 }
