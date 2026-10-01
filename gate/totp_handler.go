@@ -145,6 +145,14 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Same "nothing pending" test ConfirmTOTP makes, asked first: with no
+	// secret to check against, VerifyTOTP would fail every code and the
+	// caller would be told to check their clock instead of the 409.
+	if current.TOTPSecret == "" || !current.TOTPConfirmedAt.IsZero() {
+		g.writeAuthError(w, r, gauntlet.ErrNoPendingTOTP, http.StatusConflict)
+		return
+	}
+
 	matched, ok := gauntlet.VerifyTOTP(current.TOTPSecret, req.Code, now, current.TOTPLastCounter)
 	if !ok {
 		http.Error(w, "that code didn't match -- check your authenticator app's clock and try again", http.StatusBadRequest)

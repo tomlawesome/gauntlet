@@ -282,6 +282,20 @@ func TestTOTPConfirmRejectsBadCode(t *testing.T) {
 	}
 }
 
+// TestTOTPConfirmWithNothingPendingIsAConflict: a confirm with no
+// enrolment started is the documented 409, not a 400 telling the person
+// to check their phone's clock.
+func TestTOTPConfirmWithNothingPendingIsAConflict(t *testing.T) {
+	_, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+
+	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: "123456"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("confirm with no enrolment pending got %d, want 409", resp.StatusCode)
+	}
+}
+
 // TestTOTPConfirmAgainAfterAlreadyConfirmedRefused covers ConfirmTOTP's
 // ErrNoPendingTOTP path from the route: a second, otherwise-valid code
 // submitted after the factor is already active finds no pending
