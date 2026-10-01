@@ -190,6 +190,8 @@ func HashPassword(password string) (string, error)   // argon2id, m=64MiB t=3 p=
 func VerifyPassword(password, encoded string) bool   // constant-time; parameters read from the encoded string
 type KDFParams struct{ Memory, Time uint32; Threads uint8 }
 func DefaultKDFParams() KDFParams
+func (p KDFParams) Valid() bool      // zero fields refused, never derived cheaply
+func NewKDFSalt() ([]byte, error)
 func DeriveKey(passphrase string, salt []byte, p KDFParams) []byte  // kept: mikroview's retention key uses it
 
 type Session struct { ID, UserID string; IssuedAt, ExpiresAt time.Time }
@@ -205,6 +207,7 @@ type Token struct { ID, Name string; Kind TokenKind; Device, HashedValue string
                     CreatedAt, LastUsedAt time.Time; CreatedBy, CreatedByUsername string } // JSON as mikroview token.go
 type TokenOptions struct { Log *slog.Logger; Kinds []TokenKind }          // new: Kinds, default {api, ingest}
 func OpenTokenStore(b persist.Backend, opts TokenOptions) (*TokenStore, error)
+func (s *TokenStore) Persisted() bool
 func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error)
 func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) // SHA-256 lookup; kind must match
 func (s *TokenStore) Revoke(id string) error
@@ -217,6 +220,7 @@ func (l *LoginLimiter) SetLog(log *slog.Logger)                    // eviction p
 func (l *LoginLimiter) Reserve(key string, now time.Time) bool     // addresses, unknown names: capped map
 func (l *LoginLimiter) Release(key string, now time.Time)
 func (l *LoginLimiter) RecordFailure(key string, now time.Time)
+func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only; prefer Reserve before a slow check
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
@@ -228,6 +232,27 @@ type AccountLockouts interface {                                    // *Store im
 
 func ValidateUsername(username string) error       // 1–64 runes, no control/format chars
 func ValidateLocalUsername(username string) error  // additionally: no "@"
+
+// Second-factor and code helpers, for apps that render enrolment or check a code themselves.
+func GenerateTOTPSecret() ([]byte, error)
+func EncodeTOTPSecret(secret []byte) string
+func DecodeTOTPSecret(s string) ([]byte, error)
+func TOTPEnrollmentURI(productName, username string, secret []byte) string
+func GenerateTOTPCode(secret []byte, counter uint64) string
+func VerifyTOTP(encodedSecret, code string, now time.Time, lastUsedCounter uint64) (matchedCounter uint64, ok bool)
+func FormatRecoveryCode(code string) string; func NormaliseRecoveryCode(typed string) string
+func FormatResetCode(code string) string;    func NormaliseResetCode(typed string) string
+
+const MaxDeviceIDLen = 64; const MaxTokenNameLen = 64
+const ResetCodeTTL = 24 * time.Hour
+
+// Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
+// ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
+// ErrPasswordTooShort, ErrInvalidRole, ErrRegistrationClosed, ErrNoAdmin, ErrSingleAdmin,
+// ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
+// ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
+// ErrPasskeyLimitReached, ErrPasskeyNotFound, ErrTokenNotFound, ErrTokenKindInvalid,
+// ErrTokenNameInvalid, ErrTokenDeviceInvalid/Required/NotAllowed, ErrLimiterConfig.
 ```
 
 Reasons for the three *new* items:
@@ -626,12 +651,15 @@ once G4 is tagged.
 - **G2 Core accounts and passwords.** `User`, `Role`, `Store`
   (everything in §1.3 except tokens and second factors), `HashPassword`/
   `VerifyPassword`, `username.go`, `id.go`; mikroview's tests ported.
-  *Done when:* a copy of a mikroview `users.json` fixture loads, saves
-  and reloads byte-identical, and every ported test passes.
+  *Done when:* a `users.json`-shaped fixture, built field-for-field from
+  mikroview's `User` type (mikroview has no such fixture file), loads,
+  saves and reloads byte-identical (`roundtrip_test.go`), and every
+  ported test passes.
 - **G3 Sessions, tokens, limiter.** `SessionStore`, `TokenStore` with
-  `Kinds`, `LoginLimiter`, `internal/evict`. *Done when:* a mikroview
-  tokens fixture containing `droplist-pull` rows round-trips and only
-  registered kinds authenticate.
+  `Kinds`, `LoginLimiter`, `internal/evict`. *Done when:* a tokens
+  fixture built field-for-field from mikroview's `Token` type, with
+  `droplist-pull` rows, round-trips and only registered kinds
+  authenticate (`tokendocument_test.go`).
 - **G4 Second-factor data and stdlib flows.** TOTP, recovery codes,
   reset codes, passkey storage methods (no WebAuthn). *Done when:* the
   full mikroview `User` document round-trips and `Authenticate` redeems

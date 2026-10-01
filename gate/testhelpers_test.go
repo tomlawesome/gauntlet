@@ -75,6 +75,30 @@ func newTestGate(t *testing.T) *Gate {
 	return g
 }
 
+// openStoreWithUsers opens a Store over a hand-written accounts
+// document holding exactly users -- for fixtures that need an account
+// state no Store method can produce (an unrecognized role,
+// MustChangePassword already set), written through persist.Memory.Save
+// directly, the way a hand-edited accounts file would be.
+func openStoreWithUsers(t *testing.T, users ...gauntlet.User) *gauntlet.Store {
+	t.Helper()
+	payload, err := json.Marshal(struct {
+		Users []gauntlet.User `json:"users"`
+	}{Users: users})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := persist.NewMemory()
+	if _, err := backend.Save(t.Context(), payload, 0); err != nil {
+		t.Fatal(err)
+	}
+	store, err := gauntlet.OpenStore(backend, gauntlet.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
 // testProtectedHandler is what a real application's own session-gated
 // route stands in for -- mikroview's /api/events, minus everything
 // that route actually does.

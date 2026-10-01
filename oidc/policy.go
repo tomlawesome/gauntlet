@@ -33,8 +33,9 @@ const defaultGroupsClaim = "groups"
 // is set adds a condition, and all set conditions must hold.
 type Policy struct {
 	// AllowedGroups permits an identity carrying at least one of these in
-	// its groups claim. Sugar over RequiredClaims[GroupsClaim] -- see
-	// Permit.
+	// its groups claim (GroupsClaim). Permit checks it on its own, with
+	// its own refusal messages; it is not folded into RequiredClaims, so
+	// setting both on the same claim means both must hold.
 	AllowedGroups []string
 	// GroupsClaim is where to read groups from; defaults to "groups".
 	GroupsClaim string
@@ -45,10 +46,10 @@ type Policy struct {
 	// these domains -- the usual way to scope a Google Workspace or
 	// Microsoft 365 tenant down to one organisation.
 	AllowedEmailDomains []string
-	// RequiredClaims is the general mechanism the two email fields and
-	// AllowedGroups are conveniences over: claim name -> permitted
-	// values, where the identity must carry at least one permitted value
-	// for every named claim. Nothing here is provider-specific, which is
+	// RequiredClaims is the general mechanism for any other claim: claim
+	// name -> permitted values, where the identity must carry at least
+	// one permitted value for every named claim. Permit checks it after,
+	// and separately from, AllowedGroups and the two email fields. Nothing here is provider-specific, which is
 	// the point -- Google Workspace's hosted-domain claim is
 	// {"hd": ["example.com"]}, a single Entra tenant is
 	// {"tid": ["<tenant-guid>"]}, and a provider inventing its own claim

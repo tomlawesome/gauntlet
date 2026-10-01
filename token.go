@@ -131,6 +131,11 @@ var (
 	// an unbounded or control-bearing one is a typo that becomes a
 	// permanently, invisibly dead token at best.
 	ErrTokenDeviceInvalid = errors.New("gauntlet: device id must be at most 64 characters of printable text")
+	// ErrTokenNameInvalid is returned by Create for a name that is too
+	// long or carries control/formatting characters. The name is a
+	// display value in the same places the device id is, and bounded
+	// for the same reasons (see ErrTokenDeviceInvalid).
+	ErrTokenNameInvalid = errors.New("gauntlet: token name must be at most 64 characters of printable text")
 )
 
 // defaultTokenKinds is TokenOptions.Kinds' value when left empty --
@@ -268,15 +273,33 @@ func validDeviceID(device string) bool {
 	if device == "" {
 		return true // the required/not-allowed rules in Create already ruled on this
 	}
-	if len(device) > MaxDeviceIDLen {
+	return printableWithin(device, MaxDeviceIDLen)
+}
+
+// MaxTokenNameLen bounds a token's display name, the same cap
+// MaxDeviceIDLen puts on its device scope.
+const MaxTokenNameLen = 64
+
+// validTokenName applies validDeviceID's rules to a token's name, which
+// reaches the same terminals and browsers. Empty stays allowed, as it
+// always has been: a name is a label, not a scope.
+func validTokenName(name string) bool {
+	return printableWithin(name, MaxTokenNameLen)
+}
+
+// printableWithin is the check validDeviceID and validTokenName share:
+// at most maxBytes of valid UTF-8, with no control or Unicode formatting
+// characters.
+func printableWithin(s string, maxBytes int) bool {
+	if len(s) > maxBytes {
 		return false
 	}
-	for _, r := range device {
+	for _, r := range s {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError {
 			return false
 		}
 	}
-	return utf8.ValidString(device)
+	return utf8.ValidString(s)
 }
 
 // Create generates a new token named name, of kind kind, and persists
@@ -289,13 +312,18 @@ func validDeviceID(device string) bool {
 // kind must be one of the kinds this store was opened with
 // (TokenOptions.Kinds); anything else is ErrTokenKindInvalid. device
 // scopes an ingest token to one device and must be empty for any other
-// kind -- see Token.Device.
+// kind -- see Token.Device. name is trimmed and held to the same length
+// and character rules as device (ErrTokenNameInvalid).
 func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) {
 	if !s.Persisted() {
 		return "", nil, ErrTokenNotPersisted
 	}
 	if !s.kinds[kind] {
 		return "", nil, ErrTokenKindInvalid
+	}
+	name = strings.TrimSpace(name)
+	if !validTokenName(name) {
+		return "", nil, ErrTokenNameInvalid
 	}
 	device = strings.TrimSpace(device)
 	if kind == TokenKindIngest && device == "" {
@@ -318,7 +346,7 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 
 	t := &Token{
 		ID:          newID(),
-		Name:        strings.TrimSpace(name),
+		Name:        name,
 		Kind:        kind,
 		Device:      device,
 		HashedValue: hash,
@@ -462,6 +490,18 @@ func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error) {
 	return len(removed), nil
 }
 
+// tokenOlder is the one order List, ByKind and the saved document use:
+// oldest first, then by ID. The ID breaks ties between tokens created in
+// the same instant, which would otherwise come out in map-iteration order
+// -- different on every call, so a list that reshuffles on refresh and a
+// document whose bytes change on every save.
+func tokenOlder(a, b *Token) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
+}
+
 // List returns every token's metadata, oldest first -- HashedValue is
 // always zeroed out (never the raw value either, since this store never
 // retains it past Create's return) so a list response can never leak
@@ -475,7 +515,7 @@ func (s *TokenStore) List() []Token {
 		cp.HashedValue = ""
 		out = append(out, cp)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool { return tokenOlder(&out[i], &out[j]) })
 	return out
 }
 
@@ -494,7 +534,7 @@ func (s *TokenStore) ByKind(kind TokenKind) []*Token {
 		cp.HashedValue = ""
 		out = append(out, &cp)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool { return tokenOlder(out[i], out[j]) })
 	return out
 }
 
@@ -513,7 +553,7 @@ func (s *TokenStore) tryPersistLocked() error {
 	for _, t := range s.byID {
 		list = append(list, t)
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
+	sort.Slice(list, func(i, j int) bool { return tokenOlder(list[i], list[j]) })
 
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {

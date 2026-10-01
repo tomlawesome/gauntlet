@@ -22,21 +22,21 @@ import (
 func (g *Gate) Routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/auth/session", g.handleSession)
-	mux.HandleFunc("POST /api/auth/register", g.handleRegister)
-	mux.HandleFunc("POST /api/auth/login", g.handleLogin)
-	mux.HandleFunc("POST /api/auth/login/factor", g.handleLoginFactor)
-	mux.HandleFunc("POST /api/auth/logout", g.handleLogout)
+	mux.HandleFunc("GET "+sessionPath, g.handleSession)
+	mux.HandleFunc("POST "+registerPath, g.handleRegister)
+	mux.HandleFunc("POST "+loginPath, g.handleLogin)
+	mux.HandleFunc("POST "+loginFactorPath, g.handleLoginFactor)
+	mux.HandleFunc("POST "+logoutPath, g.handleLogout)
 	mux.HandleFunc("POST /api/auth/logout-all", g.handleLogoutAll)
-	mux.HandleFunc("POST /api/auth/password", g.handleChangePassword)
+	mux.HandleFunc("POST "+changePasswordPath, g.handleChangePassword)
 
-	mux.HandleFunc("POST /api/auth/totp/enrol", g.handleTOTPEnrol)
-	mux.HandleFunc("POST /api/auth/totp/confirm", g.handleTOTPConfirm)
+	mux.HandleFunc("POST "+totpEnrolPath, g.handleTOTPEnrol)
+	mux.HandleFunc("POST "+totpConfirmPath, g.handleTOTPConfirm)
 	mux.HandleFunc("DELETE /api/auth/totp", g.handleTOTPDelete)
 	mux.HandleFunc("POST /api/auth/recovery-codes", g.handleRecoveryCodesRegenerate)
 
-	mux.HandleFunc("GET /api/auth/oidc/login", g.handleOIDCLogin)
-	mux.HandleFunc("GET /api/auth/oidc/callback", g.handleOIDCCallback)
+	mux.HandleFunc("GET "+oidcLoginPath, g.handleOIDCLogin)
+	mux.HandleFunc("GET "+oidcCallbackPath, g.handleOIDCCallback)
 	mux.HandleFunc("POST /api/auth/oidc/link", g.handleOIDCLinkStart)
 
 	mux.Handle("GET /api/auth/users", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleListUsers)))

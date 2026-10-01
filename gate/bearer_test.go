@@ -7,8 +7,10 @@
 package gate
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -304,5 +306,58 @@ func TestBearerTokenPOSTBypassesCSRF(t *testing.T) {
 	defer func() { _ = csrfResp.Body.Close() }()
 	if csrfResp.StatusCode != http.StatusForbidden {
 		t.Errorf("POST with no Bearer token and no X-Requested-With: expected 403 from the CSRF check, got %d", csrfResp.StatusCode)
+	}
+}
+
+// TestBearerTokenPOSTBodyReachesKindHandler: every other test here
+// sends no body, so none would notice Protect's bearer branch reading
+// or dropping one on the way to the kind's handler. A POST carrying
+// JSON must arrive intact, next to its token. The CSRF header is sent
+// so this pins the body alone -- the bypass is
+// TestBearerTokenPOSTBypassesCSRF's.
+func TestBearerTokenPOSTBodyReachesKindHandler(t *testing.T) {
+	g := newTestGate(t)
+	registerUserDirect(t, g, "admin", "password123")
+	raw, _, err := g.deps.Tokens.Create("router", gauntlet.TokenKindIngest, "device-1", nil, nowUTC())
+	if err != nil {
+		t.Fatalf("Tokens.Create: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/ingest", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Reading string `json:"reading"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "body did not decode: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		tok := TokenFromContext(r)
+		if tok == nil {
+			http.Error(w, "no token in context", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(tok.Name + ":" + body.Reading))
+	})
+	g.Handle(gauntlet.TokenKindIngest, mux)
+	ts := newTestServer(t, g)
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/ingest", strings.NewReader(`{"reading":"42.5"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST with a JSON body under a valid Bearer token: got %d (%s), want 200", resp.StatusCode, body)
+	}
+	if string(body) != "router:42.5" {
+		t.Errorf("expected the kind handler to see the token and the body, got %q", body)
 	}
 }

@@ -2,6 +2,8 @@ package persist
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -344,5 +346,65 @@ func TestFileBackendSaveFailsWhenTheLockFileCannotBeOpened(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("Save wrote the document without holding the lock: stat err = %v", err)
+	}
+}
+
+// Backend.Describe goes into logs and StartupError.Location, so it must
+// stay a short, single-line label: the file backends name their path
+// and nothing else, and no backend may echo the document it holds or,
+// for EncryptedFileBackend, its key in any common encoding. Each backend
+// is described after a save, so a Describe that reached for state would
+// have something to leak.
+func TestEveryBackendDescribeIsShortAndCarriesNoSecrets(t *testing.T) {
+	const marker = "describe-test-payload-marker"
+	payload := []byte(`{"secret":"` + marker + `"}`)
+	key := []byte("describe-test-key-bytes-not-real-0123456789")
+	path := filepath.Join(t.TempDir(), "store.json")
+	sealedPath := filepath.Join(t.TempDir(), "sealed.json")
+
+	encrypted, err := NewEncryptedFileBackend(sealedPath, key)
+	if err != nil {
+		t.Fatalf("NewEncryptedFileBackend: %v", err)
+	}
+	cases := []struct {
+		name     string
+		b        Backend
+		wantPath string // "" for a backend with no path
+	}{
+		{"Memory", NewMemory(), ""},
+		{"fileBackend", newFileBackend(path), path},
+		{"EncryptedFileBackend", encrypted, sealedPath},
+	}
+	leaks := []string{
+		marker,
+		string(key),
+		hex.EncodeToString(key),
+		base64.StdEncoding.EncodeToString(key),
+		base64.RawURLEncoding.EncodeToString(key),
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := c.b.Save(context.Background(), payload, 0); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			got := c.b.Describe()
+			if got == "" {
+				t.Fatal("Describe returned nothing")
+			}
+			if limit := len(c.wantPath) + 32; len(got) > limit {
+				t.Errorf("Describe() is %d bytes, want at most %d: %q", len(got), limit, got)
+			}
+			if strings.ContainsAny(got, "\r\n") {
+				t.Errorf("Describe() spans lines: %q", got)
+			}
+			if c.wantPath != "" && !strings.Contains(got, c.wantPath) {
+				t.Errorf("Describe() = %q, want it to name %q", got, c.wantPath)
+			}
+			for _, leak := range leaks {
+				if strings.Contains(got, leak) {
+					t.Errorf("Describe() = %q leaks %q", got, leak)
+				}
+			}
+		})
 	}
 }

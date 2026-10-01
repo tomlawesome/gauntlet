@@ -2,6 +2,7 @@ package gate
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/tomlawesome/gauntlet"
 )
@@ -15,8 +16,8 @@ type changePasswordRequest struct {
 // password (mikroview's #294 item 4).
 func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
-	user, ok := g.sessionUser(r, now)
-	if !ok {
+	user := UserFromContext(r)
+	if user == nil {
 		writeUnauthorized(w, "sign in first")
 		return
 	}
@@ -40,15 +41,10 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// An admin reset (POST /api/auth/users/{id}/reset-password, which
 	// calls IssueResetCode) is what sets MustChangePassword.
 	if !user.MustChangePassword {
-		if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
-			http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		// Throttled and re-checked by recheckPassword.
+		if _, ok := g.recheckPassword(w, user, req.CurrentPassword, "current password is incorrect", now); !ok {
 			return
 		}
-		if _, err := g.deps.Users.Authenticate(user.Username, req.CurrentPassword, now); err != nil {
-			writeUnauthorized(w, "current password is incorrect")
-			return
-		}
-		g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 		if req.NewPassword == req.CurrentPassword {
 			http.Error(w, "the new password is the same as the current one", http.StatusBadRequest)
@@ -78,4 +74,33 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "otherSessionsEnded": true})
+}
+
+// recheckPassword asks a signed-in caller for their password again
+// before a route that changes how the account is protected (password
+// change, TOTP enrol and delete, recovery-code regenerate). The caller
+// already holds a session, which is exactly what a stolen cookie gives
+// an attacker; the password is the one thing a cookie does not carry.
+//
+// Rate-limited on the per-account password re-check bucket
+// (ReserveRecheck), reserve-then-release like handleLogin: a guess made
+// from behind a cookie is still a guess at a live credential, so
+// without the bucket each of these routes would be an unthrottled
+// password oracle. A wrong password keeps the reservation -- that is
+// what counts the failure -- and only a correct one releases it.
+//
+// Writes the 429, or the 401 carrying wrongMsg, itself; on success it
+// returns the freshly authenticated copy of the account.
+func (g *Gate) recheckPassword(w http.ResponseWriter, user *gauntlet.User, password, wrongMsg string, now time.Time) (*gauntlet.User, bool) {
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return nil, false
+	}
+	current, err := g.deps.Users.Authenticate(user.Username, password, now)
+	if err != nil {
+		writeUnauthorized(w, wrongMsg)
+		return nil, false
+	}
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
+	return current, true
 }

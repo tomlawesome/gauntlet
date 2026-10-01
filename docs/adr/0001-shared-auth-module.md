@@ -28,11 +28,16 @@ until mikroview itself moves onto it. This repository is that module.
    [docs/design.md](../design.md) (Fable 5.1, 2026-09-26, from birdcage's
    `docs/design/gauntlet.md`).
 
-2. **Storage, logging and eviction are interfaces**, not this module's
-   concern -- see `persist.Backend` in [docs/design.md](../design.md)
-   §1.2. Gauntlet never owns a database; each application supplies its
-   own backend, its own `*slog.Logger`, and (where it needs eviction)
-   its own copy of the pure function `evict.DownTo`.
+2. **Storage and logging are interfaces**, not this module's concern --
+   see `persist.Backend` in [docs/design.md](../design.md) §1.2.
+   Gauntlet never owns a database; each application supplies its own
+   backend and its own `*slog.Logger`. Eviction is not an interface: the
+   pure function `evict.DownTo` is copied into `internal/evict`
+   (design.md §1.1), and its one caller here is the login limiter's
+   capped map of addresses and unknown usernames. A real account's
+   counter is kept apart from that map and never evicted (#19,
+   `ratelimit.go`). *(Corrected 2026-09-30, #24: this said eviction was
+   an interface each app supplied.)*
 
 3. **Mikroview's auth code is the reference**, continuously, not a
    one-time source to port from: this module is read against mikroview's

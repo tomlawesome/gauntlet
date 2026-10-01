@@ -45,12 +45,16 @@ an issue.
 
 None in G1-G4. `golang.org/x/crypto/argon2`, `github.com/coreos/go-oidc/v3`
 and `golang.org/x/oauth2` are approved for G2/G5 (birdcage #8,
-owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. `go-webauthn`
-is not approved; it waits for G8. Anything else goes to the owner first.
+owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. For v0.2.0
+(owner 2026-09-30): `golang.org/x/exp/cmd/apidiff` in CI only and
+`github.com/getkin/kin-openapi` v0.149.0 (MIT) in tests only, both for
+#22 and ADR-0002; `github.com/go-webauthn/webauthn` v0.18.2 in `passkey/`
+for G8 (#20). Anything else goes to the owner first.
 
 ## Checks
 
 ```
+gofmt -l .                     # must print nothing
 go build ./... && go vet ./... && go test ./... -race -coverprofile=coverage.out
 python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...

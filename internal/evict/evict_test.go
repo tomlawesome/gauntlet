@@ -1,7 +1,8 @@
-// Written for gauntlet: mikroview's internal/evict carries no test file
-// of its own (checked against origin/dev, 2026-09-27), so there is
-// nothing to port here. These exercise the package's exported surface
-// directly.
+// Written for gauntlet, not ported. Mikroview's internal/evict does have
+// its own evict_test.go (on its GitLab dev since a2946435, 2026-09-27);
+// this file was written against the lagging GitHub origin/dev, which did
+// not have it yet. These exercise the package's exported surface
+// directly; mikroview's cases have not been compared against them.
 package evict
 
 import (
