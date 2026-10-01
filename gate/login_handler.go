@@ -20,24 +20,36 @@ type loginReservation struct {
 	ipKey     string
 	accountID string // set when the name matched an account
 	nameKey   string // set when it did not
+	// afterReset is set when the address was at its limit and the
+	// attempt went ahead on the account's pass after a password reset
+	// (gauntlet.LoginLimiter.AllowAfterReset, #32): nothing is
+	// reserved on ipKey, so nothing is released from it either.
+	afterReset bool
 }
 
 // reserveLogin reserves one attempt on both buckets, or neither, and
 // writes the 429 itself when it is neither. accountID is "" for a name
 // that matches no account.
+//
+// An account whose password was reset after its address reached the
+// limit gets past the address bucket until its sign-in finishes or a
+// guess fails (AllowAfterReset, #32); its own bucket still applies.
 func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, now time.Time) (loginReservation, bool) {
 	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID}
 	if accountID == "" {
 		res.nameKey = "user:" + strings.ToLower(username)
 	}
 	ok := g.deps.Limiter.Reserve(res.ipKey, now)
+	if !ok && accountID != "" && g.deps.Limiter.AllowAfterReset(res.ipKey, g.deps.Users, accountID, now) {
+		ok, res.afterReset = true, true
+	}
 	if ok {
 		if accountID != "" {
 			ok = g.deps.Limiter.ReserveAccount(g.deps.Users, accountID, now)
 		} else {
 			ok = g.deps.Limiter.Reserve(res.nameKey, now)
 		}
-		if !ok {
+		if !ok && !res.afterReset {
 			g.deps.Limiter.Release(res.ipKey, now)
 		}
 	}
@@ -49,11 +61,22 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 
 // releaseLogin returns both reservations after a successful attempt.
 func (g *Gate) releaseLogin(res loginReservation, now time.Time) {
-	g.deps.Limiter.Release(res.ipKey, now)
+	if !res.afterReset {
+		g.deps.Limiter.Release(res.ipKey, now)
+	}
 	if res.accountID != "" {
 		g.deps.Limiter.ReleaseAccount(g.deps.Users, res.accountID, now)
 	} else {
 		g.deps.Limiter.Release(res.nameKey, now)
+	}
+}
+
+// endAfterReset uses up the account's pass past the address limit, if
+// this attempt used one: called when a session is issued and on a wrong
+// password or code, never between the password and second-factor steps.
+func (g *Gate) endAfterReset(res loginReservation) {
+	if res.afterReset {
+		g.deps.Limiter.EndAfterReset(res.ipKey, res.accountID)
 	}
 }
 
@@ -99,6 +122,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// a wrong password and a revoked/expired reset code alike (see
 		// gauntlet.Store.Authenticate's own doc comment): none of that
 		// distinction is safe to hand back to whoever is asking.
+		g.endAfterReset(res)
 		writeUnauthorized(w, "invalid username or password")
 		return
 	}
@@ -139,6 +163,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// (this account or another one on the same browser) has no bearing
 	// on a login that just completed through the ordinary one-step path.
 	g.clearPendingLoginCookie(w)
+	g.endAfterReset(res)
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)
 	g.audit(user.Username, "user.login", user.Username, "")
@@ -233,6 +258,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	// regardless of whether the code looked like a TOTP guess or a
 	// recovery-code guess: which kind was tried is not information a
 	// caller needs back.
+	g.endAfterReset(res)
 	writeUnauthorized(w, "invalid code")
 }
 
@@ -241,6 +267,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // cookie, and issue the real session handleLogin withheld.
 func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, res loginReservation, now time.Time) {
 	g.releaseLogin(res, now)
+	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)

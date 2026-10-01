@@ -234,6 +234,8 @@ func (l *LoginLimiter) RecordFailure(key string, now time.Time)
 func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only; prefer Reserve before a slow check
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
+func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
+func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
 type AccountLockouts interface {                                    // *Store implements it
@@ -298,8 +300,15 @@ lockout episode, not one per wrong guess. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A new password or reset code ends the lockout, and
 guesses from before it stop counting (#24); linking the admin to SSO,
-which ends its sessions but keeps its password, does not. Re-checking a signed-in
-caller's own password has its own per-account budget, memory only.
+which ends its sessions but keeps its password, does not. The reset
+account also gets past the per-address limit (#32; owner, 2026-10-01:
+a reset needs the server's command line or an admin-issued code, so
+this gives an attacker nothing): only that account, only when the
+address reached the limit before the reset, and only until its sign-in
+issues a session or a password or code is wrong (`AllowAfterReset`,
+`EndAfterReset`). Other names tried from that address stay refused.
+Re-checking a signed-in caller's own password has its own per-account
+budget, memory only.
 
 Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
@@ -701,7 +710,8 @@ once G4 is tagged.
   `GET /api/*` answers 401 without a session and 200 with one, and an API
   token reaches `GET /api/alerts` but not `/api/auth/users`.
 - **B3 CLI `birdcage user`.** *Done when:* `reset-password` against a
-  live server is honoured on the next request without restart.
+  live server is honoured on the next request without restart --
+  including from an address the lockout's guesses filled (#32).
 - **B4 Frontend: login, register, change-password, TOTP enrolment,
   recovery codes.** *Done when:* a fresh install can be set up and signed
   into from the browser with a second factor, screenshots in the MR.
