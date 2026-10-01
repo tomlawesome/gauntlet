@@ -239,3 +239,36 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 		t.Fatalf("the token stopped working although its revoke was refused: got %d, want 200", resp.StatusCode)
 	}
 }
+
+// TestContractTokenRegisteredKinds: an application may register its own
+// token kinds (TokenOptions.Kinds), so the document must accept any of
+// them, not only api and ingest. Leaving kind out still means api, which
+// is refused when the application did not register api.
+func TestContractTokenRegisteredKinds(t *testing.T) {
+	c := newContractChecker(t)
+	g := newTestGate(t)
+	const custom gauntlet.TokenKind = "droplist-pull"
+	tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{Kinds: []gauntlet.TokenKind{custom}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Tokens = tokens
+	ts := newTestServer(t, g)
+	u := ts.URL
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: credentialsRequest{Username: "admin", Password: "contract-admin-password"}}, 201, nil)
+
+	var created tokenResponse
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom)}}, 201, &created)
+	if created.Kind != custom {
+		t.Errorf("created kind = %q, want %q", created.Kind, custom)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "default"}}, 400, nil)
+	var list struct {
+		Tokens []tokenResponse `json:"tokens"`
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/tokens"}, 200, &list)
+	if len(list.Tokens) != 1 || list.Tokens[0].Kind != custom {
+		t.Errorf("listed tokens = %+v, want one of kind %q", list.Tokens, custom)
+	}
+}

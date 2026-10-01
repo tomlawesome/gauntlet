@@ -890,7 +890,7 @@ paths:
                   description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
                 kind:
                   type: string
-                  description: "`api` (read-only; the default when empty or absent) or `ingest`."
+                  description: "One of the kinds the application registered (TokenOptions.Kinds): `api` and `ingest` by default. Empty or absent means `api` (read-only), which is a 400 if the application did not register `api`."
                 device:
                   type: string
                   description: Required for, and allowed only on, an `ingest` token.
@@ -1207,7 +1207,7 @@ components:
           type: string
         kind:
           type: string
-          description: "`api` or `ingest`."
+          description: "One of the kinds the application registered (TokenOptions.Kinds): `api` or `ingest` by default."
         device:
           type: string
           description: Present only on an `ingest` token.
