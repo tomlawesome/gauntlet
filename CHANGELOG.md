@@ -76,7 +76,11 @@ All notable changes to this project are documented in this file.
   instead of recreating the file from that one write, which for an
   accounts file could mean a file with no admin that the next start
   refuses. The single-admin rule is checked on every save as well as
-  every load, so no write can produce such a file.
+  every load, so no write can produce such a file. The first such
+  failure after each removal logs one error naming the store and file
+  and saying writes are refused until the file is restored or the
+  process restarts; reads carry on from memory (#39). To recover,
+  put the file back, or restart to start afresh.
 - `VerifyAndRecordTOTP` and `RecordPasskeyAssertionIfFresh` report a
   code or assertion as accepted only when the counter that stops it
   being used again was saved. Before, a matching TOTP code was
@@ -84,7 +88,17 @@ All notable changes to this project are documented in this file.
   left the same code good for a second login; now it is refused with
   the error, the stance reset codes and recovery codes already take.
   A caller that granted the login on `ok` despite an error no longer
-  sees that combination.
+  sees that combination. The one exception is a passkey that has
+  never counted and presents 0 (most platform passkeys): that save
+  protects nothing, since the app's single-use challenge is what stops
+  a replay, so it is best-effort like `LastLogin` -- if it fails, the
+  login is accepted, the last-used time is kept in memory and the
+  failure is logged (#36). The app must claim that challenge before
+  calling.
+- `RecordPasskeyAssertionIfFresh` refuses a passkey whose stored count
+  is above zero and that now presents 0, as the WebAuthn spec treats
+  it: a possible cloned authenticator (#36). Before, any count of 0 was
+  accepted.
 - Persistence errors from store writes no longer carry the
   `saving accounts:` / `saving API tokens:` prefix; they name the store
   and backend themselves, and `errors.Is` against the package's errors

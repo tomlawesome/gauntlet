@@ -226,6 +226,13 @@ type Store struct {
 	// through mu like byID/byName/version above.
 	refusedVersion    int64
 	hasRefusedVersion bool
+
+	// removalLogged is set once a write has met ErrDocumentRemoved and
+	// logged it, so a removed document is reported once per removal
+	// rather than on every write (#39). Cleared whenever this store
+	// installs a document again -- a save or a reload -- so a restore
+	// followed by a second removal is logged afresh. Guarded by mu.
+	removalLogged bool
 }
 
 // storeState is the in-memory index over the accounts document: the
@@ -380,11 +387,29 @@ func (s *Store) mutateLocked(op func(*storeState) error) error {
 		// The document out there is now one this process holds: an
 		// earlier refusal no longer describes it (same as applyLoaded).
 		s.refusedVersion, s.hasRefusedVersion = 0, false
+		s.removalLogged = false
 	}
 	if errors.Is(err, errNoChange) {
 		return nil
 	}
+	if errors.Is(err, ErrDocumentRemoved) {
+		s.logRemovalLocked()
+	}
 	return err
+}
+
+// logRemovalLocked tells the operator, once per removal, that the
+// document this store loaded is gone and why every write now fails.
+// The store never recreates it (see ErrDocumentRemoved); reads carry on
+// from memory.
+func (s *Store) logRemovalLocked() {
+	if s.removalLogged {
+		return
+	}
+	s.removalLogged = true
+	if s.log != nil {
+		s.log.Error(fmt.Sprintf("accounts store (%s) has been removed since this process loaded it; writes are refused until it is restored or the process restarts", s.backend.Describe()))
+	}
 }
 
 // mutateBestEffortLocked is mutateLocked for a write not worth failing
@@ -493,6 +518,7 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 	// on disk: this document was just accepted, so any earlier refusal
 	// no longer describes what's out there.
 	s.refusedVersion, s.hasRefusedVersion = 0, false
+	s.removalLogged = false
 }
 
 // reloadIfStale re-reads the document if the backend has moved on since

@@ -190,6 +190,13 @@ type TokenStore struct {
 	// by mu the same way.
 	refusedVersion    int64
 	hasRefusedVersion bool
+
+	// removalLogged is set once a write has met ErrDocumentRemoved and
+	// logged it, so a removed document is reported once per removal
+	// rather than on every write (#39). Cleared whenever this store
+	// installs a document again -- a save or a reload -- so a restore
+	// followed by a second removal is logged afresh. Guarded by mu.
+	removalLogged bool
 }
 
 // tokenState is the in-memory index over the tokens document. It is
@@ -359,11 +366,29 @@ func (s *TokenStore) mutateLocked(op func(*tokenState) error) error {
 		s.tokenState = *next
 		s.version = version
 		s.refusedVersion, s.hasRefusedVersion = 0, false
+		s.removalLogged = false
 	}
 	if errors.Is(err, errNoChange) {
 		return nil
 	}
+	if errors.Is(err, ErrDocumentRemoved) {
+		s.logRemovalLocked()
+	}
 	return err
+}
+
+// logRemovalLocked tells the operator, once per removal, that the
+// document this store loaded is gone and why every write now fails.
+// The store never recreates it (see ErrDocumentRemoved); reads carry on
+// from memory.
+func (s *TokenStore) logRemovalLocked() {
+	if s.removalLogged {
+		return
+	}
+	s.removalLogged = true
+	if s.log != nil {
+		s.log.Error(fmt.Sprintf("API tokens store (%s) has been removed since this process loaded it; writes are refused until it is restored or the process restarts", s.backend.Describe()))
+	}
 }
 
 // mutateBestEffortLocked is mutateLocked for a write not worth failing
@@ -532,6 +557,7 @@ func (s *TokenStore) reloadIfStale() {
 	s.tokenState = *st
 	s.version = snap.Version
 	s.refusedVersion, s.hasRefusedVersion = 0, false
+	s.removalLogged = false
 }
 
 // hashTokenValue is the one place a raw token value is ever hashed --
