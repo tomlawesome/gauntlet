@@ -190,8 +190,15 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		// nothing to fall back on if the app is ever lost. Recovering
 		// from here is DELETE /api/auth/totp followed by enrolling
 		// again, same as any other abandoned enrolment.
+		//
+		// JSON with totpActive rather than plain text: a frontend may not
+		// read the message, and a bare 500 reads as "setup failed" while
+		// the factor is on and this browser holds a new session.
 		g.logError("generating recovery codes for " + user.Username + " after confirming TOTP: " + err.Error())
-		http.Error(w, "the authenticator app is now active, but recovery codes could not be generated -- remove it and enrol again from account settings", http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":      "the authenticator app is now active, but recovery codes could not be generated -- remove it and enrol again from account settings",
+			"totpActive": true,
+		})
 		return
 	}
 	detail := "authenticator app confirmed"
