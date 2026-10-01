@@ -620,13 +620,13 @@ func (s *Store) Register(username, password string, now time.Time) (*User, error
 	//
 	// This is a fast path, NOT the correctness boundary: it reads the
 	// guard's fields without holding the write lock, so it can race.
-	// registrationOpenGuard re-checks under the lock inside createLocked,
-	// and that remains what actually guarantees exactly one account can
-	// be self-registered.
+	// registrationOpenGuard runs again inside createLocked's write,
+	// against the document being saved, and that remains what actually
+	// guarantees exactly one account can be self-registered.
 	if err := func() error {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return registrationOpenGuard(s)
+		return registrationOpenGuard(s, &s.storeState)
 	}(); err != nil {
 		return nil, err
 	}
@@ -634,18 +634,20 @@ func (s *Store) Register(username, password string, now time.Time) (*User, error
 	return s.createLocked(username, password, RoleAdmin, now, registrationOpenGuard)
 }
 
-// registrationOpenGuard is Register's under-the-lock precondition: no
-// account may exist yet. Re-read from the live store with the write
-// lock held (see createLocked), which is what makes "exactly one
-// account can ever be self-registered" actually hold under concurrency.
+// registrationOpenGuard is Register's precondition: no account may
+// exist yet. createLocked runs it inside the write's op, against st --
+// the document being saved, which on a replay is the one another
+// process just wrote -- and that is what makes "exactly one account can
+// ever be self-registered" hold, across processes as well as within
+// one.
 //
 // hasRefusedVersion also closes it: a document with accounts exists on
 // disk even though this process refused to apply it (see reloadIfStale),
 // so a store that opened on an empty backend must not read its own
 // empty Count() as a fresh install and create a second admin on top of
 // the one the operator already has.
-func registrationOpenGuard(s *Store) error {
-	if len(s.byID) > 0 || s.hasRefusedVersion {
+func registrationOpenGuard(s *Store, st *storeState) error {
+	if len(st.byID) > 0 || s.hasRefusedVersion {
 		return ErrRegistrationClosed
 	}
 	return nil
@@ -675,9 +677,9 @@ func (s *Store) CreateUser(username, password string, role Role, now time.Time) 
 	if role != RoleUser && role != RoleViewer {
 		return nil, ErrInvalidRole
 	}
-	// Same as Register: a whole-document save is built from what this
-	// process holds, so pick up another process's writes first or the
-	// save writes over them.
+	// Same as Register: picking up another process's writes first
+	// avoids most save conflicts, though correctness no longer depends
+	// on it -- see mutate.
 	s.reloadIfStale()
 	return s.createLocked(username, password, role, now, nil)
 }
@@ -740,51 +742,47 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 // admin beforehand, is the check-then-act race behind the Appsmith
 // duplicate-admin and open-webui zero-admin bugs.
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) {
-	// Like every other write here: the save below is a whole-document
-	// rewrite of what this process holds.
+	// Like every other write here: picking up another process's writes
+	// first avoids most save conflicts -- see mutate.
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var current *User
-	for _, u := range s.byID {
-		if u.Role == RoleAdmin {
-			current = u
-			break
+	// Who the admin is, and whether the target exists and is someone
+	// else, are decided inside the op against the document being saved:
+	// on a replay that is the one another process just wrote, which may
+	// already have moved the role. An admin transfer that only exists in
+	// memory is a deployment that silently regains its old admin -- or
+	// loses the only one -- on the next restart, so mutate installs it
+	// only once it is saved.
+	var fromCopy, toCopy User
+	err = s.mutate(func(st *storeState) error {
+		var current *User
+		for _, u := range st.byID {
+			if u.Role == RoleAdmin {
+				current = u
+				break
+			}
 		}
+		if current == nil {
+			return ErrNoAdmin
+		}
+		targetID, ok := st.byName[strings.ToLower(toUsername)]
+		if !ok {
+			return ErrUserNotFound
+		}
+		target := st.byID[targetID]
+		if target.ID == current.ID {
+			return ErrTransferToSelf
+		}
+		current.Role = RoleUser
+		current.RoleChangedAt = now
+		target.Role = RoleAdmin
+		target.RoleChangedAt = now
+		fromCopy, toCopy = *current, *target
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	if current == nil {
-		return nil, nil, ErrNoAdmin
-	}
-
-	targetID, ok := s.byName[strings.ToLower(toUsername)]
-	if !ok {
-		return nil, nil, ErrUserNotFound
-	}
-	target := s.byID[targetID]
-	if target.ID == current.ID {
-		return nil, nil, ErrTransferToSelf
-	}
-
-	prevCurrentRole, prevCurrentRoleChangedAt := current.Role, current.RoleChangedAt
-	prevTargetRole, prevTargetRoleChangedAt := target.Role, target.RoleChangedAt
-
-	current.Role = RoleUser
-	current.RoleChangedAt = now
-	target.Role = RoleAdmin
-	target.RoleChangedAt = now
-	if err := s.tryPersistLocked(); err != nil {
-		// Put both roles back rather than leave this call's caller
-		// believing the transfer happened: an admin transfer that only
-		// exists in memory is a deployment that silently regains its old
-		// admin -- or loses the only one -- on the next restart.
-		current.Role, current.RoleChangedAt = prevCurrentRole, prevCurrentRoleChangedAt
-		target.Role, target.RoleChangedAt = prevTargetRole, prevTargetRoleChangedAt
-		return nil, nil, fmt.Errorf("saving accounts: %w", err)
-	}
-
-	fromCopy, toCopy := *current, *target
 	return &fromCopy, &toCopy, nil
 }
 
@@ -822,10 +820,10 @@ func (s *Store) HasLocalAdmin() bool {
 }
 
 // createLocked inserts a new account. guard, when non-nil, is evaluated
-// with the write lock already held and aborts the insert if it returns
-// an error -- that's the hook callers use to make a precondition
-// ("registration is still open") atomic with the insert itself rather
-// than checking it beforehand and racing.
+// inside the write, against the state being saved (see mutate), and
+// aborts the insert if it returns an error -- that's the hook callers
+// use to make a precondition ("registration is still open") atomic with
+// the insert itself rather than checking it beforehand and racing.
 //
 // HashPassword deliberately runs before the lock is acquired: Argon2id
 // is ~100ms by design, and holding the store's write lock for that long
@@ -833,7 +831,7 @@ func (s *Store) HasLocalAdmin() bool {
 // easy self-inflicted DoS. The cost of hashing before the guard runs is
 // one wasted hash on the losing side of a race, which is the right
 // trade.
-func (s *Store) createLocked(username, password string, role Role, now time.Time, guard func(*Store) error) (*User, error) {
+func (s *Store) createLocked(username, password string, role Role, now time.Time, guard func(*Store, *storeState) error) (*User, error) {
 	// Validated here rather than in Register/CreateUser separately: this
 	// is the single funnel every locally-created account passes through,
 	// so nothing can be added later that skips it.
@@ -848,43 +846,45 @@ func (s *Store) createLocked(username, password string, role Role, now time.Time
 		return nil, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if guard != nil {
-		if err := guard(s); err != nil {
-			return nil, err
-		}
-	}
-
+	// An account that only exists in memory must not be reported as
+	// created: Register/CreateUser's callers hand the operator a session
+	// or a success response for it, and a restart before the next good
+	// write would erase the account under them. mutate installs it only
+	// once it is saved.
+	//
+	// The guard and the username check run inside the op, against the
+	// document being saved: on a replay that is the one another process
+	// just wrote, which may already hold an admin or this username.
+	id := newID()
 	key := strings.ToLower(username)
-	if _, exists := s.byName[key]; exists {
-		return nil, ErrUsernameTaken
+	var created User
+	err = s.mutate(func(st *storeState) error {
+		if guard != nil {
+			if err := guard(s, st); err != nil {
+				return err
+			}
+		}
+		if _, exists := st.byName[key]; exists {
+			return ErrUsernameTaken
+		}
+		u := &User{
+			ID:           id,
+			Username:     username,
+			PasswordHash: hash,
+			Role:         role,
+			CreatedAt:    now,
+			// A real password the user chose, so it may later be reset.
+			HasLocalPassword: true,
+		}
+		st.byID[u.ID] = u
+		st.byName[key] = u.ID
+		created = *u
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	u := &User{
-		ID:           newID(),
-		Username:     username,
-		PasswordHash: hash,
-		Role:         role,
-		CreatedAt:    now,
-		// A real password the user chose, so it may later be reset.
-		HasLocalPassword: true,
-	}
-	s.byID[u.ID] = u
-	s.byName[key] = u.ID
-	if err := s.tryPersistLocked(); err != nil {
-		// An account that only exists in memory must not be reported as
-		// created: Register/CreateUser's callers hand the operator a
-		// session or a success response for it, and a restart before
-		// the next good write would erase the account under them.
-		delete(s.byID, u.ID)
-		delete(s.byName, key)
-		return nil, fmt.Errorf("saving accounts: %w", err)
-	}
-
-	cp := *u
-	return &cp, nil
+	return &created, nil
 }
 
 // ByOIDCIdentity looks up the user linked to the given (issuer,
@@ -956,15 +956,23 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	defer s.mu.Unlock()
 
 	if id, ok := s.oidcIndex[key]; ok {
-		if u, ok := s.byID[id]; ok {
+		if _, ok := s.byID[id]; ok {
 			// LastLogin only -- a missed update here costs nothing
 			// worth failing an otherwise-successful SSO login over, so
-			// this keeps the log-and-carry-on write (same reasoning as
+			// this is a best-effort write (same reasoning as
 			// Authenticate's ordinary-login path below).
-			u.LastLogin = now
-			s.persistLocked()
-			cp := *u
-			return &cp, false, nil
+			s.mutateBestEffortLocked(func(st *storeState) error {
+				u, ok := st.byID[id]
+				if !ok {
+					return ErrUserNotFound
+				}
+				u.LastLogin = now
+				return nil
+			})
+			if u, ok := s.byID[id]; ok {
+				cp := *u
+				return &cp, false, nil
+			}
 		}
 	}
 
@@ -977,57 +985,75 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 		}
 	}
 
-	role := RoleUser
-	if len(s.byID) == 0 {
-		role = RoleAdmin
-	}
+	// A JIT-provisioned account that only exists in memory must not be
+	// reported as created: the caller is about to sign this person in as
+	// though the account durably exists, and a restart before the next
+	// good write would erase it while sessions referencing its ID are
+	// still live. mutate installs it only once it is saved.
+	//
+	// Everything the op decides -- whether the identity already has an
+	// account, whether this is the first account and so the admin, and
+	// which username is free -- is read from the document being saved:
+	// on a replay that is the one another process just wrote, which may
+	// have provisioned this identity, registered the admin, or taken the
+	// hinted name since this process looked.
+	id := newID()
+	var result User
+	err = s.mutateLocked(func(st *storeState) error {
+		if existingID, ok := st.oidcIndex[key]; ok {
+			if u, ok := st.byID[existingID]; ok {
+				// Another process provisioned this identity first:
+				// sign in to that account rather than make a second.
+				u.LastLogin = now
+				result, created = *u, false
+				return nil
+			}
+		}
 
-	u := &User{
-		ID:           newID(),
-		Username:     s.uniqueUsernameLocked(usernameHint, issuer, subject),
-		PasswordHash: unmatchable,
-		Role:         role,
-		CreatedAt:    now,
-		LastLogin:    now,
-		OIDCIssuer:   issuer,
-		OIDCSubject:  subject,
-		// Explicitly false: the hash above is random and unmatchable, so
-		// there is no password here to reset. Recorded rather than
-		// inferred, because the hash itself is indistinguishable from a
-		// real one.
-		HasLocalPassword: false,
+		role := RoleUser
+		if len(st.byID) == 0 {
+			role = RoleAdmin
+		}
+		u := &User{
+			ID:           id,
+			Username:     st.uniqueUsername(usernameHint, issuer, subject),
+			PasswordHash: unmatchable,
+			Role:         role,
+			CreatedAt:    now,
+			LastLogin:    now,
+			OIDCIssuer:   issuer,
+			OIDCSubject:  subject,
+			// Explicitly false: the hash above is random and unmatchable,
+			// so there is no password here to reset. Recorded rather than
+			// inferred, because the hash itself is indistinguishable from
+			// a real one.
+			HasLocalPassword: false,
+		}
+		st.byID[u.ID] = u
+		st.byName[strings.ToLower(u.Username)] = u.ID
+		st.oidcIndex[key] = u.ID
+		result, created = *u, true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
 	}
-	s.byID[u.ID] = u
-	s.byName[strings.ToLower(u.Username)] = u.ID
-	s.oidcIndex[key] = u.ID
-	if err := s.tryPersistLocked(); err != nil {
-		// A JIT-provisioned account that only exists in memory must not
-		// be reported as created: the caller is about to sign this
-		// person in as though the account durably exists, and a restart
-		// before the next good write would erase it while sessions
-		// referencing its ID are still live.
-		delete(s.byID, u.ID)
-		delete(s.byName, strings.ToLower(u.Username))
-		delete(s.oidcIndex, key)
-		return nil, false, fmt.Errorf("saving accounts: %w", err)
-	}
-
-	cp := *u
-	return &cp, true, nil
+	return &result, created, nil
 }
 
-// uniqueUsernameLocked picks hint if it's non-empty and not already
-// taken, otherwise a deterministic synthetic username derived from
-// (issuer, subject) -- see FindOrCreateOIDCUser's doc comment. Callers
-// must hold s.mu.
-func (s *Store) uniqueUsernameLocked(hint, issuer, subject string) string {
+// uniqueUsername picks hint if it's non-empty and not already taken in
+// st, otherwise a deterministic synthetic username derived from
+// (issuer, subject) -- see FindOrCreateOIDCUser's doc comment. It reads
+// the state it is called on, so a replayed write checks the document it
+// is about to save.
+func (st *storeState) uniqueUsername(hint, issuer, subject string) string {
 	// The hint is whatever the identity provider put in
 	// preferred_username or email -- text this package does not
 	// control. An unusable one is dropped, not rejected, so the person
 	// still gets a stable account under the generated name below.
 	hint = sanitiseUsernameHint(hint)
 	if hint != "" {
-		if _, taken := s.byName[strings.ToLower(hint)]; !taken {
+		if _, taken := st.byName[strings.ToLower(hint)]; !taken {
 			return hint
 		}
 	}
@@ -1047,7 +1073,7 @@ func (s *Store) uniqueUsernameLocked(hint, issuer, subject string) string {
 	const prefix = "oidc-"
 	for n := 8; n <= len(full) && len(prefix)+n <= maxUsernameLength; n += 8 {
 		candidate := prefix + full[:n]
-		if _, taken := s.byName[strings.ToLower(candidate)]; !taken {
+		if _, taken := st.byName[strings.ToLower(candidate)]; !taken {
 			return candidate
 		}
 	}
@@ -1125,94 +1151,65 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return ErrUserNotFound
-	}
-
+	// A link that only exists in memory must not be reported as done:
+	// for everyone but the admin this also destroys the local password,
+	// so the caller would tell its operator SSO is now the only way in
+	// when a restart could revert to a password nobody remembers is
+	// still live -- or, worse, leave the account's SSO index entry
+	// pointing nowhere durable. mutate installs it only once it is
+	// saved, and the "identity already taken" and "already linked"
+	// checks run against the document being saved.
 	key := oidcKey{issuer: issuer, subject: subject}
-	if existingID, ok := s.oidcIndex[key]; ok && existingID != userID {
-		return ErrOIDCIdentityTaken
-	}
-	// Already connected to something else. Idempotent for the same
-	// identity (above and below), refused for a different one: the old
-	// (issuer, subject) would stay in the index and go on signing in as
-	// this account, so "re-link" would quietly mean "two ways in".
-	if u.OIDCSubject != "" && (u.OIDCIssuer != issuer || u.OIDCSubject != subject) {
-		return ErrOIDCAlreadyLinked
-	}
-
-	prevIssuer, prevSubject := u.OIDCIssuer, u.OIDCSubject
-	prevHash, prevHasLocalPassword := u.PasswordHash, u.HasLocalPassword
-	prevPasswordChangedAt := u.PasswordChangedAt
-	prevTOTPSecret := u.TOTPSecret
-	prevTOTPConfirmedAt := u.TOTPConfirmedAt
-	prevTOTPLastCounter := u.TOTPLastCounter
-	prevRecoveryCodes := u.RecoveryCodes
-	prevPasskeys := u.Passkeys
-	prevResetHash, prevResetExpiresAt := u.ResetCodeHash, u.ResetCodeExpiresAt
-	prevMustChange := u.MustChangePassword
-	_, hadIndexEntry := s.oidcIndex[key]
-
-	u.OIDCIssuer = issuer
-	u.OIDCSubject = subject
-	if u.Role != RoleAdmin {
-		u.PasswordHash = unmatchable
-		u.HasLocalPassword = false
-		// See the doc comment above: every non-admin loses both local
-		// credentials on linking, not just the password.
-		u.TOTPSecret = ""
-		u.TOTPConfirmedAt = time.Time{}
-		u.TOTPLastCounter = 0
-		u.RecoveryCodes = nil
-		u.Passkeys = nil
-		// An outstanding admin reset dies with the password it was a
-		// stand-in for: Authenticate treats a live code as the
-		// password, so left here it would keep a local way in open for
-		// up to 24 hours after the account became SSO-only, and the
-		// forced-change flag would then door an account with nothing
-		// to change.
-		u.ResetCodeHash = ""
-		u.ResetCodeExpiresAt = time.Time{}
-		u.MustChangePassword = false
-	}
-	// Invalidates every session issued before this point, including in
-	// another process -- the account's credentials just changed
-	// fundamentally, so anything holding a session from before that
-	// should have to come back through the IdP. True for the admin too,
-	// whose password survives: a second way into the account was just
-	// attached, and a session issued before that should be re-made
-	// through one of them.
-	u.PasswordChangedAt = now
-	s.oidcIndex[key] = userID
-	if err := s.tryPersistLocked(); err != nil {
-		// A link that only exists in memory must not be reported as
-		// done: for everyone but the admin this also destroyed the
-		// local password above, so the caller would tell its operator
-		// SSO is now the only way in when a restart could revert to a
-		// password nobody remembers is still live -- or, worse, leave
-		// the account's SSO index entry pointing nowhere durable.
-		u.OIDCIssuer, u.OIDCSubject = prevIssuer, prevSubject
-		u.PasswordHash, u.HasLocalPassword = prevHash, prevHasLocalPassword
-		u.PasswordChangedAt = prevPasswordChangedAt
-		u.TOTPSecret = prevTOTPSecret
-		u.TOTPConfirmedAt = prevTOTPConfirmedAt
-		u.TOTPLastCounter = prevTOTPLastCounter
-		u.RecoveryCodes = prevRecoveryCodes
-		u.Passkeys = prevPasskeys
-		u.ResetCodeHash, u.ResetCodeExpiresAt = prevResetHash, prevResetExpiresAt
-		u.MustChangePassword = prevMustChange
-		if hadIndexEntry {
-			s.oidcIndex[key] = userID
-		} else {
-			delete(s.oidcIndex, key)
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
 		}
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+		if existingID, ok := st.oidcIndex[key]; ok && existingID != userID {
+			return ErrOIDCIdentityTaken
+		}
+		// Already connected to something else. Idempotent for the same
+		// identity (above and below), refused for a different one: the
+		// old (issuer, subject) would stay in the index and go on
+		// signing in as this account, so "re-link" would quietly mean
+		// "two ways in".
+		if u.OIDCSubject != "" && (u.OIDCIssuer != issuer || u.OIDCSubject != subject) {
+			return ErrOIDCAlreadyLinked
+		}
+
+		u.OIDCIssuer = issuer
+		u.OIDCSubject = subject
+		if u.Role != RoleAdmin {
+			u.PasswordHash = unmatchable
+			u.HasLocalPassword = false
+			// See the doc comment above: every non-admin loses both
+			// local credentials on linking, not just the password.
+			u.TOTPSecret = ""
+			u.TOTPConfirmedAt = time.Time{}
+			u.TOTPLastCounter = 0
+			u.RecoveryCodes = nil
+			u.Passkeys = nil
+			// An outstanding admin reset dies with the password it was
+			// a stand-in for: Authenticate treats a live code as the
+			// password, so left here it would keep a local way in open
+			// for up to 24 hours after the account became SSO-only, and
+			// the forced-change flag would then door an account with
+			// nothing to change.
+			u.ResetCodeHash = ""
+			u.ResetCodeExpiresAt = time.Time{}
+			u.MustChangePassword = false
+		}
+		// Invalidates every session issued before this point, including
+		// in another process -- the account's credentials just changed
+		// fundamentally, so anything holding a session from before that
+		// should have to come back through the IdP. True for the admin
+		// too, whose password survives: a second way into the account
+		// was just attached, and a session issued before that should be
+		// re-made through one of them.
+		u.PasswordChangedAt = now
+		st.oidcIndex[key] = userID
+		return nil
+	})
 }
 
 // lastLoginGranularity is how stale an account's saved LastLogin may
@@ -1286,38 +1283,56 @@ func (s *Store) Authenticate(username, password string, now time.Time) (*User, e
 		return nil, ErrInvalidCredentials
 	}
 	if viaResetCode {
-		// Re-checked under the write lock rather than trusted from the
-		// read above: a second reset in the window between them issues a
-		// new code and must kill this one, and a spend that landed first
-		// must not be honoured twice.
-		if !u.resetCodeLive(now) {
-			return nil, ErrInvalidCredentials
-		}
 		// Spending the code is the write that matters here: a spend
 		// that only lands in memory is undone by a restart, and the
 		// code is live again for whoever saw it. Refuse the login
 		// rather than honour a spend nothing recorded. A missed
 		// LastLogin on an ordinary password login costs nothing, so
-		// that path keeps the log-and-carry-on write below.
-		prevHash, prevExpires, prevLogin := u.ResetCodeHash, u.ResetCodeExpiresAt, u.LastLogin
-		u.ResetCodeHash = ""
-		u.ResetCodeExpiresAt = time.Time{}
-		u.LastLogin = now
-		if err := s.tryPersistLocked(); err != nil {
-			u.ResetCodeHash, u.ResetCodeExpiresAt, u.LastLogin = prevHash, prevExpires, prevLogin
-			return nil, fmt.Errorf("saving the spent reset code: %w", err)
+		// that path keeps the best-effort write below.
+		//
+		// Whether the code is still live is decided inside the op,
+		// against the document being saved, rather than trusted from
+		// the read above: a second reset in the window between them
+		// issues a new code and must kill this one, a spend that landed
+		// first must not be honoured twice, and on a replay either may
+		// have come from another process.
+		var spent User
+		err := s.mutateLocked(func(st *storeState) error {
+			u, ok := st.byID[id]
+			if !ok || !u.resetCodeLive(now) || u.ResetCodeHash != hash {
+				return ErrInvalidCredentials
+			}
+			u.ResetCodeHash = ""
+			u.ResetCodeExpiresAt = time.Time{}
+			u.LastLogin = now
+			spent = *u
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		cp := *u
-		return &cp, nil
+		return &spent, nil
 	}
 	// Saved only once the saved value is more than lastLoginGranularity
 	// old; otherwise held in memory, where Get and List see it, until
 	// the next save of any kind carries it. Compared against the saved
 	// value rather than u.LastLogin, which every login moves: against
 	// that, logins less than an hour apart would never save again.
-	u.LastLogin = now
-	if now.Sub(s.lastLoginSaved[id]) >= lastLoginGranularity {
-		s.persistLocked()
+	if now.Sub(s.lastLoginSaved[id]) < lastLoginGranularity {
+		u.LastLogin = now
+		cp := *u
+		return &cp, nil
+	}
+	s.mutateBestEffortLocked(func(st *storeState) error {
+		u, ok := st.byID[id]
+		if !ok {
+			return ErrInvalidCredentials
+		}
+		u.LastLogin = now
+		return nil
+	})
+	if u, ok = s.byID[id]; !ok {
+		return nil, ErrInvalidCredentials
 	}
 	cp := *u
 	return &cp, nil
@@ -1368,52 +1383,37 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		return err
 	}
 
-	// After the hash, before the lock, like every other write here: the
-	// save below is a whole-document rewrite of what this process holds.
+	// After the hash, before the write, like every other write here:
+	// picking up another process's writes first avoids most save
+	// conflicts -- see mutate.
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.byID[s.byName[strings.ToLower(username)]]
-	if !ok {
-		return ErrUserNotFound
-	}
-	prevHash := u.PasswordHash
-	prevPasswordChangedAt := u.PasswordChangedAt
-	prevHasLocalPassword := u.HasLocalPassword
-	prevResetHash := u.ResetCodeHash
-	prevResetExpiresAt := u.ResetCodeExpiresAt
-	prevMustChange := u.MustChangePassword
-
-	u.PasswordHash = hash
-	u.PasswordChangedAt = now
-	// An account that has a password has a local password, by
-	// definition. Stated explicitly rather than left to be derived from
-	// OIDCIssuer, so a linked account (OIDC *and* a local password)
-	// isn't misread as SSO-only by recovery tooling.
-	u.HasLocalPassword = true
-	// Setting a password ends any outstanding admin reset: the account
-	// now has a credential only its owner knows, so the code stops
-	// working and the forced-change gate lifts. Done here, inside the
-	// store, so every path that sets a password clears it rather than
-	// each caller having to remember.
-	u.ResetCodeHash = ""
-	u.ResetCodeExpiresAt = time.Time{}
-	u.MustChangePassword = false
-	if err := s.tryPersistLocked(); err != nil {
-		// A password change that only exists in memory must not be
-		// reported as done: the caller would tell its operator the old
-		// credential is dead, and a restart before the next good write
-		// would prove that wrong.
-		u.PasswordHash = prevHash
-		u.PasswordChangedAt = prevPasswordChangedAt
-		u.HasLocalPassword = prevHasLocalPassword
-		u.ResetCodeHash = prevResetHash
-		u.ResetCodeExpiresAt = prevResetExpiresAt
-		u.MustChangePassword = prevMustChange
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+	// A password change that only exists in memory must not be reported
+	// as done: the caller would tell its operator the old credential is
+	// dead, and a restart before the next good write would prove that
+	// wrong. mutate installs it only once it is saved.
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[st.byName[strings.ToLower(username)]]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.PasswordHash = hash
+		u.PasswordChangedAt = now
+		// An account that has a password has a local password, by
+		// definition. Stated explicitly rather than left to be derived
+		// from OIDCIssuer, so a linked account (OIDC *and* a local
+		// password) isn't misread as SSO-only by recovery tooling.
+		u.HasLocalPassword = true
+		// Setting a password ends any outstanding admin reset: the
+		// account now has a credential only its owner knows, so the
+		// code stops working and the forced-change gate lifts. Done
+		// here, inside the store, so every path that sets a password
+		// clears it rather than each caller having to remember.
+		u.ResetCodeHash = ""
+		u.ResetCodeExpiresAt = time.Time{}
+		u.MustChangePassword = false
+		return nil
+	})
 }
 
 // List returns every account, sorted by username, with every credential

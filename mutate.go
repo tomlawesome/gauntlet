@@ -64,8 +64,8 @@
 //     the granularity check where it is.
 //   - Store.FindOrCreateOIDCUser: same split as Authenticate (create
 //     fails loudly, the existing-account LastLogin is best-effort) plus
-//     uniqueUsernameLocked, which reads the index the op is given --
-//     it must read st, not s.
+//     the username pick (storeState.uniqueUsername), which must read
+//     the index of the state the op is given, st, not s.
 //   - Store.createLocked and its guard: the guard (registration
 //     open/closed, single admin) must run inside the op, against st,
 //     since a replay may find that the fresh document already has an
