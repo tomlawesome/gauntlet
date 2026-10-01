@@ -84,7 +84,17 @@ All notable changes to this project are documented in this file.
   left the same code good for a second login; now it is refused with
   the error, the stance reset codes and recovery codes already take.
   A caller that granted the login on `ok` despite an error no longer
-  sees that combination.
+  sees that combination. The one exception is a passkey that has
+  never counted and presents 0 (most platform passkeys): that save
+  protects nothing, since the app's single-use challenge is what stops
+  a replay, so it is best-effort like `LastLogin` -- if it fails, the
+  login is accepted, the last-used time is kept in memory and the
+  failure is logged (#36). The app must claim that challenge before
+  calling.
+- `RecordPasskeyAssertionIfFresh` refuses a passkey whose stored count
+  is above zero and that now presents 0, as the WebAuthn spec treats
+  it: a possible cloned authenticator (#36). Before, any count of 0 was
+  accepted.
 - Persistence errors from store writes no longer carry the
   `saving accounts:` / `saving API tokens:` prefix; they name the store
   and backend themselves, and `errors.Is` against the package's errors
