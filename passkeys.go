@@ -175,36 +175,36 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return Passkey{}, ErrUserNotFound
+	// A registration that only exists in memory must not be reported as
+	// done: the caller is about to tell its user the passkey was added
+	// -- and, on a first factor, mint recovery codes and revoke other
+	// sessions around that claim -- and a restart before the next good
+	// write would drop the credential while nothing else remembers it
+	// ever existed. mutate installs it only once it is saved, and the
+	// duplicate and capacity checks run against the document being
+	// saved, so a replay sees a passkey another process added first.
+	var added Passkey
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		if findPasskeyIndex(u, pk.ID) != -1 {
+			return ErrPasskeyDuplicate
+		}
+		if len(u.Passkeys) >= maxPasskeysPerAccount {
+			return ErrPasskeyLimitReached
+		}
+		p := pk
+		p.Name = normalisePasskeyName(pk.Name, len(u.Passkeys)+1)
+		u.Passkeys = append(u.Passkeys, p)
+		added = p
+		return nil
+	})
+	if err != nil {
+		return Passkey{}, err
 	}
-
-	if findPasskeyIndex(u, pk.ID) != -1 {
-		return Passkey{}, ErrPasskeyDuplicate
-	}
-	if len(u.Passkeys) >= maxPasskeysPerAccount {
-		return Passkey{}, ErrPasskeyLimitReached
-	}
-
-	pk.Name = normalisePasskeyName(pk.Name, len(u.Passkeys)+1)
-
-	prevPasskeys := u.Passkeys
-	u.Passkeys = append(u.Passkeys, pk)
-	if err := s.tryPersistLocked(); err != nil {
-		// A registration that only exists in memory must not be
-		// reported as done: the caller is about to tell its user the
-		// passkey was added -- and, on a first factor, mint recovery
-		// codes and revoke other sessions around that claim -- and a
-		// restart before the next good write would drop the credential
-		// while nothing else remembers it ever existed.
-		u.Passkeys = prevPasskeys
-		return Passkey{}, fmt.Errorf("saving accounts: %w", err)
-	}
-	return pk, nil
+	return added, nil
 }
 
 // RenamePasskey changes the display name of one of userID's passkeys,
@@ -219,36 +219,26 @@ func (s *Store) RenamePasskey(userID string, credID []byte, name string) (Passke
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return Passkey{}, ErrUserNotFound
+	// In place: the account the op is handed is mutate's deep copy, so
+	// no reader's copy of the User shares its Passkeys.
+	var renamed Passkey
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		idx := findPasskeyIndex(u, credID)
+		if idx == -1 {
+			return ErrPasskeyNotFound
+		}
+		u.Passkeys[idx].Name = normalisePasskeyName(name, idx+1)
+		renamed = u.Passkeys[idx].clone()
+		return nil
+	})
+	if err != nil {
+		return Passkey{}, err
 	}
-
-	idx := findPasskeyIndex(u, credID)
-	if idx == -1 {
-		return Passkey{}, ErrPasskeyNotFound
-	}
-
-	// A fresh backing array, not an in-place field write on
-	// u.Passkeys[idx]: Get hands out a shallow *User copy that shares
-	// this slice's backing array without holding the lock while the
-	// caller reads it, so mutating an element in place races that
-	// read. Here the element count doesn't change, only its contents,
-	// so every element is copied across including the one being
-	// renamed.
-	prevPasskeys := u.Passkeys
-	kept := make([]Passkey, len(u.Passkeys))
-	copy(kept, u.Passkeys)
-	kept[idx].Name = normalisePasskeyName(name, idx+1)
-	u.Passkeys = kept
-	if err := s.tryPersistLocked(); err != nil {
-		u.Passkeys = prevPasskeys
-		return Passkey{}, fmt.Errorf("saving accounts: %w", err)
-	}
-	return u.Passkeys[idx], nil
+	return renamed, nil
 }
 
 // DeletePasskey removes one of userID's passkeys, found by credential
@@ -273,45 +263,32 @@ func (s *Store) DeletePasskey(userID string, credID []byte) (Passkey, error) {
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return Passkey{}, ErrUserNotFound
-	}
-
-	idx := findPasskeyIndex(u, credID)
-	if idx == -1 {
-		return Passkey{}, ErrPasskeyNotFound
-	}
-
-	removed := u.Passkeys[idx]
-	prevPasskeys := u.Passkeys
-	prevCodes := u.RecoveryCodes
-
-	// A fresh backing array rather than the usual in-place
-	// append(s[:i], s[i+1:]...) splice: Get/List hand out a shallow
-	// *User copy that shares this slice's backing array, and splicing
-	// in place would shift elements underneath a copy taken a moment
-	// earlier by a concurrent reader.
-	kept := make([]Passkey, 0, len(u.Passkeys)-1)
-	kept = append(kept, u.Passkeys[:idx]...)
-	kept = append(kept, u.Passkeys[idx+1:]...)
-	u.Passkeys = kept
-
-	if !u.HasSecondFactor() {
-		u.RecoveryCodes = nil
-	}
-	if err := s.tryPersistLocked(); err != nil {
-		// A removal that only exists in memory must not be reported as
-		// done: the caller is about to tell its user this credential no
-		// longer works (and, if it was the last factor, that recovery
-		// codes are gone too), and a restart before the next good write
-		// would silently bring both back.
-		u.Passkeys = prevPasskeys
-		u.RecoveryCodes = prevCodes
-		return Passkey{}, fmt.Errorf("saving accounts: %w", err)
+	// A removal that only exists in memory must not be reported as
+	// done: the caller is about to tell its user this credential no
+	// longer works (and, if it was the last factor, that recovery codes
+	// are gone too), and a restart before the next good write would
+	// silently bring both back. mutate installs it only once it is
+	// saved, and the "last factor standing" check runs against the
+	// document being saved.
+	var removed Passkey
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		idx := findPasskeyIndex(u, credID)
+		if idx == -1 {
+			return ErrPasskeyNotFound
+		}
+		removed = u.Passkeys[idx].clone()
+		u.Passkeys = slices.Delete(u.Passkeys, idx, idx+1)
+		if !u.HasSecondFactor() {
+			u.RecoveryCodes = nil
+		}
+		return nil
+	})
+	if err != nil {
+		return Passkey{}, err
 	}
 	return removed, nil
 }
@@ -347,39 +324,32 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return false, ErrUserNotFound
-	}
-
-	idx := findPasskeyIndex(u, credID)
-	if idx == -1 {
-		return false, ErrPasskeyNotFound
-	}
-
-	stored := u.Passkeys[idx].SignCount
-	if signCount != 0 && signCount <= stored {
-		return false, nil
-	}
-
-	// A fresh backing array, not in-place field writes on
-	// u.Passkeys[idx] -- see RenamePasskey's identical comment.
-	prevPasskeys := u.Passkeys
-	kept := make([]Passkey, len(u.Passkeys))
-	copy(kept, u.Passkeys)
-	if signCount > stored {
-		kept[idx].SignCount = signCount
-	}
-	kept[idx].LastUsedAt = now
-	u.Passkeys = kept
-	if err := s.tryPersistLocked(); err != nil {
-		u.Passkeys = prevPasskeys
-		return true, fmt.Errorf("saving accounts: %w", err)
-	}
-	return true, nil
+	// Freshness is decided inside the op, against the count in the
+	// document being saved: a replay after another process recorded the
+	// same assertion must see the advanced count and refuse it.
+	err = s.mutate(func(st *storeState) error {
+		accepted = false
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		idx := findPasskeyIndex(u, credID)
+		if idx == -1 {
+			return ErrPasskeyNotFound
+		}
+		stored := u.Passkeys[idx].SignCount
+		if signCount != 0 && signCount <= stored {
+			return errNoChange
+		}
+		// In place: the account the op is handed is mutate's deep copy.
+		if signCount > stored {
+			u.Passkeys[idx].SignCount = signCount
+		}
+		u.Passkeys[idx].LastUsedAt = now
+		accepted = true
+		return nil
+	})
+	return accepted, err
 }
 
 // ClearPasskeys removes every passkey on userID's account in one write.
@@ -392,27 +362,17 @@ func (s *Store) ClearPasskeys(userID string) error {
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return ErrUserNotFound
-	}
-
-	prevPasskeys := u.Passkeys
-	prevCodes := u.RecoveryCodes
-
-	u.Passkeys = nil
-	if !u.HasSecondFactor() {
-		u.RecoveryCodes = nil
-	}
-	if err := s.tryPersistLocked(); err != nil {
-		u.Passkeys = prevPasskeys
-		u.RecoveryCodes = prevCodes
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.Passkeys = nil
+		if !u.HasSecondFactor() {
+			u.RecoveryCodes = nil
+		}
+		return nil
+	})
 }
 
 // ClearAllSecondFactors removes every second factor on userID's
@@ -428,38 +388,23 @@ func (s *Store) ClearAllSecondFactors(userID string) error {
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return ErrUserNotFound
-	}
-
-	prevSecret := u.TOTPSecret
-	prevConfirmedAt := u.TOTPConfirmedAt
-	prevCounter := u.TOTPLastCounter
-	prevPasskeys := u.Passkeys
-	prevCodes := u.RecoveryCodes
-
-	u.TOTPSecret = ""
-	u.TOTPConfirmedAt = time.Time{}
-	u.TOTPLastCounter = 0
-	u.Passkeys = nil
-	u.RecoveryCodes = nil
-	if err := s.tryPersistLocked(); err != nil {
-		// A clear that only exists in memory must not be reported as
-		// done: the caller tells its operator every second factor is
-		// off, and a restart before the next good write would silently
-		// bring all of it back underneath that claim.
-		u.TOTPSecret = prevSecret
-		u.TOTPConfirmedAt = prevConfirmedAt
-		u.TOTPLastCounter = prevCounter
-		u.Passkeys = prevPasskeys
-		u.RecoveryCodes = prevCodes
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+	// A clear that only exists in memory must not be reported as done:
+	// the caller tells its operator every second factor is off, and a
+	// restart before the next good write would silently bring all of it
+	// back underneath that claim. mutate installs it only once it is
+	// saved.
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.TOTPSecret = ""
+		u.TOTPConfirmedAt = time.Time{}
+		u.TOTPLastCounter = 0
+		u.Passkeys = nil
+		u.RecoveryCodes = nil
+		return nil
+	})
 }
 
 // PasskeyCount reports how many passkeys userID's account holds. It
