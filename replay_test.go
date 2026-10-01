@@ -1,0 +1,479 @@
+package gauntlet
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/tomlawesome/gauntlet/persist"
+)
+
+// The tests in this file are the invariant half of #21: a write whose
+// save is refused because another process wrote first is replayed
+// against the fresh document, and every check that protects an
+// invariant has to be made again against that document, not carried
+// over from the one this process decided on. Each test slips the other
+// process's write in just before this store's save (otherProcessBackend,
+// mutate_test.go) and changes exactly the fact the check decides on.
+
+// openRacingStores opens a store over an otherProcessBackend and a
+// second store on the same document, after setup has run on the first:
+// the second is the other process, and has seen everything setup did.
+func openRacingStores(t *testing.T, setup func(s *Store)) (s *Store, b *otherProcessBackend, other *Store) {
+	t.Helper()
+	m := persist.NewMemory()
+	b = &otherProcessBackend{Memory: m}
+	s, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup != nil {
+		setup(s)
+	}
+	other, err = OpenStore(m, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, b, other
+}
+
+// TestGenerateRecoveryCodesIfAbsentRedecidesOnReplay: another process
+// mints alice's recovery codes after this one checked and found none.
+// The replay must find that set and report alreadyIssued, leaving the
+// codes the other process showed its user working -- not replace them
+// with a set nobody will ever see.
+func TestGenerateRecoveryCodesIfAbsentRedecidesOnReplay(t *testing.T) {
+	now := time.Now()
+	var aliceID string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		alice, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aliceID = alice.ID
+	})
+
+	var otherCodes []string
+	b.beforeSave = func() {
+		codes, already, err := other.GenerateRecoveryCodesIfAbsent(aliceID, now)
+		if err != nil || already {
+			t.Errorf("the other process's GenerateRecoveryCodesIfAbsent = %v, %v", already, err)
+		}
+		otherCodes = codes
+	}
+
+	codes, already, err := s.GenerateRecoveryCodesIfAbsent(aliceID, now)
+	if err != nil {
+		t.Fatalf("GenerateRecoveryCodesIfAbsent across a conflicting write: %v", err)
+	}
+	if !already || codes != nil {
+		t.Fatalf("GenerateRecoveryCodesIfAbsent = %d codes, alreadyIssued %v; want none and true -- the other process issued a set first", len(codes), already)
+	}
+	if len(otherCodes) == 0 {
+		t.Fatal("the other process minted nothing")
+	}
+	reopened, err := OpenStore(b.Memory, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := reopened.BurnRecoveryCode(aliceID, otherCodes[0], now); err != nil || !ok {
+		t.Errorf("a code the other process showed its user no longer works (ok %v, err %v): its set was replaced", ok, err)
+	}
+}
+
+// reopenAccounts opens a fresh store on the document as saved -- which
+// fails if the saved document breaks the single-admin rule.
+func reopenAccounts(t *testing.T, b *otherProcessBackend) *Store {
+	t.Helper()
+	s, err := OpenStore(b.Memory, Options{})
+	if err != nil {
+		t.Fatalf("reopening the saved document: %v", err)
+	}
+	return s
+}
+
+// TestRegisterRedecidesRegistrationOpenOnReplay: two processes on an
+// empty store, each about to register the first account. The other one
+// gets there first. This store's replay must find registration closed,
+// not add a second admin to the document the other process wrote.
+func TestRegisterRedecidesRegistrationOpenOnReplay(t *testing.T) {
+	s, b, other := openRacingStores(t, nil)
+	b.beforeSave = func() {
+		if _, err := other.Register("alice", "password123", time.Now()); err != nil {
+			t.Errorf("the other process's Register: %v", err)
+		}
+	}
+
+	if _, err := s.Register("bob", "password456", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
+		t.Fatalf("Register after another process registered first = %v, want ErrRegistrationClosed", err)
+	}
+	if got := usernamesIn(t, b.Memory); strings.Join(got, ",") != "alice" {
+		t.Errorf("saved document holds %v, want [alice]", got)
+	}
+}
+
+// TestCreateUserRedecidesUsernameOnReplay: another process creates
+// carol after this one checked the name was free. The replay must find
+// it taken -- case-insensitively, as the check always is -- rather than
+// add a second carol whose index entry shadows the first.
+func TestCreateUserRedecidesUsernameOnReplay(t *testing.T) {
+	s, b, other := openRacingStores(t, func(s *Store) {
+		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	b.beforeSave = func() {
+		if _, err := other.CreateUser("carol", "password789", RoleUser, time.Now()); err != nil {
+			t.Errorf("the other process's CreateUser: %v", err)
+		}
+	}
+
+	if _, err := s.CreateUser("Carol", "password456", RoleUser, time.Now()); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("CreateUser of a name another process took first = %v, want ErrUsernameTaken", err)
+	}
+	if got := usernamesIn(t, b.Memory); strings.Join(got, ",") != "alice,carol" {
+		t.Errorf("saved document holds %v, want [alice carol]", got)
+	}
+}
+
+// TestTransferAdminRedecidesTheCurrentAdminOnReplay: alice is the admin
+// when this process decides to hand the role to bob, but another
+// process hands it to carol first. The replay must take the role from
+// carol -- the admin in the document it saves -- leaving exactly one
+// admin, bob, not demote alice a second time and leave carol an admin
+// alongside him.
+func TestTransferAdminRedecidesTheCurrentAdminOnReplay(t *testing.T) {
+	s, b, other := openRacingStores(t, func(s *Store) {
+		now := time.Now()
+		if _, err := s.Register("alice", "password123", now); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"bob", "carol"} {
+			if _, err := s.CreateUser(name, "password456", RoleUser, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	b.beforeSave = func() {
+		if _, _, err := other.TransferAdmin("carol", time.Now()); err != nil {
+			t.Errorf("the other process's TransferAdmin: %v", err)
+		}
+	}
+
+	from, to, err := s.TransferAdmin("bob", time.Now())
+	if err != nil {
+		t.Fatalf("TransferAdmin across a conflicting transfer: %v", err)
+	}
+	if from.Username != "carol" || to.Username != "bob" {
+		t.Errorf("TransferAdmin moved the role from %q to %q, want from carol (the admin by then) to bob", from.Username, to.Username)
+	}
+	admin := reopenAccounts(t, b).Admin()
+	if admin == nil || admin.Username != "bob" {
+		t.Errorf("saved admin = %+v, want bob", admin)
+	}
+}
+
+// TestFindOrCreateOIDCUserRedecidesRoleAndUsernameOnReplay: this store
+// is empty when an identity signs in for the first time, so the new
+// account would be the admin and the hint "alice" is free. Another
+// process registers alice -- the admin -- first. The replay must make an
+// ordinary user under a name that is not alice.
+func TestFindOrCreateOIDCUserRedecidesRoleAndUsernameOnReplay(t *testing.T) {
+	s, b, other := openRacingStores(t, nil)
+	b.beforeSave = func() {
+		if _, err := other.Register("alice", "password123", time.Now()); err != nil {
+			t.Errorf("the other process's Register: %v", err)
+		}
+	}
+
+	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "alice", time.Now())
+	if err != nil {
+		t.Fatalf("FindOrCreateOIDCUser across a conflicting write: %v", err)
+	}
+	if !created {
+		t.Error("created = false for an identity nobody had provisioned")
+	}
+	if u.Role != RoleUser {
+		t.Errorf("role = %q, want %q: the other process's account is the admin", u.Role, RoleUser)
+	}
+	if strings.EqualFold(u.Username, "alice") {
+		t.Errorf("username = %q, which the other process had already taken", u.Username)
+	}
+	reopened := reopenAccounts(t, b)
+	if n := reopened.Count(); n != 2 {
+		t.Errorf("saved document holds %d accounts, want 2", n)
+	}
+	if got, ok := reopened.ByOIDCIdentity("https://idp.example", "sub-1"); !ok || got.ID != u.ID {
+		t.Errorf("the identity does not resolve to the account returned (%+v, %v)", got, ok)
+	}
+}
+
+// TestFindOrCreateOIDCUserFindsTheAccountAnotherProcessProvisioned: the
+// same identity signs in through two processes at once. The other one
+// provisions it first; the replay here must sign in to that account,
+// not provision a second one for the same identity.
+func TestFindOrCreateOIDCUserFindsTheAccountAnotherProcessProvisioned(t *testing.T) {
+	s, b, other := openRacingStores(t, func(s *Store) {
+		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var theirs *User
+	b.beforeSave = func() {
+		u, _, err := other.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", time.Now())
+		if err != nil {
+			t.Errorf("the other process's FindOrCreateOIDCUser: %v", err)
+		}
+		theirs = u
+	}
+
+	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", time.Now())
+	if err != nil {
+		t.Fatalf("FindOrCreateOIDCUser across a conflicting write: %v", err)
+	}
+	if created {
+		t.Error("created = true for an identity the other process had already provisioned")
+	}
+	if theirs == nil || u.ID != theirs.ID {
+		t.Errorf("signed in to %q, want the other process's account", u.ID)
+	}
+	if n := reopenAccounts(t, b).Count(); n != 2 {
+		t.Errorf("saved document holds %d accounts, want 2 (alice and one for the identity)", n)
+	}
+}
+
+// TestAuthenticateRefusesAnAccountAnotherProcessDeletedMidLogin: bob's
+// password checks out, and the LastLogin bump is about to be saved
+// when another process deletes bob. That bump is best-effort, and
+// before this fix a failed one was re-applied to memory -- memory that
+// still held bob -- and the login succeeded on an account the document
+// no longer had. The store must take the fresh document instead and
+// refuse the login.
+func TestAuthenticateRefusesAnAccountAnotherProcessDeletedMidLogin(t *testing.T) {
+	var bobID string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		now := time.Now()
+		if _, err := s.Register("alice", "password123", now); err != nil {
+			t.Fatal(err)
+		}
+		bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bobID = bob.ID
+	})
+	b.beforeSave = func() {
+		if _, err := other.DeleteUser(bobID); err != nil {
+			t.Errorf("the other process's DeleteUser: %v", err)
+		}
+	}
+
+	if _, err := s.Authenticate("bob", "password456", time.Now()); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Authenticate as an account another process deleted = %v, want ErrInvalidCredentials", err)
+	}
+	if storeHas(s, "bob") {
+		t.Error("bob is still in memory after the document without him was loaded")
+	}
+}
+
+// TestTokenAuthenticateRefusesATokenAnotherProcessRevokedMidUse is the
+// same for API tokens, where it matters most: the LastUsedAt bump is
+// about to be saved when the CLI revokes the token. The server must
+// not hand back the revoked token as valid from its stale memory.
+func TestTokenAuthenticateRefusesATokenAnotherProcessRevokedMidUse(t *testing.T) {
+	m := persist.NewMemory()
+	b := &otherProcessBackend{Memory: m}
+	server, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, tok, err := server.Create("a", TokenKindAPI, "", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.beforeSave = func() {
+		if err := cli.Revoke(tok.ID); err != nil {
+			t.Errorf("the CLI's Revoke: %v", err)
+		}
+	}
+
+	if got, ok := server.Authenticate(raw, TokenKindAPI, time.Now()); ok {
+		t.Fatalf("Authenticate = %+v, true for a token another process revoked while its use was being recorded", got)
+	}
+	if n := len(server.List()); n != 0 {
+		t.Errorf("List() = %d tokens after the revoke was met, want 0", n)
+	}
+}
+
+// TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted:
+// the identity's account is deleted by another process while this
+// sign-in's LastLogin bump is being saved. The deleted account must not
+// be handed back; the store takes the fresh document and, finding no
+// account for the identity, provisions one as a first sign-in would.
+func TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted(t *testing.T) {
+	var oldID string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		now := time.Now()
+		if _, err := s.Register("alice", "password123", now); err != nil {
+			t.Fatal(err)
+		}
+		u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldID = u.ID
+	})
+	b.beforeSave = func() {
+		if _, err := other.DeleteUser(oldID); err != nil {
+			t.Errorf("the other process's DeleteUser: %v", err)
+		}
+	}
+
+	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", time.Now().Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("FindOrCreateOIDCUser across a conflicting delete: %v", err)
+	}
+	if u.ID == oldID {
+		t.Fatal("signed in to the account another process deleted")
+	}
+	if !created || u.Role != RoleUser {
+		t.Errorf("created %v, role %q; want a freshly provisioned ordinary user", created, u.Role)
+	}
+	if n := reopenAccounts(t, b).Count(); n != 2 {
+		t.Errorf("saved document holds %d accounts, want 2 (alice and the new one)", n)
+	}
+}
+
+// refuseNextSave makes the other process write a document this store
+// refuses (two admins) just before this store's next save, so the
+// replay is refused outright: the op's first run, against memory, is
+// the only one that happened, and its result was never saved.
+func refuseNextSave(t *testing.T, b *otherProcessBackend) {
+	t.Helper()
+	b.beforeSave = func() {
+		snap, err := b.Load(context.Background())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// b.Memory, not b: b's own Save is the one that runs this hook.
+		if _, err := b.Memory.Save(context.Background(), []byte(twoAdminsDocument), snap.Version); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// TestVerifyAndRecordTOTPRefusesAMatchItCouldNotRecord: the code
+// matches on the op's first run, against memory, and then the replay
+// is refused. ok was set true by that first run; it must not come
+// back true, since the counter advance it stands for was never saved
+// and the same code would win a second login. The handler trusts a
+// true ok even with an error (gate/login_handler.go), so the method is
+// where this has to hold.
+func TestVerifyAndRecordTOTPRefusesAMatchItCouldNotRecord(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	secret, err := GenerateTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	s, b, _ := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+		setTOTPForTest(t, s, id, EncodeTOTPSecret(secret), now, 30)
+	})
+	refuseNextSave(t, b)
+
+	code := GenerateTOTPCode(secret, totpCounter(now, totpStep)+1)
+	ok, err := s.VerifyAndRecordTOTP(id, code, now)
+	if err == nil {
+		t.Fatal("VerifyAndRecordTOTP whose replay was refused = nil error, want one")
+	}
+	if ok {
+		t.Error("VerifyAndRecordTOTP = true from a run that was never saved: the code is still live for a second login")
+	}
+	s.mu.RLock()
+	counter := s.byID[id].TOTPLastCounter
+	s.mu.RUnlock()
+	if counter != 30 {
+		t.Errorf("TOTPLastCounter = %d in memory after a refused write, want the stored 30", counter)
+	}
+}
+
+// TestRecordPasskeyAssertionIfFreshRefusesAnAssertionItCouldNotRecord
+// is the same for the passkey sign count: accepted is only the final,
+// saved run's answer.
+func TestRecordPasskeyAssertionIfFreshRefusesAnAssertionItCouldNotRecord(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	var id string
+	s, b, _ := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+		if _, err := s.AddPasskey(id, testPasskey(1, "keeper")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	refuseNextSave(t, b)
+
+	accepted, err := s.RecordPasskeyAssertionIfFresh(id, []byte{1}, 5, now)
+	if err == nil {
+		t.Fatal("RecordPasskeyAssertionIfFresh whose replay was refused = nil error, want one")
+	}
+	if accepted {
+		t.Error("RecordPasskeyAssertionIfFresh = true from a run that was never saved")
+	}
+}
+
+// TestAuthenticateRedecidesTheResetCodeOnReplay: bob signs in with an
+// admin-issued reset code, and the code checks out against what this
+// process holds. Before the spend is saved, bob sets a new password
+// through another process, which ends the reset. The replay must find
+// the code dead and refuse the login, not spend a code the saved
+// document no longer has.
+func TestAuthenticateRedecidesTheResetCodeOnReplay(t *testing.T) {
+	var bobID string
+	var code string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		now := time.Now()
+		if _, err := s.Register("alice", "password123", now); err != nil {
+			t.Fatal(err)
+		}
+		bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bobID = bob.ID
+		if _, code, err = s.IssueResetCode(bob.ID, now); err != nil {
+			t.Fatal(err)
+		}
+	})
+	b.beforeSave = func() {
+		if err := other.SetPassword("bob", "brand-new-password", time.Now()); err != nil {
+			t.Errorf("the other process's SetPassword: %v", err)
+		}
+	}
+
+	if _, err := s.Authenticate("bob", code, time.Now()); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Authenticate with a reset code another process ended = %v, want ErrInvalidCredentials", err)
+	}
+	reopened := reopenAccounts(t, b)
+	got, _ := reopened.Get(bobID)
+	if got.MustChangePassword || got.ResetCodeHash != "" {
+		t.Errorf("bob's saved account is back in a reset (MustChangePassword %v): the replay wrote over the other process's password change", got.MustChangePassword)
+	}
+	if _, err := reopened.Authenticate("bob", "brand-new-password", time.Now()); err != nil {
+		t.Errorf("bob's new password does not work after the replay: %v", err)
+	}
+}

@@ -133,7 +133,7 @@ func ValidateLocalUsername(username string) error {
 // already authenticated successfully -- refusing the login because
 // their IdP sent an awkward display name would lock out someone who did
 // nothing wrong and cannot fix it. An empty hint makes
-// uniqueUsernameLocked fall back to its deterministic `oidc-<hash>`
+// uniqueUsername fall back to its deterministic `oidc-<hash>`
 // name, so they still get a stable account.
 func sanitiseUsernameHint(hint string) string {
 	hint = strings.TrimSpace(hint)

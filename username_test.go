@@ -128,7 +128,7 @@ func TestOIDCProvisioningKeepsAUsableHint(t *testing.T) {
 	}
 }
 
-// TestOIDCFallbackUsernameAlwaysValidates drives uniqueUsernameLocked
+// TestOIDCFallbackUsernameAlwaysValidates drives uniqueUsername
 // down its fallback chain: a 64-character hint (the longest a username
 // may be) already taken, and every shorter hash-derived name taken too.
 // Whatever it lands on is written to the store without further checks,

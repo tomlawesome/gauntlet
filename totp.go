@@ -307,33 +307,23 @@ func (s *Store) SetPendingTOTPSecret(userID, encodedSecret string) error {
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return ErrUserNotFound
-	}
-	if u.HasActiveTOTP() {
-		return ErrTOTPAlreadyActive
-	}
-
-	prevSecret := u.TOTPSecret
-	prevCounter := u.TOTPLastCounter
-
-	u.TOTPSecret = encodedSecret
-	u.TOTPLastCounter = 0
-	if err := s.tryPersistLocked(); err != nil {
-		// An enrolment that only exists in memory must not be reported
-		// as started: the caller is about to show a QR code the user
-		// scans into their phone, and a restart before the next good
-		// write would leave the store with no secret to confirm that
-		// app's codes against.
-		u.TOTPSecret = prevSecret
-		u.TOTPLastCounter = prevCounter
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+	// An enrolment that only exists in memory must not be reported as
+	// started: the caller is about to show a QR code the user scans into
+	// their phone, and a restart before the next good write would leave
+	// the store with no secret to confirm that app's codes against.
+	// mutate installs the secret only once it is saved.
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		if u.HasActiveTOTP() {
+			return ErrTOTPAlreadyActive
+		}
+		u.TOTPSecret = encodedSecret
+		u.TOTPLastCounter = 0
+		return nil
+	})
 }
 
 // ConfirmTOTP activates the pending secret for userID, recording when
@@ -357,33 +347,23 @@ func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return ErrUserNotFound
-	}
-	if u.TOTPSecret == "" || !u.TOTPConfirmedAt.IsZero() {
-		return ErrNoPendingTOTP
-	}
-
-	prevConfirmedAt := u.TOTPConfirmedAt
-	prevCounter := u.TOTPLastCounter
-
-	u.TOTPConfirmedAt = confirmedAt
-	u.TOTPLastCounter = matchedCounter
-	if err := s.tryPersistLocked(); err != nil {
-		// A confirmation that only exists in memory must not be
-		// reported as done: the caller is about to tell its user the
-		// factor is on and hand them recovery codes, and a restart
-		// would drop the account back to password-only underneath that
-		// claim.
-		u.TOTPConfirmedAt = prevConfirmedAt
-		u.TOTPLastCounter = prevCounter
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+	// A confirmation that only exists in memory must not be reported as
+	// done: the caller is about to tell its user the factor is on and
+	// hand them recovery codes, and a restart would drop the account
+	// back to password-only underneath that claim. mutate installs it
+	// only once it is saved.
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		if u.TOTPSecret == "" || !u.TOTPConfirmedAt.IsZero() {
+			return ErrNoPendingTOTP
+		}
+		u.TOTPConfirmedAt = confirmedAt
+		u.TOTPLastCounter = matchedCounter
+		return nil
+	})
 }
 
 // VerifyAndRecordTOTP checks code against userID's active TOTP secret
@@ -398,45 +378,59 @@ func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter
 // itself (its own doc comment: "any candidate counter <= lastUsedCounter
 // is skipped even when its code is correct") refuses the replay.
 //
-// ok reports whether code matched; err is only ever a persistence
-// failure on a match -- the code that just matched earned the login
-// regardless of whether the counter's advance made it to disk, the same
-// degraded-but-not-locked-out stance mikroview's RecordTOTPCounter took.
+// ok is true only when code matched and the counter's advance was
+// saved. A match whose advance could not be saved is refused -- ok
+// false, with the error -- rather than let in on the strength of the
+// match: the advance is what stops the same code winning a second
+// login, and one that lives nowhere (the failed attempt is dropped, not
+// kept in memory) leaves the code live for whoever else holds it. That
+// is the stance the reset-code login (Authenticate) and BurnRecoveryCode
+// take for their spends. It replaces mikroview's RecordTOTPCounter
+// stance, which granted the login and logged the failure: under the
+// replay loop a match can be made against memory the document has
+// moved past, so a result from a run that was not saved is not one to
+// trust. Nothing is lost by refusing -- the person enters the next code
+// once the backend answers again.
 func (s *Store) VerifyAndRecordTOTP(userID, code string, now time.Time) (ok bool, err error) {
 	if !s.Persisted() {
 		return false, ErrNotPersisted
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, found := s.byID[userID]
-	if !found {
-		return false, ErrUserNotFound
+	// The code is checked inside the op, against the counter in the
+	// document being saved: a replay after another process's write --
+	// another login with the same code -- must see that counter and
+	// refuse the code, not advance past it a second time.
+	err = s.mutate(func(st *storeState) error {
+		ok = false
+		u, found := st.byID[userID]
+		if !found {
+			return ErrUserNotFound
+		}
+		// Only a confirmed secret is a factor. A pending one (set by
+		// SetPendingTOTPSecret, never confirmed) is mid-setup, and an
+		// account that reaches this step through another factor -- a
+		// passkey -- must not be let in by a code from it: whoever
+		// started that enrolment and stopped would hold a working
+		// second factor the account owner never activated.
+		if !u.HasActiveTOTP() {
+			return errNoChange
+		}
+		matched, matchedOK := VerifyTOTP(u.TOTPSecret, code, now, u.TOTPLastCounter)
+		if !matchedOK {
+			return errNoChange
+		}
+		u.TOTPLastCounter = matched
+		ok = true
+		return nil
+	})
+	if err != nil {
+		// ok may be true from a run the loop then threw away -- the
+		// first, against memory, before a replay was refused. A result
+		// is only the final run's when mutate returns nil.
+		return false, err
 	}
-	// Only a confirmed secret is a factor. A pending one (set by
-	// SetPendingTOTPSecret, never confirmed) is mid-setup, and an
-	// account that reaches this step through another factor -- a
-	// passkey -- must not be let in by a code from it: whoever started
-	// that enrolment and stopped would hold a working second factor the
-	// account owner never activated.
-	if !u.HasActiveTOTP() {
-		return false, nil
-	}
-
-	matched, matchedOK := VerifyTOTP(u.TOTPSecret, code, now, u.TOTPLastCounter)
-	if !matchedOK {
-		return false, nil
-	}
-
-	prevCounter := u.TOTPLastCounter
-	u.TOTPLastCounter = matched
-	if err := s.tryPersistLocked(); err != nil {
-		u.TOTPLastCounter = prevCounter
-		return true, fmt.Errorf("saving accounts: %w", err)
-	}
-	return true, nil
+	return ok, nil
 }
 
 // ClearTOTP removes userID's authenticator-app factor entirely: the
@@ -453,36 +447,22 @@ func (s *Store) ClearTOTP(userID string) error {
 	}
 	s.reloadIfStale()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	u, ok := s.byID[userID]
-	if !ok {
-		return ErrUserNotFound
-	}
-
-	prevSecret := u.TOTPSecret
-	prevConfirmedAt := u.TOTPConfirmedAt
-	prevCounter := u.TOTPLastCounter
-	prevCodes := u.RecoveryCodes
-
-	u.TOTPSecret = ""
-	u.TOTPConfirmedAt = time.Time{}
-	u.TOTPLastCounter = 0
-	if len(u.Passkeys) == 0 {
-		u.RecoveryCodes = nil
-	}
-	if err := s.tryPersistLocked(); err != nil {
-		// A clear that only exists in memory must not be reported as
-		// done: the caller tells its operator the authenticator app is
-		// off, and a restart before the next good write would silently
-		// bring back the old secret, counter and (if it was cleared)
-		// recovery codes underneath that claim.
-		u.TOTPSecret = prevSecret
-		u.TOTPConfirmedAt = prevConfirmedAt
-		u.TOTPLastCounter = prevCounter
-		u.RecoveryCodes = prevCodes
-		return fmt.Errorf("saving accounts: %w", err)
-	}
-	return nil
+	// A clear that only exists in memory must not be reported as done:
+	// the caller tells its operator the authenticator app is off, and a
+	// restart before the next good write would silently bring back the
+	// old secret, counter and (if it was cleared) recovery codes
+	// underneath that claim. mutate installs it only once it is saved.
+	return s.mutate(func(st *storeState) error {
+		u, ok := st.byID[userID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.TOTPSecret = ""
+		u.TOTPConfirmedAt = time.Time{}
+		u.TOTPLastCounter = 0
+		if len(u.Passkeys) == 0 {
+			u.RecoveryCodes = nil
+		}
+		return nil
+	})
 }
