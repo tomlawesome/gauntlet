@@ -1,7 +1,9 @@
 package gate
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -41,7 +43,9 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if len(req.Name) == 0 {
+	// Trimmed first because the store trims it: a name of only spaces
+	// would pass an untrimmed check and be issued with no name at all.
+	if strings.TrimSpace(req.Name) == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
@@ -113,7 +117,14 @@ func (g *Gate) handleTokensList(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) handleTokensRevoke(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := g.deps.Tokens.Revoke(id); err != nil {
-		http.Error(w, "no such token", http.StatusNotFound)
+		// Only a missing token is a 404. A failed save leaves the token
+		// working, so telling the admin it is gone would leave a leaked
+		// token live with nobody the wiser; writeAuthError logs it.
+		if errors.Is(err, gauntlet.ErrTokenNotFound) {
+			http.Error(w, "no such token", http.StatusNotFound)
+			return
+		}
+		g.writeAuthError(w, r, err, http.StatusInternalServerError)
 		return
 	}
 	g.audit(auditActor(r), "token.revoke", id, "")

@@ -197,6 +197,11 @@ type tokenState struct {
 	// (below) is never entered here, so it can never be found by any
 	// raw value at all.
 	byHash map[string]string
+	// lastUsedSaved is each token's LastUsedAt as of the last load or
+	// save, by ID -- what Authenticate measures staleness against (see
+	// lastUsedGranularity), since the in-memory value may be ahead of
+	// it. Store.lastLoginSaved is the same for LastLogin.
+	lastUsedSaved map[string]time.Time
 }
 
 // clone deep-copies the state, so a change to the copy can be thrown
@@ -204,15 +209,28 @@ type tokenState struct {
 // a struct copy of each one is a full copy.
 func (st *tokenState) clone() *tokenState {
 	cp := &tokenState{
-		byID:   make(map[string]*Token, len(st.byID)),
-		byHash: make(map[string]string, len(st.byHash)),
+		byID:          make(map[string]*Token, len(st.byID)),
+		byHash:        make(map[string]string, len(st.byHash)),
+		lastUsedSaved: make(map[string]time.Time, len(st.lastUsedSaved)),
 	}
 	for id, t := range st.byID {
 		tc := *t
 		cp.byID[id] = &tc
 	}
 	maps.Copy(cp.byHash, st.byHash)
+	maps.Copy(cp.lastUsedSaved, st.lastUsedSaved)
 	return cp
+}
+
+// recordSaved notes each token's LastUsedAt as the value just saved.
+func (st *tokenState) recordSaved() {
+	if st.lastUsedSaved == nil {
+		st.lastUsedSaved = make(map[string]time.Time, len(st.byID))
+	}
+	clear(st.lastUsedSaved)
+	for id, t := range st.byID {
+		st.lastUsedSaved[id] = t.LastUsedAt
+	}
 }
 
 // tokens is the tokens in document order -- see tokenOlder.
@@ -237,14 +255,16 @@ func encodeTokens(st *tokenState) ([]byte, error) {
 // loading means.
 func (s *TokenStore) indexTokens(list []*Token) *tokenState {
 	st := &tokenState{
-		byID:   make(map[string]*Token, len(list)),
-		byHash: make(map[string]string, len(list)),
+		byID:          make(map[string]*Token, len(list)),
+		byHash:        make(map[string]string, len(list)),
+		lastUsedSaved: make(map[string]time.Time, len(list)),
 	}
 	for _, t := range list {
 		if t == nil { // see Store.applyLoaded's identical guard for why this is needed
 			continue
 		}
 		st.byID[t.ID] = t
+		st.lastUsedSaved[t.ID] = t.LastUsedAt
 		if !s.kinds[t.Kind] {
 			if s.log != nil {
 				s.log.Warn(fmt.Sprintf("token %q has unregistered kind %q -- it will not authenticate; revoke and reissue it", t.Name, t.Kind))
@@ -293,6 +313,7 @@ func (s *TokenStore) mutate(op func(*tokenState) error) error {
 func (s *TokenStore) mutateLocked(op func(*tokenState) error) error {
 	next, version, err := s.tokens().replay(&s.tokenState, s.version, op)
 	if next != nil {
+		next.recordSaved()
 		s.tokenState = *next
 		s.version = version
 	}
@@ -626,7 +647,10 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 	// once the recorded value is more than lastUsedGranularity stale
 	// keeps the display honest to the minute while collapsing a poll
 	// loop's writes to one an hour instead of one per request.
-	if now.Sub(t.LastUsedAt) < lastUsedGranularity {
+	// Measured against the saved value, not t.LastUsedAt, which every
+	// use moves: against that, uses less than an hour apart would never
+	// save again.
+	if now.Sub(s.lastUsedSaved[id]) < lastUsedGranularity {
 		t.LastUsedAt = now
 		cp := *t
 		return &cp, true

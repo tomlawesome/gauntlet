@@ -145,11 +145,29 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Same "nothing pending" test ConfirmTOTP makes, asked first: with no
+	// secret to check against, VerifyTOTP would fail every code and the
+	// caller would be told to check their clock instead of the 409.
+	if current.TOTPSecret == "" || !current.TOTPConfirmedAt.IsZero() {
+		g.writeAuthError(w, r, gauntlet.ErrNoPendingTOTP, http.StatusConflict)
+		return
+	}
+
+	// Throttled on the per-account re-check bucket, reserve-then-release
+	// as recheckPassword does: this route asks only for the session
+	// cookie, so without it a stolen cookie could guess the six digits
+	// without limit while the owner's enrolment is pending -- and a hit
+	// signs the owner out and hands over the recovery codes.
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
 	matched, ok := gauntlet.VerifyTOTP(current.TOTPSecret, req.Code, now, current.TOTPLastCounter)
 	if !ok {
 		http.Error(w, "that code didn't match -- check your authenticator app's clock and try again", http.StatusBadRequest)
 		return
 	}
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 	if err := g.deps.Users.ConfirmTOTP(user.ID, now, matched); err != nil {
 		status := http.StatusInternalServerError
@@ -182,8 +200,15 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		// nothing to fall back on if the app is ever lost. Recovering
 		// from here is DELETE /api/auth/totp followed by enrolling
 		// again, same as any other abandoned enrolment.
+		//
+		// JSON with totpActive rather than plain text: a frontend may not
+		// read the message, and a bare 500 reads as "setup failed" while
+		// the factor is on and this browser holds a new session.
 		g.logError("generating recovery codes for " + user.Username + " after confirming TOTP: " + err.Error())
-		http.Error(w, "the authenticator app is now active, but recovery codes could not be generated -- remove it and enrol again from account settings", http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":      "the authenticator app is now active, but recovery codes could not be generated -- remove it and enrol again from account settings",
+			"totpActive": true,
+		})
 		return
 	}
 	detail := "authenticator app confirmed"

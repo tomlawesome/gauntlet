@@ -335,3 +335,58 @@ func BenchmarkSessionCreate(b *testing.B) {
 	}
 	b.ReportMetric(float64(most), "max-visits/op")
 }
+
+// TestSessionRevokeAllForUserTouchesOnlyThatUser: signing out everywhere
+// is open to any signed-in user, so it must not walk every session in
+// the store under the lock -- a loop of it would stall every other
+// request. It checks only the target user's own sessions, however many
+// other users hold.
+func TestSessionRevokeAllForUserTouchesOnlyThatUser(t *testing.T) {
+	const others = 1 << 14
+	s := NewSessionStore(time.Hour, 0)
+	now := time.Now()
+	for i := range others {
+		s.Create("other-"+strconv.Itoa(i%100), now)
+	}
+	mine := []Session{s.Create("user-1", now), s.Create("user-1", now), s.Create("user-1", now)}
+
+	before := s.revokeVisits
+	s.RevokeAllForUser("user-1")
+	if visited := s.revokeVisits - before; visited != len(mine) {
+		t.Errorf("RevokeAllForUser checked %d sessions, want only user-1's %d", visited, len(mine))
+	}
+	for _, sess := range mine {
+		if _, ok := s.Validate(sess.ID, now); ok {
+			t.Error("a user-1 session survived RevokeAllForUser")
+		}
+	}
+	if got := heldSessions(s); got != others {
+		t.Errorf("%d sessions held, want the other users' %d", got, others)
+	}
+}
+
+// The per-user index RevokeAllForUser relies on must shrink with the
+// store: every way a session leaves -- Revoke, Validate finding it
+// expired, the sweep finding it expired -- takes it out of the index
+// too, or the index would grow for the life of the process.
+func TestSessionPerUserIndexFollowsEveryRemoval(t *testing.T) {
+	s := NewSessionStore(time.Minute, 0)
+	t0 := time.Now()
+	revoked := s.Create("revoked", t0)
+	validated := s.Create("validated", t0)
+	for i := range 100 {
+		s.Create("swept-"+strconv.Itoa(i), t0)
+	}
+	s.Revoke(revoked.ID)
+	later := t0.Add(2 * time.Minute)
+	s.Validate(validated.ID, later)
+	for range 100 {
+		s.Create("live", later)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.byUser) != 1 || len(s.byUser["live"]) != len(s.sessions) {
+		t.Errorf("index holds %d users (%d live sessions) for %d sessions, want only the live user's", len(s.byUser), len(s.byUser["live"]), len(s.sessions))
+	}
+}

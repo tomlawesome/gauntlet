@@ -90,3 +90,36 @@ func TestResetPasswordRequiresAdmin(t *testing.T) {
 		t.Errorf("a non-admin resetting a password got %d, want 403", resp.StatusCode)
 	}
 }
+
+// TestResetCodeLoginSaveFailureIsServerError: a reset code whose spend
+// cannot be saved is refused, but as the server's failure, not a wrong
+// credential -- 500, and the attempt handed back, so more tries than
+// the limit (5) during an outage do not lock the account once the
+// backend recovers.
+func TestResetCodeLoginSaveFailureIsServerError(t *testing.T) {
+	g, ts, admin, backend := budgetFixture(t)
+	id := totpBobID(t, g)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", nil)
+	var reset resetPasswordResponse
+	if err := json.NewDecoder(resp.Body).Decode(&reset); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	backend.left = 0
+	login := credentialsRequest{Username: totpBobUsername, Password: reset.Code}
+	for i := range 6 {
+		resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", login)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("attempt %d with the spend's save failing returned %d, want 500", i+1, resp.StatusCode)
+		}
+	}
+
+	backend.left = -1
+	resp = postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", login)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("the same code once saves work again returned %d, want 200", resp.StatusCode)
+	}
+}

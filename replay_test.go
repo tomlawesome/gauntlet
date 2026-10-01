@@ -477,3 +477,157 @@ func TestAuthenticateRedecidesTheResetCodeOnReplay(t *testing.T) {
 		t.Errorf("bob's new password does not work after the replay: %v", err)
 	}
 }
+
+// lateWriteBackend is a persist.Memory whose next version check
+// answers with the version as it stood, and only then lets afterVersion
+// write: a reloadIfStale that read the version just before the CLI's
+// write landed, and so did not reload.
+type lateWriteBackend struct {
+	*persist.Memory
+	afterVersion func()
+}
+
+func (b *lateWriteBackend) Version(ctx context.Context) (int64, bool, error) {
+	v, exists, err := b.Memory.Version(ctx)
+	if f := b.afterVersion; f != nil {
+		b.afterVersion = nil
+		f()
+	}
+	return v, exists, err
+}
+
+// TestRevokeAllCreatedByFindsATokenThisStoreHadNotLoaded: the CLI
+// creates a token for bob after this store's staleness check, so memory
+// has no token of bob's and the op finds nothing to revoke. That
+// decision was made on stale memory; the store must check it against
+// the document as it is now and revoke the token, not report (0, nil)
+// while it keeps authenticating.
+func TestRevokeAllCreatedByFindsATokenThisStoreHadNotLoaded(t *testing.T) {
+	m := persist.NewMemory()
+	b := &lateWriteBackend{Memory: m}
+	server, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob := &User{ID: "bob-id", Username: "bob"}
+	var raw string
+	b.afterVersion = func() {
+		if raw, _, err = cli.Create("bob's", TokenKindAPI, "", bob, time.Now()); err != nil {
+			t.Errorf("the CLI's Create: %v", err)
+		}
+	}
+
+	n, err := server.RevokeAllCreatedBy(bob.ID)
+	if err != nil {
+		t.Fatalf("RevokeAllCreatedBy: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("RevokeAllCreatedBy = %d, want 1: the CLI's token for bob was missed", n)
+	}
+	reopened, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Authenticate(raw, TokenKindAPI, time.Now()); ok {
+		t.Error("bob's token still authenticates after his tokens were revoked")
+	}
+}
+
+// TestVerifyAndRecordTOTPRechecksTheCodeOnReplay: the same code is
+// submitted to two processes at once. This store matches it against
+// memory, but the other process records it first. The replay must
+// check the code again against the counter the other process saved and
+// refuse it, not let one code win two logins.
+func TestVerifyAndRecordTOTPRechecksTheCodeOnReplay(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	secret, err := GenerateTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+		setTOTPForTest(t, s, id, EncodeTOTPSecret(secret), now, 30)
+	})
+	code := GenerateTOTPCode(secret, totpCounter(now, totpStep)+1)
+	b.beforeSave = func() {
+		if ok, err := other.VerifyAndRecordTOTP(id, code, now); err != nil || !ok {
+			t.Errorf("the other process's VerifyAndRecordTOTP = %v, %v; want true", ok, err)
+		}
+	}
+
+	ok, err := s.VerifyAndRecordTOTP(id, code, now)
+	if err != nil {
+		t.Fatalf("VerifyAndRecordTOTP across a conflicting write: %v", err)
+	}
+	if ok {
+		t.Error("VerifyAndRecordTOTP = true for a code another process had already recorded: one code won two logins")
+	}
+}
+
+// removedAfterVersionBackend is a persist.Memory whose document is gone
+// once the store has checked its version: a file moved aside between the
+// staleness check and the write.
+type removedAfterVersionBackend struct {
+	*persist.Memory
+	removed bool
+}
+
+func (b *removedAfterVersionBackend) Version(ctx context.Context) (int64, bool, error) {
+	v, exists, err := b.Memory.Version(ctx)
+	b.removed = true
+	return v, exists, err
+}
+
+func (b *removedAfterVersionBackend) Load(ctx context.Context) (persist.Snapshot, error) {
+	if b.removed {
+		return persist.Snapshot{}, nil
+	}
+	return b.Memory.Load(ctx)
+}
+
+// TestNothingToChangeAgainstARemovedDocumentIsAnError: the store has a
+// saved document, decides a revoke has nothing to do, and then finds the
+// document gone when it checks that decision. It cannot know what the
+// document held, so it must report the removal rather than (0, nil).
+func TestNothingToChangeAgainstARemovedDocumentIsAnError(t *testing.T) {
+	m := persist.NewMemory()
+	seed, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := &User{ID: "alice-id", Username: "alice"}
+	if _, _, err := seed.Create("alice's", TokenKindAPI, "", alice, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b := &removedAfterVersionBackend{Memory: m}
+	server, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := server.RevokeAllCreatedBy("bob-id")
+	if !errors.Is(err, ErrDocumentRemoved) {
+		t.Fatalf("RevokeAllCreatedBy = (%d, %v), want ErrDocumentRemoved: the decision was never checked against a document", n, err)
+	}
+}
+
+// TestNothingToChangeOnANeverSavedStoreIsFine: a store that has never
+// written anything finds no document, and that is not a removal.
+func TestNothingToChangeOnANeverSavedStoreIsFine(t *testing.T) {
+	server, err := OpenTokenStore(persist.NewMemory(), TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := server.RevokeAllCreatedBy("nobody"); n != 0 || err != nil {
+		t.Fatalf("RevokeAllCreatedBy on an empty store = (%d, %v), want (0, nil)", n, err)
+	}
+}

@@ -359,6 +359,65 @@ func TestUnsavedLockoutRetriesAreSpacedOut(t *testing.T) {
 	}
 }
 
+// A stored lockout further out than one window is clamped and saved
+// back; while the backend is down that save is spaced out like any other
+// lockout retry, not tried again on every refused guess.
+func TestClampedLockoutRetriesAreSpacedOut(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := s.SetLoginLockedUntil(id, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+
+	b.fail.Store(true)
+	start := b.saves.Load()
+	for i := range 100 {
+		if l.ReserveAccount(s, id, now.Add(time.Duration(i)*100*time.Millisecond)) {
+			t.Fatal("a guess was let through a stored lockout")
+		}
+	}
+	if got := b.saves.Load() - start; got != 1 {
+		t.Fatalf("expected one save attempt within lockoutRetryInterval, got %d", got)
+	}
+	l.ReserveAccount(s, id, now.Add(lockoutRetryInterval))
+	if got := b.saves.Load() - start; got != 2 {
+		t.Fatalf("expected a retry once lockoutRetryInterval had passed, got %d save attempts", got)
+	}
+}
+
+// A successful login whose clear of the lockout fails to save does not
+// leave its owner locked out by the record for the rest of the window:
+// the next attempt is let through and the clear is saved again.
+func TestFailedLockoutClearDoesNotLockTheOwnerOut(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := mustNewLoginLimiter(t, 3, time.Hour)
+
+	l.ReserveAccount(s, id, now) // wrong
+	l.ReserveAccount(s, id, now) // wrong
+	if !l.ReserveAccount(s, id, now) {
+		t.Fatal("test setup: the third attempt was refused")
+	}
+	if s.LoginLockedUntil(id).IsZero() {
+		t.Fatal("test setup: expected the third attempt's lockout on the record")
+	}
+	b.fail.Store(true)
+	l.ReleaseAccount(s, id, now) // right, but the clear fails to save
+	b.fail.Store(false)
+
+	at := now.Add(time.Second)
+	if !l.ReserveAccount(s, id, at) {
+		t.Fatal("the owner stayed locked out after a clear that failed to save")
+	}
+	l.ReleaseAccount(s, id, at)
+	if got := s.LoginLockedUntil(id); !got.IsZero() {
+		t.Fatalf("expected the lockout cleared from the record, got %v", got)
+	}
+}
+
 // A new password -- set by its owner, by an admin through SetPassword,
 // or replaced by an admin's reset code -- ends any login lockout on the
 // account, in the record and in the limiter's own count: the guesses
@@ -527,17 +586,19 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	l := mustNewLoginLimiter(t, 3, time.Hour)
-	for range 3 {
-		l.ReserveAccount(s, id, now)
+	// Spread out, so the later two are still in the window when the
+	// lockout (one window after the first) ends.
+	for i := range 3 {
+		l.ReserveAccount(s, id, now.Add(time.Duration(i)*10*time.Minute))
 	}
-	if l.ReserveAccount(s, id, now.Add(time.Second)) {
+	if l.ReserveAccount(s, id, now.Add(20*time.Minute+time.Second)) {
 		t.Fatal("test setup: expected the account to be locked")
 	}
 
-	if err := s.LinkOIDCIdentity(id, "https://idp.example", "subject-1", now.Add(time.Minute)); err != nil {
+	if err := s.LinkOIDCIdentity(id, "https://idp.example", "subject-1", now.Add(50*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	at := now.Add(2 * time.Minute)
+	at := now.Add(51 * time.Minute)
 	if l.ReserveAccount(s, id, at) {
 		t.Error("linking the admin ended its lockout in the limiter")
 	}
@@ -546,5 +607,16 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	}
 	if s.LoginLockedUntil(id).IsZero() {
 		t.Error("linking the admin cleared the lockout on its record")
+	}
+
+	// Once the recorded lockout has ended, the guesses made before the
+	// link still count: one more fills the window again, and the next is
+	// refused, rather than the link buying three fresh guesses.
+	ended := now.Add(time.Hour + time.Second)
+	if !l.ReserveAccount(s, id, ended) {
+		t.Fatal("expected an attempt once the recorded lockout had ended")
+	}
+	if l.ReserveAccount(s, id, ended.Add(time.Second)) {
+		t.Error("linking the admin stopped its earlier wrong guesses counting once the lockout ended")
 	}
 }

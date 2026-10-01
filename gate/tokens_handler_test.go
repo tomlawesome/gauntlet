@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 func TestTokensCreateRequiresAdmin(t *testing.T) {
@@ -37,6 +38,23 @@ func TestCreateTokenRejectsEmptyName(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for an empty name, got %d", resp.StatusCode)
+	}
+}
+
+// TestCreateTokenRejectsABlankName: the store trims the name, so one of
+// only spaces would otherwise be issued with no name at all.
+func TestCreateTokenRejectsABlankName(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "   "})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for a name of only spaces, got %d", resp.StatusCode)
+	}
+	if len(g.deps.Tokens.List()) != 0 {
+		t.Error("a refused token was created anyway")
 	}
 }
 
@@ -186,5 +204,71 @@ func TestCreateTokenWithoutStorageSaysWhatToDo(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(string(body)), gateErrorMessages[gauntlet.ErrTokenNotPersisted]; got != want {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// TestRevokeTokenStorageFailureIsNotReportedAsGone: a revoke whose save
+// fails leaves the token working, so answering 404 ("already revoked")
+// would tell an admin revoking a leaked token that it is dead when it
+// is not. The refusal must be a 5xx the document describes.
+func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
+	c := newContractChecker(t)
+	g := newTestGate(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	tokens, err := gauntlet.OpenTokenStore(backend, gauntlet.TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Tokens = tokens
+	registerUserDirect(t, g, "admin", "password123")
+	raw, tok, err := tokens.Create("leaked", gauntlet.TokenKindAPI, "", nil, nowUTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Handle(gauntlet.TokenKindAPI, kindEchoHandler("/api/readonly"))
+	ts := newTestServer(t, g)
+	admin := c.client()
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{Username: "admin", Password: "password123"}}, 200, nil)
+
+	backend.left = 0
+	c.do(admin, ts.URL, call{method: "DELETE", path: "/api/tokens/" + tok.ID}, http.StatusInternalServerError, nil)
+
+	resp := bearerRequest(t, ts.URL, "/api/readonly", raw)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the token stopped working although its revoke was refused: got %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestContractTokenRegisteredKinds: an application may register its own
+// token kinds (TokenOptions.Kinds), so the document must accept any of
+// them, not only api and ingest. Leaving kind out still means api, which
+// is refused when the application did not register api.
+func TestContractTokenRegisteredKinds(t *testing.T) {
+	c := newContractChecker(t)
+	g := newTestGate(t)
+	const custom gauntlet.TokenKind = "droplist-pull"
+	tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{Kinds: []gauntlet.TokenKind{custom}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Tokens = tokens
+	ts := newTestServer(t, g)
+	u := ts.URL
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: credentialsRequest{Username: "admin", Password: "contract-admin-password"}}, 201, nil)
+
+	var created tokenResponse
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom)}}, 201, &created)
+	if created.Kind != custom {
+		t.Errorf("created kind = %q, want %q", created.Kind, custom)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "default"}}, 400, nil)
+	var list struct {
+		Tokens []tokenResponse `json:"tokens"`
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/tokens"}, 200, &list)
+	if len(list.Tokens) != 1 || list.Tokens[0].Kind != custom {
+		t.Errorf("listed tokens = %+v, want one of kind %q", list.Tokens, custom)
 	}
 }

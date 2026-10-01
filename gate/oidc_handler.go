@@ -2,6 +2,7 @@ package gate
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -56,11 +57,13 @@ func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 
 	fs, err := oidc.NewFlowState(g.now())
 	if err != nil {
+		g.logError("starting SSO login: " + err.Error())
 		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
 		return
 	}
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
+		g.logError("starting SSO login: " + err.Error())
 		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
 		return
 	}
@@ -110,6 +113,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
 	fs, err := oidc.NewFlowState(now)
 	if err != nil {
+		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
 		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
 		return
 	}
@@ -117,6 +121,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
+		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
 		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
 		return
 	}
@@ -252,7 +257,11 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		// The specific unmet condition goes to the server log, not the
 		// browser -- telling an outsider "not a member of any permitted
 		// group" maps out the allowlist for them.
-		g.logWarn("refused SSO login for subject " + identity.Subject + " at " + identity.Issuer + ": " + err.Error())
+		//
+		// Subject and issuer are quoted: both come from the provider's
+		// token, and a newline or terminal escape in either would
+		// otherwise forge a log line or run in the reader's terminal.
+		g.logWarn(fmt.Sprintf("refused SSO login for subject %q at %q: %v", identity.Subject, identity.Issuer, err))
 		g.redirectWithSSOError(w, r, "not_permitted")
 		return
 	}

@@ -3,8 +3,15 @@
 package gate
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
+
+	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 func TestChangePasswordRotatesTheSessionAndEndsOthers(t *testing.T) {
@@ -81,5 +88,51 @@ func TestChangePasswordRequiresASession(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 401 with no session, got %d", resp.StatusCode)
+	}
+}
+
+// lockedBuffer is a log sink the server's handler goroutine writes while
+// the test goroutine reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestChangePasswordStoreFailureIsLogged: the 500's documented promise
+// is that the details are in the server log, so the store's error has to
+// actually reach it.
+func TestChangePasswordStoreFailureIsLogged(t *testing.T) {
+	g := newTestGate(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deps.Users = users
+	logs := &lockedBuffer{}
+	g.cfg.Log = slog.New(slog.NewTextHandler(logs, nil))
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password123")
+
+	backend.left = 0
+	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password123", NewPassword: "new-password-1"})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("a failing store got %d, want 500", resp.StatusCode)
+	}
+	if !strings.Contains(logs.String(), "save refused") {
+		t.Errorf("the store's error is not in the server log; log = %q", logs.String())
 	}
 }

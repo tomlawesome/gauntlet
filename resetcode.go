@@ -196,7 +196,6 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 	// The copy handed back is for the caller's audit entry and response
 	// envelope, neither of which has any business with a credential
 	// verifier -- the same blanking List does.
-	issued.PasswordHash = ""
-	issued.ResetCodeHash = ""
+	issued.blankCredentials()
 	return &issued, FormatResetCode(code), nil
 }

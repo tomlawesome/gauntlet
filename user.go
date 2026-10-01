@@ -158,12 +158,48 @@ type User struct {
 	// only stores what it would produce.
 	Passkeys []Passkey `json:"passkeys,omitempty"`
 
-	// totpSecretBlanked is set only on a copy Store.List returns, and
-	// only when List blanked a TOTPSecret that was there, so
+	// totpSecretBlanked is set only on a copy blankCredentials has
+	// blanked, and only when it blanked a TOTPSecret that was there, so
 	// HasActiveTOTP on that copy gives the answer it would have given
 	// before the blanking. Unexported, so it never reaches JSON; it says
 	// that a secret exists, never what it is.
 	totpSecretBlanked bool
+	// passkeysBlanked is the same for Passkeys: set only on a blanked
+	// copy whose passkeys were removed, so HasSecondFactor on that copy
+	// still sees a passkey-only account as having a second factor.
+	passkeysBlanked bool
+}
+
+// blankCredentials clears every credential and credential verifier on
+// u, which must be a copy on its way out of the Store, never the stored
+// account. Every Store method that hands an account back for a caller to
+// list, log or audit (List, IssueResetCode, DeleteUser, TransferAdmin)
+// goes through here, so a new credential field only has to be added
+// once to stay out of all of them.
+func (u *User) blankCredentials() {
+	// The password hash and the reset-code hash are both verifiers for
+	// the account's password -- for as long as a reset is live, the
+	// code *is* the password.
+	u.PasswordHash = ""
+	u.ResetCodeHash = ""
+	// TOTPSecret is worse than a verifier hash if it leaked -- it's the
+	// actual shared secret, good for minting valid codes indefinitely,
+	// not just checking one. RecoveryCodes are hashes only, same
+	// category as ResetCodeHash. HasActiveTOTP still answers truly on
+	// the copy (see totpSecretBlanked), so a caller showing who has an
+	// authenticator app needs no extra Get.
+	u.totpSecretBlanked = u.totpSecretBlanked || u.TOTPSecret != ""
+	u.TOTPSecret = ""
+	u.RecoveryCodes = nil
+	// Passkeys carries each credential's PublicKey -- not a secret the
+	// way a private key would be, but still credential material nothing
+	// outside the Store has business serializing. Blanked wholesale
+	// rather than per-field: a caller that needs a count must call a
+	// dedicated accessor instead of reading len(this copy's Passkeys),
+	// which always reads zero. HasSecondFactor still answers truly on
+	// the copy (see passkeysBlanked).
+	u.passkeysBlanked = u.passkeysBlanked || len(u.Passkeys) > 0
+	u.Passkeys = nil
 }
 
 // clone deep-copies the account, including the slices a plain struct
@@ -204,5 +240,5 @@ func (u *User) HasActiveTOTP() bool {
 // only affects whether a passkey can complete a *login*, not whether the
 // account is considered to have a second factor at all.
 func (u *User) HasSecondFactor() bool {
-	return u.HasActiveTOTP() || len(u.Passkeys) > 0
+	return u.HasActiveTOTP() || len(u.Passkeys) > 0 || u.passkeysBlanked
 }

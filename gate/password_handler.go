@@ -56,6 +56,9 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// The 500 tells the caller nothing by design; the log is the
+		// only place an operator can find out why.
+		g.logError("changing the password for " + user.Username + ": " + err.Error())
 		http.Error(w, "could not change the password", http.StatusInternalServerError)
 		return
 	}

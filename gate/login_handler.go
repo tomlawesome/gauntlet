@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -82,6 +83,16 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := g.deps.Users.Authenticate(req.Username, req.Password, now)
+	if err != nil && !errors.Is(err, gauntlet.ErrInvalidCredentials) {
+		// Authenticate's only other error is a reset code's spend that
+		// could not be saved. Refused either way, but that is the
+		// backend failing, not a wrong credential: no 401, and no count
+		// toward a lockout that outlasts the outage.
+		g.releaseLogin(res, now)
+		g.logError("recording login for " + req.Username + ": " + err.Error())
+		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		return
+	}
 	if err != nil {
 		// Reservations stay claimed -- that is what counts the failure.
 		// Deliberately the same body and status for an unknown username,
@@ -188,19 +199,30 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	// concurrent submissions of the same code can't both check against
 	// the same not-yet-advanced counter -- see VerifyAndRecordTOTP's own
 	// doc comment.
-	if matched, err := g.deps.Users.VerifyAndRecordTOTP(user.ID, req.Code, now); matched {
-		if err != nil {
-			// The replay guard failing to advance doesn't undo the fact
-			// that a correct, unreplayed code was just presented -- see
-			// VerifyAndRecordTOTP's own doc comment.
-			g.logWarn("advancing TOTP replay counter for " + user.Username + ": " + err.Error())
-		}
+	matched, err := g.deps.Users.VerifyAndRecordTOTP(user.ID, req.Code, now)
+	if err != nil {
+		// A code whose counter could not be saved is refused (ok is
+		// false), but that is the backend failing, not a wrong guess: it
+		// must not try the recovery codes, answer 401, or count toward
+		// a lockout that outlasts the outage.
+		g.releaseLogin(res, now)
+		g.logError("recording TOTP replay counter for " + user.Username + ": " + err.Error())
+		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		return
+	}
+	if matched {
 		g.completeLoginFactor(w, user, res, now)
 		return
 	}
 
 	if burned, err := g.deps.Users.BurnRecoveryCode(user.ID, req.Code, now); err != nil {
+		// A wrong or used code is (false, nil); an error is a spend that
+		// could not be saved. Refused either way, but as the backend's
+		// failure, like the TOTP case above: no 401, no lockout count.
+		g.releaseLogin(res, now)
 		g.logError("recording spent recovery code for " + user.Username + ": " + err.Error())
+		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		return
 	} else if burned {
 		g.completeLoginFactor(w, user, res, now)
 		return

@@ -40,9 +40,11 @@ info:
     session cookie" issue a fresh one; logout clears it.
 
     **Errors.** Every error body is `text/plain` holding one human-readable
-    line, except the one `application/json` body `DELETE
-    /api/auth/users/{id}` returns when the account was deleted but its
-    tokens could not be revoked. A frontend must branch on the status code
+    line, except two `application/json` bodies for a step that half
+    succeeded: `DELETE /api/auth/users/{id}` when the account was deleted
+    but its tokens could not be revoked, and `POST /api/auth/totp/confirm`
+    when the authenticator is now active but recovery codes could not be
+    generated. A frontend must branch on the status code
     and the `X-Auth-Gate` header, never on the message text. The switch to
     RFC 9457 Problem Details is #23 and is not in this version.
 
@@ -198,6 +200,8 @@ paths:
           $ref: "#/components/responses/CSRFRefused"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -412,8 +416,28 @@ paths:
             text/plain:
               schema:
                 $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
-          $ref: "#/components/responses/InternalError"
+          description: |
+            `text/plain` when the app could not be activated; details are in
+            the server log. The JSON body when the app WAS activated (other
+            sessions ended, a fresh session cookie set) but recovery codes
+            could not be generated -- remove the app and enrol again.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [error, totpActive]
+                properties:
+                  error:
+                    type: string
+                  totpActive:
+                    const: true
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -865,10 +889,10 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
+                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
                 kind:
                   type: string
-                  description: "`api` (read-only; the default when empty or absent) or `ingest`."
+                  description: "One of the kinds the application registered (TokenOptions.Kinds): `api` and `ingest` by default. Empty or absent means `api` (read-only), which is a 400 if the application did not register `api`."
                 device:
                   type: string
                   description: Required for, and allowed only on, an `ingest` token.
@@ -926,6 +950,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: No such token -- never existed or already revoked; the two are not told apart.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          description: The revoke could not be saved, so the token still works; try again.
           content:
             text/plain:
               schema:
@@ -1179,7 +1209,7 @@ components:
           type: string
         kind:
           type: string
-          description: "`api` or `ingest`."
+          description: "One of the kinds the application registered (TokenOptions.Kinds): `api` or `ingest` by default."
         device:
           type: string
           description: Present only on an `ingest` token.

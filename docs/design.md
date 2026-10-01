@@ -46,7 +46,7 @@ github.com/tomlawesome/gauntlet
 ├── totp.go  recoverycodes.go  resetcode.go  passkeys.go   (storage + stdlib logic)
 ├── id.go
 ├── persist/                    Backend, Snapshot, ErrConflict, VersionReader,
-│                               Open, SaveWithRetry, LoadDocument, Memory (tests),
+│                               Open, SaveWithRetry (deprecated), LoadDocument, Memory (tests),
 │                               EncryptedFileBackend, MinKeyBytes (issue #18)
 ├── oidc/                       Config, Client, Identity, Policy, FlowState, StateCodec,
 │                               AllowIssuer, IsMultiTenantIssuer
@@ -116,7 +116,7 @@ type VersionReader interface { // optional; lets a live server notice a CLI's wr
 var ErrConflict = errors.New("persist: store was modified by someone else")
 
 func Open(ctx context.Context, b Backend, name string, decode func([]byte) error) (version int64, existed bool, err error)
-func SaveWithRetry(ctx context.Context, b Backend, payload []byte, current int64) (version int64, conflicted bool, err error)
+func SaveWithRetry(ctx context.Context, b Backend, payload []byte, current int64) (version int64, conflicted bool, err error) // deprecated
 func LoadDocument(ctx context.Context, b Backend) ([]byte, int64, error)
 func NewMemory() *Memory // in-memory Backend for tests
 ```
@@ -125,6 +125,17 @@ Identical to mikroview's `internal/persist/{persist,document,open}.go`.
 `Open`'s fail-closed contract (a document that exists but cannot be
 parsed is a startup error, never "empty") is kept: it is what stops a
 corrupt accounts file re-opening registration to the next visitor.
+
+`SaveWithRetry` is deprecated (`persist/document.go`): on a conflict it
+saved the new change on top of whatever the other writer left,
+last-writer-wins, which can quietly drop a change. Nothing in this
+module calls it any more. Store and TokenStore now handle a conflicting
+write with a replay loop instead (`mutate.go`): when a save finds that
+another process wrote first, the store reloads that process's document
+and re-applies the same change on top of it, rather than writing over
+what the other process saved. It tries this up to five times before
+giving up with `ErrSaveConflict`. `SaveWithRetry` stays, unchanged, for
+a caller that already depends on it.
 
 Logging: every constructor takes `*slog.Logger` in its options; nil
 means discard. Mikroview passes `logging.New("auth")`; birdcage passes
@@ -252,7 +263,11 @@ const ResetCodeTTL = 24 * time.Hour
 // ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
 // ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
 // ErrPasskeyLimitReached, ErrPasskeyNotFound, ErrTokenNotFound, ErrTokenKindInvalid,
-// ErrTokenNameInvalid, ErrTokenDeviceInvalid/Required/NotAllowed, ErrLimiterConfig.
+// ErrTokenNameInvalid, ErrTokenDeviceInvalid/Required/NotAllowed, ErrLimiterConfig,
+// ErrSaveConflict (a write kept losing a race with another save; nothing
+// was written, so the caller can just try again), ErrDocumentRemoved (the
+// backend's file is gone since this process loaded it; restore the file,
+// or restart the process to start afresh).
 ```
 
 Reasons for the three *new* items:

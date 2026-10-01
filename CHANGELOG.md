@@ -44,11 +44,18 @@ All notable changes to this project are documented in this file.
   `ErrSaveConflict` and changes nothing; the caller can try again. The
   whole write, retries and reloads included, is held to one five-second
   limit (the limit one save had before), since it runs while every
-  login and signed-in request on that store waits.
+  login and signed-in request on that store waits. The shipped file
+  backends cannot be interrupted mid-call, so on a hung mount the
+  limit only stops another retry from starting, not a call already
+  in progress.
   Checks such as "registration is still open", "one admin only",
   "username free" and "recovery codes already issued" are made again
   against the document another process saved, so a retried write never
-  breaks them.
+  breaks them. A write that finds nothing to change -- a revoke of a
+  token already gone, say -- now re-checks that decision against the
+  saved document too, so it cannot miss a token another process just
+  issued; such a call can now return an error if that re-check fails,
+  where before it always returned nil.
 - A write that meets an accounts document this store refuses to load
   (two admins, say) now fails instead of saving over it. One that finds
   the document removed from under it -- a file deleted or moved aside
@@ -72,10 +79,16 @@ All notable changes to this project are documented in this file.
 - `persist.SaveWithRetry` is deprecated and no longer used by the
   stores; it stays exported for compatibility.
 - Smaller fixes from the v0.1.0 audit (#24):
-  - `User.HasActiveTOTP` now answers correctly on the copies
-    `Store.List` returns; it read false for every listed account.
-  - A password login saves `LastLogin` at most once an hour. The value
-    in memory is always current; a crash can lose up to an hour of it.
+  - `User.HasActiveTOTP` and `HasSecondFactor` now answer correctly on
+    the copies `Store.List` returns: `HasActiveTOTP` read false for
+    every listed account, and `HasSecondFactor` read false for a
+    passkey-only account even though `Get` said true.
+  - A password login saves `LastLogin`, and a token use saves its
+    last-used time, at most once an hour each, compared against the
+    saved value, as `LastLogin` already was -- a token used more often
+    than hourly had been saving its last use once and then looking
+    idle. The value in memory is always current; a crash can lose up to
+    an hour of it.
   - `TokenStore.List`, `ByKind` and the saved document order tokens
     created in the same instant by ID, so the list no longer reshuffles
     on refresh.
@@ -90,13 +103,22 @@ All notable changes to this project are documented in this file.
     copy another caller is reading.
   - Clearing out expired sessions no longer pauses every login and
     session check while a large session store is walked in one go; each
-    login now checks a fixed few sessions instead.
+    login now checks a fixed few sessions instead. Signing out
+    everywhere, and other per-user session revokes, no longer walk
+    every session either: the store now keeps each user's session IDs
+    alongside the sessions and revokes from that list.
   - Each CI job keeps its own cache, so the lint jobs running side by
     side no longer overwrite each other's and every job starts warm.
   - A login lockout that could not be saved is saved again by a later
     refused attempt on that account (at most every 30 seconds), so a
     backend that recovers inside the lockout ends up holding it and a
-    restart no longer lets more guesses through.
+    restart no longer lets more guesses through. Clearing a lockout
+    whose save failed is retried the same way, every 30 seconds, while
+    the stored lockout is still in the future, so a correct password is
+    not kept out once storage recovers -- within one process; a restart
+    inside that window still waits out the lockout. A stored lockout
+    ending more than one window away no longer tries a save on every
+    refused guess, only once per 30 seconds.
   - Setting a new password (`SetPassword`) or issuing a reset code
     (`IssueResetCode`) ends any login lockout on the account, so its
     owner can sign in with the new password or the code at once. The
@@ -105,6 +127,8 @@ All notable changes to this project are documented in this file.
     place.
   - Internal tidying in `gate` with no change on the wire, plus test and
     documentation fixes.
+- A failed password change, and a failed SSO login or link, are now
+  logged, as the API document already said (#26).
 
 ### Fixed
 
@@ -113,6 +137,25 @@ All notable changes to this project are documented in this file.
 - `POST /api/auth/users` answers 503 with the same "no persistent
   storage" message as register when the deployment has no storage set
   up, instead of 500 (#25).
+- `DELETE /api/tokens/{id}` answers 500 and logs the error when the
+  revoke cannot be saved, instead of 404 "already revoked" while the
+  token kept working; 404 is now only for a token that does not exist
+  (#26).
+- `POST /api/tokens` refuses a name made only of spaces with 400, like
+  an empty one (#26).
+- `POST /api/auth/login/factor` answers 500 and logs the error,
+  without counting the attempt toward the login lockout, when a
+  correct authenticator code or recovery code cannot be recorded as
+  used; `POST /api/auth/login` does the same for a reset code. Before,
+  both answered 401 and counted toward the lockout (#26).
+- `POST /api/auth/totp/confirm` answers 409, as the API document
+  already said, when no enrolment is pending, instead of 400; and when
+  the authenticator is confirmed but recovery codes could not be
+  generated, its 500 body is JSON `{"error": ..., "totpActive": true}`
+  so a frontend can tell the factor is on (#26).
+- `docs/api/auth.yaml` now says a token's kind is whatever the
+  application registered (`api` and `ingest` by default), not only
+  `api` or `ingest` (#26).
 
 ## [0.1.0] - 2026-09-30
 

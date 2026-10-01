@@ -361,6 +361,34 @@ func TestListAnswersHasActiveTOTPWithoutTheSecret(t *testing.T) {
 	}
 }
 
+// TestListAnswersHasSecondFactorForPasskeyOnlyAccounts: List blanks
+// Passkeys, but an admin list or a second-factor check built from it
+// must still see a passkey-only account as having a second factor --
+// the same answer Get gives.
+func TestListAnswersHasSecondFactorForPasskeyOnlyAccounts(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	passkey, _ := s.Register("passkey", "password123", now)
+	none, _ := s.CreateUser("none", "password123", RoleUser, now)
+	if _, err := s.AddPasskey(passkey.ID, testPasskey(1, "")); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{passkey.ID: true, none.ID: false}
+	for _, u := range s.List() {
+		if u.Passkeys != nil {
+			t.Errorf("List returned %s's passkeys", u.Username)
+		}
+		full, _ := s.Get(u.ID)
+		if full.HasSecondFactor() != want[u.ID] {
+			t.Errorf("Get %s: HasSecondFactor = %v, want %v", u.Username, full.HasSecondFactor(), want[u.ID])
+		}
+		if got := u.HasSecondFactor(); got != full.HasSecondFactor() {
+			t.Errorf("listed %s: HasSecondFactor = %v, Get says %v", u.Username, got, full.HasSecondFactor())
+		}
+	}
+}
+
 func TestPersistenceRoundTrip(t *testing.T) {
 	m := persist.NewMemory()
 
@@ -718,6 +746,86 @@ func TestDeleteUserUnknownIDReturnsNotFound(t *testing.T) {
 	if _, err := s.DeleteUser("no-such-id"); err != ErrUserNotFound {
 		t.Errorf("expected ErrUserNotFound, got %v", err)
 	}
+}
+
+// giveEveryCredential puts every credential-bearing field on userID's
+// account: a password (already there), an outstanding reset code, an
+// active TOTP secret, recovery codes and a passkey.
+func giveEveryCredential(t *testing.T, s *Store, userID string, now time.Time) {
+	t.Helper()
+	if _, _, err := s.IssueResetCode(userID, now); err != nil {
+		t.Fatalf("IssueResetCode: %v", err)
+	}
+	setTOTPForTest(t, s, userID, testTOTPSecret, now, 0)
+	if _, err := s.GenerateRecoveryCodes(userID, now); err != nil {
+		t.Fatalf("GenerateRecoveryCodes: %v", err)
+	}
+	if _, err := s.AddPasskey(userID, testPasskey(1, "")); err != nil {
+		t.Fatalf("AddPasskey: %v", err)
+	}
+}
+
+// requireNoCredentials fails if a copy a Store method handed back still
+// carries any credential, while HasActiveTOTP and HasSecondFactor give
+// the answers the stored account would.
+func requireNoCredentials(t *testing.T, what string, u *User) {
+	t.Helper()
+	for field, present := range map[string]bool{
+		"PasswordHash":  u.PasswordHash != "",
+		"ResetCodeHash": u.ResetCodeHash != "",
+		"TOTPSecret":    u.TOTPSecret != "",
+		"RecoveryCodes": u.RecoveryCodes != nil,
+		"Passkeys":      u.Passkeys != nil,
+	} {
+		if present {
+			t.Errorf("%s returned the account's %s", what, field)
+		}
+	}
+	if !u.HasActiveTOTP() || !u.HasSecondFactor() {
+		t.Errorf("%s: the copy no longer reports the account's second factor", what)
+	}
+}
+
+// TestDeleteUserReturnsNoCredentials: the deleted account is returned
+// for the caller to log and clean up after, so it must carry none of
+// the account's credentials.
+func TestDeleteUserReturnsNoCredentials(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	_, _ = s.Register("alice", "password123", now)
+	bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	giveEveryCredential(t, s, bob.ID, now)
+
+	deleted, err := s.DeleteUser(bob.ID)
+	if err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	requireNoCredentials(t, "DeleteUser", deleted)
+}
+
+// TestTransferAdminReturnsNoCredentials: both accounts TransferAdmin
+// hands back are for the caller's audit trail, so neither may carry
+// credentials.
+func TestTransferAdminReturnsNoCredentials(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	alice, _ := s.Register("alice", "password123", now)
+	bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	giveEveryCredential(t, s, alice.ID, now)
+	giveEveryCredential(t, s, bob.ID, now)
+
+	from, to, err := s.TransferAdmin("bob", now)
+	if err != nil {
+		t.Fatalf("TransferAdmin: %v", err)
+	}
+	requireNoCredentials(t, "TransferAdmin (from)", from)
+	requireNoCredentials(t, "TransferAdmin (to)", to)
 }
 
 // TestDeleteUserLeavesTheAccountInPlaceWhenPersistFails: a deletion that

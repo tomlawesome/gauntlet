@@ -171,19 +171,24 @@ type document[S any] struct {
 // the state returned is that document as loaded, untouched, with its
 // version. Nothing was saved, but it is what is out there, and the
 // caller installs it so the store does not go on answering from the
-// stale memory op was first run against. Every other error returns a
-// nil state.
+// stale memory op was first run against. The same goes for errNoChange
+// from op's re-run against a newer document (see below). Every other
+// error returns a nil state.
 //
 // The caller holds the store's write lock throughout, as the old
 // tryPersistLocked did: the version it saves with is the one the store holds, and nothing
 // else may move it between the copy and the swap.
 func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64, error) {
 	next := d.clone(cur)
-	if err := op(next); err != nil {
-		return nil, 0, err
-	}
+	opErr := op(next)
 	if d.backend == nil {
+		if opErr != nil {
+			return nil, 0, opErr
+		}
 		return next, version, nil // persistence not configured: memory only
+	}
+	if opErr != nil && !errors.Is(opErr, errNoChange) {
+		return nil, 0, opErr
 	}
 
 	// One deadline for the whole loop -- every save and every reload one
@@ -193,6 +198,32 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 	// reloads between them, blocking every read and login for that long.
 	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
 	defer cancel()
+
+	// "Nothing to change" saves nothing, so no version check would ever
+	// catch it being decided on stale memory -- a token another process
+	// issued after this store last reloaded, missed by a revoke. Decide
+	// again against the document as it is now. A store that has never
+	// saved (version 0) finds no document and that is fine: nothing is
+	// out there to overturn the decision. One that has saved and now
+	// finds none must say so, as the save loop below does -- "nothing to
+	// revoke" was never checked against the live document.
+	if opErr != nil {
+		fresh, freshVersion, err := d.load(ctx)
+		if errors.Is(err, ErrDocumentRemoved) && version == 0 {
+			return nil, 0, errNoChange
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		if freshVersion == version {
+			return nil, 0, errNoChange
+		}
+		next = d.clone(fresh)
+		if err := op(next); err != nil {
+			return fresh, freshVersion, err
+		}
+		version = freshVersion
+	}
 
 	for attempt := 1; ; attempt++ {
 		if d.check != nil {
@@ -250,7 +281,7 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 func (d document[S]) load(ctx context.Context) (*S, int64, error) {
 	snap, err := d.backend.Load(ctx)
 	if err != nil {
-		return nil, 0, fmt.Errorf("reloading %s from %s after a conflicting write failed: %w", d.what, d.backend.Describe(), err)
+		return nil, 0, fmt.Errorf("reloading %s from %s failed: %w", d.what, d.backend.Describe(), err)
 	}
 	if !snap.Exists {
 		return nil, 0, fmt.Errorf("%s in %s: %w", d.what, d.backend.Describe(), ErrDocumentRemoved)

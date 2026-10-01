@@ -38,7 +38,13 @@ type Session struct {
 type SessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]Session
-	ttl      time.Duration
+	// byUser holds each user's session IDs, kept in step with sessions,
+	// so RevokeAllForUser touches only that user's entries. Signing out
+	// everywhere is open to any signed-in user; walking the whole map
+	// under the lock for it would let a loop of those calls stall every
+	// other request.
+	byUser map[string]map[string]struct{}
+	ttl    time.Duration
 	// maxLifetime caps how long a session can live from IssuedAt,
 	// regardless of how often it is used.
 	//
@@ -72,6 +78,9 @@ type SessionStore struct {
 	// sweepVisits counts the entries the sweep has checked, so tests can
 	// see how much work one call did without timing it.
 	sweepVisits int
+	// revokeVisits counts the sessions RevokeAllForUser has checked, for
+	// the same reason.
+	revokeVisits int
 }
 
 // sweepBatch is how many entries of order each Create checks. It must
@@ -89,7 +98,7 @@ func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore {
 	if maxLifetime < 0 {
 		maxLifetime = 0
 	}
-	return &SessionStore{sessions: make(map[string]Session), ttl: ttl, maxLifetime: maxLifetime}
+	return &SessionStore{sessions: make(map[string]Session), byUser: make(map[string]map[string]struct{}), ttl: ttl, maxLifetime: maxLifetime}
 }
 
 // Create starts a new session for userID.
@@ -98,6 +107,10 @@ func (s *SessionStore) Create(userID string, now time.Time) Session {
 	defer s.mu.Unlock()
 	sess := Session{ID: newID(), UserID: userID, IssuedAt: now, ExpiresAt: now.Add(s.ttl)}
 	s.sessions[sess.ID] = sess
+	if s.byUser[userID] == nil {
+		s.byUser[userID] = make(map[string]struct{})
+	}
+	s.byUser[userID][sess.ID] = struct{}{}
 	s.order.push(sess.ID)
 	s.sweepLocked(now)
 	return sess
@@ -118,7 +131,7 @@ func (s *SessionStore) sweepLocked(now time.Time) {
 			continue
 		}
 		if s.expired(sess, now) {
-			delete(s.sessions, id)
+			s.removeLocked(sess)
 			continue
 		}
 		s.order.push(id)
@@ -193,12 +206,12 @@ func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) {
 		return Session{}, false
 	}
 	if now.After(sess.ExpiresAt) {
-		delete(s.sessions, id)
+		s.removeLocked(sess)
 		return Session{}, false
 	}
 	if deadline, capped := s.deadline(sess); capped {
 		if now.After(deadline) {
-			delete(s.sessions, id)
+			s.removeLocked(sess)
 			return Session{}, false
 		}
 		sess.ExpiresAt = earliest(now.Add(s.ttl), deadline)
@@ -229,7 +242,19 @@ func earliest(a, b time.Time) time.Time {
 func (s *SessionStore) Revoke(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, id)
+	if sess, ok := s.sessions[id]; ok {
+		s.removeLocked(sess)
+	}
+}
+
+// removeLocked drops sess from both sessions and byUser.
+func (s *SessionStore) removeLocked(sess Session) {
+	delete(s.sessions, sess.ID)
+	ids := s.byUser[sess.UserID]
+	delete(ids, sess.ID)
+	if len(ids) == 0 {
+		delete(s.byUser, sess.UserID)
+	}
 }
 
 // RevokeAllForUser ends every session belonging to userID -- used when
@@ -238,9 +263,9 @@ func (s *SessionStore) Revoke(id string) {
 func (s *SessionStore) RevokeAllForUser(userID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id, sess := range s.sessions {
-		if sess.UserID == userID {
-			delete(s.sessions, id)
-		}
+	for id := range s.byUser[userID] {
+		s.revokeVisits++
+		delete(s.sessions, id)
 	}
+	delete(s.byUser, userID)
 }
