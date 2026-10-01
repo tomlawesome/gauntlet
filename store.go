@@ -155,9 +155,10 @@ func (f storeFile) checkAdmins() error {
 
 // Options configures OpenStore.
 type Options struct {
-	// Log receives warnings (a concurrent write from another process was
-	// overwritten -- see tryPersistLocked) and errors (a change could not
-	// be persisted and exists only in memory -- see persistLocked). nil
+	// Log receives errors: a bookkeeping change (a LastLogin bump) that
+	// could not be saved and exists only in memory -- see
+	// mutateBestEffortLocked -- and a document another process wrote
+	// that this store refuses to apply -- see reloadIfStale. nil
 	// discards both.
 	Log *slog.Logger
 }
@@ -184,7 +185,7 @@ type Store struct {
 	// server until it restarts, defeating the point of a recovery tool
 	// that shouldn't require one.
 	//
-	// It is also what makes a write conditional: see persistLocked.
+	// It is also what makes a write conditional: see mutate.
 	version int64
 
 	// reloadInFlight is non-nil while one caller is checking the backend
@@ -389,13 +390,13 @@ func (s *Store) mutateBestEffortLocked(op func(*storeState) error) {
 // tests assigns to it.
 var reloadTimeout = 5 * time.Second
 
-// saveTimeout is the write-side counterpart: it bounds one save in
-// tryPersistLocked (Store and TokenStore alike), which runs while the
-// store's write lock is held. Without it a backend that stops answering
-// mid-save would hold that lock, and with it every login and every
-// signed-in request, until the process was restarted. A save that
-// overruns fails like any other save failure: the caller rolls its
-// change back and reports the error.
+// saveTimeout is the write-side counterpart: it bounds each save the
+// replay loop makes (mutate.go, Store and TokenStore alike), which runs
+// while the store's write lock is held. Without it a backend that stops
+// answering mid-save would hold that lock, and with it every login and
+// every signed-in request, until the process was restarted. A save that
+// overruns fails like any other save failure: nothing is changed and
+// the caller gets the error.
 //
 // That protection only reaches a backend that honours ctx. The shipped
 // file backends (persist/file.go's Save, and EncryptedFileBackend on top
@@ -525,12 +526,11 @@ func (s *Store) reloadIfStale() {
 
 	// Captured before the unlocked read below, and compared against
 	// again once the write lock is held: the only safe way to detect a
-	// concurrent in-process write (persistLocked/tryPersistLocked) that
-	// landed while this call was reading without the lock. A version
-	// that moved at all between here and the write-lock check below
-	// means some other caller's write is now the authoritative state,
-	// and applying a snapshot read before it would silently revert that
-	// write.
+	// concurrent in-process write (mutate) that landed while this call
+	// was reading without the lock. A version that moved at all between
+	// here and the write-lock check below means some other caller's
+	// write is now the authoritative state, and applying a snapshot read
+	// before it would silently revert that write.
 	s.mu.RLock()
 	beforeLoad := s.version
 	s.mu.RUnlock()
@@ -551,11 +551,12 @@ func (s *Store) reloadIfStale() {
 		return
 	}
 	// Unlike a transient read failure, this is a document someone wrote:
-	// keep serving what is in memory, and say why once. A server with its
-	// own live accounts saves over this on its next write; one that opened
-	// on an empty backend has none to save, so registrationOpenGuard keeps
-	// registration closed instead of treating Count() == 0 as a fresh
-	// install.
+	// keep serving what is in memory, and say why once. Every write
+	// fails while it stands -- mutate meets the same refusal when its
+	// save conflicts and reloads, rather than writing over it -- and a
+	// store that opened on an empty backend also keeps registration
+	// closed (registrationOpenGuard) instead of treating Count() == 0 as
+	// a fresh install.
 	if err := file.checkAdmins(); err != nil {
 		s.mu.Lock()
 		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
@@ -1453,59 +1454,4 @@ func (s *Store) List() []User {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
 	return out
-}
-
-// tryPersistLocked is persistLocked's error-returning half, for the
-// callers (TransferAdmin, SetPassword, createLocked -- behind Register
-// and CreateUser --, FindOrCreateOIDCUser's new-account branch,
-// LinkOIDCIdentity) that change a credential, a role, or which accounts
-// exist, and so must not let the caller believe a write happened when
-// it didn't -- see each one's own restore-on-error comment. Every other
-// caller keeps using persistLocked below, which keeps the default
-// swallow-and-log behaviour.
-//
-// Being replaced by mutate (#21), which replays the change on a
-// conflict instead of writing on top; DeleteUser is converted, the rest
-// follow. See mutate.go.
-func (s *Store) tryPersistLocked() error {
-	if s.backend == nil {
-		return nil
-	}
-	data, err := encodeAccounts(&s.storeState)
-	if err != nil {
-		return fmt.Errorf("encoding accounts for persistence failed: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
-	defer cancel()
-	version, conflicted, err := persist.SaveWithRetry(ctx, s.backend, data, s.version) //nolint:staticcheck // goes with this function once every write is on mutate (#21)
-	if err != nil {
-		return fmt.Errorf("writing accounts to %s failed: %w", s.backend.Describe(), err)
-	}
-	if conflicted && s.log != nil {
-		// Another process wrote while this change was pending -- almost
-		// always a CLI recovery command against a live server. This
-		// change went on top; a concurrent change to a *different*
-		// account may have been lost. Said out loud rather than
-		// implied, because a whole-document store cannot merge them.
-		s.log.Warn(fmt.Sprintf("accounts store was modified by another process while this change "+
-			"was pending (%s); this change was applied on top", s.backend.Describe()))
-	}
-	s.version = version
-	s.recordSaved()
-	return nil
-}
-
-// persistLocked is the swallow-and-log default every ordinary write
-// uses: the in-memory state (which every read goes through) stays
-// correct either way, so a transient disk issue degrades to "won't
-// survive a restart right now" rather than failing the caller outright.
-// Kept by FindOrCreateOIDCUser's existing-login branch and
-// Authenticate's ordinary-login branch, both of which only touch
-// LastLogin -- a bookkeeping timestamp not worth failing an otherwise
-// successful login over.
-func (s *Store) persistLocked() {
-	if err := s.tryPersistLocked(); err != nil && s.log != nil {
-		s.log.Error(fmt.Sprintf("%v -- this change exists only in memory and will be lost on restart", err))
-	}
 }

@@ -7,8 +7,9 @@
 // The loop below answers that by reloading the fresh document, running
 // the same change against it, and saving again -- what a database does
 // with a version column -- so no write is ever silently discarded and
-// the caller never sees the conflict. Its predecessor,
-// persist.SaveWithRetry, saved the stale document on top instead.
+// the caller never sees the conflict. Its predecessor (the persist
+// package's deprecated save-and-retry helper) saved the stale document
+// on top instead.
 //
 // # Converting a method onto the loop
 //
@@ -17,8 +18,9 @@
 //
 //  1. Keep everything before the write lock as it is: argument checks,
 //     Persisted(), hashing, reloadIfStale(). None of it moves.
-//  2. Replace the block from s.mu.Lock() to the tryPersistLocked() call,
-//     including the rollback that follows it, with one call:
+//  2. Replace the block from s.mu.Lock() to the old save call
+//     (tryPersistLocked, now deleted), including the rollback that
+//     followed it, with one call:
 //     s.mutate(func(st *storeState) error { ... }) (TokenStore: the
 //     same, with *tokenState). The op reads what it needs from st --
 //     never from s, and never from a *User or *Token pointer taken
@@ -39,7 +41,7 @@
 //     errors.Is against the sentinels keeps working.
 //  6. A method whose write is bookkeeping only (LastLogin, LastUsedAt)
 //     uses mutateBestEffortLocked, which logs a failed save and keeps
-//     the change in memory, as persistLocked did.
+//     the change in memory, as the old persistLocked did.
 //  7. Where the old code returned early without saving because there
 //     was nothing to do (a value already set, a code already spent),
 //     the op returns errNoChange: mutate saves nothing and returns nil,
@@ -77,11 +79,10 @@
 //   - Store.TransferAdmin: touches two accounts and re-checks the
 //     single-admin invariant; the check belongs in the op, against st.
 //
-// Once every method is converted, tryPersistLocked and persistLocked on
-// both stores go, Options.Log's comment about overwritten writes goes
-// with them, and reloadIfStale's "saves over this on its next write"
-// remark stops being true: a write that meets a refused document now
-// fails instead.
+// Every write on both stores is now on this loop, and the old save
+// helpers (tryPersistLocked, persistLocked) are gone. A write that meets
+// a document this store refuses (see reloadIfStale) fails instead of
+// saving over it.
 package gauntlet
 
 import (
@@ -139,8 +140,8 @@ type document[S any] struct {
 // back as is; every persistence failure is wrapped, so a store can wrap
 // it again in its own words.
 //
-// The caller holds the store's write lock throughout, as tryPersistLocked
-// did: the version it saves with is the one the store holds, and nothing
+// The caller holds the store's write lock throughout, as the old
+// tryPersistLocked did: the version it saves with is the one the store holds, and nothing
 // else may move it between the copy and the swap.
 func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64, error) {
 	next := d.clone(cur)

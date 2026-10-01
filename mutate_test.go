@@ -349,7 +349,7 @@ func TestMutateWithoutABackendChangesMemoryOnly(t *testing.T) {
 
 // TestMutateBestEffortKeepsTheChangeInMemoryAndLogs: a bookkeeping
 // write that cannot be saved is still applied in memory, where Get sees
-// it, and logged -- the behaviour persistLocked gave LastLogin. An op
+// it, and logged -- the behaviour the old persistLocked gave LastLogin. An op
 // that fails is dropped silently: nothing applied, nothing to log.
 func TestMutateBestEffortKeepsTheChangeInMemoryAndLogs(t *testing.T) {
 	var logs bytes.Buffer
