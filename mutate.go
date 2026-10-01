@@ -40,6 +40,11 @@
 //  6. A method whose write is bookkeeping only (LastLogin, LastUsedAt)
 //     uses mutateBestEffortLocked, which logs a failed save and keeps
 //     the change in memory, as persistLocked did.
+//  7. Where the old code returned early without saving because there
+//     was nothing to do (a value already set, a code already spent),
+//     the op returns errNoChange: mutate saves nothing and returns nil,
+//     and the method reports its own result from the captured
+//     variables.
 //
 // A method that already holds mu (createLocked, or a branch inside
 // Authenticate) calls mutateLocked instead of mutate; the op is the
@@ -94,6 +99,12 @@ import (
 // never stops -- a runaway script -- rather than one CLI command against
 // a live server, which the first replay absorbs.
 var ErrSaveConflict = errors.New("gauntlet: the store kept changing under this write; nothing was saved")
+
+// errNoChange is what an op returns when the state it was given already
+// says what the call wanted -- a lockout already recorded, a code that
+// no longer matches -- so there is nothing to save. mutate saves nothing
+// and returns nil for it; it never reaches a caller.
+var errNoChange = errors.New("gauntlet: nothing to change")
 
 // maxSaveAttempts bounds how many times one write is replayed against a
 // freshly loaded document before it gives up with ErrSaveConflict.

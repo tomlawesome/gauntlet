@@ -341,6 +341,9 @@ func (s *Store) mutate(op func(*storeState) error) error {
 // mutateLocked is mutate for a caller that already holds mu.
 func (s *Store) mutateLocked(op func(*storeState) error) error {
 	next, version, err := s.accounts().replay(&s.storeState, s.version, op)
+	if errors.Is(err, errNoChange) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

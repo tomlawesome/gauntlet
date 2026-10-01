@@ -284,6 +284,9 @@ func (s *TokenStore) mutate(op func(*tokenState) error) error {
 // mutateLocked is mutate for a caller that already holds mu.
 func (s *TokenStore) mutateLocked(op func(*tokenState) error) error {
 	next, version, err := s.tokens().replay(&s.tokenState, s.version, op)
+	if errors.Is(err, errNoChange) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

@@ -520,3 +520,37 @@ func TestStoreStateCloneIsDeep(t *testing.T) {
 		t.Error("changing the clone's lastLoginSaved reached the original")
 	}
 }
+
+// TestMutateNoChangeSavesNothing: an op that finds nothing to do
+// returns errNoChange, which mutate answers with nil and no save -- the
+// early return-before-saving the hand-written methods had.
+func TestMutateNoChangeSavesNothing(t *testing.T) {
+	b := &conflictingBackend{Memory: persist.NewMemory(), allow: 1}
+	s, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.saves = 0
+
+	if err := s.mutate(func(st *storeState) error { return errNoChange }); err != nil {
+		t.Fatalf("mutate with nothing to change = %v, want nil", err)
+	}
+	if b.saves != 0 {
+		t.Errorf("saves = %d for an op with nothing to change, want 0", b.saves)
+	}
+
+	tb := &conflictingBackend{Memory: persist.NewMemory()}
+	ts, err := OpenTokenStore(tb, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.mutate(func(st *tokenState) error { return errNoChange }); err != nil {
+		t.Fatalf("TokenStore.mutate with nothing to change = %v, want nil", err)
+	}
+	if tb.saves != 0 {
+		t.Errorf("saves = %d for a token op with nothing to change, want 0", tb.saves)
+	}
+}
