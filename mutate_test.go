@@ -554,3 +554,41 @@ func TestMutateNoChangeSavesNothing(t *testing.T) {
 		t.Errorf("saves = %d for a token op with nothing to change, want 0", tb.saves)
 	}
 }
+
+// TestTokenStoreRevokeReplaysOnAConflictingWrite: the first store
+// revokes its token after the second store, unseen by it, added one.
+// The revoke must be replayed against the document holding both, so
+// the other store's token survives and the revoked one is gone.
+func TestTokenStoreRevokeReplaysOnAConflictingWrite(t *testing.T) {
+	m := persist.NewMemory()
+	first, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawA, a, err := first.Create("a", TokenKindAPI, "", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawB, _, err := second.Create("b", TokenKindAPI, "", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := first.Revoke(a.ID); err != nil {
+		t.Fatalf("Revoke on a stale store: %v", err)
+	}
+	reopened, err := OpenTokenStore(m, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Authenticate(rawA, TokenKindAPI, time.Now()); ok {
+		t.Error("the revoked token still authenticates")
+	}
+	if _, ok := reopened.Authenticate(rawB, TokenKindAPI, time.Now()); !ok {
+		t.Error("the other store's token was written over by the revoke")
+	}
+}

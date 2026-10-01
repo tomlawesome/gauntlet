@@ -535,11 +535,21 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 	// once the recorded value is more than lastUsedGranularity stale
 	// keeps the display honest to the minute while collapsing a poll
 	// loop's writes to one an hour instead of one per request.
-	if now.Sub(t.LastUsedAt) >= lastUsedGranularity {
+	if now.Sub(t.LastUsedAt) < lastUsedGranularity {
 		t.LastUsedAt = now
-		s.persistLocked()
-	} else {
+		cp := *t
+		return &cp, true
+	}
+	s.mutateBestEffortLocked(func(st *tokenState) error {
+		t, ok := st.byID[id]
+		if !ok {
+			return ErrTokenNotFound
+		}
 		t.LastUsedAt = now
+		return nil
+	})
+	if t, ok = s.byID[id]; !ok {
+		return nil, false
 	}
 	cp := *t
 	return &cp, true
@@ -549,24 +559,20 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 // keep around" state, matching how a revoked session is deleted
 // outright rather than flagged (see SessionStore.Revoke).
 func (s *TokenStore) Revoke(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	t, ok := s.byID[id]
-	if !ok {
-		return ErrTokenNotFound
-	}
-	delete(s.byID, id)
-	delete(s.byHash, t.HashedValue)
-	if err := s.tryPersistLocked(); err != nil {
-		// A revoke that only exists in memory must not be reported as
-		// done: the caller tells its operator the token is dead, and a
-		// restart before the next good write would let the raw value
-		// authenticate again with nobody the wiser.
-		s.byID[id] = t
-		s.byHash[t.HashedValue] = id
-		return fmt.Errorf("saving API tokens: %w", err)
-	}
-	return nil
+	// A revoke that only exists in memory must not be reported as done:
+	// the caller tells its operator the token is dead, and a restart
+	// before the next good write would let the raw value authenticate
+	// again with nobody the wiser. mutate installs it only once it is
+	// saved.
+	return s.mutate(func(st *tokenState) error {
+		t, ok := st.byID[id]
+		if !ok {
+			return ErrTokenNotFound
+		}
+		delete(st.byID, id)
+		delete(st.byHash, t.HashedValue)
+		return nil
+	})
 }
 
 // RevokeAllCreatedBy deletes every token issued by userID, returning how
@@ -579,35 +585,35 @@ func (s *TokenStore) Revoke(id string) error {
 // let deleting any one account wipe every unattributed token in the
 // deployment.
 //
-// On a persistence failure the deletions are rolled back and the
-// returned count is 0: a revoke that only exists in memory must not be
-// reported as done.
+// On a persistence failure nothing is deleted and the returned count is
+// 0: a revoke that only exists in memory must not be reported as done.
 func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error) {
 	if userID == "" {
 		return 0, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	removed := make([]*Token, 0)
-	for id, t := range s.byID {
-		if t.CreatedBy != userID {
-			continue
+	// Counted inside the op, against the document being saved: a replay
+	// after another process issued or revoked one of this account's
+	// tokens must take what is there then.
+	var removed int
+	err := s.mutate(func(st *tokenState) error {
+		removed = 0
+		for id, t := range st.byID {
+			if t.CreatedBy != userID {
+				continue
+			}
+			delete(st.byID, id)
+			delete(st.byHash, t.HashedValue)
+			removed++
 		}
-		delete(s.byID, id)
-		delete(s.byHash, t.HashedValue)
-		removed = append(removed, t)
-	}
-	if len(removed) == 0 {
-		return 0, nil
-	}
-	if err := s.tryPersistLocked(); err != nil {
-		for _, t := range removed {
-			s.byID[t.ID] = t
-			s.byHash[t.HashedValue] = t.ID
+		if removed == 0 {
+			return errNoChange
 		}
-		return 0, fmt.Errorf("saving API tokens: %w", err)
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
-	return len(removed), nil
+	return removed, nil
 }
 
 // tokenOlder is the one order List, ByKind and the saved document use:
