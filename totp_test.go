@@ -23,41 +23,65 @@ import (
 	"time"
 )
 
-// TestGenerateTOTPCodeRFC6238Vectors is the reason any of this can be
-// trusted: RFC 6238 Appendix B's SHA-1 column, computed against the
-// shared secret the RFC itself specifies ("12345678901234567890", 20
-// ASCII bytes -- exactly totpSecretLen).
-//
-// The RFC's published vectors are 8-digit codes; this package produces
-// 6. RFC 4226 §5.3's truncation is "DT mod 10^Digit" against the same
-// 31-bit DT regardless of digit count, so the 6-digit code is exactly
-// the low 6 digits of the RFC's 8-digit OTP -- not a different value
-// that happens to be close. Each case below carries the RFC's original
-// 8-digit OTP in a comment so it can be checked against the RFC text
-// directly.
+// TestGenerateTOTPCodeRFC6238Vectors pins RFC 6238 Appendix B's SHA-1
+// rows: the 20-byte ASCII seed, each listed time, its time-step counter
+// T (which pins the 30-second step) and its OTP. GenerateTOTPCode takes
+// no digits or algorithm argument -- gauntlet is SHA-1 and 6 digits
+// only (docs/security-by-design.md) -- so each 8-digit RFC value is
+// checked by its last 6 digits, which RFC 4226's truncation (the code
+// modulo 10^digits) makes equal to the 6-digit code.
 func TestGenerateTOTPCodeRFC6238Vectors(t *testing.T) {
 	secret := []byte("12345678901234567890")
 
 	tests := []struct {
 		unixSeconds int64
-		want        string // low 6 digits of the RFC's 8-digit OTP
+		counter     uint64 // the RFC's T column
+		rfcOTP      string // the RFC's 8-digit SHA-1 OTP
 	}{
-		{59, "287082"},          // RFC OTP 94287082, T = 0000000000000001
-		{1111111109, "081804"},  // RFC OTP 07081804, T = 00000000023523EC
-		{1111111111, "050471"},  // RFC OTP 14050471, T = 00000000023523ED
-		{1234567890, "005924"},  // RFC OTP 89005924, T = 000000000273EF07
-		{2000000000, "279037"},  // RFC OTP 69279037, T = 0000000003F940AA
-		{20000000000, "353130"}, // RFC OTP 65353130, T = 0000000027BC86AA
+		{59, 0x0000000000000001, "94287082"},
+		{1111111109, 0x00000000023523EC, "07081804"},
+		{1111111111, 0x00000000023523ED, "14050471"},
+		{1234567890, 0x000000000273EF07, "89005924"},
+		{2000000000, 0x0000000003F940AA, "69279037"},
+		{20000000000, 0x0000000027BC86AA, "65353130"},
 	}
 
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("t=%d", tc.unixSeconds), func(t *testing.T) {
 			counter := totpCounter(time.Unix(tc.unixSeconds, 0).UTC(), totpStep)
-			if got := GenerateTOTPCode(secret, counter); got != tc.want {
-				t.Errorf("GenerateTOTPCode at unix time %d (counter %d) = %q, want %q",
-					tc.unixSeconds, counter, got, tc.want)
+			if counter != tc.counter {
+				t.Errorf("counter at unix time %d = %#x, want the RFC's T %#x", tc.unixSeconds, counter, tc.counter)
+			}
+			want := tc.rfcOTP[len(tc.rfcOTP)-totpDigits:]
+			if got := GenerateTOTPCode(secret, tc.counter); got != want {
+				t.Errorf("GenerateTOTPCode at T %#x = %q, want %q (the last %d digits of %s)",
+					tc.counter, got, want, totpDigits, tc.rfcOTP)
 			}
 		})
+	}
+}
+
+// TestVerifyTOTPWindowInSeconds pins the accepted window against the
+// clock, using an RFC 6238 vector rather than a code this package made:
+// the code for unix time 1111111109 is accepted 30 seconds either side
+// (one step, totpWindow) and refused 60 seconds either side.
+func TestVerifyTOTPWindowInSeconds(t *testing.T) {
+	encoded := EncodeTOTPSecret([]byte("12345678901234567890"))
+	const code = "081804" // RFC OTP 07081804 at unix time 1111111109
+	at := time.Unix(1111111109, 0).UTC()
+	for _, tc := range []struct {
+		offset time.Duration
+		ok     bool
+	}{
+		{0, true},
+		{30 * time.Second, true},
+		{-30 * time.Second, true},
+		{60 * time.Second, false},
+		{-60 * time.Second, false},
+	} {
+		if _, ok := VerifyTOTP(encoded, code, at.Add(tc.offset), 0); ok != tc.ok {
+			t.Errorf("VerifyTOTP %v from the code's time = %v, want %v", tc.offset, ok, tc.ok)
+		}
 	}
 }
 
