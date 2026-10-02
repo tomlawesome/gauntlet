@@ -138,6 +138,15 @@ type Gate struct {
 	// requireAuth construction follows; neither is guarded by a mutex.
 	kindHandlers map[gauntlet.TokenKind]http.Handler
 	kindOrder    []gauntlet.TokenKind
+
+	// warns rates the Warn lines refused requests leave (warnrate.go).
+	warns warnRater
+
+	// signInHook, when set, receives every sign-in attempt recordSignIn
+	// handles, after its client and lockout fields are filled. It is
+	// where a sign-in history attaches (#53); nil records only the
+	// audit and the log.
+	signInHook func(ev gauntlet.SignInEvent, now time.Time)
 }
 
 // errMissingDep is New's fail-closed refusal for a Deps field with no

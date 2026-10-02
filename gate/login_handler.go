@@ -36,6 +36,24 @@ type loginReservation struct {
 	// reservation it holds -- nothing on ipKey or the account's login
 	// budget -- so it is the one released.
 	knownBrowser bool
+
+	// address is the client address ipKey was built from, so the
+	// attempt's record names the address the limiter counted
+	// (recordSignIn).
+	address string
+	// refusal is why reserveLogin refused the attempt: locked, disabled
+	// or rate_limited. Empty for an admitted one.
+	refusal gauntlet.SignInOutcome
+	// lockoutStarted, disabledNow and lockouts are the account's
+	// decision for this attempt (gauntlet.AccountDecision): set when the
+	// attempt filled the window and started a lockout ending at
+	// lockedUntil, or disabled sign-in. They are recorded only if the
+	// attempt then fails; one that succeeds hands both back. lockedUntil
+	// is also the end of the lockout that refused an attempt.
+	lockoutStarted bool
+	disabledNow    bool
+	lockouts       int
+	lockedUntil    time.Time
 }
 
 // reserveLogin reserves one attempt on both buckets, or neither, and
@@ -56,8 +74,13 @@ type loginReservation struct {
 // for a token that matched. It is refused while the account is
 // disabled, and every failure through it still counts toward the
 // disable.
-func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, pendingAfterReset bool, now time.Time) (loginReservation, bool) {
-	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID, pendingAfterReset: pendingAfterReset}
+//
+// username is the account's own username when accountID is set, else
+// the name as typed; method is what the attempt presents. A refusal is
+// recorded (recordSignIn) as locked, disabled or rate_limited.
+func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, method gauntlet.SignInMethod, pendingAfterReset bool, now time.Time) (loginReservation, bool) {
+	address := g.cfg.ClientIP(r)
+	res := loginReservation{ipKey: "ip:" + address, address: address, accountID: accountID, pendingAfterReset: pendingAfterReset}
 	if accountID == "" {
 		res.nameKey = "user:" + strings.ToLower(username)
 	}
@@ -67,7 +90,15 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 	}
 	if ok {
 		if accountID != "" {
-			ok = g.deps.Limiter.ReserveAccount(g.deps.Users, accountID, now)
+			d := g.deps.Limiter.ReserveAccountDecision(g.deps.Users, accountID, now)
+			ok = d.Allowed
+			res.lockoutStarted, res.disabledNow, res.lockouts, res.lockedUntil = d.LockoutStarted, d.DisabledNow, d.Lockouts, d.LockedUntil
+			switch {
+			case d.Disabled:
+				res.refusal = gauntlet.SignInDisabled
+			case d.Locked:
+				res.refusal = gauntlet.SignInLocked
+			}
 		} else {
 			ok = g.deps.Limiter.Reserve(res.nameKey, now)
 		}
@@ -83,9 +114,17 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 		// Whatever the ordinary path reserved has been handed back
 		// above, a reset pass included, so this is the only
 		// reservation the attempt holds.
-		ok, res.afterReset, res.knownBrowser = true, false, true
+		ok, res.afterReset, res.knownBrowser, res.refusal = true, false, true, ""
 	}
 	if !ok {
+		if res.refusal == "" {
+			res.refusal = gauntlet.SignInRateLimited
+		}
+		ev := gauntlet.SignInEvent{UserID: accountID, Username: username, Outcome: res.refusal, Method: method}
+		if accountID == "" {
+			ev.Username = gauntlet.MaskUnknownUsername(username)
+		}
+		g.recordSignIn(r, ev, res, now)
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 	}
 	return res, ok
@@ -168,9 +207,10 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := g.now()
-	var accountID string
+	var matched *gauntlet.User
+	accountID, name := "", req.Username
 	if u, ok := g.deps.Users.ByUsername(req.Username); ok {
-		accountID = u.ID
+		matched, accountID, name = u, u.ID, u.Username
 	}
 	// Reserve, not a read-then-record: the attempt is claimed *before*
 	// the ~100ms Argon2id verification, exactly as mikroview's own
@@ -178,7 +218,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// pass a plain check before any of them finishes verifying, and a
 	// threshold of N admits as many concurrent attempts as an attacker
 	// cares to send.
-	res, ok := g.reserveLogin(w, r, accountID, req.Username, false, now)
+	res, ok := g.reserveLogin(w, r, accountID, name, gauntlet.SignInMethodPassword, false, now)
 	if !ok {
 		return
 	}
@@ -202,6 +242,11 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// gauntlet.Store.Authenticate's own doc comment): none of that
 		// distinction is safe to hand back to whoever is asking.
 		g.endAfterReset(res)
+		outcome := gauntlet.SignInWrongPassword
+		if matched == nil {
+			outcome = gauntlet.SignInNoSuchUser
+		}
+		g.recordSignIn(r, loginEvent(matched, req.Username, outcome, gauntlet.SignInMethodPassword), res, now)
 		writeUnauthorized(w, "invalid username or password")
 		return
 	}
@@ -248,6 +293,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
 			return
 		}
+		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInPasswordOK, gauntlet.SignInMethodPassword), res, now)
 		resp := map[string]any{"secondFactor": factors}
 		if passkeyOrigin != "" {
 			resp["passkeyOrigin"] = passkeyOrigin
@@ -266,7 +312,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// the cookie below replaces it, and nothing else would (ASVS 7.2.4;
 	// see revokeReplacedSession).
 	g.issueSession(w, r, user.ID, now)
-	g.audit(user.Username, "user.login", user.Username, "")
+	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodPassword), res, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 }
 
@@ -320,7 +366,11 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, st.AfterReset, now)
+	method := gauntlet.SignInMethodCode
+	if len(req.Assertion) > 0 {
+		method = gauntlet.SignInMethodPasskey
+	}
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, method, st.AfterReset, now)
 	if !ok {
 		return
 	}
@@ -335,7 +385,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 			// releases this request's own; begin's goes back only once
 			// the sign-in has actually completed, so a replay refused
 			// there keeps both.
-			if g.completeLoginFactor(w, r, user, res, st, now) {
+			if g.completeLoginFactor(w, r, user, res, st, method, now) {
 				g.releaseLogin(res, now)
 			}
 		}
@@ -358,7 +408,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if matched {
-		g.completeLoginFactor(w, r, user, res, st, now)
+		g.completeLoginFactor(w, r, user, res, st, method, now)
 		return
 	}
 
@@ -371,7 +421,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
 		return
 	} else if burned {
-		g.completeLoginFactor(w, r, user, res, st, now)
+		g.completeLoginFactor(w, r, user, res, st, method, now)
 		return
 	}
 
@@ -382,6 +432,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	// caller needs back.
 	g.endAfterReset(res)
 	g.secondFactorFailed(user, now)
+	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode), res, now)
 	writeUnauthorized(w, "invalid code")
 }
 
@@ -389,7 +440,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // pending login, release the reservations a wrong guess would have kept
 // and reset the account's count (completeLogin), drop the pending
 // cookie, and issue the real session handleLogin withheld. It reports
-// whether it did.
+// whether it did. method is how the second factor was presented.
 //
 // The pending login is claimed first, under spentPendingLogins' lock, so
 // of two completions racing on one cookie exactly one wins (ruling R2 on
@@ -398,7 +449,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // pendingLoginCookieMaxAge -- the same expiry pendingLoginCodec.decode
 // refuses the cookie at, so the claim and the decode share one expiry by
 // construction, on the same wall clock.
-func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, now time.Time) bool {
+func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) bool {
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
@@ -412,7 +463,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// is replaced by the cookie below, so it ends here (ASVS 7.2.4). Only
 	// here, not at the password step, which issues no session.
 	g.issueSession(w, r, user.ID, now)
-	g.audit(user.Username, "user.login", user.Username, "via second factor")
+	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, method), res, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 	return true
 }

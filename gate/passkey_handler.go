@@ -487,7 +487,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, st.AfterReset, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodPasskey, st.AfterReset, now)
 	if !ok {
 		return
 	}
@@ -540,6 +540,7 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 	refuse := func(msg string) bool {
 		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
+		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodPasskey), res, now)
 		writeUnauthorized(w, msg)
 		return false
 	}
