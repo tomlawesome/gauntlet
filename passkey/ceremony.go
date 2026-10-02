@@ -148,14 +148,12 @@ func (rp *RelyingParty) BeginRegistration(u *gauntlet.User) (json.RawMessage, st
 // FinishRegistration verifies the browser's response to the options
 // BeginRegistration returned and gives back the credential to store.
 //
-// The challenge is not claimed: a registration is final only when
-// Store.AddPasskey accepts it, which happens in the caller after this
-// returns, so a claim here would fire before the store had said yes.
-// The ceremony stays open until it expires, and the caller ends it by
-// clearing the ceremony cookie on success. Until then a refused finish
-// -- a wrong origin, a duplicate, the account full -- can be followed by
-// a corrected response or another authenticator. Registering the same
-// credential twice is refused by AddPasskey's duplicate check.
+// The challenge is not claimed here: registrations are spent by gate,
+// by the sealed cookie's hash, where the store decides (ruling S1 on
+// #20) -- it claims the ceremony once this returns a credential and
+// before Store.AddPasskey writes, so one begin stores at most one
+// passkey. A response this refuses (a wrong origin, a bad signature, a
+// malformed body) leaves the ceremony open for a corrected one.
 func (rp *RelyingParty) FinishRegistration(u *gauntlet.User, sealed string, credential json.RawMessage) (gauntlet.Passkey, error) {
 	if !rp.ready() {
 		return gauntlet.Passkey{}, ErrNotReady

@@ -223,14 +223,22 @@ type passkeyRegisterFinishResponse struct {
 // started: verify, AddPasskey, and -- on the account's first factor --
 // revoke every session, reissue this browser's, and mint recovery codes.
 //
-// Two kinds of refusal, told apart by gauntlet.ErrPasskeyCeremonyInvalid:
-// a dead ceremony (the cookie is missing, expired, tampered with or
-// sealed for the other ceremony) answers 401 "start registration again"
-// and clears the cookie, since it can never succeed; a refused
-// credential (wrong origin, bad signature, malformed) answers 400 and
-// keeps the cookie, so a corrected response -- or another authenticator,
-// after a 409 duplicate -- can finish inside the same five minutes, as
-// in mikroview. The cookie is otherwise cleared only on success.
+// The ceremony ends at the first finish the library accepts (ruling S1
+// on #20): one password-proved begin stores at most one passkey. Its
+// sealed cookie's hash is claimed in spentRegistrations after
+// FinishRegistration accepts and before AddPasskey writes, so of two
+// finishes racing on one cookie only one can store; a stored passkey
+// (200), a store refusal (409 duplicate or limit, 500 on a failed save)
+// and a lost race all end it, and the cookie is cleared with the answer.
+// A cookie already spent is refused before the body is read.
+//
+// Refusals that do not end the ceremony are the library's, told apart
+// from a dead ceremony by gauntlet.ErrPasskeyCeremonyInvalid: a dead
+// ceremony (the cookie is missing, expired, tampered with or sealed for
+// the other ceremony) answers 401 "start registration again" and clears
+// the cookie, since it can never succeed; a refused credential (wrong
+// origin, bad signature, malformed) answers 400 and keeps the cookie, so
+// a corrected response can finish inside the same five minutes.
 //
 // A malformed body is refused (400) before the ceremony cookie is
 // examined, since only the ceremony can judge the cookie and it needs
@@ -252,6 +260,13 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	}
 	cookie, err := r.Cookie(passkeyRegisterCookieName)
 	if err != nil {
+		g.clearPasskeyRegisterCookie(w)
+		writeUnauthorized(w, "start registration again")
+		return
+	}
+	now := g.now()
+	key := registrationKey(cookie.Value)
+	if spentRegistrations.Spent(key, now) {
 		g.clearPasskeyRegisterCookie(w)
 		writeUnauthorized(w, "start registration again")
 		return
@@ -281,14 +296,23 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "that passkey couldn't be registered -- try again", http.StatusBadRequest)
 		return
 	}
+	// The library accepted it: from here the ceremony is spent, whatever
+	// the store says. Forgotten one cookie lifetime after the claim (gate
+	// cannot read the sealed Expires, which under a steady clock is never
+	// later), plus the set's grace of another lifetime.
+	if !spentRegistrations.Claim(key, now.Add(passkeyCeremonyCookieMaxAge), now) {
+		g.clearPasskeyRegisterCookie(w)
+		writeUnauthorized(w, "start registration again")
+		return
+	}
 
-	now := g.now()
 	pk.Name = req.Name
 	pk.CreatedAt = now
 	wasFirstFactor := !current.HasSecondFactor()
 
 	stored, err := g.deps.Users.AddPasskey(current.ID, pk)
 	if err != nil {
+		g.clearPasskeyRegisterCookie(w) // the ceremony is spent: begin again
 		status := http.StatusInternalServerError
 		if errors.Is(err, gauntlet.ErrPasskeyDuplicate) || errors.Is(err, gauntlet.ErrPasskeyLimitReached) {
 			status = http.StatusConflict

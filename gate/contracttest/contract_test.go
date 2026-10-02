@@ -779,6 +779,35 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	spare := passkeytest.New("passkeys.example.org", publicURL)
 	var second passkeyRegisterFinishResponse
 	register(bob, spare, "spare", 200, &second)
+	// A copy of that ceremony's cookie, kept and sent again after the
+	// finish stored its passkey, is refused (one begin, one passkey).
+	var again protocol.CredentialCreation
+	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{bobPass}}, 200, &again)
+	regURL, err := url.Parse(u + "/api/auth/passkeys/register/finish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keptRegister *http.Cookie
+	for _, ck := range bob.Jar.Cookies(regURL) {
+		if ck.Name == "gate_passkey_register" {
+			keptRegister = &http.Cookie{Name: ck.Name, Value: ck.Value, Path: "/api/auth/passkeys"}
+		}
+	}
+	if keptRegister == nil {
+		t.Fatal("register/begin set no ceremony cookie")
+	}
+	third := passkeytest.New("passkeys.example.org", publicURL)
+	thirdBody, err := third.RegisterResponse(&again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(thirdBody), "third"}}, 200, nil)
+	bob.Jar.SetCookies(regURL, []*http.Cookie{keptRegister})
+	fourthBody, err := passkeytest.New("passkeys.example.org", publicURL).RegisterResponse(&again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(fourthBody), "fourth"}}, 401, nil)
 	if !second.AlreadyIssued || second.RecoveryCodes != nil {
 		t.Fatalf("second passkey = %+v, want alreadyIssued and no codes", second)
 	}
@@ -845,13 +874,13 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/passkeys/" + second.Passkey.ID, body: passwordRequest{"wrong"}}, 401, nil)
 	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/passkeys/" + second.Passkey.ID, body: passwordRequest{bobPass}}, 200, &removed)
 	if removed["signedOut"] != false {
-		t.Fatalf("removing one of two passkeys = %v, want signedOut false", removed)
+		t.Fatalf("removing one of three passkeys = %v, want signedOut false", removed)
 	}
 	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/passkeys/" + second.Passkey.ID, body: passwordRequest{bobPass}}, 404, nil)
 	adminRow := slices.IndexFunc(users, func(s userSummary) bool { return s.Username == "admin" })
 	bobRow := slices.IndexFunc(users, func(s userSummary) bool { return s.Username == "bob" })
-	if adminRow < 0 || bobRow < 0 || users[bobRow].PasskeyCount != 2 {
-		t.Fatalf("users list = %+v, want bob with passkeyCount 2", users)
+	if adminRow < 0 || bobRow < 0 || users[bobRow].PasskeyCount != 3 {
+		t.Fatalf("users list = %+v, want bob with passkeyCount 3", users)
 	}
 	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[adminRow].ID + "/passkeys"}, 409, nil)
 	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id/passkeys"}, 404, nil)

@@ -41,9 +41,11 @@ All notable changes to this project are documented in this file.
   answers 404 and nothing links the WebAuthn library. Each login
   challenge is usable once, and a pending login (the cookie a password
   step sets when a second factor is needed) is spent by the sign-in
-  that completes it, whichever factor completes it; a registration ceremony stays open until it
-  succeeds or expires, so a refused finish can be retried with another
-  authenticator, and a credential is never registered twice. The root package
+  that completes it, whichever factor completes it. A registration
+  ceremony is spent by the first finish the library accepts, so one
+  begin (one password entry) stores at most one passkey; a finish the
+  library refuses (wrong origin, bad signature) can still be corrected
+  inside its five minutes. The root package
   gains the seam both sides use (`PasskeyCeremony`, `PasskeyAssertion`,
   `PasskeyStatus`, and `ErrPasskeyCeremonyInvalid`, which marks a dead
   ceremony: expired, tampered with, from the other ceremony or already

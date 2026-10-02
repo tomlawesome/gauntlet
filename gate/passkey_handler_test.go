@@ -1299,12 +1299,13 @@ func TestPasskeyRoutesAnswer404WhenPasskeysAreOff(t *testing.T) {
 	}
 }
 
-// TestPasskeyRegisterCeremonySurvivesADuplicateRefusal: registration
-// challenges are not spent (ruling B on #20). Finishing a ceremony with
-// an authenticator already on the account is refused as a duplicate
-// (409), and the same ceremony -- its cookie kept -- then finishes with
-// another authenticator.
-func TestPasskeyRegisterCeremonySurvivesADuplicateRefusal(t *testing.T) {
+// TestPasskeyRegisterCeremonyEndsAtAStoreRefusal (ruling S1 on #20,
+// superseding addendum 1's B): a finish the library accepts spends the
+// ceremony even when the store then refuses it. Finishing with an
+// authenticator already on the account is a 409 duplicate that clears
+// the ceremony cookie, and a further finish on a kept copy of it -- even
+// with another authenticator -- answers 401.
+func TestPasskeyRegisterCeremonyEndsAtAStoreRefusal(t *testing.T) {
 	g, ts, _ := passkeyFixture(t)
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
 	fakeA, _ := registerPasskey(t, bilbo, ts, g, "A")
@@ -1330,16 +1331,28 @@ func TestPasskeyRegisterCeremonySurvivesADuplicateRefusal(t *testing.T) {
 	if dup.StatusCode != http.StatusConflict {
 		t.Fatalf("finishing with an authenticator already on the account got %d, want 409", dup.StatusCode)
 	}
-	if cookieCleared(dup, passkeyRegisterCookieName) {
-		t.Error("a duplicate refusal cleared the live ceremony cookie")
+	if !cookieCleared(dup, passkeyRegisterCookieName) {
+		t.Error("a duplicate refusal did not clear the spent ceremony cookie")
 	}
 
-	out := passkeyRegisterFinishOK(t, bilbo, ts, newFake(g), &creation, "B")
-	if out.Passkey.Name != "B" {
-		t.Errorf("the second authenticator's passkey = %+v", out.Passkey)
+	body, err := newFake(g).RegisterResponse(&creation)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 2 {
-		t.Errorf("the account holds %d passkeys, want 2", n)
+	resp, raw := postWithCookie(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish",
+		passkeyRegisterFinishRequest{Credential: json.RawMessage(body), Name: "B"},
+		&http.Cookie{Name: sealed.Name, Value: sealed.Value})
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "start registration again") {
+		t.Errorf("a finish on a kept copy of the spent ceremony got %d %q, want 401 start registration again", resp.StatusCode, raw)
+	}
+	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
+		t.Errorf("the account holds %d passkeys, want 1", n)
+	}
+	// A spent cookie is refused before the body is read.
+	resp, raw = postWithCookie(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish",
+		map[string]any{"unknown": 1}, &http.Cookie{Name: sealed.Name, Value: sealed.Value})
+	if resp.StatusCode != http.StatusUnauthorized || !cookieCleared(resp, passkeyRegisterCookieName) {
+		t.Errorf("a spent ceremony cookie with a malformed body got %d %q, want 401 and cleared before the body is read", resp.StatusCode, raw)
 	}
 }
 
@@ -2004,5 +2017,168 @@ func TestConcurrentCompletionsOfOnePendingLoginHaveOneWinner(t *testing.T) {
 		if wins.Load() != 1 || refusedReplay.Load() != 1 {
 			t.Fatalf("round %d: %d of 2 concurrent completions of one pending login won and %d was refused as a replay, want 1 and 1", round, wins.Load(), refusedReplay.Load())
 		}
+	}
+}
+
+// stealJar copies every cookie the owner's jar would send to the
+// session-wide path and to register/finish into a fresh jar: the
+// cookie-jar theft R1 is about. (From the #20 security re-review.)
+func stealJar(t *testing.T, owner *http.Client, ts *httptest.Server) *http.Client {
+	t.Helper()
+	jar := mustCookieJar(t)
+	for _, p := range []string{"/", passkeyRegisterFinishPath} {
+		u, err := url.Parse(ts.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cs []*http.Cookie
+		for _, c := range owner.Jar.Cookies(u) {
+			path := "/"
+			if c.Name == passkeyRegisterCookieName {
+				path = passkeyRegisterCookiePath
+			}
+			cs = append(cs, &http.Cookie{Name: c.Name, Value: c.Value, Path: path})
+		}
+		jar.SetCookies(u, cs)
+	}
+	return &http.Client{Jar: jar}
+}
+
+// TestPasskeyStolenRegisterCookieIsOneShot (ruling S1 on #20, the
+// re-review's scenario B): the owner finishes their own registration;
+// a copy of the cookie jar taken in the meantime cannot finish the same
+// ceremony again with another authenticator. Both when the owner's
+// passkey is the account's first factor and when one already exists.
+func TestPasskeyStolenRegisterCookieIsOneShot(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a factor already exists: %v", existing), func(t *testing.T) {
+			g, ts, _ := passkeyFixture(t)
+			owner := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+			want := 1
+			if existing {
+				registerPasskey(t, owner, ts, g, "first")
+				want = 2
+			}
+			creation := passkeyRegisterBegin(t, owner, ts)
+			thief := stealJar(t, owner, ts)
+			passkeyRegisterFinishOK(t, owner, ts, newFake(g), creation, "owner")
+			if !existing {
+				// A first factor ends every session and reissues the
+				// owner's; the thief copies that new one too, so what
+				// stops them is the spent ceremony, not a dead session.
+				u, err := url.Parse(ts.URL + "/")
+				if err != nil {
+					t.Fatal(err)
+				}
+				thief.Jar.SetCookies(u, owner.Jar.Cookies(u))
+			}
+
+			resp := passkeyRegisterFinishRaw(t, thief, ts, newFake(g), creation, "thief")
+			raw, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(raw), "start registration again") {
+				t.Errorf("a second finish on the owner's spent ceremony got %d %q, want 401 start registration again", resp.StatusCode, raw)
+			}
+			if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != want {
+				t.Errorf("the account holds %d passkeys, want %d -- one per password-proved begin", n, want)
+			}
+		})
+	}
+}
+
+// TestConcurrentFinishesOfOneRegistrationStoreOnePasskey: two finishes
+// on one ceremony cookie, with two different authenticators, arrive
+// together. Both pass the library; only the one that claims the ceremony
+// first may store. Repeated, and run with -race.
+func TestConcurrentFinishesOfOneRegistrationStoreOnePasskey(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	g.deps.Limiter = mustNewLoginLimiter(t, 1000, time.Minute) // begin re-checks the password each round
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	// A first passkey up front, so no round's winner is a first factor
+	// that ends the session the next round begins with.
+	registerPasskey(t, bilbo, ts, g, "first")
+	id := passkeyBilboID(t, g)
+	for round := range 8 { // the account holds at most ten passkeys
+		begin := postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: passkeyBilboPassword})
+		var creation protocol.CredentialCreation
+		if err := json.NewDecoder(begin.Body).Decode(&creation); err != nil {
+			t.Fatal(err)
+		}
+		_ = begin.Body.Close()
+		var sealed *http.Cookie
+		for _, c := range begin.Cookies() {
+			if c.Name == passkeyRegisterCookieName {
+				sealed = &http.Cookie{Name: c.Name, Value: c.Value}
+			}
+		}
+		session := &http.Cookie{Name: testCookieName}
+		u, err := url.Parse(ts.URL + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range bilbo.Jar.Cookies(u) {
+			if c.Name == testCookieName {
+				session.Value = c.Value
+			}
+		}
+		var bodies [2]passkeyRegisterFinishRequest
+		for i := range bodies {
+			raw, err := newFake(g).RegisterResponse(&creation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodies[i] = passkeyRegisterFinishRequest{Credential: json.RawMessage(raw), Name: fmt.Sprintf("round %d key %d", round, i)}
+		}
+		before := g.deps.Users.PasskeyCount(id)
+		var wins atomic.Int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, body := range bodies {
+			wg.Go(func() {
+				<-start
+				resp, _ := postRaw(t, ts.URL+"/api/auth/passkeys/register/finish", body, session, sealed)
+				if resp.StatusCode == http.StatusOK {
+					wins.Add(1)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		if got := g.deps.Users.PasskeyCount(id) - before; wins.Load() != 1 || got != 1 {
+			t.Fatalf("round %d: %d of 2 concurrent finishes of one ceremony succeeded and %d passkeys were stored, want 1 and 1", round, wins.Load(), got)
+		}
+	}
+}
+
+// TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual
+// pins the re-review's scenario A, which ruling S1 on #20 accepts and
+// ADR-0004 records: the owner begins a registration (giving the
+// password) and cancels the browser prompt; someone who copied both of
+// the owner's HttpOnly cookies inside those five minutes finishes it
+// with their own authenticator. It stores one passkey -- at most one per
+// such window -- listed under its name and audited as
+// account.passkey_added. If this test starts failing because the finish
+// is refused, the residual has been closed: update ADR-0004.
+func TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	owner := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	creation := passkeyRegisterBegin(t, owner, ts) // the owner gave the password, then cancelled
+	thief := stealJar(t, owner, ts)
+
+	resp := passkeyRegisterFinishRaw(t, thief, ts, newFake(g), creation, "thief")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the accepted residual changed: the thief's finish got %d", resp.StatusCode)
+	}
+	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
+		t.Errorf("the account holds %d passkeys, want exactly 1", n)
+	}
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=thief" {
+		t.Errorf("account.passkey_added detail = %q, want the thief's passkey named", entry.Detail)
+	}
+	again := passkeyRegisterFinishRaw(t, thief, ts, newFake(g), creation, "thief again")
+	_ = again.Body.Close()
+	if again.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a second thief finish on the same window got %d, want 401", again.StatusCode)
 	}
 }

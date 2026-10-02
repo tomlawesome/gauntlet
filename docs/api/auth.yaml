@@ -730,7 +730,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/TextError"
         "401":
-          description: No valid session, or the ceremony cookie is missing, expired, tampered with or already used -- start registration again. A dead ceremony cookie is cleared.
+          description: No valid session, or the ceremony cookie is missing, expired, tampered with or already used, or this ceremony already stored a passkey or was ended by a refusal -- begin again. A dead or spent ceremony cookie is cleared.
           headers:
             WWW-Authenticate:
               required: true
@@ -746,7 +746,7 @@ paths:
         "404":
           $ref: "#/components/responses/PasskeysOff"
         "409":
-          description: The relying party is not ready (the message names why), the passkey is already registered to this account, or the account already holds ten.
+          description: The relying party is not ready (the message names why), the passkey is already registered to this account, or the account already holds ten. For a duplicate or a full account the ceremony is ended and its cookie cleared; begin again.
           content:
             text/plain:
               schema:

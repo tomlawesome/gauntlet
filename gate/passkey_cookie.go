@@ -1,8 +1,12 @@
 package gate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
 // The two passkey ceremony cookies (G8, ADR-0004). Each carries the
@@ -47,4 +51,22 @@ func (g *Gate) setPasskeyAssertCookie(w http.ResponseWriter, sealed string) {
 
 func (g *Gate) clearPasskeyAssertCookie(w http.ResponseWriter) {
 	g.writeCookie(w, passkeyAssertCookieName, "", passkeyAssertCookiePath, -1)
+}
+
+// spentRegistrations holds every registration ceremony a finish has
+// spent, keyed by registrationKey, so one password-proved begin stores
+// at most one passkey (ruling S1 on #20). Claimed by
+// handlePasskeyRegisterFinish once the library accepts the browser's
+// response and before AddPasskey writes. The grace is one cookie
+// lifetime, as internal/spent's contract asks of every caller. Shared by
+// every Gate this process runs, like the ceremony cookies' sealing keys.
+var spentRegistrations = spent.New(passkeyCeremonyCookieMaxAge)
+
+// registrationKey is the hex SHA-256 of a sealed registration cookie --
+// the one thing gate holds that is unique per begin (the seal carries a
+// fresh random nonce), so the seam with gauntlet/passkey stays as it is
+// rather than exporting a ceremony ID for this one caller.
+func registrationKey(sealed string) string {
+	sum := sha256.Sum256([]byte(sealed))
+	return hex.EncodeToString(sum[:])
 }

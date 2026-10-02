@@ -30,11 +30,9 @@ const ceremonyLifetime = 5 * time.Minute
 // accepted, or while a request that read the clock before the expiry is
 // still on its way, whatever the host's clock does.
 //
-// Claimed by FinishLogin only, as in mikroview. A login is final inside
-// FinishLogin -- the signature is the proof -- so that is where its
-// challenge is spent. A registration is final only at
-// Store.AddPasskey, outside this package, so FinishRegistration claims
-// nothing: a claim there would fire before the store said yes, and
-// AddPasskey's duplicate check already refuses a credential registered
-// twice.
+// Claimed by FinishLogin only. A login is final inside FinishLogin --
+// the signature is the proof -- so that is where its challenge is spent.
+// Registrations are spent by gate, by the sealed cookie's hash, where
+// the store decides (ruling S1 on #20): a claim inside FinishRegistration
+// would fire before Store.AddPasskey had said yes.
 var spentLoginChallenges = spent.New(ceremonyLifetime)
