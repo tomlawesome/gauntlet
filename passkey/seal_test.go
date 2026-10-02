@@ -4,9 +4,11 @@
 package passkey
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,5 +124,61 @@ func TestSessionCodecRejectsAnAuthenticNonSessionPayload(t *testing.T) {
 	sealed := codec.aead.Seal(nonce, nonce, []byte("not json"), nil)
 	if _, err := codec.decode(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 		t.Fatalf("decode(non-JSON payload) error = %v, want ErrPasskeyCeremonyInvalid", err)
+	}
+}
+
+// respell returns another spelling of s that base64.RawURLEncoding,
+// read leniently, decodes to the same bytes: the last character with one
+// of its unused low bits set. "" when s has no unused bits (its decoded
+// length is a multiple of three).
+func respell(t *testing.T, s string) string {
+	t.Helper()
+	want, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	for _, c := range alphabet {
+		v := s[:len(s)-1] + string(c)
+		if v == s {
+			continue
+		}
+		if got, err := base64.RawURLEncoding.DecodeString(v); err == nil && bytes.Equal(got, want) {
+			return v
+		}
+	}
+	return ""
+}
+
+// TestSessionCodecRefusesANonCanonicalSpelling: a sealed value whose
+// last character carries unused bits can be spelled several ways that a
+// lenient decoder reads as the same bytes. gate keys a spent
+// registration on the cookie text, so every other spelling must be
+// refused as an invalid ceremony, or a re-spelled copy of a spent cookie
+// would get past it. The session data is padded until the sealed value
+// has unused bits, so the test does not depend on a random length.
+func TestSessionCodecRefusesANonCanonicalSpelling(t *testing.T) {
+	for _, codec := range []*sessionCodec{registerCodec, assertCodec} {
+		var encoded, variant string
+		for pad := range 3 {
+			sd := testSessionData()
+			sd.Challenge += strings.Repeat("x", pad)
+			var err error
+			if encoded, err = codec.encode(sd); err != nil {
+				t.Fatal(err)
+			}
+			if variant = respell(t, encoded); variant != "" {
+				break
+			}
+		}
+		if variant == "" {
+			t.Fatal("no padding gave a sealed value with unused bits")
+		}
+		if _, err := codec.decode(encoded); err != nil {
+			t.Fatalf("the canonical spelling was refused: %v", err)
+		}
+		if _, err := codec.decode(variant); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+			t.Errorf("a re-spelling of a sealed value decoded: error = %v, want ErrPasskeyCeremonyInvalid", err)
+		}
 	}
 }

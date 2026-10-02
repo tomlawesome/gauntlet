@@ -80,10 +80,14 @@ func (c *sessionCodec) encode(sd webauthn.SessionData) (string, error) {
 }
 
 // decode reverses encode, refusing (gauntlet.ErrPasskeyCeremonyInvalid)
-// anything malformed, tampered with, or sealed under another codec's
-// key.
+// anything malformed, spelled other than encode spelled it, tampered
+// with, or sealed under another codec's key.
 func (c *sessionCodec) decode(sealed string) (webauthn.SessionData, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(sealed)
+	// Strict: only the spelling encode wrote opens. A lenient decoder
+	// ignores the unused bits in the last character, so one sealed value
+	// would open under several cookie strings -- and gate keys a spent
+	// registration on the cookie string (registrationKey).
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(sealed)
 	if err != nil {
 		return webauthn.SessionData{}, errUnreadable
 	}

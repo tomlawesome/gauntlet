@@ -97,10 +97,14 @@ mikroview's fake authenticator copies and this module reuses.
    Registration is password-gated at begin, as TOTP enrolment is, and
    refused (409) for an account with no local password (rulings R1 and
    R4 on #20). A login
-   challenge is used once (the spent-challenge set). A registration
+   challenge is used once (the spent-challenge set). One
+   password-proved registration begin stores at most one passkey: the
    ceremony is spent by the first finish the library accepts, keyed by
-   the sealed cookie's hash, so one password-proved begin stores at
-   most one passkey (ruling S1); a stolen register cookie finished
+   the sealed cookie's hash (ruling S1), and a sealed value opens only
+   in the one base64 spelling it was written in, so no other spelling
+   of a spent cookie gets past that key. A finish the library refuses
+   (wrong origin, bad signature, malformed) leaves the ceremony usable
+   for a corrected one within its five minutes. A stolen register cookie finished
    inside the owner's own five-minute window is the accepted residual
    -- it needs both of the owner's HttpOnly cookies, yields at most one
    passkey per window, and shows in the owner's list and audit log.

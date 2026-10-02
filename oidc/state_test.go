@@ -1,7 +1,9 @@
 package oidc
 
 import (
+	"bytes"
 	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 )
@@ -188,5 +190,63 @@ func TestFlowStateDecodeRejectsWrongCodecKey(t *testing.T) {
 	// cleanly, not partially decode.
 	if _, err := codecB.Decode(encoded, 10*time.Minute, time.Now()); err != ErrFlowStateInvalid {
 		t.Errorf("Decode under a different codec's key = %v, want ErrFlowStateInvalid", err)
+	}
+}
+
+// respell returns another spelling of s that base64.RawURLEncoding,
+// read leniently, decodes to the same bytes: the last character with one
+// of its unused low bits set. "" when s has no unused bits.
+func respell(t *testing.T, s string) string {
+	t.Helper()
+	want, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	for _, c := range alphabet {
+		v := s[:len(s)-1] + string(c)
+		if v == s {
+			continue
+		}
+		if got, err := base64.RawURLEncoding.DecodeString(v); err == nil && bytes.Equal(got, want) {
+			return v
+		}
+	}
+	return ""
+}
+
+// TestFlowStateDecodeRefusesANonCanonicalSpelling: a sealed flow state
+// is accepted only in the one spelling Encode wrote, so a value can
+// never be told apart from itself by its text. LinkUserID is padded
+// until the sealed value has unused bits, so the test does not depend on
+// a random length.
+func TestFlowStateDecodeRefusesANonCanonicalSpelling(t *testing.T) {
+	codec, err := NewStateCodec()
+	if err != nil {
+		t.Fatalf("NewStateCodec: %v", err)
+	}
+	now := time.Now()
+	var encoded, variant string
+	for pad := range 3 {
+		fs, err := NewFlowState(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs.LinkUserID = strings.Repeat("x", pad+1)
+		if encoded, err = codec.Encode(fs); err != nil {
+			t.Fatal(err)
+		}
+		if variant = respell(t, encoded); variant != "" {
+			break
+		}
+	}
+	if variant == "" {
+		t.Fatal("no padding gave a sealed value with unused bits")
+	}
+	if _, err := codec.Decode(encoded, time.Minute, now); err != nil {
+		t.Fatalf("the canonical spelling was refused: %v", err)
+	}
+	if _, err := codec.Decode(variant, time.Minute, now); err != ErrFlowStateInvalid {
+		t.Errorf("a re-spelling of a sealed flow state decoded: error = %v, want ErrFlowStateInvalid", err)
 	}
 }

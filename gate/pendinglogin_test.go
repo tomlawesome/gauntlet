@@ -7,6 +7,7 @@
 package gate
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -192,5 +193,55 @@ func TestSpentPendingLoginIsNotReopenedAtTheFiveMinuteMark(t *testing.T) {
 	resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor", loginFactorRequest{Code: codes[1]}, kept)
 	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "sign in again") {
 		t.Errorf("request B on the spent pending login got %d %q, want 401 sign in again", resp.StatusCode, raw)
+	}
+}
+
+// respell returns another spelling of s that base64.RawURLEncoding,
+// read leniently, decodes to the same bytes: the last character with one
+// of its unused low bits set. "" when s has no unused bits.
+func respell(t *testing.T, s string) string {
+	t.Helper()
+	want, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	for _, c := range alphabet {
+		v := s[:len(s)-1] + string(c)
+		if v == s {
+			continue
+		}
+		if got, err := base64.RawURLEncoding.DecodeString(v); err == nil && bytes.Equal(got, want) {
+			return v
+		}
+	}
+	return ""
+}
+
+// TestPendingLoginCodecRefusesANonCanonicalSpelling: a sealed pending
+// login is accepted only in the one spelling encode wrote. UserID is
+// padded until the sealed value has unused bits, so the test does not
+// depend on a random length.
+func TestPendingLoginCodecRefusesANonCanonicalSpelling(t *testing.T) {
+	now := time.Now()
+	var encoded, variant string
+	for pad := range 3 {
+		var err error
+		encoded, err = pendingLoginCodec.encode(pendingLoginState{UserID: "user-" + strings.Repeat("x", pad), IssuedAt: now, ID: newTestPendingID(t)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if variant = respell(t, encoded); variant != "" {
+			break
+		}
+	}
+	if variant == "" {
+		t.Fatal("no padding gave a sealed value with unused bits")
+	}
+	if _, err := pendingLoginCodec.decode(encoded, now); err != nil {
+		t.Fatalf("the canonical spelling was refused: %v", err)
+	}
+	if _, err := pendingLoginCodec.decode(variant, now); err != errPendingLoginInvalid {
+		t.Errorf("a re-spelling of a sealed pending login decoded: error = %v, want errPendingLoginInvalid", err)
 	}
 }

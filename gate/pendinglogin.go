@@ -132,7 +132,9 @@ func (c *pendingLoginStateCodec) encode(st pendingLoginState) (string, error) {
 // malformed, tampered, or older than pendingLoginCookieMaxAge as measured
 // from the sealed IssuedAt against now.
 func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pendingLoginState, error) {
-	sealed, err := base64.RawURLEncoding.DecodeString(cookieValue)
+	// Strict: only the spelling encode wrote opens, so a sealed value has
+	// one cookie string, as passkey's seal does (#20).
+	sealed, err := base64.RawURLEncoding.Strict().DecodeString(cookieValue)
 	if err != nil {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}

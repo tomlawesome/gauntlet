@@ -45,7 +45,9 @@ All notable changes to this project are documented in this file.
   ceremony is spent by the first finish the library accepts, so one
   begin (one password entry) stores at most one passkey; a finish the
   library refuses (wrong origin, bad signature) can still be corrected
-  inside its five minutes. The root package
+  inside its five minutes. Sealed cookies (the passkey ceremonies, the
+  pending login, the SSO flow) open only in the exact base64 spelling
+  they were written in. The root package
   gains the seam both sides use (`PasskeyCeremony`, `PasskeyAssertion`,
   `PasskeyStatus`, and `ErrPasskeyCeremonyInvalid`, which marks a dead
   ceremony: expired, tampered with, from the other ceremony or already

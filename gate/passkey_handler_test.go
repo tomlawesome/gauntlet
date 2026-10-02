@@ -2182,3 +2182,90 @@ func TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual(t *tes
 		t.Errorf("a second thief finish on the same window got %d, want 401", again.StatusCode)
 	}
 }
+
+// TestARespelledRegisterCookieIsRefusedAfterTheOwnersFinish: the spent
+// registration key is the hash of the cookie text, so a cookie that
+// opened under several spellings would let a thief re-spell a copy of
+// the owner's spent cookie and register a second passkey. The seal is
+// read only in its canonical spelling, so the re-spelled copy is a dead
+// ceremony: 401, and the account keeps the owner's one new passkey.
+//
+// The sealed value has unused bits only when its decoded length is not a
+// multiple of three, and the one part of it that varies in length is the
+// sealed Expires, whose fraction of a second is written without trailing
+// zeros. The test runs in a synctest bubble, where the clock starts on a
+// whole second and moves only when told to, and steps the begin time
+// through fractions with 0, 1, 2 and 3 digits until the cookie has
+// unused bits -- one of those four lengths always does.
+func TestARespelledRegisterCookieIsRefusedAfterTheOwnersFinish(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := passkeyGate(t)
+		mux := http.NewServeMux()
+		mux.Handle("/", g.Routes())
+		const base = "http://gate.test"
+		client := &http.Client{Jar: mustCookieJar(t), Transport: inProcess{g.Protect(mux)}}
+		reg := postJSON(t, client, base+"/api/auth/register", registerRequest{Username: "admin", Password: "password123", SetupCode: setupCodeFor(t, g)})
+		_ = reg.Body.Close()
+		if reg.StatusCode != http.StatusCreated {
+			t.Fatalf("register returned %d", reg.StatusCode)
+		}
+
+		start := time.Now()
+		var creation protocol.CredentialCreation
+		var sealed, variant string
+		for _, fraction := range []time.Duration{0, 100 * time.Millisecond, 120 * time.Millisecond, 123 * time.Millisecond} {
+			time.Sleep(time.Until(start.Add(time.Second + fraction)))
+			begin := postJSON(t, client, base+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "password123"})
+			creation = protocol.CredentialCreation{}
+			if err := json.NewDecoder(begin.Body).Decode(&creation); err != nil {
+				t.Fatal(err)
+			}
+			_ = begin.Body.Close()
+			for _, c := range begin.Cookies() {
+				if c.Name == passkeyRegisterCookieName {
+					sealed = c.Value
+				}
+			}
+			if variant = respell(t, sealed); variant != "" {
+				break
+			}
+			start = start.Add(time.Second)
+		}
+		if variant == "" {
+			t.Fatal("no begin time gave a register cookie with unused bits")
+		}
+
+		finish := func(cookieValue, name string) int {
+			body, err := newFake(g).RegisterResponse(&creation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := json.Marshal(passkeyRegisterFinishRequest{Credential: json.RawMessage(body), Name: name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, base+"/api/auth/passkeys/register/finish", bytes.NewReader(b))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(csrfHeaderName, testCSRFValue)
+			req.AddCookie(&http.Cookie{Name: passkeyRegisterCookieName, Value: cookieValue})
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			return resp.StatusCode
+		}
+		if got := finish(sealed, "owner"); got != http.StatusOK {
+			t.Fatalf("the owner's finish got %d, want 200", got)
+		}
+		if got := finish(variant, "thief"); got != http.StatusUnauthorized {
+			t.Errorf("a re-spelled copy of the spent register cookie got %d, want 401", got)
+		}
+		admin, _ := g.deps.Users.ByUsername("admin")
+		if n := g.deps.Users.PasskeyCount(admin.ID); n != 1 {
+			t.Errorf("the account holds %d passkeys after one begin, want 1", n)
+		}
+	})
+}
