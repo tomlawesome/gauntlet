@@ -440,7 +440,7 @@ release:version:
   # every job in every earlier stage has passed, which is the bar.
   cache: []
   script:
-    - apk add --no-cache git >/dev/null
+    - apk add --no-cache git bash >/dev/null  # release-version-check.sh is bash (#56)
     # The release carries the common-password list, so refuse to tag
     # while it is the placeholder or more than 90 days old (#52).
     - scripts/blocklist-age-check.sh
