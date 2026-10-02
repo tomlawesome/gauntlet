@@ -1,9 +1,9 @@
 # gauntlet
 
 A shared Go authentication library: local accounts, sessions, tokens,
-OIDC and the HTTP middleware that gates them -- factored out of
-[mikroview](https://github.com/tomlawesome/mikroview) so it and
-[birdcage](https://gitlab.tomlawson.io/ai/birdcage) share one
+OIDC (OpenID Connect) and the HTTP middleware that gates them. It was
+factored out of [mikroview](https://github.com/tomlawesome/mikroview)
+so it and [birdcage](https://gitlab.tomlawson.io/ai/birdcage) share one
 implementation instead of two copies that drift apart.
 
 **Status: v0.1.0 shipped; still pre-1.0, so the API may change between
@@ -11,8 +11,10 @@ minor versions until then.** The API is still being built out issue by
 issue against the design in [docs/design.md](docs/design.md); nothing
 here has a stability guarantee until it tags.
 
-See [docs/adr/0001-shared-auth-module.md](docs/adr/0001-shared-auth-module.md)
-for why this module exists, and [SECURITY.md](SECURITY.md) for its threat
+See ADR-0001
+([docs/adr/0001-shared-auth-module.md](docs/adr/0001-shared-auth-module.md);
+an ADR is an architecture decision record, kept in docs/adr/) for why
+this module exists, and [SECURITY.md](SECURITY.md) for its threat
 model.
 
 ## Using gauntlet
@@ -45,12 +47,14 @@ admin, err := store.Register("alice", password, time.Now()) // first account -> 
 user, err := store.Authenticate("alice", password, time.Now())
 ```
 
-Every new local password is checked before it is set (#43): not the
-username or the product's name (`Options.ProductName`), not on the
-common-password list (`Options.PasswordBlocklist`, by default the one
-built into the release, `blocklist.Embedded()`), and -- only if the app
-opts in, since it is an outbound call -- not in Have I Been Pwned's
-breach corpus:
+Every new local password is checked before it is set (#43). It can't
+be:
+
+- the username or the product's name (`Options.ProductName`)
+- on the common-password list (`Options.PasswordBlocklist`, by default
+  the one built into the release, `blocklist.Embedded()`)
+- in Have I Been Pwned (HIBP)'s breach corpus, when the app opts in --
+  since it is an outbound call:
 
 ```go
 hibp, err := blocklist.NewPwnedChecker(blocklist.PwnedConfig{}) // only a 5-character hash prefix leaves the process
@@ -100,13 +104,13 @@ g, err := gate.New(gate.Config{ /* ... */ Notify: mailNotifier{mail, users}}, de
 ```
 
 It is called after the admin's response, in its own goroutine, with a
-context that ends after 10 seconds; an error or panic is logged and
+context that ends after 10 seconds. An error or panic is logged and
 never changes the admin's answer. `Reason` may be empty: the message
 should still say an administrator signed them out.
 
 To give admins a sign-in history (`GET /api/auth/sign-ins`), open a
 third document beside the accounts and tokens ones, sealed under its own
-label, and close it at shutdown so its last rows are saved:
+label. Close it at shutdown so its last rows are saved:
 
 ```go
 sealed, err := persist.Encrypt(myBackendFor("signins"), key, persist.EncryptOptions{Label: "signins"})

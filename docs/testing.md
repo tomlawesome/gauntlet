@@ -21,22 +21,22 @@ There is no frontend, no shipped image and no live-stack e2e stage here
 and every behaviour it has is reachable from a Go test.
 
 The common-password list's code (`blocklist`, `cmd/pwlist`, #52) is
-tested against `httptest` fakes of HIBP's range API, the list's
-download host and GitHub's releases API, with synthetic hashes and
-Ed25519 keys made per test. No test reaches the network, and no real
-HIBP response is recorded in this repository: the owner has not
-approved one as a fixture. What only the real producer can show -- the
-real corpus's size and counts -- is checked by the build's own sanity
-bars on every scheduled run.
+tested against `httptest` fakes of Have I Been Pwned (HIBP)'s range
+API, the list's download host and GitHub's releases API. It uses
+synthetic hashes and Ed25519 keys made per test. No test reaches the
+network, and no real HIBP response is recorded in this repository: the
+owner has not approved one as a fixture. What only the real producer
+can show -- the real corpus's size and counts -- is checked by the
+build's own sanity bars on every scheduled run.
 
 The new-password checks (#43) are tested the same way: the live check's
-`blocklist.PwnedChecker` against an `httptest` fake of the range API
-(including that a request carries only the 5-character prefix), and the
-store and gate with an injected list and an injected breach checker,
-since the embedded list is still the empty placeholder. The range
-response's shape in those fakes is from HIBP's API documentation, not a
-recorded response; a test against the real API would be the only proof
-that shape still holds.
+`blocklist.PwnedChecker` is tested against an `httptest` fake of the
+range API, including that a request carries only the 5-character
+prefix. The store and gate are tested with an injected list and an
+injected breach checker, since the embedded list is still the empty
+placeholder. The range response's shape in those fakes is from HIBP's
+API documentation, not a recorded response. A test against the real API
+would be the only proof that shape still holds.
 
 ## Compatibility checks
 
@@ -59,8 +59,9 @@ itself, which ADR-0002 allows only in a new major version.
   WebAuthn options `register/begin` and `login/factor/begin` answer and
   the `credential` and `assertion` request fields are open objects.
   They are the W3C's `PublicKeyCredential` JSON, made and read by the
-  WebAuthn library and the browser, and a library update that adds a
-  W3C field must not fail the contract (ADR-0004 decision 6). `TestContractRoutesMatchDocument` checks that the routes
+  WebAuthn library and the browser. A library update that adds a W3C
+  field must not fail the contract (ADR-0004 decision 6).
+  `TestContractRoutesMatchDocument` checks that the routes
   `routes.go` registers (read from the source code and confirmed
   against the running router) are the same list as the document
   describes, in both directions. `TestContractRequestBodiesMatchHandlers`
@@ -95,7 +96,7 @@ What each check fails on:
 `test:go` writes a profile and `scripts/coverage-floor.py` checks it
 against `supply-chain/coverage-floors.yml`, one floor per package, copied
 from birdcage's script. A package fails below its floor, and also fails
-more than 5 points above it -- that means the floor is stale, and the fix
+more than 5 points above it. That means the floor is stale, and the fix
 is to raise it, never to leave the headroom. Floors only ever go up.
 
 Go measures statement coverage, not branch coverage: a 100% package means
@@ -110,7 +111,7 @@ every line ran, not that every condition was tried both ways.
   so on the issue.
 - Where a type or function is copied from mikroview's implementation
   (`persist`, and later the accounts, session and token stores), its
-  ported tests come with it -- see each file's doc comment for where it
+  ported tests come with it. See each file's doc comment for where it
   came from. Divergence from mikroview's behaviour needs its own test,
   not just a comment explaining the difference.
 - A refusal is behaviour: fail-closed paths (`persist.Open` on an

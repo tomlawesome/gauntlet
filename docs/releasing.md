@@ -81,11 +81,11 @@ Apps then take it with `go get github.com/tomlawesome/gauntlet@v<VERSION>`.
 
 `blocklist.Embedded()` and `blocklist.Refresher` serve the SHA-1
 hashes of the 10,000 most prevalent passwords in the Pwned Passwords
-list from Have I Been Pwned (HIBP). See the ADR (an architecture
-decision record, in docs/adr/) at
-[adr/0007-common-password-list.md](adr/0007-common-password-list.md)
-(#52). The monthly `blocklist` pipeline schedule rebuilds the list
-from HIBP, signs it, and publishes it to this project's package
+list from Have I Been Pwned (HIBP) (#52,
+[ADR-0007](adr/0007-common-password-list.md); an ADR is an
+architecture decision record, kept in docs/adr/). The monthly
+`blocklist` pipeline schedule rebuilds the list from HIBP, signs it,
+and publishes it to this project's package
 registry and then to releases on the public GitHub mirror, where
 applications fetch it. Step 2 above copies the published list into
 each release.
