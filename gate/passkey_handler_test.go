@@ -3,9 +3,10 @@
 // to a ready gauntlet/passkey relying party; g.deps.Users for s.Auth;
 // g.deps.Limiter for the limiter swap; /api/protected as the protected
 // probe; 409 where mikroview answers 503 for a relying party that is
-// not ready). Then the cases gate adds (ADR-0004): passkeys off, an
-// expired ceremony, and a register replay refused by the spent challenge
-// rather than only by the cleared cookie.
+// not ready). Then the cases gate adds (ADR-0004 and the rulings on
+// #20): passkeys off, an expired ceremony, a dead ceremony told apart
+// from a refused credential, and a registration ceremony that survives
+// a duplicate refusal.
 //
 // This file may import gauntlet/passkey and the WebAuthn library's
 // protocol package: only gate's non-test code must not.
@@ -656,8 +657,8 @@ func TestPasskeyRoutesRefusedWhenRelyingPartyNotReady(t *testing.T) {
 
 // TestPasskeyRegisterFinishReplayRefused: a second finish with the same
 // body, through the same browser, is refused -- here because the
-// ceremony cookie is cleared on success. TestPasskeyRegisterReplay
-// RefusedBySpentChallenge below covers a replay that keeps the cookie.
+// ceremony cookie is cleared on success. A client that kept a copy of
+// the cookie is refused by AddPasskey's duplicate check instead (409).
 func TestPasskeyRegisterFinishReplayRefused(t *testing.T) {
 	g, ts, _ := passkeyFixture(t)
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
@@ -1298,14 +1299,15 @@ func TestPasskeyRoutesAnswer404WhenPasskeysAreOff(t *testing.T) {
 	}
 }
 
-// TestPasskeyRegisterReplayRefusedBySpentChallenge: replaying a finished
-// registration with its ceremony cookie put back -- as a client that
-// kept a copy of it would -- is refused by the spent challenge, not
-// merely by the cookie being gone. Without the spent set the replay
-// would reach AddPasskey and come back 409 duplicate.
-func TestPasskeyRegisterReplayRefusedBySpentChallenge(t *testing.T) {
+// TestPasskeyRegisterCeremonySurvivesADuplicateRefusal: registration
+// challenges are not spent (ruling B on #20). Finishing a ceremony with
+// an authenticator already on the account is refused as a duplicate
+// (409), and the same ceremony -- its cookie kept -- then finishes with
+// another authenticator.
+func TestPasskeyRegisterCeremonySurvivesADuplicateRefusal(t *testing.T) {
 	g, ts, _ := passkeyFixture(t)
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	fakeA, _ := registerPasskey(t, bilbo, ts, g, "A")
 
 	begin := postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/begin", struct{}{})
 	var creation protocol.CredentialCreation
@@ -1322,37 +1324,22 @@ func TestPasskeyRegisterReplayRefusedBySpentChallenge(t *testing.T) {
 	if sealed == nil || sealed.Path != passkeysPath || sealed.MaxAge != 300 || !sealed.HttpOnly {
 		t.Fatalf("register/begin's ceremony cookie = %+v, want %s on %s for 300s, HttpOnly", sealed, passkeyRegisterCookieName, passkeysPath)
 	}
-	body, err := newFake(g).RegisterResponse(&creation)
-	if err != nil {
-		t.Fatal(err)
+
+	dup := passkeyRegisterFinishRaw(t, bilbo, ts, fakeA, &creation, "A again")
+	_ = dup.Body.Close()
+	if dup.StatusCode != http.StatusConflict {
+		t.Fatalf("finishing with an authenticator already on the account got %d, want 409", dup.StatusCode)
 	}
-	req := passkeyRegisterFinishRequest{Credential: json.RawMessage(body), Name: "once"}
-	first := postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish", req)
-	_ = first.Body.Close()
-	if first.StatusCode != http.StatusOK {
-		t.Fatalf("the first finish got %d, want 200", first.StatusCode)
+	if cookieCleared(dup, passkeyRegisterCookieName) {
+		t.Error("a duplicate refusal cleared the live ceremony cookie")
 	}
 
-	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
+	out := passkeyRegisterFinishOK(t, bilbo, ts, newFake(g), &creation, "B")
+	if out.Passkey.Name != "B" {
+		t.Errorf("the second authenticator's passkey = %+v", out.Passkey)
 	}
-	replay, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/passkeys/register/finish", bytes.NewReader(b))
-	if err != nil {
-		t.Fatal(err)
-	}
-	replay.Header.Set(csrfHeaderName, testCSRFValue)
-	replay.AddCookie(&http.Cookie{Name: sealed.Name, Value: sealed.Value})
-	resp, err := bilbo.Do(replay)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("replaying a finished registration with its cookie got %d, want 401 (refused by the spent challenge, not 409 duplicate)", resp.StatusCode)
-	}
-	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
-		t.Errorf("the account holds %d passkeys after the replay, want 1", n)
+	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 2 {
+		t.Errorf("the account holds %d passkeys, want 2", n)
 	}
 }
 

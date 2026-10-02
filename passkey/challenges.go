@@ -13,7 +13,7 @@ import (
 // browser. gate's ceremony cookies carry the same Max-Age.
 const ceremonyLifetime = 5 * time.Minute
 
-// spentChallenges remembers the challenge of every ceremony that
+// spentChallenges remembers the challenge of every login ceremony that
 // finished, until it would have expired anyway. The ceremony state rides
 // in a sealed value the browser holds, so without this the server keeps
 // nothing saying a ceremony was used, and an authenticator that always
@@ -49,7 +49,11 @@ func (c *spentChallenges) claim(challenge string, expires, now time.Time) bool {
 	return true
 }
 
-// spent is the one set both Finish methods claim from: a challenge is
-// random and 32 bytes long, so the two ceremonies never collide by
-// chance, and one rule covers both.
+// spent is claimed by FinishLogin only, as in mikroview. A login is
+// final inside FinishLogin -- the signature is the proof -- so that is
+// where its challenge is spent. A registration is final only at
+// Store.AddPasskey, outside this package, so FinishRegistration claims
+// nothing: a claim there would fire before the store said yes, and
+// AddPasskey's duplicate check already refuses a credential registered
+// twice.
 var spent = &spentChallenges{}

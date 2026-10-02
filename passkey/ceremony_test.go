@@ -5,6 +5,7 @@
 package passkey
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -113,27 +114,14 @@ func TestCeremonyRegisterAndLogin(t *testing.T) {
 	}
 }
 
-// TestCeremonyReplayIsRefusedBySpentChallenge: the same sealed state and
-// response cannot finish twice, for either ceremony -- for a
-// zero-reporting authenticator this is the whole replay defence.
+// TestCeremonyReplayIsRefusedBySpentChallenge: the same sealed login
+// state and assertion cannot finish twice -- for a zero-reporting
+// authenticator this is the whole replay defence.
 func TestCeremonyReplayIsRefusedBySpentChallenge(t *testing.T) {
 	rp := mustReady(t)
 	u := testUser()
 	fake := passkeytest.New(rp.RPID(), rp.Origin())
-
-	creation, sealed := beginRegistration(t, rp, u)
-	body, err := fake.RegisterResponse(creation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pk, err := rp.FinishRegistration(u, sealed, body)
-	if err != nil {
-		t.Fatalf("first FinishRegistration: %v", err)
-	}
-	if _, err := rp.FinishRegistration(u, sealed, body); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
-		t.Fatalf("replayed FinishRegistration error = %v, want ErrPasskeyCeremonyInvalid", err)
-	}
-	u.Passkeys = append(u.Passkeys, pk)
+	registerOn(t, rp, u, fake)
 
 	sealedLogin, assertion := assertWith(t, rp, u, fake)
 	if _, err := rp.FinishLogin(u, sealedLogin, assertion); err != nil {
@@ -141,6 +129,36 @@ func TestCeremonyReplayIsRefusedBySpentChallenge(t *testing.T) {
 	}
 	if _, err := rp.FinishLogin(u, sealedLogin, assertion); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 		t.Fatalf("replayed FinishLogin error = %v, want ErrPasskeyCeremonyInvalid", err)
+	}
+}
+
+// TestRegistrationCeremonyFinishesAgainAfterARefusal: registration
+// challenges are not spent (ruling B on #20), so a finish the library
+// refuses leaves the same sealed state usable by a correct response.
+func TestRegistrationCeremonyFinishesAgainAfterARefusal(t *testing.T) {
+	rp := mustReady(t)
+	u := testUser()
+	creation, sealed := beginRegistration(t, rp, u)
+
+	wrong := passkeytest.New(rp.RPID(), "https://not-the-relying-party.example")
+	body, err := wrong.RegisterResponse(creation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.FinishRegistration(u, sealed, body); err == nil || errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Fatalf("wrong-origin FinishRegistration error = %v, want a refused credential", err)
+	}
+
+	right := passkeytest.New(rp.RPID(), rp.Origin())
+	if body, err = right.RegisterResponse(creation); err != nil {
+		t.Fatal(err)
+	}
+	pk, err := rp.FinishRegistration(u, sealed, body)
+	if err != nil {
+		t.Fatalf("the same ceremony with a correct authenticator: %v", err)
+	}
+	if !bytes.Equal(pk.ID, right.CredentialID()) {
+		t.Errorf("registered credential %x, want the correct authenticator's %x", pk.ID, right.CredentialID())
 	}
 }
 
@@ -255,14 +273,6 @@ func TestCeremonyRefusals(t *testing.T) {
 		}
 		if _, err := rp.FinishRegistration(u, sealed, body); err == nil || errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 			t.Fatalf("wrong-origin FinishRegistration error = %v, want a library refusal", err)
-		}
-		// Not spent: the same ceremony still finishes for the right origin.
-		fake.Origin = rp.Origin()
-		if body, err = fake.RegisterResponse(creation); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := rp.FinishRegistration(u, sealed, body); err != nil {
-			t.Fatalf("the same ceremony at the right origin: %v", err)
 		}
 	})
 	t.Run("wrong RP ID at login", func(t *testing.T) {

@@ -12,7 +12,9 @@
 // What lives here: turning the application's public URL into a relying
 // party, or a reason it cannot be one (New, Status); the two sealing
 // keys that let the browser carry ceremony state it can neither read nor
-// alter; the set of challenges already used; the library calls; and the
+// alter; the set of login challenges already used (registrations are
+// final only at Store.AddPasskey, outside this package, so they are not
+// claimed); the library calls; and the
 // conversion between gauntlet.Passkey and the library's credential. It
 // never sees a request or a cookie -- gate owns routes, cookies, the
 // login limiter, sessions, recovery codes and audit.

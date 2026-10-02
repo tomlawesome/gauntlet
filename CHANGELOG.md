@@ -36,7 +36,10 @@ All notable changes to this project are documented in this file.
   begin/finish, rename, delete, `POST /api/auth/login/factor/begin`, an
   `assertion` on `POST /api/auth/login/factor`, and the admin
   `DELETE /api/auth/users/{id}/passkeys`. Left nil, every passkey route
-  answers 404 and nothing links the WebAuthn library. The root package
+  answers 404 and nothing links the WebAuthn library. Each login
+  challenge is usable once; a registration ceremony stays open until it
+  succeeds or expires, so a refused finish can be retried with another
+  authenticator, and a credential is never registered twice. The root package
   gains the seam both sides use (`PasskeyCeremony`, `PasskeyAssertion`,
   `PasskeyStatus`, and `ErrPasskeyCeremonyInvalid`, which marks a dead
   ceremony: expired, tampered with, from the other ceremony or already

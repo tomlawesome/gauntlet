@@ -428,7 +428,7 @@ taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by
-`passkey` under two independent keys, each challenge usable once); the 503 "setup required"
+`passkey` under two independent keys, each login challenge usable once); the 503 "setup required"
 state while `Count()==0` with only healthz, session and register
 reachable (the OIDC pair is not: SSO cannot create the first account,
 #37); identical 401 bodies for unknown and revoked tokens;
@@ -717,8 +717,9 @@ Argon2id-hashed and single-use; the reset code is Argon2id-hashed,
 24-hour, single-use, and replaces the password outright. A passkey
 sign-count that fails to advance refuses the login (the library's clone
 warning, then `RecordPasskeyAssertionIfFresh` under the store's lock)
-and never moves the stored count; each challenge is used once and
-expires five minutes after begin; user verification is requested, not
+and never moves the stored count; each login challenge is used once,
+a registration replay is refused as a duplicate credential, and every
+ceremony expires five minutes after begin; user verification is requested, not
 required, and attestation is `none` (ADR-0004 decision 5).
 `github.com/go-webauthn/webauthn` v0.18.2 is the newest release and has
 no entry in the OSV or Go vulnerability databases (re-checked

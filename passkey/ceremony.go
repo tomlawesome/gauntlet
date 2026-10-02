@@ -147,8 +147,15 @@ func (rp *RelyingParty) BeginRegistration(u *gauntlet.User) (json.RawMessage, st
 
 // FinishRegistration verifies the browser's response to the options
 // BeginRegistration returned and gives back the credential to store.
-// The ceremony's challenge is claimed once the library accepts it, so
-// the same sealed state and response cannot register twice.
+//
+// The challenge is not claimed: a registration is final only when
+// Store.AddPasskey accepts it, which happens in the caller after this
+// returns, so a claim here would fire before the store had said yes.
+// The ceremony stays open until it expires, and the caller ends it by
+// clearing the ceremony cookie on success. Until then a refused finish
+// -- a wrong origin, a duplicate, the account full -- can be followed by
+// a corrected response or another authenticator. Registering the same
+// credential twice is refused by AddPasskey's duplicate check.
 func (rp *RelyingParty) FinishRegistration(u *gauntlet.User, sealed string, credential json.RawMessage) (gauntlet.Passkey, error) {
 	if !rp.ready() {
 		return gauntlet.Passkey{}, ErrNotReady
@@ -164,9 +171,6 @@ func (rp *RelyingParty) FinishRegistration(u *gauntlet.User, sealed string, cred
 	cred, err := rp.wa.CreateCredential(rp.user(u, nil), sd, parsed)
 	if err != nil {
 		return gauntlet.Passkey{}, fmt.Errorf("passkey: verifying the registration response: %w", err)
-	}
-	if !spent.claim(sd.Challenge, sd.Expires, time.Now()) {
-		return gauntlet.Passkey{}, fmt.Errorf("passkey: challenge already used: %w", gauntlet.ErrPasskeyCeremonyInvalid)
 	}
 	return credentialToPasskey(*cred, rp.rpID), nil
 }

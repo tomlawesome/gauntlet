@@ -93,8 +93,10 @@ mikroview's fake authenticator copies and this module reuses.
    presence required; user verification requested but not required
    (a second factor behind a password; requiring it shuts out
    security keys without a PIN); attestation `none`, not verified, no
-   metadata service; no discoverable or passwordless login. A
-   challenge is used once (the spent-challenge set), expires five
+   metadata service; no discoverable or passwordless login. A login
+   challenge is used once (the spent-challenge set); a registration
+   ceremony ends when the cookie is cleared on success, and a replay is
+   refused as a duplicate credential. Either ceremony expires five
    minutes after begin (sealed `Expires`, checked by the library), and
    a value sealed for one ceremony cannot decode as the other. A sign
    counter that fails to advance refuses the login through the
