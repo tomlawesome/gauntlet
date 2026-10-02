@@ -6,6 +6,25 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `gauntlet/blocklist`, the common-password list (#52,
+  [ADR-0005](docs/adr/0005-common-password-list.md)): the SHA-1 hashes
+  of the 10,000 most prevalent passwords in Have I Been Pwned's Pwned
+  Passwords. `Embedded()` is the copy built into the release and never
+  touches the network; `List.Contains` checks a password against it.
+  An application that wants newer lists between releases runs a
+  `Refresher` (`NewRefresher`, `RefreshConfig`): it checks the public
+  GitHub mirror once a day by default, accepts a list only if its
+  checksum and signature verify and it is newer than the one in use,
+  and keeps it in a directory the application names. Until the first
+  signed list is published, `Embedded()` is empty and blocks nothing,
+  and a release refuses to tag. #43 will use it to refuse common
+  passwords.
+- `cmd/pwlist` and three CI jobs, run by a monthly pipeline schedule,
+  build that list from HIBP, sign it on a dedicated runner, and publish
+  it to the GitLab package registry and the GitHub mirror's releases.
+  `scripts/update-blocklist.sh` copies the newest published list into
+  a release. Setting this up -- a signing key, a GitHub token, two
+  runners and the schedule -- is the owner's, in docs/releasing.md.
 - `docs/api/auth.yaml` (OpenAPI 3.1) describes every route `gate.Routes`
   serves -- each request body, response body and status -- as the one
   copy a frontend can build against (ADR-0002, #22). `docs/design.md`

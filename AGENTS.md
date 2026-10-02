@@ -38,6 +38,15 @@ is created at v0.1.0 so birdcage can `go get` the tag by its module path
 (#17, owner 2026-09-29, replacing 2026-09-27's "mirror at v0.2.0"). GitHub
 is the mirror only: no GitHub issues or pull requests.
 
+## Runner tags
+
+Every job runs on the shared `light` lane except the common-password
+list's two (#52, ADR-0005): `blocklist:sign` on `gauntlet-signing`
+(signing key at `/etc/gauntlet-signing/`) and `blocklist:publish` on
+`gauntlet-publish` (GitHub release token at `/etc/gauntlet-github/`).
+Both are protected, locked to this project, and set up by the owner
+(docs/releasing.md); no other job may use those tags.
+
 ## Closing issues from commits
 
 Same trap as birdcage: GitLab treats `Implements`/`Closes`/`Fixes` next to

@@ -14,11 +14,16 @@
 # the job never runs.
 #
 # Runner lane (ai/agent-infra#3): `light` is 4 CPU / 6 GB, which is ample
-# for a dependency-free Go module. `big` is not needed here.
+# for a dependency-free Go module. `big` is not needed here. The two
+# exceptions are the common-password list's blocklist:sign, on the
+# `gauntlet-signing` runner that holds the signing key, and
+# blocklist:publish, on the `gauntlet-publish` runner that holds the
+# GitHub release token (#52, ADR-0005).
 
 stages:
   - lint
   - test
+  - blocklist
   - release
   - sync
 
@@ -238,6 +243,172 @@ test:contract:
     - go test ./... -race
 
 # ---------------------------------------------------------------------------
+# BLOCKLIST
+# ---------------------------------------------------------------------------
+# The common-password list (#52, ADR-0005): the SHA-1 hashes of the
+# 10,000 most prevalent Pwned Passwords, rebuilt from HIBP's range API,
+# signed, and published -- first to this project's generic package
+# registry, then, because this project is private, to releases on the
+# public GitHub mirror, which is where blocklist.Refresher and
+# scripts/update-blocklist.sh fetch it (owner, 2026-10-02).
+#
+# These jobs run only in the pipeline the `blocklist` pipeline schedule
+# starts: a monthly schedule on `dev` (owner, 2026-10-02) carrying the
+# variable BLOCKLIST_BUILD=true. Every other job above is `.gate`d off
+# for schedules, and the release and sync jobs need a push, so that
+# pipeline holds these three and nothing else.
+#
+# Three jobs on three runners, so no one job or runner holds two of:
+# the network path to HIBP, the signing key, the publishing
+# credentials. build talks to HIBP and holds nothing; sign holds the key
+# and talks to nobody; publish holds the job token and the GitHub token
+# and checks the signature against the committed keys before uploading.
+#
+# The sample path: a pipeline run by hand from any branch with
+# BLOCKLIST_SAMPLE=true runs blocklist:build alone over the first 2,048
+# prefixes (about 2 MB from HIBP instead of 20-40 GB). Its output is
+# marked `# sample:`, which `pwlist sign`, `pwlist verify` and every
+# Refresher refuse, and sign and publish never run for it.
+.blocklist_full: &blocklist_full
+  rules:
+    - if: $BLOCKLIST_SAMPLE == "true"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $BLOCKLIST_BUILD == "true" && $CI_COMMIT_REF_PROTECTED == "true"
+
+blocklist:build:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  <<: *git_safe
+  needs: []
+  # A four-hour run must not be cancelled by an unrelated merge to dev.
+  interruptible: false
+  # About a million requests, 32 at a time; HIBP's CDN answers most
+  # from cache. The checkpoint lets a retried job pick up after the
+  # last finished chunk instead of starting again.
+  timeout: 4h
+  rules:
+    - if: $BLOCKLIST_SAMPLE == "true"
+      variables:
+        PWLIST_PREFIXES: "2048"
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $BLOCKLIST_BUILD == "true" && $CI_COMMIT_REF_PROTECTED == "true"
+      variables:
+        PWLIST_PREFIXES: "1048576"
+  # The usual Go cache, plus the run's checkpoint. The checkpoint's key
+  # carries the pipeline id, so a retry of this job resumes but the next
+  # scheduled run starts clean: nothing from HIBP is kept between runs.
+  cache:
+    - key:
+        prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+        files:
+          - go.sum
+          - .gitlab-ci.yml
+      paths:
+        - .gocache/
+    - key: blocklist-checkpoint-$CI_PIPELINE_ID
+      paths:
+        - .blocklist/
+      when: always
+  script:
+    - go build -trimpath -ldflags "-X main.version=$(tr -d '[:space:]' < VERSION)" -o pwlist ./cmd/pwlist
+    - mkdir -p .blocklist out
+    - ./pwlist build --prefixes "$PWLIST_PREFIXES" --checkpoint .blocklist/checkpoint.json --out out/top10k.txt
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - out/top10k.txt
+      - out/top10k.txt.sha256
+
+# Runs on the `gauntlet-signing` runner only: protected, locked to this
+# project, with /etc/gauntlet-signing mounted read-only (docs/releasing.md,
+# "The common-password list"). It builds pwlist from this commit's
+# source rather than taking a binary from the build job, so nothing made
+# on the shared lane ever runs next to the key. `sign` refuses a list
+# whose checksum does not match or that does not parse; the verify after
+# it fails the job if the key that signed is not one of the committed
+# blocklist/keys/*.pub.
+blocklist:sign:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  tags: [gauntlet-signing]
+  interruptible: false
+  timeout: 5m
+  <<: [*blocklist_full, *git_safe]
+  needs:
+    - job: blocklist:build
+      artifacts: true
+  cache: []
+  script:
+    - test -d /etc/gauntlet-signing || { echo "/etc/gauntlet-signing is not mounted -- is this the gauntlet-signing runner?"; exit 1; }
+    - go build -trimpath -o pwlist ./cmd/pwlist
+    - ./pwlist sign --keys /etc/gauntlet-signing --in out/top10k.txt
+    - ./pwlist verify --keys blocklist/keys --in out/top10k.txt
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - out/top10k.txt
+      - out/top10k.txt.sha256
+      - out/top10k.txt.sig
+
+# Uploads the signed list to the GitLab package registry, then copies
+# the same files to the GitHub mirror's releases. Each host gets it
+# twice: under a version named for its build date, which is never
+# written again, and under `current`, which is replaced. GitHub's
+# `pwned-top10k-current` release is what blocklist.DefaultURL reads.
+# Within each version the checksum goes last: a Refresher fetches the
+# checksum first and stops if it is unchanged, so it never pairs the
+# new list with the old checksum.
+#
+# It runs on the `gauntlet-publish` runner -- protected, locked to this
+# project -- because that runner mounts the GitHub token file read-only;
+# the shared `light` lane must never see it. The token is never a CI
+# variable: GAUNTLET_GITHUB_RELEASE_TOKEN_FILE holds only the path of
+# the mounted file. The GitLab job token is written to a 0600 header
+# file by a shell builtin rather than passed on curl's command line,
+# where the process list would show it; the GitHub token is read from
+# its file by pwlist itself and sent only as a header.
+blocklist:publish:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  tags: [gauntlet-publish]
+  interruptible: false
+  timeout: 10m
+  <<: [*blocklist_full, *git_safe]
+  needs:
+    - job: blocklist:sign
+      artifacts: true
+  cache: []
+  script:
+    - test -n "${GAUNTLET_GITHUB_RELEASE_TOKEN_FILE:-}" && test -r "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" || { echo "GAUNTLET_GITHUB_RELEASE_TOKEN_FILE must name the GitHub token file mounted on the gauntlet-publish runner"; exit 1; }
+    - go build -trimpath -ldflags "-X main.version=$(tr -d '[:space:]' < VERSION)" -o pwlist ./cmd/pwlist
+    - ./pwlist verify --keys blocklist/keys --in out/top10k.txt
+    - |
+      set -eu
+      built="$(sed -n 's/^# built: //p' out/top10k.txt | head -n 1)"
+      dated="$(printf '%s' "$built" | cut -c1-10 | tr - .)"
+      case "$dated" in
+        [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
+        *) echo "cannot read the build date from out/top10k.txt: '$built'"; exit 1 ;;
+      esac
+      headers="$(mktemp)"
+      chmod 600 "$headers"
+      printf 'JOB-TOKEN: %s\n' "$CI_JOB_TOKEN" > "$headers"
+      base="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/pwned-top10k"
+      for version in "$dated" current; do
+        for f in top10k.txt top10k.txt.sig top10k.txt.sha256; do
+          echo "uploading $version/$f to the GitLab package registry"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            --header "@$headers" --upload-file "out/$f" "$base/$version/$f"
+          echo
+        done
+      done
+      rm -f "$headers"
+      ./pwlist publish-github --repo tomlawesome/gauntlet \
+        --token-file "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" \
+        --in out/top10k.txt \
+        --dated-tag "pwned-top10k-$dated" --current-tag pwned-top10k-current
+      echo "published the list built $built as $dated and current, on GitLab and GitHub"
+
+# ---------------------------------------------------------------------------
 # RELEASE
 # ---------------------------------------------------------------------------
 # Birdcage's release:promote / release:gitlab pair, cut down: there are no
@@ -270,6 +441,9 @@ release:version:
   cache: []
   script:
     - apk add --no-cache git >/dev/null
+    # The release carries the common-password list, so refuse to tag
+    # while it is the placeholder or more than 90 days old (#52).
+    - scripts/blocklist-age-check.sh
     - |
       set -eu
       version="$(tr -d '[:space:]' < VERSION)"
