@@ -40,7 +40,7 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		g.logError("forgetting the browsers account " + user.ID + " remembers: " + err.Error())
 		detail = "sessions ended: all, via sign out everywhere; remembered browsers could not be forgotten"
 	}
-	g.audit(user.Username, "account.sessions_ended", user.Username, detail)
+	g.audit(r, user.Username, "account.sessions_ended", user.Username, detail)
 
 	g.issueSession(w, r, user.ID, now)
 	writeJSON(w, http.StatusOK, map[string]any{"signedOutEverywhere": true})

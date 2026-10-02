@@ -234,6 +234,41 @@ type Options struct {
 	// process makes is no use to the running server. Called outside the
 	// store's lock, before OpenStore returns.
 	OnUnlockCode UnlockCodeHandler
+	// PasswordBlocklist is the common-password list every new local
+	// password is checked against (#43): Register, CreateUser and
+	// SetPassword refuse a password on it, as typed or in lower case,
+	// with ErrPasswordBlocked. nil means blocklist.Embedded(), the list
+	// compiled into this release; pass a *blocklist.Refresher to use the
+	// newest published list instead. There is no way to turn the check
+	// off. Until the first signed list ships, Embedded is empty and
+	// blocks nothing (ADR-0005).
+	PasswordBlocklist PasswordList
+	// ProductName is the application's name, which no password may be
+	// (ASVS 5.0 V6.2.11), any more than the account's own username may:
+	// a password that is either, give or take case, punctuation and
+	// digits around it (PasswordMatchesContext), is refused with
+	// ErrPasswordContext. Empty checks the username alone. gate refuses
+	// its own Config.ProductName on its routes whatever this holds; set
+	// it to the same name so a CLI that calls SetPassword refuses it as
+	// well. A string rather than a list of words, so Options stays
+	// comparable (ADR-0002).
+	ProductName string
+	// BreachCheck, when set, asks it -- in practice a
+	// *blocklist.PwnedChecker, HIBP's k-anonymity range API -- about
+	// every new local password that passed the local checks, and refuses
+	// one found in a breach with ErrPasswordBlocked. nil means no live
+	// check: gauntlet makes no outbound call the application did not ask
+	// for. Each check is bounded by BreachCheckTimeout.
+	//
+	// When it cannot answer -- HIBP unreachable, slow, or answering
+	// nonsense -- the password is accepted, since the common-password
+	// list still applied, the miss is logged, and the account is marked
+	// (User.BreachCheckPending). The next sign-in with that password
+	// checks it again: a hit then sets MustChangePassword and ends the
+	// account's other sessions, a clean answer clears the mark, and no
+	// answer leaves it for the sign-in after (owner, 2026-10-02, on #43).
+	// SSO accounts have no local password and are never checked.
+	BreachCheck BreachChecker
 }
 
 // Store persists user accounts through a persist.Backend -- an
@@ -303,6 +338,15 @@ type Store struct {
 	unlockCodeHash []byte
 	unlockCodeFor  string
 	onUnlockCode   UnlockCodeHandler
+
+	// The new-password checks (passwordcheck.go, #43), fixed at
+	// OpenStore: Options.PasswordBlocklist or the embedded list, the
+	// product name, the optional live breach check, and its
+	// bound (BreachCheckTimeout; shorter in tests).
+	passwordList  PasswordList
+	productName   string
+	breachCheck   BreachChecker
+	breachTimeout time.Duration
 }
 
 // storeState is the in-memory index over the accounts document: the
@@ -563,6 +607,11 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 		onSetupCode:  opts.OnSetupCode,
 		onUnlockCode: opts.OnUnlockCode,
 		storeState:   indexUsers(storeFile{}),
+
+		passwordList:  passwordListOrEmbedded(opts.PasswordBlocklist),
+		productName:   opts.ProductName,
+		breachCheck:   opts.BreachCheck,
+		breachTimeout: BreachCheckTimeout,
 	}
 
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
@@ -1028,6 +1077,10 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 	if len(password) < minPasswordLength {
 		return nil, ErrPasswordTooShort
 	}
+	breachPending, err := s.checkNewPassword(username, password)
+	if err != nil {
+		return nil, err
+	}
 	hash, err := HashPassword(password)
 	if err != nil {
 		return nil, err
@@ -1061,7 +1114,8 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 			Role:         role,
 			CreatedAt:    now,
 			// A real password the user chose, so it may later be reset.
-			HasLocalPassword: true,
+			HasLocalPassword:   true,
+			BreachCheckPending: breachPending,
 		}
 		st.byID[u.ID] = u
 		st.byName[key] = u.ID
@@ -1409,6 +1463,8 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 			u.ResetCodeHash = ""
 			u.ResetCodeExpiresAt = time.Time{}
 			u.MustChangePassword = false
+			// No local password left to recheck against HIBP (#43).
+			u.BreachCheckPending = false
 		}
 		// Invalidates every session issued before this point, including
 		// in another process -- the account's credentials just changed
@@ -1465,7 +1521,20 @@ const lastLoginGranularity = time.Hour
 // MustChangePassword is *not* cleared here -- only setting a new
 // password does that -- so the session this login goes on to create is
 // still the restricted one.
+//
+// An account owed a breach check (BreachCheckPending, #43) is checked
+// again here, once the password has verified: see recheckBreach. A hit
+// returns the account with MustChangePassword set.
 func (s *Store) Authenticate(username, password string, now time.Time) (*User, error) {
+	u, err := s.authenticate(username, password, now)
+	if err != nil || !u.BreachCheckPending || u.MustChangePassword || s.breachCheck == nil {
+		return u, err
+	}
+	return s.recheckBreach(u, password, now), nil
+}
+
+// authenticate is Authenticate without the breach recheck.
+func (s *Store) authenticate(username, password string, now time.Time) (*User, error) {
 	s.reloadIfStale()
 
 	s.mu.RLock()
@@ -1598,6 +1667,10 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	if len(newPassword) < minPasswordLength {
 		return ErrPasswordTooShort
 	}
+	breachPending, err := s.checkNewPassword(username, newPassword)
+	if err != nil {
+		return err
+	}
 	hash, err := HashPassword(newPassword)
 	if err != nil {
 		return err
@@ -1633,6 +1706,9 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		u.ResetCodeHash = ""
 		u.ResetCodeExpiresAt = time.Time{}
 		u.MustChangePassword = false
+		// The breach check this password got decides the mark: a new
+		// password owes a recheck only if HIBP could not answer for it.
+		u.BreachCheckPending = breachPending
 		// And it ends any login lockout and the count of lockouts before
 		// it (#44): the guesses that caused them were at the old
 		// password, and whoever set the new one should be able to use it

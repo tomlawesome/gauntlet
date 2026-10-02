@@ -39,7 +39,7 @@ type tokenResponse struct {
 // retains it, only its SHA-256 hash.
 func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	var req createTokenRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -82,7 +82,7 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	if tok.Device != "" {
 		detail += " device=" + tok.Device
 	}
-	g.audit(auditActor(r), "token.create", tok.Name, detail)
+	g.audit(r, auditActor(r), "token.create", tok.Name, detail)
 	writeJSON(w, http.StatusCreated, tokenResponse{
 		ID:        tok.ID,
 		Name:      tok.Name,
@@ -127,6 +127,6 @@ func (g *Gate) handleTokensRevoke(w http.ResponseWriter, r *http.Request) {
 		g.writeAuthError(w, r, err, http.StatusInternalServerError)
 		return
 	}
-	g.audit(auditActor(r), "token.revoke", id, "")
+	g.audit(r, auditActor(r), "token.revoke", id, "")
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
 }

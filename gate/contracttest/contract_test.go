@@ -356,6 +356,8 @@ func contractNoStorage(t *testing.T, c *contractChecker) {
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", stored.setupCode}}, 201, nil)
 	enrolTOTPFactor(t, c, ts.URL, admin, "contract-admin-password") // POST /api/auth/users is not an enrolment route
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "operator", Password: "contract-operator-password"}}, 503, nil)
+	// This gate keeps no sign-in history.
+	c.do(admin, ts.URL, call{method: "GET", path: "/api/auth/sign-ins"}, 404, nil)
 }
 
 // contractUnlockCode covers POST /api/auth/unlock, the lone-admin unlock
@@ -408,7 +410,7 @@ func contractUnlockCode(t *testing.T, c *contractChecker) {
 }
 
 func contractLocalAccounts(t *testing.T, c *contractChecker) {
-	f := newTestGate(t)
+	f := newSignInsGate(t)
 	g := f.g
 	g.Handle(gauntlet.TokenKindAPI, testProtectedHandler())
 	ts := newTestServer(t, g)
@@ -425,6 +427,8 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(anon, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"nobody", "x"}}, 503, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/users"}, 503, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: unlockCodeRequest{"admin", "AAAA-AAAA-AAAA-AAAA"}}, 503, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/users/no-such-id/logout-all"}, 503, nil)
+	c.do(anon, u, call{method: "GET", path: "/api/auth/sign-ins"}, 503, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, ""}, noCSRF: true}, 403, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: "not json", bad: true}, 400, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
@@ -461,6 +465,28 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", bobPass}}, 200, nil)
 	c.do(bob, u, call{method: "GET", path: "/api/auth/users"}, 403, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all", noCSRF: true}, 403, nil)
+
+	// The sign-in history (#53): the wrong password and the sign-ins
+	// above are rows.
+	var history struct {
+		SignIns []struct {
+			Outcome string `json:"outcome"`
+		} `json:"signIns"`
+		More  bool `json:"more"`
+		Total int  `json:"total"`
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/auth/sign-ins"}, 200, &history)
+	if history.Total < 3 || len(history.SignIns) != history.Total {
+		t.Fatalf("sign-in history = %+v, want the attempts made so far", history)
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/auth/sign-ins?outcome=wrong_password&limit=1&before=1000&address=198.51.100.1"}, 200, &history)
+	if len(history.SignIns) != 1 || history.SignIns[0].Outcome != "wrong_password" {
+		t.Fatalf("filtered sign-in history = %+v", history)
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/auth/sign-ins?limit=0", bad: true}, 400, nil)
+	c.do(admin, u, call{method: "GET", path: "/api/auth/sign-ins?outcome=bogus", bad: true}, 400, nil)
+	c.do(bob, u, call{method: "GET", path: "/api/auth/sign-ins"}, 403, nil)
+	c.do(anon, u, call{method: "GET", path: "/api/auth/sign-ins"}, 401, nil)
 	bobID, adminID, vicID := "", "", ""
 	for _, s := range users {
 		switch s.Username {
@@ -562,6 +588,22 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock", body: unlockSelfRequest{Password: adminPass, Code: adminRecovery[0]}}, 200, &unlocked)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/unlock"}, 404, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/unlock"}, 401, nil)
+
+	// The admin's sign-out of another account (#53): every status but
+	// 503, which the setup section above drives.
+	var loggedOut adminLogoutAllResponse
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", body: adminLogoutAllRequest{Reason: "contract test"}}, 200, &loggedOut)
+	if loggedOut.Username != "bob" || loggedOut.Notified {
+		t.Fatalf("admin logout-all = %+v, want bob's, not notified", loggedOut)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all"}, 200, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", body: adminLogoutAllRequest{Reason: "line\nbreak"}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", body: "{", bad: true}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/logout-all"}, 409, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/logout-all"}, 404, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", noCSRF: true}, 403, nil)
+	c.do(vic, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all"}, 403, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all"}, 401, nil)
 	bob = c.client()
 	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", reset.Code}}, 200, nil)
 	resp := c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all"}, 403, nil)

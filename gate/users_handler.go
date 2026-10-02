@@ -50,7 +50,7 @@ type userSummary struct {
 // only way to create a user once self-registration has closed.
 func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -69,6 +69,9 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if g.refuseProductName(w, r, req.Password) {
+		return
+	}
 	user, err := g.deps.Users.CreateUser(req.Username, req.Password, role, g.now())
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -77,14 +80,15 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusConflict
 		case gauntlet.ErrNotPersisted:
 			status = http.StatusServiceUnavailable
-		case gauntlet.ErrPasswordTooShort, gauntlet.ErrSingleAdmin, gauntlet.ErrInvalidRole,
+		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
+			gauntlet.ErrSingleAdmin, gauntlet.ErrInvalidRole,
 			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
 			status = http.StatusBadRequest
 		}
 		g.writeAuthError(w, r, err, status)
 		return
 	}
-	g.audit(auditActor(r), "user.create", user.Username, "role="+string(user.Role))
+	g.audit(r, auditActor(r), "user.create", user.Username, "role="+string(user.Role))
 	writeJSON(w, http.StatusCreated, map[string]any{"username": user.Username, "role": user.Role})
 }
 
@@ -156,7 +160,7 @@ func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		// from here, but that is not a reason to answer as if this part
 		// succeeded too -- see this handler's doc comment.
 		g.logError(fmt.Sprintf("revoking tokens for deleted user %s: %v", user.ID, err))
-		g.audit(auditActor(r), "user.delete", user.Username,
+		g.audit(r, auditActor(r), "user.delete", user.Username,
 			fmt.Sprintf("role=%s tokensRevoked=0 tokenRevokeFailed=true", user.Role))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"username": user.Username,
@@ -165,7 +169,7 @@ func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.audit(auditActor(r), "user.delete", user.Username,
+	g.audit(r, auditActor(r), "user.delete", user.Username,
 		fmt.Sprintf("role=%s tokensRevoked=%d", user.Role, revokedTokens))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":      user.Username,
@@ -237,7 +241,7 @@ func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	// Who reset whom, and never the code -- not here, not in any log
 	// line. The detail records the deadline instead, which is what an
 	// operator reading this entry later actually needs.
-	g.audit(auditActor(r), "user.password_reset", user.Username,
+	g.audit(r, auditActor(r), "user.password_reset", user.Username,
 		fmt.Sprintf("one-time code issued, expires %s; sessions ended: all; sign-in lockout and any disable lifted",
 			user.ResetCodeExpiresAt.Format(time.RFC3339)))
 
@@ -296,11 +300,11 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 		// Only the caller's own unlock reads a body; another account's
 		// takes none, as before.
 		var req unlockSelfRequest
-		if err := decodeJSONBody(w, r, &req); err != nil {
+		if err := g.decodeJSONBody(w, r, &req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if !g.recheckUnlockSelf(w, caller, req, now) {
+		if !g.recheckUnlockSelf(w, r, caller, req, now) {
 			return
 		}
 	}
@@ -328,7 +332,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
 		how = "own sign-in unlocked by admin, password and second factor re-entered"
 	}
-	g.audit(auditActor(r), "user.unlock", target.Username,
+	g.audit(r, auditActor(r), "user.unlock", target.Username,
 		fmt.Sprintf("%s; wasDisabled=%t wasLockedOut=%t; lockout count cleared", how, resp.WasDisabled, resp.WasLockedOut))
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -352,13 +356,13 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 //
 // The one-time unlock code in the server's log (POST /api/auth/unlock)
 // remains the way back for an admin with no session left.
-func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, caller *gauntlet.User, req unlockSelfRequest, now time.Time) bool {
+func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, req unlockSelfRequest, now time.Time) bool {
 	if req.Password == "" || req.Code == "" {
 		http.Error(w, "unlocking your own account needs your password and a code from your authenticator app or a recovery code", http.StatusBadRequest)
 		return false
 	}
-	if _, ok := g.recheckPassword(w, caller, req.Password, "incorrect password or code", now); !ok {
+	if _, ok := g.recheckPassword(w, r, caller, req.Password, "incorrect password or code", now); !ok {
 		return false
 	}
-	return g.recheckSecondFactor(w, caller, req.Code, "incorrect password or code", now)
+	return g.recheckSecondFactor(w, r, caller, req.Code, "incorrect password or code", now)
 }

@@ -278,7 +278,7 @@ func readGateSource(t *testing.T) gateSource {
 }
 
 // decodedType returns the type of the request body fn decodes: the T of
-// `var req T` behind its one decodeJSONBody(w, r, &req) call.
+// `var req T` behind its one g.decodeJSONBody(w, r, &req) call.
 func decodedType(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl) (string, bool) {
 	t.Helper()
 	varTypes := map[string]string{}
@@ -292,7 +292,8 @@ func decodedType(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl) (string, b
 				}
 			}
 		case *ast.CallExpr:
-			if id, ok := n.Fun.(*ast.Ident); !ok || id.Name != "decodeJSONBody" {
+			// g.decodeJSONBody(w, r, &req): a Gate method since #45.
+			if sel, ok := n.Fun.(*ast.SelectorExpr); !ok || sel.Sel.Name != "decodeJSONBody" {
 				return true
 			}
 			if len(n.Args) == 3 {

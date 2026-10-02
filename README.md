@@ -44,6 +44,24 @@ admin, err := store.Register("alice", password, time.Now()) // first account -> 
 user, err := store.Authenticate("alice", password, time.Now())
 ```
 
+Every new local password is checked before it is set (#43): not the
+username or the product's name (`Options.ProductName`), not on the
+common-password list (`Options.PasswordBlocklist`, by default the one
+built into the release, `blocklist.Embedded()`), and -- only if the app
+opts in, since it is an outbound call -- not in Have I Been Pwned's
+breach corpus:
+
+```go
+hibp, err := blocklist.NewPwnedChecker(blocklist.PwnedConfig{}) // only a 5-character hash prefix leaves the process
+store, err := gauntlet.OpenStore(myBackend, gauntlet.Options{
+	Log: logger, ProductName: "birdcage", BreachCheck: hibp,
+})
+```
+
+If HIBP cannot be reached the password is accepted against the built-in
+list and checked again at the account's next sign-in; a hit then forces
+a password change. See [docs/design.md](docs/design.md) §1.3.
+
 Runnable, checked examples for the entry points above, plus
 `NewSessionStore`, `OpenTokenStore` and `NewLoginLimiter`, are in
 [example_test.go](example_test.go) and
@@ -57,6 +75,48 @@ The HTTP layer that wires these into a `net/http` middleware is
 `Routes` serves mikroview's `/api/auth/*` and `/api/tokens` routes. See
 `go doc github.com/tomlawesome/gauntlet/gate` and
 [docs/design.md](docs/design.md) §1.5.
+
+gate records every sign-in attempt, failed ones included, through
+`Config.Audit`, with the client address `Config.ClientIP` resolves, and
+logs refused requests to `Config.Log` (see design.md §1.5). An admin can
+sign another account out everywhere (`POST
+/api/auth/users/{id}/logout-all`). gauntlet sends no mail itself; to tell
+the account's owner, set `Config.Notify`:
+
+```go
+type mailNotifier struct{ mail *myapp.Mailer; users *myapp.Directory }
+
+func (m mailNotifier) SessionsEnded(ctx context.Context, n gate.SessionsEndedNotice) error {
+	to, ok := m.users.EmailFor(n.Username) // the app maps the account to an address
+	if !ok {
+		return nil // nobody to tell
+	}
+	return m.mail.Send(ctx, to, "You were signed out",
+		fmt.Sprintf("An administrator (%s) signed you out of %d sessions. Reason: %s", n.EndedBy, n.Ended, n.Reason))
+}
+
+g, err := gate.New(gate.Config{ /* ... */ Notify: mailNotifier{mail, users}}, deps)
+```
+
+It is called after the admin's response, in its own goroutine, with a
+context that ends after 10 seconds; an error or panic is logged and
+never changes the admin's answer. `Reason` may be empty: the message
+should still say an administrator signed them out.
+
+To give admins a sign-in history (`GET /api/auth/sign-ins`), open a
+third document beside the accounts and tokens ones, sealed under its own
+label, and close it at shutdown so its last rows are saved:
+
+```go
+sealed, err := persist.Encrypt(myBackendFor("signins"), key, persist.EncryptOptions{Label: "signins"})
+signIns, err := gauntlet.OpenSignInHistory(sealed, gauntlet.SignInHistoryOptions{Log: logger}) // MaxRows 0: the newest 10,000
+defer signIns.Close()
+g, err := gate.New(cfg, gate.Deps{ /* ... */ SignIns: signIns})
+```
+
+Leave `Deps.SignIns` nil and the route answers 404; the audit records
+are written either way. See
+[docs/adr/0006-sign-in-history.md](docs/adr/0006-sign-in-history.md).
 
 ## Licence
 

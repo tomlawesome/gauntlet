@@ -67,6 +67,19 @@ func newTestGateWith(t *testing.T, backend persist.Backend, tokens *gauntlet.Tok
 	return &fixture{g: newGate(t, gate.Deps{Users: users, Tokens: tokens}), users: users, setupCode: code}
 }
 
+// newSignInsGate is newTestGate with a sign-in history in memory behind
+// Deps.SignIns, closed when the test ends.
+func newSignInsGate(t *testing.T) *fixture {
+	t.Helper()
+	history, err := gauntlet.OpenSignInHistory(nil, gauntlet.SignInHistoryOptions{})
+	if err != nil {
+		t.Fatalf("OpenSignInHistory: %v", err)
+	}
+	t.Cleanup(func() { _ = history.Close() })
+	users, code := openStore(t, persist.NewMemory())
+	return &fixture{g: newGate(t, gate.Deps{Users: users, SignIns: history}), users: users, setupCode: code}
+}
+
 // openStore opens a store over backend and returns the setup code it
 // announced, the one an operator would read from the log.
 func openStore(t *testing.T, backend persist.Backend) (*gauntlet.Store, string) {
@@ -387,6 +400,16 @@ type unlockUserResponse struct {
 type unlockSelfRequest struct {
 	Password string `json:"password"`
 	Code     string `json:"code"`
+}
+
+type adminLogoutAllRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+type adminLogoutAllResponse struct {
+	Username string `json:"username"`
+	Ended    int    `json:"ended"`
+	Notified bool   `json:"notified"`
 }
 
 type unlockCodeRequest struct {

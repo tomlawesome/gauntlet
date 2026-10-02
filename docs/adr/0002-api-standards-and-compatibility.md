@@ -4,7 +4,8 @@
 **Date:** 2026-09-30
 **Amended:** 2026-10-01 -- decision 1, stored-document versions (#29);
 decision 5, ASVS moved out of v0.2.0 (#31). 2026-10-02 -- decision 1,
-added fields raise the version (#28)
+added fields raise the version (#28); decision 1, a third stored
+document, the sign-in history (#53, ADR-0006)
 **Relates to:** [ADR-0001](0001-shared-auth-module.md), #22 (CI compatibility
 checks), #23 (Problem Details errors), mikroview #1202
 
@@ -32,7 +33,8 @@ house rule (2026-09-30).
    follows **OpenID Connect Core** over OAuth 2.0, TOTP follows
    **RFC 6238**. Security requirements are measured against
    **OWASP ASVS**. The Go library follows **semantic versioning** under
-   Go's module compatibility rules. Stored documents (accounts, tokens)
+   Go's module compatibility rules. Stored documents (accounts, tokens
+   and, since #53, the sign-in history, which starts at version 1)
    carry a top-level `version` number; a v0.1.0 document, which has
    none, reads as version 1. A document newer than the running build
    reads is refused -- on open, on reload and by a write -- so an older

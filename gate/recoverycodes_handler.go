@@ -34,14 +34,14 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req recoveryCodesRegenerateRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	now := g.now()
 	// Password-gated and throttled by recheckPassword.
-	current, ok := g.recheckPassword(w, user, req.Password, "incorrect password", now)
+	current, ok := g.recheckPassword(w, r, user, req.Password, "incorrect password", now)
 	if !ok {
 		return
 	}
@@ -63,7 +63,7 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	g.audit(user.Username, "account.recovery_codes_regenerated", user.Username, "")
+	g.audit(r, user.Username, "account.recovery_codes_regenerated", user.Username, "")
 
 	writeJSON(w, http.StatusOK, recoveryCodesRegenerateResponse{RecoveryCodes: codes})
 }

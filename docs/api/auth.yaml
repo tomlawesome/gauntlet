@@ -62,7 +62,7 @@ info:
     sign-in is disabled, and every failure through it counts toward the
     disable. An account remembers at most three browsers, each for 45
     days from its latest sign-in there; sign out everywhere and an
-    admin's password reset forget them all. A frontend does nothing with
+    admin's password reset or sign-out forget them all. A frontend does nothing with
     it: the browser keeps and sends it.
 
     **Errors.** Every error body is `text/plain` holding one human-readable
@@ -130,7 +130,9 @@ paths:
         address by the login limiter (`429` at the limit), and nothing is
         created. The code is typed with or without its dashes, in either
         case. Refused once any account exists. Reachable while no account
-        exists; still needs the CSRF header.
+        exists; still needs the CSRF header. The password is checked as
+        every new password is (see `changePassword`); a refused one is
+        `400`, with the reason.
       security:
         - {}
       parameters:
@@ -502,11 +504,22 @@ paths:
       summary: Change the caller's own password
       description: |
         Needs `currentPassword` unless the account must change its password
-        -- an administrator reset it, or five second-factor steps in a row
-        failed -- (then only `newPassword`; this is the one route such a
-        session can reach, and both causes ended every earlier session, so
+        -- an administrator reset it, five second-factor steps in a row
+        failed, or a sign-in found the password in a known breach --
+        (then only `newPassword`; this is the one route such a
+        session can reach, and every cause ended every earlier session, so
         it was opened by a sign-in made since). The re-check is rate-limited per account. Ends every
         session on the account and sets a fresh session cookie.
+
+        A new password is refused with `400`, and a plain-text reason, when
+        it is under 8 characters; on the common-password list, in any
+        case; found in a known breach by the live Have I Been Pwned check,
+        where the application turned that on; or the account's username
+        or the product's name, give or take case, punctuation and digits
+        around it (#43). When the live check cannot be reached the
+        password is accepted and checked again at the next sign-in, which
+        sets `mustChangePassword` on a hit. The same checks apply to
+        `register` and `createUser`.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1100,7 +1113,7 @@ paths:
     post:
       operationId: createUser
       summary: Create an account (admin)
-      description: The only way to add an account once registration has closed. `role` defaults to `user`; `admin` is refused (one admin per deployment).
+      description: The only way to add an account once registration has closed. `role` defaults to `user`; `admin` is refused (one admin per deployment). The password is checked as every new password is (see `changePassword`); a refused one is `400`, with the reason.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1322,6 +1335,60 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/users/{id}/logout-all:
+    post:
+      operationId: adminLogoutAll
+      summary: Sign another account out everywhere (admin)
+      description: |
+        Ends every gauntlet session the account holds and forgets every
+        browser it remembers (the known-browser cookie), as the account's
+        own sign out everywhere does, without issuing it a new one. The
+        identity provider's own session is not touched. All of the
+        account's sessions or none: there is no admin route to end one
+        session, or to list another account's sessions (#53).
+
+        The body is optional. `reason` is at most 200 bytes of plain text
+        (no control or format characters); it goes into the audit record
+        and to the application's `Config.Notify`, which may mail the
+        account's owner. `notified` is true when the application was
+        asked -- after this response, in the background -- not that a
+        message was delivered.
+
+        `409` for the caller's own account: use `POST
+        /api/auth/logout-all`, which keeps this browser signed in.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLogoutAllRequest"
+      responses:
+        "200":
+          description: Every session the account held has ended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminLogoutAllResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NoSuchUser"
+        "409":
+          description: The account is the caller's own; nothing ends.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/users/{id}/totp:
     delete:
       operationId: clearUserTOTP
@@ -1405,6 +1472,90 @@ paths:
                 $ref: "#/components/schemas/TextError"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/sign-ins:
+    get:
+      operationId: listSignIns
+      summary: The sign-in history (admin)
+      description: |
+        Every sign-in attempt the gate has seen, newest first: the password
+        step, the second-factor step, the SSO callback and every attempt the
+        login limiter refused (#53). Kept in the application's third sealed
+        document (`signins`, ADR-0006), the newest 10,000 rows by default
+        (`gauntlet.DefaultMaxSignInRows`; the application may set up to
+        50,000); `total` says how full it is and `since` how far back it
+        goes.
+
+        A row may stand for several attempts: one source repeating one
+        outcome against one name within 10 minutes is one row whose
+        `count` grows and `until` moves. Failed attempts may start at most
+        100 rows per 10-minute bucket; past that they are counted in one
+        `unrecorded` row for the bucket, which carries only the required
+        fields. A name that matched no account is shown masked: its first
+        two characters and one `•` per further character, except common
+        probe names (root, admin, postgres and the like), which are shown
+        as typed. A name that matched an account is the account's
+        username.
+
+        `404` when the application keeps no history (`Deps.SignIns` is
+        nil). Page by passing the last row's `seq` as `before` while
+        `more` is true.
+      parameters:
+        - name: user
+          in: query
+          required: false
+          description: Only rows for this account `id`.
+          schema:
+            type: string
+        - name: address
+          in: query
+          required: false
+          description: Only rows from this client address, exactly. At most 64 bytes.
+          schema:
+            type: string
+            maxLength: 64
+        - name: outcome
+          in: query
+          required: false
+          description: Only rows with this outcome.
+          schema:
+            $ref: "#/components/schemas/SignInOutcome"
+        - name: before
+          in: query
+          required: false
+          description: Only rows whose `seq` is below this.
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          description: How many rows, 1 to 200; 50 when absent.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: A page of the history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignInList"
+        "400":
+          description: A query value is out of range -- an unknown outcome, a `before` that is not a positive whole number, a `limit` outside 1 to 200, or an `address` over 64 bytes.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/SignInsOff"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1618,9 +1769,10 @@ components:
         X-Auth-Gate:
           description: |
             Present only when the session is stopped at a door:
-            `must-change-password` (an administrator reset the account, or
+            `must-change-password` (an administrator reset the account,
             five second-factor steps in a row failed, which says someone
-            else knows the password; only `POST /api/auth/password` is
+            else knows the password, or a sign-in found the password in a
+            known breach; only `POST /api/auth/password` is
             reachable) or
             `must-enrol-factor` (the account has no second factor yet --
             every local-password account must hold one; only the TOTP
@@ -1665,6 +1817,12 @@ components:
             $ref: "#/components/schemas/TextError"
     PasskeysOff:
       description: This application has no passkeys (`Deps.Passkeys` is nil).
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    SignInsOff:
+      description: This application keeps no sign-in history (`Deps.SignIns` is nil).
       content:
         text/plain:
           schema:
@@ -1962,7 +2120,7 @@ components:
           type: boolean
         mustChangePassword:
           type: boolean
-          description: The session is stopped at the change-password door -- an administrator reset the account, or five second-factor steps in a row failed. The account records which of the two in neither case, so a frontend should not say.
+          description: The session is stopped at the change-password door -- an administrator reset the account, five second-factor steps in a row failed, or a sign-in found the password in a known breach. The account does not record which, so a frontend should not say.
         mustEnrolSecondFactor:
           type: boolean
           description: True only when the account has no second factor yet -- every local-password account must hold one.
@@ -2042,3 +2200,104 @@ components:
         value:
           type: string
           description: The raw bearer token; only in the response that creates it.
+    SignInOutcome:
+      type: string
+      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded]
+      description: |
+        How an attempt ended. `password_ok` is the right password with a
+        second factor still owed; `factor_refused` a wrong or used code or a
+        refused passkey; `locked`, `disabled` and `rate_limited` the login
+        limiter refusing it before any credential was checked; `unrecorded`
+        the failed attempts past a bucket's row budget. New values may be
+        added.
+    SignInRow:
+      type: object
+      additionalProperties: false
+      required: [seq, at, until, count, outcome]
+      properties:
+        seq:
+          type: integer
+          minimum: 1
+          description: The row's number, rising in the order rows began; what `before` takes.
+        at:
+          type: string
+          format: date-time
+          description: The first attempt the row stands for.
+        until:
+          type: string
+          format: date-time
+          description: The last attempt the row stands for.
+        count:
+          type: integer
+          minimum: 1
+          description: How many attempts the row stands for.
+        outcome:
+          $ref: "#/components/schemas/SignInOutcome"
+        userId:
+          type: string
+          description: The account the attempts were on. Absent when the name matched none.
+        username:
+          type: string
+          description: The account's username, or the name typed, masked (see the operation). Absent on an `unrecorded` row, and for an empty name.
+        method:
+          type: string
+          enum: [password, code, passkey, sso]
+          description: What the attempt presented. New values may be added.
+        address:
+          type: string
+          maxLength: 64
+          description: The client address the application resolved, for the first attempt.
+        userAgent:
+          type: string
+          maxLength: 256
+          description: The first attempt's `User-Agent`, with control and formatting characters removed.
+        lockedUntil:
+          type: string
+          format: date-time
+          description: The end of the lockout this attempt started, or for `locked` the one in force.
+        disabled:
+          type: boolean
+          description: True on the failure that disabled the account's sign-in, and on a `disabled` refusal.
+    SignInList:
+      type: object
+      additionalProperties: false
+      required: [signIns, more, total]
+      properties:
+        signIns:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/SignInRow"
+        more:
+          type: boolean
+          description: More rows match beyond this page.
+        total:
+          type: integer
+          minimum: 0
+          description: How many rows the history holds.
+        since:
+          type: string
+          format: date-time
+          description: When the oldest row began. Absent while the history is empty.
+    AdminLogoutAllRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+          description: Why, for the audit and the account owner's notice. At most 200 bytes (the length shown here counts characters); control and format characters are refused with `400`.
+    AdminLogoutAllResponse:
+      type: object
+      additionalProperties: false
+      required: [username, ended, notified]
+      properties:
+        username:
+          type: string
+        ended:
+          type: integer
+          minimum: 0
+          description: How many live sessions ended.
+        notified:
+          type: boolean
+          description: The application's notifier was asked to tell the account's owner. Asked, not delivered.

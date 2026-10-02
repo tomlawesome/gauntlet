@@ -184,18 +184,18 @@ it says so instead of repeating the reasoning.
 | Req | Level | Status | Evidence |
 |---|---|---|---|
 | 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44); a browser that completed a sign-in keeps a small allowance of its own during a lockout, so a stranger cannot cheaply lock the owner out, and its failures count toward the 50 (`knownbrowser.go`, `LoginLimiter.ReserveKnownBrowser`, #44) |
-| 6.1.2, 6.2.11 context-specific word list | 2 | Gap | #43 (password blocklist). See 800-63B §3.1.1.2 |
+| 6.1.2, 6.2.11 context-specific word list | 2 | Met | The list is the account's username and the product's name (`Options.ProductName`; gate adds `Config.ProductName` on its routes), matched whole-password, ignoring case, punctuation and digits around it (`PasswordMatchesContext`, `passwordcheck.go`), refused with `ErrPasswordContext` (#43). See 800-63B §3.1.1.2 |
 | 6.1.3, 6.3.4 all pathways documented, strength consistent | 2 | Met, with one deviation | Pathways: password then TOTP/passkey/recovery code; reset code then the same second factor (`gate/login_handler.go:129-172`); SSO; bearer token; setup code. All in `docs/api/auth.yaml`. Deviation: an SSO sign-in creates a session with no local second factor (`gate/oidc_handler.go:292`); see 6.8.4 |
 | 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met | `store.go:39` `minPasswordLength = 8`, conforming because a second factor is mandatory for every local-password account (#49); see 800-63B §3.1.1.2 |
 | 6.2.2 users can change their password | 1 | Met | `POST /api/auth/password`, `gate/password_handler.go` |
 | 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code, or (since #44) a sign-in with both factors, just proved the account: both causes end every earlier session in the write that sets the flag |
-| 6.2.4 checked against the top 3000 passwords | 1 | Gap | #43 (password blocklist) |
+| 6.2.4 checked against the top 3000 passwords | 1 | Partial | The check is built: every new password is checked, as typed and in lower case, against `Options.PasswordBlocklist`, by default `blocklist.Embedded()`, the 10,000 most prevalent Pwned Passwords (#43, ADR-0005), and refused with `ErrPasswordBlocked`. Until the first signed list ships (#52's owner setup) the embedded copy is empty and blocks nothing; v0.2.0 alone may ship so, and every later release refuses to tag without a list (`scripts/blocklist-age-check.sh`) |
 | 6.2.5 no composition rules | 1 | Met | Length is the only rule (`store.go:962`, `:1532`) |
 | 6.2.6, 6.2.7 masking, paste, password managers | 1 | App | Frontend; gauntlet imposes nothing that blocks them |
 | 6.2.8 verified exactly as received | 1 | Met | `password.go:92`, `:159`: raw bytes to Argon2id, no trimming or case change. See 800-63B §3.1.1.2 on NFC |
 | 6.2.9 at least 64 characters permitted | 2 | Met | No maximum; the 64 KiB body limit (`gate/httpjson.go:37`) is the only bound |
-| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, or five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44) |
-| 6.2.12 breached-password check | 2 | Gap | #43 (password blocklist) |
+| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44), or a sign-in recheck that finds the password in a breach (#43) |
+| 6.2.12 breached-password check | 2 | Met, opt-in | `Options.BreachCheck` with `blocklist.PwnedChecker`: HIBP's range API by k-anonymity (only the first 5 hex characters of the SHA-1 are sent, with `Add-Padding`), bounded by `BreachCheckTimeout` (5 s), refused with `ErrPasswordBlocked`. An outbound call, so the application turns it on. When HIBP cannot answer, the password is accepted against the embedded list, the miss logged, and the account marked (`User.BreachCheckPending`); the next sign-in rechecks, and a hit sets `MustChangePassword` and ends every session (owner, 2026-10-02, #43). SSO accounts have no local password and are never checked |
 | 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `knownbrowser_test.go`, `gate/knownbrowser_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
 | 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
@@ -241,7 +241,7 @@ it says so instead of repeating the reasoning.
 | 7.4.2 sessions ended when an account is disabled or deleted | 1 | Met | A deleted user no longer resolves, so every session dies on its next request; `DeleteUser` also revokes the tokens it created |
 | 7.4.3 option to end other sessions after a factor change | 2 | Met | A password change and a reset end every session (`SessionsEndedAt`, `store.go:1556`, `resetcode.go:185`); TOTP and passkey changes do not, and `POST /api/auth/logout-all` is the option |
 | 7.4.4 logout visible on every page | 2 | App | Frontend |
-| 7.4.5 admins can end a user's sessions | 2 | Met, bluntly | An admin reset code ends them (and the password); deleting the account ends them. No softer admin route |
+| 7.4.5 admins can end a user's sessions | 2 | Met | `POST /api/auth/users/{id}/logout-all` ends every session the account holds and forgets its remembered browsers, leaving its password and factors (`gate/users_logoutall_handler.go`, #53); audited as `user.sessions_ended`, and `gate.Config.Notify` lets the application tell the owner. A reset code or deleting the account also ends them |
 | 7.5.1 full re-authentication before changing authentication settings | 2 | Met | `recheckPassword` guards password change, TOTP enrol and delete, passkey register and delete, recovery-code regeneration (`gate/password_handler.go:45,67`, `gate/totp_handler.go:253`, `gate/passkey_handler.go:182,431`, `gate/recoverycodes_handler.go:44`) |
 | 7.5.2 users can view and end their sessions | 2 | Met, with a deviation | `GET /api/auth/sessions` lists the caller's own live sessions with the address and browser each signed in from; `DELETE /api/auth/sessions/{ref}` ends one, `logout-all` ends all (`gate/sessions_handler.go`, #48). Deviation: ending a session asks for no re-authentication, for any account, SSO-only included. Owner decision, 2026-10-02: signing out is a safe direction -- a stolen session can already end every session through `logout-all` without a password, and an SSO-only account has none to give. Ends gauntlet's session only, not the IdP's |
 | 7.5.3 step-up before highly sensitive operations | 3 | Not targeted | Admin routes (create user, create token, reset) rely on the session alone |
@@ -348,27 +348,45 @@ store, keep and protect:
   pressure (`ratelimit.go:251`), a lockout whose save failed
   (`ratelimit.go:512`), a refused setup code (`gate/register_handler.go:56`),
   an SSO policy denial (`gate/oidc_handler.go:154,268`), the setup code
-  itself once (`setupcode.go:109`). Lines name the account; they never
+  itself once (`setupcode.go:109`), a sessions-ended notifier that
+  failed (`gate/notify.go`), and rated Warn lines (`gate/warnrate.go`,
+  at most one per kind and address per minute) for a sign-in the login
+  limiter refused, a re-check it refused, a request body over 64 KiB, a
+  missing CSRF header, a malformed `Authorization` header, a role
+  refusal on gate's admin routes and the two door 403s, each with
+  `from=` the client address (#45). Lines name the account
+  (a name that matched none masked by `MaskUnknownUsername`); they never
   carry a password, code, token, cookie or secret.
 - `gate.Auditor.Record(actor, action, target, detail)`: `user.login`,
+  `user.login_failed` (a failed sign-in, or a wrong password or code at
+  an in-session re-check, `step=recheck`), `account.locked`,
+  `account.disabled` (#45, `gate/signin_record.go`),
+  `user.sessions_ended` (an admin's sign-out of another account, #53),
   `user.register`, `account.password_changed`, `account.totp_enabled`,
   `account.totp_disabled`, `user.totp_cleared`, `account.passkey_added`,
   `account.passkey_removed`, `account.passkey_clone_suspected`,
   `user.passkeys_cleared`, `account.link_sso`, `account.sessions_ended`,
   `account.recovery_codes_regenerated`, `user.create`, `user.delete`,
-  `user.password_reset`, `token.create`, `token.revoke`. Timestamps and
-  storage are the application's sink.
+  `user.password_reset`, `token.create`, `token.revoke`, each ending
+  with `from=` the client address (#45). Timestamps and storage are the
+  application's sink.
+- The sign-in history (#53, ADR-0006), a third sealed document the
+  application stores (`gate.Deps.SignIns`): one row per sign-in
+  attempt or fold of alike attempts -- time, account or masked name,
+  outcome, method, address, browser -- the newest 10,000 by default,
+  read by admins through `GET /api/auth/sign-ins`. Never a password,
+  code or a name as typed.
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
 | 16.1.1 inventory | 2 | Met | Above |
-| 16.2.1 who, what, when, where | 2 | Gap, partial | Who and what are in every record; when is the sink's; where (client address) is in none. Part of #45 (log failed sign-ins) |
+| 16.2.1 who, what, when, where | 2 | Met | Who and what are in every record; when is the sink's; where (`from=` the client address, quoted) is in every audit record a request writes (`gate.audit` takes the request) and every refused-request Warn line (#45); the sign-in history keeps the address and browser of each attempt (#53) |
 | 16.2.2 UTC timestamps | 2 | App | The sink's clock |
 | 16.2.3, 16.2.4 only documented sinks, parseable | 2 | Met | Only the two channels above; `slog` is structured |
 | 16.2.5 no secrets in logs | 2 | Met | Inventory above; raw token shown once in the create response only |
-| 16.3.1 all authentication attempts logged, success and failure | 2 | Gap | Successes are audited (`user.login`); a refused password, code, assertion or setup code is counted by the limiter but not logged. #45 (log failed sign-ins) |
-| 16.3.2 failed authorization logged | 2 | Gap | 403s (CSRF, role, doors) are silent. #45 (log failed sign-ins) |
-| 16.3.3 attempts to bypass controls logged | 2 | Gap | Lockouts, malformed `Authorization`, oversize bodies: silent. #45 (log failed sign-ins) |
+| 16.3.1 all authentication attempts logged, success and failure | 2 | Met | Every sign-in attempt is recorded (`gate/signin_record.go`): `user.login` for password, second-factor and SSO sign-ins, `user.login_failed` for each refused password, code, passkey assertion or SSO identity the limiter admitted, a rated Warn line for each it refused, and a row in the sign-in history when the application keeps one (#53); a wrong password or code at an in-session re-check is `user.login_failed` with `step=recheck`, a refused re-check a rated Warn line; a refused setup or unlock code is logged (#45) |
+| 16.3.2 failed authorization logged | 2 | Met | A rated Warn line with the address for a missing CSRF header, an unrecognised role, either door, and a role refusal on every admin route `Routes` serves (`gate/protect.go` `warnRefused`, `adminOnly`). An application's own `RequireRole` wrapping has no `Gate` to log through and writes nothing (#45) |
+| 16.3.3 attempts to bypass controls logged | 2 | Met | A lockout starting is `account.locked`, a disable `account.disabled` (on the ordinary path and through a known browser's allowance), every attempt refused during either a rated Warn line, and a malformed `Authorization` header and a request body over 64 KiB each a rated Warn line (#45) |
 | 16.3.4 unexpected errors logged | 2 | Met | `logError` on every backend or sealing failure |
 | 16.4.1 log injection | 2 | Met | Usernames refuse control and format characters (`username.go:74-82`); token names likewise (`token.go`); `slog` quotes |
 | 16.4.2, 16.4.3 log protection and shipping | 2 | App | The sink |
@@ -395,6 +413,7 @@ store, keep and protect:
 | 14.3.2 `Cache-Control: no-store` | 2 | Gap | Not set; #46 (no-store/nosniff headers) |
 | 15.1.2 dependency inventory | 2 | Met | `go.sum`, `supply-chain/licence-policy.yml`, `govulncheck` in CI |
 | 15.2.2 resource-heavy functions bounded | 2 | Met | At most 4 concurrent Argon2id (`password.go:66`), limiter before hashing, 64 KiB bodies |
+| Request floods (no ASVS row) | -- | App | Gauntlet limits every route that checks a guessable secret (above) and nothing else: session IDs and bearer tokens are 128 random bits (`id.go`), out of reach of guessing at any rate. A general per-address request limit across all routes belongs in the application's reverse proxy, which sees every request before the application does (owner, 2026-10-02) |
 | 15.3.1 only the needed fields returned | 1 | Met | `blankCredentials`; closed response schemas |
 | 15.3.3 mass assignment | 2 | Met | Each handler decodes a named request struct |
 | 15.3.4 client IP from a trusted field | 2 | App | `ClientIP` |
@@ -409,10 +428,10 @@ store, keep and protect:
 
 ### Summary
 
-At L2 gauntlet meets every requirement except: password blocklists
-(6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
-decisions (16.2.1, 16.3.1–16.3.3). Each has an issue; the password
-blocklist needs the owner. The lockout shape from the 800-63B review is
+At L2 gauntlet meets every requirement except: the common-password
+list's data (6.2.4: the check is built, the first signed list is #52's
+owner setup). The breached-password check (6.2.12)
+is met where the application turns on the live HIBP check. The lockout shape from the 800-63B review is
 settled (#44). Three deviations are recorded rather than fixed: the TOTP
 acceptance window, the SSO sign-in's reliance on the IdP's policy, and
 ending one session without re-authentication (7.5.2, owner 2026-10-02).
@@ -466,12 +485,12 @@ already holds the evidence, the row points at it.
 | 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms | `minPasswordLength = 8` (`store.go:39`), conforming unconditionally because a second factor is mandatory for every local-password account and cannot be turned off (#49) |
 | Permit at least 64 characters; accept printing ASCII, space and Unicode; count code points (SHOULD) | Conforms | No maximum, no character rules; length counted in characters (`store.go:962`, `:1532`) |
 | No other composition rules (SHALL NOT) | Conforms | None |
-| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too and sign the account out everywhere (`LoginLimiter.SecondFactorFailed`, #44) |
+| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too and sign the account out everywhere (`LoginLimiter.SecondFactorFailed`, #44); so does a sign-in whose breach recheck finds the password in HIBP (`Store.Authenticate`, #43) |
 | No hints, no knowledge-based questions | Conforms | None exist |
 | Verify the whole password, no truncation | Conforms | `password.go:92`, `:159` |
 | NFC normalisation before hashing (SHOULD) | Deviation | Not applied: ASVS 6.2.8 asks for the bytes exactly as received, and both consumers' operators type on their own devices. A password typed on a device that composes accented characters differently will not match; documented, not fixed |
-| Blocklist of common, expected and compromised passwords, whole-password match, reason given on refusal (SHALL) | Gap | None. #43 (password blocklist); owner decision on the list |
-| Guidance on choosing a strong password (SHALL) | Application | Frontend copy; gauntlet returns a plain "too short" |
+| Blocklist of common, expected and compromised passwords, whole-password match, reason given on refusal (SHALL) | Partial | Built (#43): context words (username, product name), the embedded common-password list, and the opt-in live HIBP check, each whole-password, each refusal a plain reason (`ErrPasswordContext`, `ErrPasswordBlocked`, mapped to `400` by gate). The embedded list is empty until the first signed list ships (#52's owner setup, ADR-0005); an application that turns on the HIBP check is covered meanwhile |
+| Guidance on choosing a strong password (SHALL) | Application | Frontend copy; gauntlet returns a plain reason for each refusal: too short, common or breached, too close to the username or product name |
 | Rate limiting on the account (SHALL, §3.2.2) | Conforms | Below |
 | Password managers and paste allowed | Conforms | Nothing server-side interferes |
 | Salted and hashed with a password hashing scheme, cost as high as practical, parameters stored with each hash, salt at least 32 bits | Conforms | Argon2id, RFC 9106 §4 second profile, 128-bit salt, parameters in the hash string (`password.go:28-48`, `:94`). ASVS 11.4.2 |
@@ -508,7 +527,7 @@ stand alone, which these never do.
 | Accepted only once while valid (replay resistance, §3.2.7) | Conforms | `TOTPLastCounter`, advanced under the same lock as the check (`totp.go:394-434`); the enrolment code cannot also sign in (`totp.go:344`) |
 | Defined lifetime from clock drift plus entry delay | Conforms, and the ASVS 6.5.5 deviation | One step either side of now, never two (`totp.go:64`, `TestVerifyTOTPRejectsTwoStepsAway`): the drift allowance NIST describes, and the 90 s ASVS counts against |
 | Rate limiting SHALL for outputs under 64 bits (§3.2.2) | Conforms | 6 digits; shares the account budget, so at most 50 consecutive guesses before sign-in is disabled (#44) |
-| Warn on a duplicate OTP (MAY) | Not done | A replay is refused silently; #45 (log failed sign-ins) would at least record it |
+| Warn on a duplicate OTP (MAY) | Not done | A replay is refused without telling the subscriber; it is recorded as `user.login_failed` (`factor_refused`) with the address, and as a row of the sign-in history (#45, #53) |
 
 ### Cryptographic authenticators: passkeys (§3.1.6, §3.1.7, §3.2.5, Appendix B)
 
@@ -538,9 +557,9 @@ stand alone, which these never do.
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Record of every bound authenticator with event times (§4.1) | Conforms, one gap | `TOTPConfirmedAt`, `Passkey.CreatedAt` and `LastUsedAt`, `PasswordChangedAt`. Recovery codes carry no issue time (`GenerateRecoveryCodes` ignores `now`); the audit record `account.recovery_codes_regenerated` holds it. Source address of a binding is not recorded (SHOULD): #45 (log failed sign-ins) adds the address to audit detail |
+| Record of every bound authenticator with event times (§4.1) | Conforms | `TOTPConfirmedAt`, `Passkey.CreatedAt` and `LastUsedAt`, `PasswordChangedAt`. Recovery codes carry no issue time (`GenerateRecoveryCodes` ignores `now`); the audit record `account.recovery_codes_regenerated` holds it. Every binding's audit record carries the source address (`from=`, SHOULD; #45) |
 | Binding an additional authenticator needs authentication at the account's current AAL (§4.1.2.1) | Conforms | TOTP enrol and passkey registration need the session and the password again (`gate/totp_handler.go:67`, `gate/passkey_handler.go:182`); a first factor is enrolled behind the AAL1 session the forced-enrolment door allows, which §4.1.2.1 permits when the account "currently has only AAL1" |
-| Notify the subscriber, independently of the binding transaction (§4.1.2.1, §4.2.3, §4.6) | Deviation | Gauntlet stores no contact addresses and sends nothing; the owner's standing rule forbids its agents from sending mail at all. Every binding, recovery and invalidation is an audit record instead, which the single operator reads. Documented, not fixed |
+| Notify the subscriber, independently of the binding transaction (§4.1.2.1, §4.2.3, §4.6) | Deviation | Gauntlet stores no contact addresses and sends nothing; the owner's standing rule forbids its agents from sending mail at all. Every binding, recovery and invalidation is an audit record instead, which the single operator reads. The one hook is an admin ending another account's sessions, which calls the application's `gate.Config.Notify` so it can mail the owner (#53). Documented, not fixed |
 | Encourage two means of authentication (SHOULD) | Conforms | Recovery codes are minted with the first second factor; TOTP and passkeys coexist |
 | Account recovery: an application-specific method is allowed if risk-assessed and documented (§4.2.1) | Conforms, documented here | The method is an admin-issued reset code read out in person or on a trusted call (`resetcode.go` header). It replaces the password only; the second factor is still demanded (`gate/login_handler.go:172`), which is §4.2.2.2's "one recovery code plus one bound single-factor authenticator". An admin clearing the second factor as well is the "interaction with a CSP agent" case. Risk: whoever holds admin can take any account; that is already true of the host |
 | Issued code validity 24 h, throttled, at least six digits (§4.2.1.2) | Conforms | `ResetCodeTTL` 24 h, 80 bits, single use, Argon2id-hashed, counted by the login limiter |
@@ -565,9 +584,9 @@ stand alone, which these never do.
 
 ### Summary of findings
 
-Conforms on everything above except: the password blocklist (#43, owner
-decision on the list); refused attempts and binding sources not logged
-(#45). Documented
+Conforms on everything above except: the common-password list's data
+(the check is built, #43; the first signed list is #52's owner setup).
+Documented
 deviations: no NFC normalisation, no pepper, no out-of-band
 notifications, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),

@@ -201,6 +201,11 @@ func (u *User) HasActiveTOTP() bool
 func (u *User) HasSecondFactor() bool
 
 type Options struct { Log *slog.Logger; OnSetupCode SetupCodeHandler }     // new; OnSetupCode #37
+//   ...; PasswordBlocklist PasswordList; ProductName string; BreachCheck BreachChecker  // #43
+type PasswordList interface { Contains(password string) bool }             // *blocklist.List, *blocklist.Refresher
+type BreachChecker interface { Breached(ctx context.Context, password string) (bool, error) } // *blocklist.PwnedChecker
+func PasswordMatchesContext(password string, words ...string) bool        // #43
+const BreachCheckTimeout = 5 * time.Second                                 // #43
 type SetupCodeHandler interface { SetupCode(code string) }; type SetupCodeFunc func(code string) // adapter, as http.HandlerFunc
 func OpenStore(b persist.Backend, opts Options) (*Store, error)            // = OpenWithBackend
 func (s *Store) Persisted() bool
@@ -213,7 +218,7 @@ func (s *Store) DeleteUser(id string) (*User, error)
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error)
 func (s *Store) Admin() *User
 func (s *Store) HasLocalAdmin() bool
-func (s *Store) Authenticate(username, password string, now time.Time) (*User, error)     // also redeems a live reset code
+func (s *Store) Authenticate(username, password string, now time.Time) (*User, error)     // also redeems a live reset code; rechecks a BreachCheckPending account (#43)
 func (s *Store) Get(id string) (*User, bool)
 func (s *Store) ByUsername(username string) (*User, bool)
 func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
@@ -284,12 +289,15 @@ func (l *LoginLimiter) Reserve(key string, now time.Time) bool     // addresses,
 func (l *LoginLimiter) Release(key string, now time.Time)
 func (l *LoginLimiter) RecordFailure(key string, now time.Time)
 func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only; prefer Reserve before a slow check
-func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
+func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19; ReserveAccountDecision's Allowed
+func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision // new (#45): why it refused or what it started
+type AccountDecision struct { Allowed, Locked, Disabled bool; LockedUntil time.Time; LockoutStarted, DisabledNow bool; Lockouts int }
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
 func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time)           // #44: completed sign-in resets the count
 func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword, end every session
 func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) error                // #44: Store.UnlockLogin plus this limiter's own count
 func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time) bool // #44: a known browser's own budget once the ordinary path refuses
+func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision // new (#45): Disabled, DisabledNow, Lockouts
 func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time)
 const MaxConsecutiveLoginFailures = 50                                                             // #44: disables local sign-in
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
@@ -301,6 +309,26 @@ type AccountLockouts interface {                                    // *Store im
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
 }
+
+type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
+type SignInMethod string  // password, code, passkey, sso
+type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool }
+func MaskUnknownUsername(typed string) string // new (#53): first two runes + one • per further rune; probe names (root, admin, ...) kept
+
+// The sign-in history (#53, ADR-0006): a third sealed document, "signins".
+func OpenSignInHistory(b persist.Backend, opts SignInHistoryOptions) (*SignInHistory, error) // nil b = memory only
+type SignInHistoryOptions struct { Log *slog.Logger; MaxRows int; AllowPlaintextAtRest bool }
+const DefaultMaxSignInRows = 10_000 // MaxRows 0; MaxSignInRows = 50_000 is the most allowed
+const DefaultSignInListLimit, MaxSignInListLimit = 50, 200
+type SignInRow struct { Seq uint64; At, Until time.Time; Count int; UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool }
+type SignInQuery struct { UserID, Address string; Outcome SignInOutcome; Before uint64; Limit int }
+func (h *SignInHistory) Record(ev SignInEvent, now time.Time)        // never waits for a save
+func (h *SignInHistory) List(q SignInQuery) (rows []SignInRow, more bool) // newest first
+func (h *SignInHistory) Summary() (total int, since time.Time)
+func (h *SignInHistory) Flush(ctx context.Context) error           // save now
+func (h *SignInHistory) Close() error                              // flush once, stop the writer
+func (h *SignInHistory) Persisted() bool
+func (h *SignInHistory) Describe() string
 
 func ValidateUsername(username string) error       // 1–64 runes, no control/format chars
 func ValidateLocalUsername(username string) error  // additionally: no "@"
@@ -320,7 +348,7 @@ const ResetCodeTTL = 24 * time.Hour
 
 // Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
 // ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
-// ErrPasswordTooShort, ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
+// ErrPasswordTooShort, ErrPasswordBlocked, ErrPasswordContext (#43), ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
 // ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin,
 // ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
 // ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
@@ -483,8 +511,33 @@ public GitHub mirror's `pwned-top10k-current` release, adopts it only
 if its checksum, Ed25519 signature (keys in `blocklist/keys/`) and
 format check out and it is newer than the list in use, and keeps it in
 a directory the app names. `cmd/pwlist` builds the list from HIBP's
-range API in a monthly scheduled pipeline. #43 wires it into password
-checks.
+range API in a monthly scheduled pipeline.
+
+**New-password checks** (#43, `passwordcheck.go`). `Register`,
+`CreateUser` and `SetPassword` -- the only places a local password is
+set -- run the same checks, cheapest first, before the Argon2id hash:
+the 8-character minimum; the account's username and
+`Options.ProductName`, whole-password, ignoring case, punctuation and
+digits around them (`PasswordMatchesContext`; gate adds its own
+`Config.ProductName` on its routes) -> `ErrPasswordContext`; the
+common-password list, as typed and in lower case
+(`Options.PasswordBlocklist`, default `blocklist.Embedded()`) ->
+`ErrPasswordBlocked`; and, only when the application sets
+`Options.BreachCheck`, HIBP's range API by k-anonymity
+(`blocklist.PwnedChecker`: the first 5 hex characters of the SHA-1
+sent with `Add-Padding`, suffixes compared locally, padding entries of
+count 0 ignored) -> `ErrPasswordBlocked`. The live check is bounded by
+`BreachCheckTimeout` (5 s) even if the checker ignores its context.
+When it cannot answer, the password is accepted against the local
+list, the miss is logged, and `User.BreachCheckPending` is set (accounts
+document version 5). `Authenticate`, after the password verifies,
+rechecks a marked account: a hit sets `MustChangePassword` and
+`SessionsEndedAt` in one write, as `requirePasswordChange` does, since
+the change-password door then asks for no current password; a clean
+answer clears the mark; no answer leaves it. A new password, a reset
+code and an SSO link that removes the local password all settle the
+mark. SSO-provisioned accounts never reach any of this (owner,
+2026-10-02, on #43).
 
 ### 1.4 `gauntlet/oidc`
 
@@ -509,7 +562,8 @@ type Config struct {
     RequireSecondFactor bool          // deprecated, ignored: see §1.6
     Log                 *slog.Logger
     Audit               Auditor       // nil = no audit
-    ClientIP            func(*http.Request) string // limiter key; app owns trusted-proxy policy
+    Notify              Notifier      // new (#53): told after an admin ends another account's sessions; nil = nobody told
+    ClientIP            func(*http.Request) string // limiter key and from= in every audit record (#45); app owns trusted-proxy policy
     Now                 func() time.Time
 }
 
@@ -522,6 +576,7 @@ type Deps struct {
     OIDCState  *oidc.StateCodec
     OIDCPolicy oidc.Policy
     Passkeys   gauntlet.PasskeyCeremony // nil = no passkeys in this app: passkey routes answer 404 (G8, ADR-0004)
+    SignIns    *gauntlet.SignInHistory  // new (#53): nil = no history; GET /api/auth/sign-ins answers 404, audit unchanged
 }
 
 func New(cfg Config, deps Deps) (*Gate, error)
@@ -542,7 +597,59 @@ func (g *Gate) Routes() http.Handler
 func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below min
+
+// new (#53): the application mails the owner; gauntlet sends nothing.
+type Notifier interface { SessionsEnded(ctx context.Context, n SessionsEndedNotice) error }
+type SessionsEndedNotice struct { UserID, Username, EndedBy, Reason string; Ended int; At time.Time }
+const MaxSessionEndReason = 200 // bytes
 ```
+
+**Sign-in records (#45).** Every sign-in attempt -- the password step,
+the code or passkey step, the SSO callback -- goes through one helper,
+`recordSignIn` (`gate/signin_record.go`), which writes through `Auditor`:
+`user.login` on a completed sign-in, detail `from="<address>"` (quoted:
+`ClientIP` may read a client-set header), prefixed `via second factor; `
+or `via sso; `; `user.login_failed` for each failed attempt the limiter
+admitted, actor and target the account's username or `unknown`, detail
+`outcome=<outcome> method=<method> from="..."` plus `name="Hu••••"`
+(`MaskUnknownUsername`) when no account matched -- the typed name never
+reaches the audit or the log; and `account.locked` (`until=... lockouts=n
+from=...`) or `account.disabled` beside the failure whose limiter
+decision started a lockout or the disable. An attempt that starts one
+but succeeds hands it back and writes neither. A limiter refusal (429)
+is no audit record but a rated Warn line, as are a missing CSRF header,
+a malformed `Authorization` header, a role refusal on `Routes`' admin
+routes and the two door 403s: at most one line per kind and address per
+minute, the next counting what was left out, 4,096 sources tracked
+before the rest share one line (`gate/warnrate.go`). A right password
+with a factor still owed, a "sign in again" refusal and a backend
+failure write nothing.
+
+Every other audit record a request writes ends with `; from="<address>"`
+(`gate.audit` takes the request, so none can leave it out). A wrong
+password or code at an in-session re-check (`recheckPassword`,
+`recheckSecondFactor`) is `user.login_failed` with `step=recheck`; a
+re-check the limiter refuses and a request body over 64 KiB each leave a
+rated Warn line. A failure through a known browser's allowance that disables
+sign-in writes `account.disabled`, read from
+`ReserveKnownBrowserDecision`.
+
+**Sign-in history (#53).** `recordSignIn` also appends each event to
+`Deps.SignIns` when set, and `GET /api/auth/sign-ins` (admin) pages
+through it newest first, filtered by `user`, `address` and `outcome`,
+`before` a row's `seq`, `limit` 1-200 (default 50); 404 while
+`Deps.SignIns` is nil. Re-checks are not rows: the caller already holds
+a session. Bounds and write cadence are in §4 and ADR-0006.
+
+**Admin sign-out (#53).** `POST /api/auth/users/{id}/logout-all` ends
+every gauntlet session the account holds and forgets its remembered
+browsers -- all or nothing, no per-session admin route and no admin list
+of another account's sessions (owner, 2026-10-02). 409 for the caller's
+own account, 404 for none, 400 for a reason over 200 bytes or holding a
+control or format character. Audited as `user.sessions_ended`. Once the
+response is written, `Config.Notify` is called in its own goroutine with
+a 10-second deadline and `recover()`; an error or panic is one log line,
+and the response's `notified` means asked, not delivered.
 
 The HTTP contract `Routes` serves -- every route, request, response,
 status code and error body, carried over from mikroview's
@@ -689,7 +796,7 @@ One table, both dialects, migration `0025_auth_store`:
 
 ```sql
 CREATE TABLE auth_store (
-  name       TEXT PRIMARY KEY,   -- 'accounts' | 'tokens'
+  name       TEXT PRIMARY KEY,   -- 'accounts' | 'tokens' | 'signins'
   payload    TEXT NOT NULL,      -- the JSON document, byte-exact
   version    BIGINT NOT NULL,    -- compare-and-swap token
   updated_at TEXT NOT NULL
@@ -715,6 +822,14 @@ stays `TEXT`: the envelope is JSON text. `OpenStore` refuses the
 unwrapped table (`gauntlet.ErrPlaintextAtRest`). Birdcage has no
 plaintext accounts document to migrate, so it never needs
 `MigratePlaintext`.
+
+The sign-in history (#53, [ADR-0006](adr/0006-sign-in-history.md)) is a
+third row of the same table: birdcage adds the name `signins`, opened
+through `persist.Encrypt(store.NewAuthBackend(database, "signins"), key,
+persist.EncryptOptions{Label: "signins"})` and
+`gauntlet.OpenSignInHistory`, passed as `gate.Deps.SignIns`
+and closed at shutdown. That is birdcage's change to make, reported
+there; nothing here changes birdcage.
 
 Why a document table rather than `users`/`tokens` rows: gauntlet's
 `Store` is an in-memory index that persists whole documents -- that is
@@ -870,7 +985,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
-| Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept |
+| Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept; new (#53): an admin's `POST /api/auth/users/{id}/logout-all` revokes every session of another account and forgets its remembered browsers |
 | Sessions their owner cannot see | none: logout-all only | new (#48): `GET /api/auth/sessions` lists the caller's own live sessions (address and agent from sign-in, capped at 100 rows with a `total`) by a one-way `ref`, never the ID; `DELETE /api/auth/sessions/{ref}` ends one, with no password (owner, 2026-10-02: signing out is a safe direction), and 404 for any ref not the caller's. Own sessions only: no admin view of anyone else's |
 
 ### OIDC
@@ -896,6 +1011,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
+| Unseen failures | only successes audited | new (#45): every failed sign-in, and every wrong password or code at an in-session re-check, is `user.login_failed`; a lockout or disable starting, through a known browser too, is `account.locked` or `account.disabled`; every audit record a request writes carries the client address; refused requests and oversize bodies are rated Warn lines (§1.5) |
 | Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19, #44): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save as it starts and one as it clears, not per guess); each lockout lasts three times the last (5 min up to 24 h) and 50 failures in a row disable sign-in until an unlock; addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
 | `golang.org/x/crypto` advisories | all 30 entries are in `ssh`, `ssh/agent` or `openpgp`; none touches `argon2` | import only `argon2`; birdcage already carries this module at 0.57.0 |
 
@@ -913,6 +1029,18 @@ required, and attestation is `none` (ADR-0004 decision 5).
 `github.com/go-webauthn/webauthn` v0.18.2 is the newest release and has
 no entry in the OSV or Go vulnerability databases (re-checked
 2026-10-02 for G8); `govulncheck` in CI watches it from here on.
+
+### Sign-in history (#53, ADR-0006)
+
+| Pitfall | Module does |
+|---|---|
+| A flood of failed attempts becomes a flood of writes | attempts change memory only; one writer saves the whole document at most every 5 s while a new row is unsaved and every 60 s while only counts changed; `Flush`/`Close` at shutdown. A crash loses at most that much; the audit sink has every attempt |
+| A flood of attempts fills the history | alike attempts within 10 minutes fold into one row (`count`, `until`); failures may start at most 100 rows per 10-minute bucket, the rest counted in one `unrecorded` row; a success or a passed password step is never budgeted. 100,000 made-up names in 10 minutes are 101 rows |
+| The history grows without end | the newest `MaxRows` kept, 10,000 by default (owner, 2026-10-02), at most 50,000, oldest dropped; `total` and `since` show how full and how far back. ~340 B a row typically, ~645 B worst: 6.5 MB of JSON, 8.6 MB sealed in a text column, at the default |
+| A save holds up sign-ins | rows are copied under the lock; encode, seal and save run outside it (about 60 ms for a full worst-case history), one at a time |
+| A password typed into the username box is kept | a name matching no account is masked before it is stored, audited or logged (`MaskUnknownUsername`); probe names in full |
+| Addresses and browsers readable in a backup | sealed under its own `persist.Encrypt` label, `signins`; a plaintext backend is refused unless allowed |
+| Two writers, or a removed document | a conflicting save reloads and re-appends its unsaved rows renumbered; a removed document keeps memory and is logged once until a save succeeds |
 
 ### Common-password list (#52, ADR-0005)
 

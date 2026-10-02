@@ -28,9 +28,18 @@ import (
 // the field issued, so the allowance starts at each browser's next
 // completed sign-in. A build that reads up to version 3 refuses a
 // version-4 document rather than drop the field on its next save.
+// Version 5 (#43) added User.BreachCheckPending; an older document reads
+// it as false -- no breach recheck owed -- which is what it meant, since
+// no build that wrote it accepted a password the live check had not
+// answered for. A build that reads up to version 4 refuses a version-5
+// document rather than drop a recheck that is owed.
+//
+// The sign-in history (#53, signins.go) is the third document, version 1
+// from its first release: {"version":1,"nextSeq":n,"rows":[...]}.
 const (
-	accountsDocumentVersion = 4
+	accountsDocumentVersion = 5
 	tokensDocumentVersion   = 1
+	signInsDocumentVersion  = 1
 )
 
 // errNewerDocument is the decode error for a stored document whose
@@ -42,8 +51,8 @@ const (
 var errNewerDocument = errors.New("it was written by a newer gauntlet, and this build would drop what it does not know on the next save")
 
 // errSealedDocument is the decode error for a document that is
-// persist.Encrypt's sealed envelope rather than an accounts or tokens
-// document (#50): the backend holds ciphertext and was opened without
+// persist.Encrypt's sealed envelope rather than an accounts, tokens or
+// sign-in history document (#50): the backend holds ciphertext and was opened without
 // the wrapper -- an application that dropped persist.Encrypt from a
 // backend whose document it had already sealed. Without this check the
 // envelope, a JSON object with no "users" or "tokens" member, would
@@ -55,8 +64,8 @@ var errSealedDocument = errors.New("it is sealed (persist.Encrypt), and this bac
 // top-level object, without parsing the rest: a newer document must be
 // reported as newer even when the rest no longer parses as this build's
 // shape. A document without the field is version 0, which reads as 1.
-// A sealed envelope is refused here, before any shape is read, for both
-// stores at once -- see errSealedDocument.
+// A sealed envelope is refused here, before any shape is read, for every
+// store at once -- see errSealedDocument.
 func documentVersion(data []byte) (int, error) {
 	var head struct {
 		Version int             `json:"version"`

@@ -175,8 +175,9 @@ func (g *Gate) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 	if signedOut {
 		g.clearSessionCookie(w)
 	}
-	// The ref, never the agent or the address: the audit log is read by
-	// operators, and what a person's browser calls itself is theirs.
-	g.audit(user.Username, "account.sessions_ended", user.Username, "sessions ended: one, ref="+ref+", via session list")
+	// The ref, never the ended session's agent or address: the audit log
+	// is read by operators, and what a person's browser calls itself is
+	// theirs. (The caller's own address is appended, as to every record.)
+	g.audit(r, user.Username, "account.sessions_ended", user.Username, "sessions ended: one, ref="+ref+", via session list")
 	writeJSON(w, http.StatusOK, sessionEndedResponse{Ended: true, SignedOut: signedOut})
 }

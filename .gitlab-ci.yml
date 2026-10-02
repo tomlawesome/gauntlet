@@ -442,7 +442,8 @@ release:version:
   script:
     - apk add --no-cache git bash >/dev/null  # release-version-check.sh is bash (#56)
     # The release carries the common-password list, so refuse to tag
-    # while it is the placeholder or more than 90 days old (#52).
+    # while it is the placeholder or more than 90 days old (#52). v0.2.0
+    # alone may ship the placeholder (owner, 2026-10-02).
     - scripts/blocklist-age-check.sh
     - |
       set -eu

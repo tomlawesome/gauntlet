@@ -166,7 +166,7 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 	} else {
 		detail += "; local password removed"
 	}
-	g.audit(caller.Username, "account.link_sso", caller.Username, detail)
+	g.audit(r, caller.Username, "account.link_sso", caller.Username, detail)
 
 	// LinkOIDCIdentity sets SessionsEndedAt, which invalidates every
 	// session issued before it -- including the one that just made this
@@ -265,6 +265,7 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		// token, and a newline or terminal escape in either would
 		// otherwise forge a log line or run in the reader's terminal.
 		g.logWarn(fmt.Sprintf("refused SSO login for subject %q at %q: %v", identity.Subject, identity.Issuer, err))
+		g.recordSignIn(r, loginEvent(nil, ssoUsernameHint(identity), gauntlet.SignInSSORefused, gauntlet.SignInMethodSSO), loginReservation{}, now)
 		g.redirectWithSSOError(w, r, "not_permitted")
 		return
 	}
@@ -278,11 +279,7 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	usernameHint := identity.PreferredUsername
-	if usernameHint == "" {
-		usernameHint = identity.Email
-	}
-	user, _, err := g.deps.Users.FindOrCreateOIDCUser(identity.Issuer, identity.Subject, usernameHint, now)
+	user, _, err := g.deps.Users.FindOrCreateOIDCUser(identity.Issuer, identity.Subject, ssoUsernameHint(identity), now)
 	if err != nil {
 		g.redirectWithSSOError(w, r, "login_failed")
 		return
@@ -292,5 +289,15 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// the session this browser held for the account ends, since the
 	// cookie below replaces it (ASVS 7.2.4; see revokeReplacedSession).
 	g.issueSession(w, r, user.ID, now)
+	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodSSO), loginReservation{}, now)
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// ssoUsernameHint is the name an identity asks to be known by: its
+// preferred_username, else its email.
+func ssoUsernameHint(identity *oidc.Identity) string {
+	if identity.PreferredUsername != "" {
+		return identity.PreferredUsername
+	}
+	return identity.Email
 }

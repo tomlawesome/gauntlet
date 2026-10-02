@@ -6,6 +6,65 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Failed sign-ins, lockouts and refused requests are recorded, with the
+  client address (#45). Through `gate.Config.Audit`: `user.login_failed`
+  for each failed password, code, passkey assertion or refused SSO
+  identity the login limiter admitted (detail
+  `outcome=... method=... from="..."`; actor and target the account's
+  username, or `unknown` with the name masked when it matched no
+  account), and `account.locked` (`until=... lockouts=n from=...`) or
+  `account.disabled` beside the failure that started a lockout or
+  disabled sign-in. A refusal by the limiter (429), a missing CSRF
+  header, a malformed `Authorization` header, a role refusal on gate's
+  admin routes and the two door 403s are Warn lines on `Config.Log`
+  carrying `from=`, at most one per kind and address per minute. The
+  name typed for an attempt that matched no account never reaches the
+  audit or the log: `gauntlet.MaskUnknownUsername` keeps its first two
+  characters and its length (`Hunter2024` is `Hu••••••••`), and names
+  that probes try (`root`, `admin`, `postgres` and the like) in full.
+  `LoginLimiter.ReserveAccountDecision` (`AccountDecision`) is
+  `ReserveAccount` saying why it refused or what the attempt started;
+  `SignInOutcome`, `SignInMethod` and `SignInEvent` name an attempt for
+  the sign-in history (#53).
+- A sign-in history admins can page through (#53,
+  [ADR-0006](docs/adr/0006-sign-in-history.md)).
+  `gauntlet.OpenSignInHistory(backend, gauntlet.SignInHistoryOptions{})`
+  opens a third sealed document, `signins` (wrap its backend in
+  `persist.Encrypt` with the label `"signins"`; a plaintext backend is
+  refused unless `AllowPlaintextAtRest`, and a nil one keeps it in memory).
+  Pass it as the new `gate.Deps.SignIns` and every sign-in attempt
+  becomes a row: time, account or masked name, outcome, method, address
+  and browser. `GET /api/auth/sign-ins` (admin) lists them newest first,
+  filtered by `user`, `address` and `outcome`, paged with `before` and
+  `limit`; it answers 404 while `Deps.SignIns` is nil. The newest 10,000
+  rows are kept by default (`MaxRows`, at most 50,000). Attempts alike
+  within 10 minutes fold into one row with a `count`; failed attempts
+  may start at most 100 rows per 10 minutes, the rest counted in one
+  `unrecorded` row, so a flood of attempts is a bounded number of rows
+  and saves. Saves run in the background, at most every 5 s while a new
+  row is unsaved and every minute while only counts changed, and never
+  hold up a sign-in; call `Close` at shutdown to save the rest. The
+  document starts at version 1.
+- Every audit record a request writes now ends with `from="<address>"`
+  (#45), not only the sign-in records. A wrong password or code at an
+  in-session re-check (password change, authenticator and passkey
+  changes, recovery codes, an admin's own unlock) is `user.login_failed`
+  with `step=recheck`; a re-check the limiter refuses and a request body
+  over 64 KiB each leave a rated Warn line; and a failure through a known
+  browser's allowance that disables sign-in writes `account.disabled`
+  (`LoginLimiter.ReserveKnownBrowserDecision`, which
+  `ReserveKnownBrowser` now wraps).
+- `POST /api/auth/users/{id}/logout-all` lets an admin sign another
+  account out everywhere (#53): every gauntlet session it holds ends and
+  every browser it remembers is forgotten; its password and factors are
+  untouched. An optional `reason` (at most 200 bytes, no control or
+  format characters) goes into the `user.sessions_ended` audit record.
+  409 for the caller's own account, 404 for none. gauntlet sends no
+  mail: an application that sets the new `gate.Config.Notify` (a
+  `gate.Notifier`) is handed a `gate.SessionsEndedNotice` after the
+  response, in the background with a 10-second deadline, to mail the
+  account's owner; its failure is one log line and never changes the
+  admin's answer.
 - `persist.Encrypt(backend, key, persist.EncryptOptions{Label: "accounts"})`
   wraps any `persist.Backend` so every document is sealed before the
   backend stores it and opened after it is read: the AES-256-GCM
@@ -59,8 +118,36 @@ All notable changes to this project are documented in this file.
   checksum and signature verify and it is newer than the one in use,
   and keeps it in a directory the application names. Until the first
   signed list is published, `Embedded()` is empty and blocks nothing,
-  and a release refuses to tag. #43 will use it to refuse common
-  passwords.
+  and a release refuses to tag. `Refresher.Contains` lets a refresher
+  stand wherever a list is expected.
+- New passwords are checked before they are set (#43): `Register`,
+  `CreateUser` and `SetPassword`, and so gate's register, create-user
+  and change-password routes, refuse a password that is on the
+  common-password list (`Options.PasswordBlocklist`, by default
+  `blocklist.Embedded()`; a `*blocklist.Refresher` works too), in any
+  case, with `ErrPasswordBlocked`, and one that is the account's
+  username or the product's name, give or take case, punctuation and
+  digits around it, with `ErrPasswordContext` (`PasswordMatchesContext`;
+  new `Options.ProductName`, and gate adds its `Config.ProductName`
+  itself). gate answers both with `400` and a plain reason. The new
+  `PasswordList` interface is what the list option takes. Until the
+  first signed list ships, the embedded list blocks nothing.
+- An optional live breach check (#43): set `Options.BreachCheck` to a
+  `blocklist.PwnedChecker` (`NewPwnedChecker`, `PwnedConfig`,
+  `DefaultPwnedURL`) and every new password that passed the local
+  checks is looked up in Have I Been Pwned's Pwned Passwords by
+  k-anonymity -- only the first five hex characters of its SHA-1 are
+  sent, with padding requested -- and refused with
+  `ErrPasswordBlocked` on a hit. Each check is bounded by
+  `BreachCheckTimeout` (5 s), whatever the checker does. When HIBP
+  cannot answer, the password is accepted against the embedded list,
+  the miss is logged, and the account is marked (new
+  `User.BreachCheckPending`); its next sign-in rechecks the password,
+  and a hit sets `MustChangePassword` and ends every session on the
+  account, while a clean answer clears the mark. SSO accounts are never
+  checked. Off by default: gauntlet makes no outbound call the
+  application did not ask for. `BreachChecker` is the interface the
+  option takes.
 - `cmd/pwlist` and three CI jobs, run by a monthly pipeline schedule,
   build that list from HIBP, sign it on a dedicated runner, and publish
   it to the GitLab package registry and the GitHub mirror's releases.
@@ -177,6 +264,19 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The `user.login` audit record's detail now carries the client address
+  (`from="<address>"`, after `via second factor; ` on the code and
+  passkey step), where a one-step sign-in's was empty, and a completed
+  SSO sign-in now writes `user.login` too (`via sso; from=...`), which
+  it never did (#45). An audit consumer matching on the old detail
+  needs updating.
+
+- release:version lets v0.2.0, and only v0.2.0, ship with the
+  common-password list still the placeholder, so `Embedded()` blocks
+  nothing in that release; the first signed list does not exist yet.
+  Every later version is refused again until a real list is in place
+  (refs #52, owner 2026-10-02).
+
 - **Breaking.** `OpenStore` now refuses a backend that stores the
   accounts document in the clear -- one that does not implement
   `persist.AtRest`, which is every application database backend
@@ -273,14 +373,15 @@ All notable changes to this project are documented in this file.
   That run is kept in memory and starts again after a restart. Still
   one save as a lockout starts and one as it clears, never one per
   guess.
-- The accounts document is now version 4 (#44): version 3 added
-  `loginLockoutCount` and `loginDisabledAt`, and version 4
-  `knownBrowsers`. Version-1, -2 and -3 documents open unchanged with
-  the fields they lack empty, and are written as version 4 on their
-  next save; no migration is needed. No earlier build -- v0.1.0, or a
-  development build that wrote version 3 -- can open an accounts
-  document once this version has saved it, so keep a copy before
-  upgrading if a rollback is possible.
+- The accounts document is now version 5: version 3 (#44) added
+  `loginLockoutCount` and `loginDisabledAt`, version 4 (#44)
+  `knownBrowsers`, and version 5 (#43) `breachCheckPending`.
+  Version-1 to -4 documents open unchanged with the fields they lack
+  empty, and are written as version 5 on their next save; no migration
+  is needed. No earlier build -- v0.1.0, or a development build that
+  wrote version 3 or 4 -- can open an accounts document once this
+  version has saved it, so keep a copy before upgrading if a rollback
+  is possible.
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

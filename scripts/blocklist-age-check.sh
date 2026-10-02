@@ -8,7 +8,13 @@ set -eu
 #
 # Usage: scripts/blocklist-age-check.sh [DIR]
 #   DIR defaults to blocklist/embedded.
-#   MAX_AGE_DAYS (default 90) and NOW_EPOCH (default: now) are for tests.
+#   MAX_AGE_DAYS (default 90), NOW_EPOCH (default: now) and
+#   RELEASE_VERSION (default: the VERSION file) are for tests.
+#
+# One release only, v0.2.0, may ship the placeholder: the first signed
+# list did not exist yet (owner, 2026-10-02). release-version-check.sh
+# refuses to cut a version twice, so every later release is refused
+# again until a real list is in place.
 #
 # POSIX sh and awk only: release:version runs on plain Alpine, which has
 # busybox and no bash, GNU date or Go. The date arithmetic is Howard
@@ -29,7 +35,14 @@ fail() {
   exit 1
 }
 
+PLACEHOLDER_VERSION=0.2.0
+version="${RELEASE_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}"
+
 if [ -e "$DIR/PLACEHOLDER" ]; then
+  if [ "$version" = "$PLACEHOLDER_VERSION" ] && [ ! -e "$DIR/top10k.txt" ] && [ ! -e "$DIR/top10k.txt.sig" ]; then
+    echo "blocklist-age-check: WARNING -- v$version ships the placeholder: no common-password list, so Embedded() blocks nothing. Allowed for v$PLACEHOLDER_VERSION only (#52)." >&2
+    exit 0
+  fi
   fail "$DIR holds the placeholder, not a list. The first real list comes from the first signed run of the blocklist schedule; then run scripts/update-blocklist.sh (#52)."
 fi
 list="$DIR/top10k.txt"

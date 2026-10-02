@@ -425,6 +425,44 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // recovers inside the window ends up holding it, and a restart after
 // that is still locked out.
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool {
+	return l.ReserveAccountDecision(lockouts, accountID, now).Allowed
+}
+
+// AccountDecision is ReserveAccountDecision's answer: whether the attempt
+// was admitted, and why it was refused or what it started. It only
+// reports what ReserveAccount decides anyway, so a caller can record a
+// sign-in attempt's outcome (#45, #53) without a second read.
+type AccountDecision struct {
+	// Allowed is ReserveAccount's answer.
+	Allowed bool
+	// Locked and Disabled say why an attempt was refused: a lockout in
+	// force, or the account's sign-in disabled. Neither set with
+	// Allowed false means the in-memory count refused it (see
+	// ReserveAccount): a lockout cleared elsewhere while this limiter
+	// still counts the attempts behind it.
+	Locked   bool
+	Disabled bool
+	// LockedUntil is when the lockout ends: the one in force for a
+	// Locked refusal, or the one this attempt started (LockoutStarted).
+	// Zero otherwise.
+	LockedUntil time.Time
+	// LockoutStarted is set on the admitted attempt that filled the
+	// window and so started a lockout. It is decided before the
+	// attempt's outcome is known: one that turns out to succeed hands
+	// the lockout back (SignedIn, ReleaseAccount).
+	LockoutStarted bool
+	// DisabledNow is set on the admitted attempt that brought the
+	// account's consecutive failures to MaxConsecutiveLoginFailures,
+	// disabling its sign-in, with the same caveat.
+	DisabledNow bool
+	// Lockouts is the account's count of lockouts since its last
+	// completed sign-in, this attempt's included (User.LoginLockoutCount).
+	Lockouts int
+}
+
+// ReserveAccountDecision is ReserveAccount, reporting why: see
+// AccountDecision. ReserveAccount is this call's Allowed.
+func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision {
 	rec := l.recorder(lockouts)
 	stored, record, changed := l.readRecord(rec, accountID, now)
 
@@ -444,7 +482,11 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		if sync {
 			l.syncLockout(rec, accountID, now)
 		}
-		return false
+		d := AccountDecision{Disabled: cur.disabled(), Lockouts: cur.episodes}
+		if !d.Disabled {
+			d.Locked, d.LockedUntil = true, cur.until
+		}
+		return d
 	}
 	key := loginBucket + accountID
 	cutoff := now.Add(-l.window)
@@ -459,7 +501,7 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 		// process or by hand, UnlockLogin -- or in the instant a lockout
 		// ends exactly one window after the attempt that started it.
 		l.mu.Unlock()
-		return false
+		return AccountDecision{Lockouts: cur.episodes}
 	}
 	entries = append(entries, now)
 	l.accounts[key] = entries
@@ -482,7 +524,15 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 	if sync {
 		l.syncLockout(rec, accountID, now)
 	}
-	return true
+	d := AccountDecision{
+		Allowed:     true,
+		DisabledNow: !cur.disabled() && next.disabled(),
+		Lockouts:    next.episodes,
+	}
+	if next.episodes > cur.episodes {
+		d.LockoutStarted, d.LockedUntil = true, next.until
+	}
+	return d
 }
 
 // readRecord reads accountID's lockout state from rec: as stored, as the
@@ -704,6 +754,17 @@ func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) e
 // ReleaseKnownBrowser at the password step, SignedIn when a sign-in
 // completes.
 func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time) bool {
+	return l.ReserveKnownBrowserDecision(lockouts, accountID, now).Allowed
+}
+
+// ReserveKnownBrowserDecision is ReserveKnownBrowser, reporting why, as
+// ReserveAccountDecision does for ReserveAccount (#45): Disabled for a
+// refusal while the account's sign-in is disabled, DisabledNow on the
+// admitted attempt that disabled it, and Lockouts, the account's count
+// of lockouts. The allowance filling is not a lockout of the account,
+// so LockoutStarted, Locked and LockedUntil are never set.
+// ReserveKnownBrowser is this call's Allowed.
+func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision {
 	rec := l.recorder(lockouts)
 	stored, record, changed := l.readRecord(rec, accountID, now)
 
@@ -721,13 +782,13 @@ func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID s
 		if sync {
 			l.syncLockout(rec, accountID, now)
 		}
-		return false
+		return AccountDecision{Disabled: true, Lockouts: cur.episodes}
 	}
 	key := knownBrowserBucket + accountID
 	entries := l.knownEntriesLocked(key, changed, now)
 	if len(entries) >= l.threshold {
 		l.mu.Unlock()
-		return false
+		return AccountDecision{Lockouts: cur.episodes}
 	}
 	entries = append(entries, now)
 	next := cur
@@ -750,7 +811,7 @@ func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID s
 	if sync {
 		l.syncLockout(rec, accountID, now)
 	}
-	return true
+	return AccountDecision{Allowed: true, DisabledNow: !cur.disabled() && next.disabled(), Lockouts: next.episodes}
 }
 
 // knownEntriesLocked is a known browser's budget for key: its attempts

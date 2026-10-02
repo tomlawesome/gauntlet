@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -83,6 +84,10 @@ type Config struct {
 	// Audit receives account and token events (register, login,
 	// password change, user/token create/delete). nil means no audit.
 	Audit Auditor
+	// Notify is told when an admin ends another account's sessions
+	// (POST /api/auth/users/{id}/logout-all), so the application can
+	// tell the account's owner. nil means nobody is told. See Notifier.
+	Notify Notifier
 	// ClientIP resolves the address the login limiter is keyed on
 	// (mikroview's clientIP -- its own trusted-proxy policy is the
 	// application's, not gate's). Required.
@@ -118,6 +123,13 @@ type Deps struct {
 	// relying party that is not ready is a reported state, not a wiring
 	// mistake.
 	Passkeys gauntlet.PasskeyCeremony
+	// SignIns is the sign-in history (#53): every sign-in attempt is
+	// appended to it, and GET /api/auth/sign-ins lets an admin page
+	// through it. nil means no history: nothing is appended and the
+	// route answers 404. The audit records (Config.Audit) are written
+	// either way. Not checked by New; the application opens it
+	// (gauntlet.OpenSignInHistory) and closes it at shutdown.
+	SignIns *gauntlet.SignInHistory
 }
 
 // Gate is the middleware and handler set built by New.
@@ -138,6 +150,17 @@ type Gate struct {
 	// requireAuth construction follows; neither is guarded by a mutex.
 	kindHandlers map[gauntlet.TokenKind]http.Handler
 	kindOrder    []gauntlet.TokenKind
+
+	// warns rates the Warn lines refused requests leave (warnrate.go).
+	warns warnRater
+	// notifying counts Notifier calls still running (notify.go), so a
+	// test can wait for them.
+	notifying sync.WaitGroup
+
+	// signInHook, when set, receives every sign-in attempt recordSignIn
+	// handles, after its client and lockout fields are filled, beside
+	// Deps.SignIns: a test seam.
+	signInHook func(ev gauntlet.SignInEvent, now time.Time)
 }
 
 // errMissingDep is New's fail-closed refusal for a Deps field with no
@@ -232,8 +255,24 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 func (g *Gate) now() time.Time { return g.cfg.Now() }
 
 // audit records action against target with detail as actor, through
-// Config.Audit if one is configured -- a no-op otherwise.
-func (g *Gate) audit(actor, action, target, detail string) {
+// Config.Audit if one is configured -- a no-op otherwise. The address r
+// came from (Config.ClientIP) is appended to detail as from="...",
+// quoted because ClientIP may read a header the client set (#45, ASVS
+// 16.2.1): every record a request writes says where it came from.
+func (g *Gate) audit(r *http.Request, actor, action, target, detail string) {
+	from := fmt.Sprintf("from=%q", g.cfg.ClientIP(r))
+	if detail == "" {
+		detail = from
+	} else {
+		detail += "; " + from
+	}
+	g.auditRecord(actor, action, target, detail)
+}
+
+// auditRecord is audit for a detail that already names the address:
+// the sign-in records (recordSignIn), which name the address the
+// limiter counted.
+func (g *Gate) auditRecord(actor, action, target, detail string) {
 	if g.cfg.Audit == nil {
 		return
 	}
