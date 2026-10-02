@@ -370,6 +370,16 @@ type resetPasswordResponse struct {
 	Code string `json:"code"`
 }
 
+type unlockUserResponse struct {
+	WasDisabled  bool `json:"wasDisabled"`
+	WasLockedOut bool `json:"wasLockedOut"`
+}
+
+type unlockCodeRequest struct {
+	Username   string `json:"username"`
+	UnlockCode string `json:"unlockCode"`
+}
+
 type tokenResponse struct {
 	ID         string             `json:"id"`
 	Kind       gauntlet.TokenKind `json:"kind"`

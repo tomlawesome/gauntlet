@@ -39,7 +39,12 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// After an admin reset there is no current password to supply -- see
 	// mikroview's own handleAuthChangePassword for the full reasoning.
 	// An admin reset (POST /api/auth/users/{id}/reset-password, which
-	// calls IssueResetCode) is what sets MustChangePassword.
+	// calls IssueResetCode) sets MustChangePassword, and so does a run of
+	// failed second-factor steps (gauntlet.LoginLimiter.SecondFactorFailed,
+	// #44). Skipping the check is safe for both: each ends every session
+	// in the same write that sets the flag, so the caller got here
+	// through a sign-in made since -- with the reset code, or with the
+	// password and a second factor.
 	if !user.MustChangePassword {
 		// Throttled and re-checked by recheckPassword.
 		if _, ok := g.recheckPassword(w, user, req.CurrentPassword, "current password is incorrect", now); !ok {
@@ -70,7 +75,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	detail := "sessions ended: all"
 	if user.MustChangePassword {
-		detail += ", after an administrator's reset"
+		detail += ", forced (an administrator's reset or repeated second-factor failures)"
 	}
 	g.audit(user.Username, "account.password_changed", user.Username, detail)
 

@@ -142,7 +142,8 @@ func TestACorrectPasswordAloneDoesNotResetTheLockoutCount(t *testing.T) {
 // A new password -- the owner's, an admin's through SetPassword, or an
 // admin's reset code -- resets the count: the guesses were at the old
 // password. The next lockout is a first one again. A disabled sign-in
-// is not lifted by it.
+// is not lifted by SetPassword; a reset code, an admin action, does lift
+// it (TestAResetCodeLiftsADisabledSignIn).
 func TestPasswordChangeResetsTheLockoutCountButNotADisable(t *testing.T) {
 	changes := map[string]func(t *testing.T, s *Store, id string, at time.Time){
 		"SetPassword": func(t *testing.T, s *Store, _ string, at time.Time) {
@@ -167,6 +168,9 @@ func TestPasswordChangeResetsTheLockoutCountButNotADisable(t *testing.T) {
 				t.Errorf("after a new password the next lockout lasts %v, want a first one's %v", got, want)
 			}
 		})
+		if name == "IssueResetCode" {
+			continue // lifts it, by the owner's decision of 2026-10-02
+		}
 		t.Run(name+" keeps a disable", func(t *testing.T) {
 			s, id := openLockoutStore(t, persist.NewMemory())
 			l := mustNewLoginLimiter(t, 5, 5*time.Minute)

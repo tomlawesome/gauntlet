@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -237,7 +238,7 @@ func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	// line. The detail records the deadline instead, which is what an
 	// operator reading this entry later actually needs.
 	g.audit(auditActor(r), "user.password_reset", user.Username,
-		fmt.Sprintf("one-time code issued, expires %s; sessions ended: all",
+		fmt.Sprintf("one-time code issued, expires %s; sessions ended: all; sign-in lockout and any disable lifted",
 			user.ResetCodeExpiresAt.Format(time.RFC3339)))
 
 	writeJSON(w, http.StatusOK, resetPasswordResponse{
@@ -245,4 +246,71 @@ func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		Code:      code,
 		ExpiresAt: user.ResetCodeExpiresAt,
 	})
+}
+
+// unlockUserResponse is the admin unlock route's answer: what the
+// account's record held before the unlock, for the admin's own
+// confirmation. Both false is the idempotent case -- there was nothing
+// to lift, and still 200.
+type unlockUserResponse struct {
+	Username string `json:"username"`
+	// WasDisabled is true when the account's sign-in had been disabled
+	// after gauntlet.MaxConsecutiveLoginFailures failures in a row.
+	WasDisabled bool `json:"wasDisabled"`
+	// WasLockedOut is true when a login lockout was in force.
+	WasLockedOut bool `json:"wasLockedOut"`
+}
+
+// handleUnlockUser is the admin's way to lift a disabled sign-in on
+// another account (#44), and with it any lockout and the count of
+// lockouts: the account then signs in as one that never failed, with
+// the password and second factor it already has. Nothing else about the
+// account changes -- not its password, factors, sessions or a pending
+// forced password change.
+//
+// It goes through gauntlet.LoginLimiter.UnlockLogin rather than the
+// store's UnlockLogin alone, so this process's own count of the
+// account's recent wrong guesses, and any lockout decision it has yet to
+// save, go too; otherwise the account could stay refused here until that
+// window passed.
+//
+// The caller's own account is refused with 409, as the other admin
+// routes that act on an account refuse it: the admin's way back from
+// their own disabled sign-in is the one-time unlock code in the server's
+// log (POST /api/auth/unlock), since by the time it matters they cannot
+// sign in to reach this route. 404 for an unknown account.
+func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "user id is required", http.StatusBadRequest)
+		return
+	}
+	if caller := UserFromContext(r); caller != nil && caller.ID == id {
+		http.Error(w, "an administrator cannot unlock their own account here -- use the unlock code in the server's log", http.StatusConflict)
+		return
+	}
+
+	now := g.now()
+	target, ok := g.deps.Users.Get(id)
+	if !ok {
+		http.Error(w, "no such user", http.StatusNotFound)
+		return
+	}
+	resp := unlockUserResponse{
+		Username:     target.Username,
+		WasDisabled:  !target.LoginDisabledAt.IsZero(),
+		WasLockedOut: now.Before(target.LoginLockedUntil),
+	}
+	if err := g.deps.Limiter.UnlockLogin(g.deps.Users, id); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, gauntlet.ErrUserNotFound) {
+			status = http.StatusNotFound // deleted since the read above
+		}
+		g.writeAuthError(w, r, err, status)
+		return
+	}
+
+	g.audit(auditActor(r), "user.unlock", target.Username,
+		fmt.Sprintf("sign-in unlocked by admin; wasDisabled=%t wasLockedOut=%t; lockout count cleared", resp.WasDisabled, resp.WasLockedOut))
+	writeJSON(w, http.StatusOK, resp)
 }

@@ -327,6 +327,7 @@ func TestContractEveryRoute(t *testing.T) {
 	contractSSO(t, c)
 	contractNoStorage(t, c)
 	contractPasskeys(t, c)
+	contractUnlockCode(t, c)
 	c.requireEveryOperationDriven()
 }
 
@@ -357,6 +358,55 @@ func contractNoStorage(t *testing.T, c *contractChecker) {
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "operator", Password: "contract-operator-password"}}, 503, nil)
 }
 
+// contractUnlockCode covers POST /api/auth/unlock, the lone-admin unlock
+// code (#44): a store that opens with its admin's sign-in disabled
+// announces one, and the route takes it. The admin is registered through
+// the checked server, disabled by fifty failures made straight on the
+// limiter (the exported API, on a clock long past), and the store opened
+// again over the same backend, as a restart would.
+func contractUnlockCode(t *testing.T, c *contractChecker) {
+	backend := persist.NewMemory()
+	first := newTestGateWith(t, backend, nil)
+	firstTS := newTestServer(t, first.g)
+	c.do(c.client(), firstTS.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", first.setupCode}}, 201, nil)
+	admin, ok := first.users.ByUsername("admin")
+	if !ok {
+		t.Fatal("no admin after registering")
+	}
+	limiter, err := gauntlet.NewLoginLimiter(5, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-30 * 24 * time.Hour)
+	for range gauntlet.MaxConsecutiveLoginFailures {
+		limiter.ReserveAccount(first.users, admin.ID, at)
+		if until := first.users.LoginLockedUntil(admin.ID); until.After(at) {
+			at = until
+		}
+		at = at.Add(time.Second)
+	}
+
+	var code string
+	users, err := gauntlet.OpenStore(backend, gauntlet.Options{
+		OnUnlockCode: gauntlet.UnlockCodeFunc(func(_, c string) { code = c }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code == "" {
+		t.Fatal("a store opening with its admin disabled announced no unlock code")
+	}
+	ts := newTestServer(t, newGate(t, gate.Deps{Users: users}))
+	u := ts.URL
+	anon := c.client()
+	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: unlockCodeRequest{"admin", code}, noCSRF: true}, 403, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: "{", bad: true}, 400, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: unlockCodeRequest{"admin", "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: unlockCodeRequest{"admin", code}}, 200, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: unlockCodeRequest{"admin", code}}, 401, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", "contract-admin-password"}}, 200, nil)
+}
+
 func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	f := newTestGate(t)
 	g := f.g
@@ -374,6 +424,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	}
 	c.do(anon, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"nobody", "x"}}, 503, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/users"}, 503, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: unlockCodeRequest{"admin", "AAAA-AAAA-AAAA-AAAA"}}, 503, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, ""}, noCSRF: true}, 403, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: "not json", bad: true}, 400, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
@@ -494,6 +545,17 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/reset-password"}, 200, &reset)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/reset-password"}, 409, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/reset-password"}, 404, nil)
+
+	// The admin unlock route (#44): 200 whether or not anything was
+	// locked, 409 for the caller's own account, 404 for none.
+	var unlocked unlockUserResponse
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/unlock"}, 200, &unlocked)
+	if unlocked.WasDisabled || unlocked.WasLockedOut {
+		t.Fatalf("unlocking an account with nothing to lift = %+v", unlocked)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock"}, 409, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/unlock"}, 404, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/unlock"}, 401, nil)
 	bob = c.client()
 	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", reset.Code}}, 200, nil)
 	resp := c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all"}, 403, nil)

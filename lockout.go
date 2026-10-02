@@ -57,26 +57,18 @@ func (s *Store) SetLoginLockedUntil(accountID string, until time.Time) error {
 // The store has no notion of who is asking: deciding who may unlock
 // whom is the caller's job.
 //
-// #44 follow-up: a running LoginLimiter still holds its in-memory count
-// of the account's recent wrong guesses (up to one window of them), and
-// may hold a decision it has yet to save; the admin unlock route should
-// clear those too, through a limiter method added with it, or the
-// account can stay refused until that window passes.
+// A running LoginLimiter still holds its in-memory count of the
+// account's recent wrong guesses (up to one window of them), and may
+// hold a decision it has yet to save; a process with a limiter calls
+// LoginLimiter.UnlockLogin instead, which clears those and makes this
+// same write. This method is for a caller with no limiter -- a CLI
+// opening the store for one command.
+//
+// Lifting the admin's disable also retires the lone-admin unlock code
+// (unlockcode.go), in this process at once and in another on its next
+// reload.
 func (s *Store) UnlockLogin(accountID string) error {
-	s.reloadIfStale()
-	return s.mutate(func(st *storeState) error {
-		u, ok := st.byID[accountID]
-		if !ok {
-			return ErrUserNotFound
-		}
-		if u.LoginLockedUntil.IsZero() && u.LoginLockoutCount == 0 && u.LoginDisabledAt.IsZero() {
-			return errNoChange
-		}
-		u.LoginLockedUntil = time.Time{}
-		u.LoginLockoutCount = 0
-		u.LoginDisabledAt = time.Time{}
-		return nil
-	})
+	return s.setLockoutRecord(accountID, lockoutState{})
 }
 
 // lockoutState is what an account's record says about its sign-in
@@ -164,12 +156,27 @@ func (s *Store) setLockoutRecord(accountID string, st lockoutState) error {
 // lockoutRecorder; a limiter given anything else has no account to set
 // it on and skips it.
 type passwordChangeRequirer interface {
-	requirePasswordChange(accountID string) error
+	requirePasswordChange(accountID string, now time.Time) error
 }
 
 // requirePasswordChange implements passwordChangeRequirer: one write
-// setting MustChangePassword, or none if it is already set.
-func (s *Store) requirePasswordChange(accountID string) error {
+// setting MustChangePassword and ending every session the account holds
+// (SessionsEndedAt, #44), or none if the flag is already set.
+//
+// The sessions go because the change-password door asks for no current
+// password while MustChangePassword is set (gate's
+// handleChangePassword): that is safe only if whoever stands at the door
+// has just proved the account with both factors. A session issued before
+// the run of failures -- a cookie someone else may hold -- would
+// otherwise reach the door and choose the new password. Ending them
+// leaves a fresh, complete sign-in as the only way there (owner,
+// 2026-10-02).
+//
+// PasswordChangedAt is left alone: the password has not changed, and
+// guesses at it still count (lockoutRecorder). A flag already set needs
+// nothing: every session then either predates the write that set it, and
+// was ended by it, or came from a complete sign-in since.
+func (s *Store) requirePasswordChange(accountID string, now time.Time) error {
 	s.reloadIfStale()
 	return s.mutate(func(st *storeState) error {
 		u, ok := st.byID[accountID]
@@ -180,6 +187,7 @@ func (s *Store) requirePasswordChange(accountID string) error {
 			return errNoChange
 		}
 		u.MustChangePassword = true
+		u.SessionsEndedAt = now
 		return nil
 	})
 }
