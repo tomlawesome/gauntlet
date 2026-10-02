@@ -55,8 +55,8 @@ github.com/tomlawesome/gauntlet
 │                               AllowIssuer, IsMultiTenantIssuer
 ├── gate/                       Config, Deps, Gate, Protect, Routes, RequireRole,
 │                               UserFromContext, TokenFromContext
-├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrCeremonyInvalid,
-│                               ErrNoUsablePasskey (G8, ADR-0004; the one importer of go-webauthn)
+├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrNoUsablePasskey
+│                               (G8, ADR-0004; the one importer of go-webauthn)
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
 ├── internal/testutil/          fake OIDC provider (mikroview's fake_provider_test.go)
 └── internal/passkeytest/       fake WebAuthn authenticator (mikroview's webauthnfake_test.go)
@@ -217,6 +217,7 @@ type PasskeyCeremony interface {
     FinishLogin(u *User, sealed string, assertion json.RawMessage) (PasskeyAssertion, error)
 }
 type PasskeyAssertion struct { CredentialID []byte; SignCount uint32; CloneWarning bool } // what RecordPasskeyAssertionIfFresh consumes
+var ErrPasskeyCeremonyInvalid error // wrapped by passkey's Finish methods for a dead ceremony: unreadable, other ceremony, expired, already used
 
 func HashPassword(password string) (string, error)   // argon2id, m=64MiB t=3 p=4, 16-byte salt, 32-byte key
 func VerifyPassword(password, encoded string) bool   // constant-time; parameters read from the encoded string

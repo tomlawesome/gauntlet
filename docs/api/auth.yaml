@@ -708,13 +708,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/PasskeyRegisterFinishResponse"
         "400":
-          description: The body is not one JSON object of the documented fields, or the WebAuthn ceremony refused the credential (wrong origin, expired, already used, tampered with).
+          description: The body is not one JSON object of the documented fields, or the credential was refused (wrong origin, bad signature, malformed). The ceremony cookie is kept, so a corrected credential can finish it.
           content:
             text/plain:
               schema:
                 $ref: "#/components/schemas/TextError"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: No valid session, or the ceremony cookie is missing, expired, tampered with or already used -- start registration again. A dead ceremony cookie is cleared.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":

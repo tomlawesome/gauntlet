@@ -194,16 +194,14 @@ type passkeyRegisterFinishResponse struct {
 // started: verify, AddPasskey, and -- on the account's first factor --
 // revoke every session, reissue this browser's, and mint recovery codes.
 //
-// The ceremony cookie is cleared only on success, as in mikroview, so a
-// refused finish (a wrong origin, say) can be corrected inside the same
-// five minutes without a new begin.
-//
-// Every refusal from the ceremony answers 400. The note for #20 also
-// separates a ceremony cookie that is unusable (expired, tampered with,
-// already used) as 401 "start registration again", via
-// passkey.ErrCeremonyInvalid; gate cannot recognise that error without
-// importing gauntlet/passkey, which ADR-0004 forbids, so only a missing
-// cookie gets the 401 until that is decided.
+// Two kinds of refusal, told apart by gauntlet.ErrPasskeyCeremonyInvalid:
+// a dead ceremony (the cookie is missing, expired, tampered with or
+// sealed for the other ceremony) answers 401 "start registration again"
+// and clears the cookie, since it can never succeed; a refused
+// credential (wrong origin, bad signature, malformed) answers 400 and
+// keeps the cookie, so a corrected response -- or another authenticator,
+// after a 409 duplicate -- can finish inside the same five minutes, as
+// in mikroview. The cookie is otherwise cleared only on success.
 func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -219,6 +217,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	}
 	cookie, err := r.Cookie(passkeyRegisterCookieName)
 	if err != nil {
+		g.clearPasskeyRegisterCookie(w)
 		writeUnauthorized(w, "start registration again")
 		return
 	}
@@ -238,6 +237,11 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	}
 
 	pk, err := g.deps.Passkeys.FinishRegistration(current, cookie.Value, req.Credential)
+	if errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		g.clearPasskeyRegisterCookie(w)
+		writeUnauthorized(w, "start registration again")
+		return
+	}
 	if err != nil {
 		http.Error(w, "that passkey couldn't be registered -- try again", http.StatusBadRequest)
 		return
@@ -456,6 +460,10 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 // which check failed is not something a caller needs back.
 const passkeyNotVerified = "that passkey couldn't be verified -- use another way in"
 
+// passkeyStartAgain is the answer to a dead login ceremony: nothing
+// sent on it can ever succeed, so the frontend begins again.
+const passkeyStartAgain = "start passkey sign-in again"
+
 // verifyPasskeyAssertion is handleLoginFactor's passkey branch, called
 // with the reservations res already held. It writes its own response on
 // every refusal and returns false; on success it writes nothing and
@@ -469,9 +477,12 @@ const passkeyNotVerified = "that passkey couldn't be verified -- use another way
 // RecordPasskeyAssertionIfFresh decides and records under the store's
 // lock, so two copies of one assertion cannot both win.
 //
-// Every refusal from the ceremony answers the same 401 and leaves the
-// ceremony cookie in place; see handlePasskeyRegisterFinish for why an
-// unusable cookie is not told apart yet.
+// Every refusal answers 401 and keeps the reservations. A dead ceremony
+// (the cookie missing, or gauntlet.ErrPasskeyCeremonyInvalid: expired,
+// tampered with, already used) answers "start passkey sign-in again" and
+// clears the cookie, since it can never succeed; anything else answers
+// passkeyNotVerified and keeps it, so a corrected assertion can still
+// finish inside the window.
 func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, user *gauntlet.User, assertion json.RawMessage, res loginReservation, now time.Time) bool {
 	refuse := func(msg string) bool {
 		g.endAfterReset(res)
@@ -484,10 +495,15 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 	}
 	cookie, err := r.Cookie(passkeyAssertCookieName)
 	if err != nil {
-		return refuse("start passkey sign-in again")
+		g.clearPasskeyAssertCookie(w)
+		return refuse(passkeyStartAgain)
 	}
 
 	verified, err := g.deps.Passkeys.FinishLogin(user, cookie.Value, assertion)
+	if errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		g.clearPasskeyAssertCookie(w)
+		return refuse(passkeyStartAgain)
+	}
 	if err != nil {
 		return refuse(passkeyNotVerified)
 	}

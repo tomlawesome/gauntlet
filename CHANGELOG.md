@@ -26,7 +26,6 @@ All notable changes to this project are documented in this file.
   returning the new `ErrTokenNameInvalid` (#24). Code that passes
   user-typed names should handle this error. An empty name is still
   allowed. Device ids already followed this rule.
-
 - Passkeys (G8, #20, [ADR-0004](docs/adr/0004-passkey-ceremony.md)).
   The new `gauntlet/passkey` package runs the WebAuthn ceremony:
   `passkey.New(passkey.Config{PublicURL, DisplayName})` builds the
@@ -39,7 +38,9 @@ All notable changes to this project are documented in this file.
   `DELETE /api/auth/users/{id}/passkeys`. Left nil, every passkey route
   answers 404 and nothing links the WebAuthn library. The root package
   gains the seam both sides use (`PasskeyCeremony`, `PasskeyAssertion`,
-  `PasskeyStatus`).
+  `PasskeyStatus`, and `ErrPasskeyCeremonyInvalid`, which marks a dead
+  ceremony: expired, tampered with, from the other ceremony or already
+  used).
 - `POST /api/auth/login` lists `passkey` (first) in `secondFactor`, with
   `passkeyOrigin`, when the account holds a usable passkey;
   `GET /api/auth/session` gains `passkeys: {count, status, origin}` when

@@ -130,8 +130,8 @@ func TestCeremonyReplayIsRefusedBySpentChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first FinishRegistration: %v", err)
 	}
-	if _, err := rp.FinishRegistration(u, sealed, body); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Fatalf("replayed FinishRegistration error = %v, want ErrCeremonyInvalid", err)
+	if _, err := rp.FinishRegistration(u, sealed, body); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Fatalf("replayed FinishRegistration error = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
 	u.Passkeys = append(u.Passkeys, pk)
 
@@ -139,8 +139,8 @@ func TestCeremonyReplayIsRefusedBySpentChallenge(t *testing.T) {
 	if _, err := rp.FinishLogin(u, sealedLogin, assertion); err != nil {
 		t.Fatalf("first FinishLogin: %v", err)
 	}
-	if _, err := rp.FinishLogin(u, sealedLogin, assertion); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Fatalf("replayed FinishLogin error = %v, want ErrCeremonyInvalid", err)
+	if _, err := rp.FinishLogin(u, sealedLogin, assertion); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Fatalf("replayed FinishLogin error = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
 }
 
@@ -154,11 +154,11 @@ func TestCeremonyStateDoesNotCrossCeremonies(t *testing.T) {
 
 	_, registerSealed := beginRegistration(t, rp, u)
 	loginSealed, assertion := assertWith(t, rp, u, fake)
-	if _, err := rp.FinishLogin(u, registerSealed, assertion); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Errorf("FinishLogin with a registration's state: error = %v, want ErrCeremonyInvalid", err)
+	if _, err := rp.FinishLogin(u, registerSealed, assertion); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Errorf("FinishLogin with a registration's state: error = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
-	if _, err := rp.FinishRegistration(u, loginSealed, json.RawMessage(`{}`)); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Errorf("FinishRegistration with a login's state: error = %v, want ErrCeremonyInvalid", err)
+	if _, err := rp.FinishRegistration(u, loginSealed, json.RawMessage(`{}`)); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Errorf("FinishRegistration with a login's state: error = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
 }
 
@@ -182,8 +182,8 @@ func TestCeremonyExpires(t *testing.T) {
 			}
 			time.Sleep(wait)
 			pk, err := rp.FinishRegistration(u, sealed, body)
-			if expired != errors.Is(err, ErrCeremonyInvalid) {
-				t.Fatalf("FinishRegistration after %v: error = %v, want ErrCeremonyInvalid: %v", wait, err, expired)
+			if expired != errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+				t.Fatalf("FinishRegistration after %v: error = %v, want ErrPasskeyCeremonyInvalid: %v", wait, err, expired)
 			}
 			if !expired && err != nil {
 				t.Fatalf("FinishRegistration after %v: %v", wait, err)
@@ -197,8 +197,8 @@ func TestCeremonyExpires(t *testing.T) {
 			loginSealed, assertion := assertWith(t, rp, u, fake)
 			time.Sleep(wait)
 			_, err = rp.FinishLogin(u, loginSealed, assertion)
-			if expired != errors.Is(err, ErrCeremonyInvalid) || (!expired && err != nil) {
-				t.Fatalf("FinishLogin after %v: error = %v, want ErrCeremonyInvalid: %v", wait, err, expired)
+			if expired != errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) || (!expired && err != nil) {
+				t.Fatalf("FinishLogin after %v: error = %v, want ErrPasskeyCeremonyInvalid: %v", wait, err, expired)
 			}
 		})
 	}
@@ -253,7 +253,7 @@ func TestCeremonyRefusals(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := rp.FinishRegistration(u, sealed, body); err == nil || errors.Is(err, ErrCeremonyInvalid) {
+		if _, err := rp.FinishRegistration(u, sealed, body); err == nil || errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 			t.Fatalf("wrong-origin FinishRegistration error = %v, want a library refusal", err)
 		}
 		// Not spent: the same ceremony still finishes for the right origin.
@@ -272,7 +272,7 @@ func TestCeremonyRefusals(t *testing.T) {
 		registerOn(t, rp, u, fake)
 		fake.RPID = "not-the-relying-party.example"
 		sealed, body := assertWith(t, rp, u, fake)
-		if _, err := rp.FinishLogin(u, sealed, body); err == nil || errors.Is(err, ErrCeremonyInvalid) {
+		if _, err := rp.FinishLogin(u, sealed, body); err == nil || errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 			t.Fatalf("wrong-RPID FinishLogin error = %v, want a library refusal", err)
 		}
 	})
@@ -289,8 +289,8 @@ func TestCeremonyRefusals(t *testing.T) {
 		if _, err := rp.FinishLogin(u, loginSealed, json.RawMessage(`{"id":1}`)); err == nil {
 			t.Error("FinishLogin accepted an unparsable assertion")
 		}
-		if _, err := rp.FinishLogin(u, "garbage", json.RawMessage(`{}`)); !errors.Is(err, ErrCeremonyInvalid) {
-			t.Errorf("FinishLogin with garbage state: error = %v, want ErrCeremonyInvalid", err)
+		if _, err := rp.FinishLogin(u, "garbage", json.RawMessage(`{}`)); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+			t.Errorf("FinishLogin with garbage state: error = %v, want ErrPasskeyCeremonyInvalid", err)
 		}
 	})
 	t.Run("stale passkeys are neither allowed nor excluded", func(t *testing.T) {

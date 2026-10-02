@@ -12,6 +12,8 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // testSessionData is a representative webauthn.SessionData: every field
@@ -70,8 +72,8 @@ func TestSessionCodecRejectsTampering(t *testing.T) {
 		t.Fatalf("sealed value too short to tamper with: %d bytes", len(sealed))
 	}
 	sealed[ns] ^= 0xFF
-	if _, err := codec.decode(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Fatalf("decode(tampered) error = %v, want ErrCeremonyInvalid", err)
+	if _, err := codec.decode(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Fatalf("decode(tampered) error = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
 }
 
@@ -83,15 +85,15 @@ func TestSessionCodecsAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode with the register codec: %v", err)
 	}
-	if _, err := assertCodec.decode(registerSealed); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Fatalf("the assert codec opened a register-sealed value: err = %v, want ErrCeremonyInvalid", err)
+	if _, err := assertCodec.decode(registerSealed); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Fatalf("the assert codec opened a register-sealed value: err = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
 	assertSealed, err := assertCodec.encode(testSessionData())
 	if err != nil {
 		t.Fatalf("encode with the assert codec: %v", err)
 	}
-	if _, err := registerCodec.decode(assertSealed); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Fatalf("the register codec opened an assert-sealed value: err = %v, want ErrCeremonyInvalid", err)
+	if _, err := registerCodec.decode(assertSealed); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Fatalf("the register codec opened an assert-sealed value: err = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
 }
 
@@ -104,8 +106,8 @@ func TestSessionCodecRejectsMalformedInput(t *testing.T) {
 	}
 	for name, value := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := codec.decode(value); !errors.Is(err, ErrCeremonyInvalid) {
-				t.Fatalf("decode(%q) error = %v, want ErrCeremonyInvalid", value, err)
+			if _, err := codec.decode(value); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+				t.Fatalf("decode(%q) error = %v, want ErrPasskeyCeremonyInvalid", value, err)
 			}
 		})
 	}
@@ -118,8 +120,8 @@ func TestSessionCodecRejectsAnAuthenticNonSessionPayload(t *testing.T) {
 	codec := registerCodec
 	nonce := make([]byte, codec.aead.NonceSize())
 	sealed := codec.aead.Seal(nonce, nonce, []byte("not json"), nil)
-	if _, err := codec.decode(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, ErrCeremonyInvalid) {
-		t.Fatalf("decode(non-JSON payload) error = %v, want ErrCeremonyInvalid", err)
+	if _, err := codec.decode(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Fatalf("decode(non-JSON payload) error = %v, want ErrPasskeyCeremonyInvalid", err)
 	}
 }
 

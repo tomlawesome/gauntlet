@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -753,6 +754,17 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	register(bob, wrongOrigin, "wrong origin", 400, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: "{", bad: true}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), "no begin"}}, 401, nil)
+	// A dead ceremony (a garbage cookie) is 401 and clears the cookie; the
+	// wrong-origin finish above was 400, the refused-credential meaning.
+	deadURL, err := url.Parse(u + "/api/auth/passkeys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob.Jar.SetCookies(deadURL, []*http.Cookie{{Name: "gate_passkey_register", Value: "garbage", Path: "/api/auth/passkeys"}})
+	dead := c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), "dead"}}, 401, nil)
+	if i := slices.IndexFunc(dead.Cookies(), func(ck *http.Cookie) bool { return ck.Name == "gate_passkey_register" && ck.MaxAge < 0 }); i < 0 {
+		t.Fatal("a dead registration ceremony did not clear its cookie")
+	}
 	key := passkeytest.New("passkeys.example.org", publicURL)
 	var first passkeyRegisterFinishResponse
 	register(bob, key, "first", 200, &first)

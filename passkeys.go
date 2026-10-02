@@ -63,6 +63,17 @@ var (
 	// credential is never reported as "limit reached" merely because
 	// the account happens to be full.
 	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
+	// ErrPasskeyCeremonyInvalid is wrapped by gauntlet/passkey's
+	// FinishRegistration and FinishLogin (PasskeyCeremony) whenever the
+	// sealed ceremony state is unusable: it fails the authentication
+	// tag, is malformed, was sealed for the other ceremony or by another
+	// process, has expired, or its challenge was already used. Such a
+	// ceremony can never succeed, so the caller starts again; gate
+	// matches it with errors.Is to answer "start again" and clear the
+	// ceremony cookie. Any other Finish error means the browser's
+	// response itself was refused, and a corrected one may still finish
+	// the same ceremony.
+	ErrPasskeyCeremonyInvalid = errors.New("gauntlet: passkey ceremony expired, was tampered with, belongs to the other ceremony, or was already used")
 )
 
 // PasskeyStatus reports whether an application can offer passkeys at
@@ -122,7 +133,9 @@ type PasskeyCeremony interface {
 	BeginRegistration(u *User) (options json.RawMessage, sealed string, err error)
 	// FinishRegistration verifies the browser's response to
 	// BeginRegistration's options and returns the new credential for
-	// Store.AddPasskey. Name and CreatedAt are left for the caller.
+	// Store.AddPasskey. Name and CreatedAt are left for the caller. An
+	// error wrapping ErrPasskeyCeremonyInvalid means the sealed state is
+	// dead; any other means the credential was refused.
 	FinishRegistration(u *User, sealed string, credential json.RawMessage) (Passkey, error)
 	// BeginLogin starts a login ceremony allowing only u's passkeys
 	// registered under the current RPID.
@@ -130,7 +143,9 @@ type PasskeyCeremony interface {
 	// FinishLogin verifies the browser's assertion against the ceremony
 	// BeginLogin started. A nil error means the signature checked out;
 	// the caller still refuses a CloneWarning and records the count
-	// through Store.RecordPasskeyAssertionIfFresh.
+	// through Store.RecordPasskeyAssertionIfFresh. An error wrapping
+	// ErrPasskeyCeremonyInvalid means the sealed state is dead; any other
+	// means the assertion was refused.
 	FinishLogin(u *User, sealed string, assertion json.RawMessage) (PasskeyAssertion, error)
 }
 

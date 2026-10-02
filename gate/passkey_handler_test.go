@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -1347,8 +1348,8 @@ func TestPasskeyRegisterReplayRefusedBySpentChallenge(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("replaying a finished registration with its cookie got %d, want 400 (refused by the spent challenge, not 409 duplicate)", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("replaying a finished registration with its cookie got %d, want 401 (refused by the spent challenge, not 409 duplicate)", resp.StatusCode)
 	}
 	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
 		t.Errorf("the account holds %d passkeys after the replay, want 1", n)
@@ -1425,10 +1426,13 @@ func TestPasskeyRegisterExpiredCeremony(t *testing.T) {
 
 			want := http.StatusOK
 			if expired {
-				want = http.StatusBadRequest
+				want = http.StatusUnauthorized
 			}
 			if resp.StatusCode != want {
 				t.Errorf("register/finish %v after begin got %d, want %d", wait, resp.StatusCode, want)
+			}
+			if expired && !cookieCleared(resp, passkeyRegisterCookieName) {
+				t.Error("an expired registration did not clear its ceremony cookie")
 			}
 			admin, _ := g.deps.Users.ByUsername("admin")
 			if n, wantN := g.deps.Users.PasskeyCount(admin.ID), map[bool]int{true: 0, false: 1}[expired]; n != wantN {
@@ -1495,4 +1499,127 @@ func postStatus(t *testing.T, client *http.Client, url string) int {
 	resp := postJSON(t, client, url, struct{}{})
 	_ = resp.Body.Close()
 	return resp.StatusCode
+}
+
+// cookieCleared reports whether resp tells the browser to drop name.
+func cookieCleared(resp *http.Response, name string) bool {
+	for _, c := range resp.Cookies() {
+		if c.Name == name && c.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// jarHolds reports whether client would send cookie name to path.
+func jarHolds(t *testing.T, client *http.Client, ts *httptest.Server, path, name string) bool {
+	t.Helper()
+	u, err := url.Parse(ts.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range client.Jar.Cookies(u) {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// postWithCookie posts body through client with one extra cookie, as a
+// client holding a forged or stale copy would send it.
+func postWithCookie(t *testing.T, client *http.Client, url string, body any, cookie *http.Cookie) (*http.Response, string) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	req.AddCookie(cookie)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, string(raw)
+}
+
+// TestPasskeyRegisterFinishDeadCeremonyClearsCookie: a ceremony cookie
+// that cannot be opened is a dead ceremony -- 401 "start registration
+// again", and the cookie is cleared.
+func TestPasskeyRegisterFinishDeadCeremonyClearsCookie(t *testing.T) {
+	_, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	resp, body := postWithCookie(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish",
+		passkeyRegisterFinishRequest{Credential: json.RawMessage(`{}`), Name: "x"},
+		&http.Cookie{Name: passkeyRegisterCookieName, Value: "garbage"})
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(body, "start registration again") {
+		t.Errorf("finish with a garbage ceremony cookie got %d %q, want 401 asking to start again", resp.StatusCode, body)
+	}
+	if !cookieCleared(resp, passkeyRegisterCookieName) {
+		t.Error("the dead ceremony cookie was not cleared")
+	}
+}
+
+// TestPasskeyRegisterFinishRefusedCredentialKeepsCookie: a credential
+// the ceremony refuses (wrong origin) answers 400 and leaves the cookie
+// where it is, for a corrected attempt.
+func TestPasskeyRegisterFinishRefusedCredentialKeepsCookie(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	creation := passkeyRegisterBegin(t, bilbo, ts)
+	fake := newFake(g)
+	fake.Origin = "https://not-the-relying-party.example"
+	resp := passkeyRegisterFinishRaw(t, bilbo, ts, fake, creation, "wrong origin")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("wrong-origin finish got %d, want 400", resp.StatusCode)
+	}
+	if cookieCleared(resp, passkeyRegisterCookieName) || !jarHolds(t, bilbo, ts, passkeyRegisterFinishPath, passkeyRegisterCookieName) {
+		t.Error("a refused credential cleared the live ceremony cookie")
+	}
+}
+
+// TestPasskeyAssertionDeadCeremonyClearsCookie: an assertion carrying a
+// ceremony cookie that cannot be opened answers 401 "start passkey
+// sign-in again" and clears the cookie.
+func TestPasskeyAssertionDeadCeremonyClearsCookie(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	registerPasskey(t, bilbo, ts, g, "key")
+	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	resp, body := postWithCookie(t, pending, ts.URL+"/api/auth/login/factor",
+		loginFactorRequest{Assertion: json.RawMessage(`{"id":"x"}`)},
+		&http.Cookie{Name: passkeyAssertCookieName, Value: "garbage"})
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(body, passkeyStartAgain) {
+		t.Errorf("an assertion on a garbage ceremony cookie got %d %q, want 401 %q", resp.StatusCode, body, passkeyStartAgain)
+	}
+	if !cookieCleared(resp, passkeyAssertCookieName) {
+		t.Error("the dead ceremony cookie was not cleared")
+	}
+}
+
+// TestPasskeyAssertionRefusedKeepsCookie: an assertion the ceremony
+// refuses (wrong RP ID) answers 401 "couldn't be verified" and keeps
+// the live cookie.
+func TestPasskeyAssertionRefusedKeepsCookie(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	fake, _ := registerPasskey(t, bilbo, ts, g, "key")
+	fake.RPID = "not-the-relying-party.example"
+	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	resp := submitPasskeyAssertion(t, pending, ts, fake, passkeyLoginFactorBegin(t, pending, ts))
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(raw), passkeyNotVerified) {
+		t.Errorf("a wrong-RPID assertion got %d %q, want 401 %q", resp.StatusCode, raw, passkeyNotVerified)
+	}
+	if cookieCleared(resp, passkeyAssertCookieName) || !jarHolds(t, pending, ts, loginFactorPath, passkeyAssertCookieName) {
+		t.Error("a refused assertion cleared the live ceremony cookie")
+	}
 }

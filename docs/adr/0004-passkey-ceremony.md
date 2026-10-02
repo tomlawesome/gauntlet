@@ -44,7 +44,14 @@ mikroview's fake authenticator copies and this module reuses.
    `FinishLogin`) whose every value is a root type, a string or raw
    JSON; `gauntlet.PasskeyAssertion` is what a verified login reports,
    in the shape `RecordPasskeyAssertionIfFresh` consumes;
-   `gauntlet.PasskeyStatus` names the four availability states. The
+   `gauntlet.PasskeyStatus` names the four availability states; and
+   `gauntlet.ErrPasskeyCeremonyInvalid`, which `passkey` wraps whenever
+   the sealed ceremony state is unusable (fails the authentication tag,
+   is malformed, was sealed for the other ceremony or by another
+   process, has expired, or its challenge is spent), lets `gate` tell a
+   dead ceremony (start again: 401, cookie cleared) from a refused
+   credential (try again: 400 or 401, cookie kept) without importing
+   `passkey`. Those four are the seam's root additions. The
    root already carries the WebAuthn-free data shapes and the seams
    other packages implement, and only there can the implementer carry
    a compile-time check that it satisfies the contract.
@@ -52,7 +59,9 @@ mikroview's fake authenticator copies and this module reuses.
 2. **`gauntlet/passkey` is a leaf.** It imports the root and the
    library, never `gate`, and `gate` never imports it. It exports
    `Config{PublicURL, DisplayName}`, `New`, the opaque `RelyingParty`
-   and three sentinel errors. It owns turning the public URL into a
+   and two sentinel errors (`ErrNotReady`, `ErrNoUsablePasskey`) for
+   direct callers and tests -- `gate` never needs them, since it checks
+   `Status()` and the usable-passkey count before calling Begin. It owns turning the public URL into a
    relying party or a reason it cannot be one, the two sealing keys
    for ceremony state, the spent-challenge set, the library calls and
    the conversion between `gauntlet.Passkey` and the library's

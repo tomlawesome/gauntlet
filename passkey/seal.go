@@ -9,6 +9,8 @@ import (
 	"fmt"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // sessionCodec seals the library's ceremony state (webauthn.SessionData:
@@ -60,6 +62,10 @@ var (
 	assertCodec   = newSessionCodec()
 )
 
+// errUnreadable is every way decode refuses: which one is not worth
+// telling apart, even in the log.
+var errUnreadable = fmt.Errorf("passkey: sealed state unreadable: %w", gauntlet.ErrPasskeyCeremonyInvalid)
+
 // encode seals sd.
 func (c *sessionCodec) encode(sd webauthn.SessionData) (string, error) {
 	plaintext, err := json.Marshal(sd)
@@ -73,24 +79,25 @@ func (c *sessionCodec) encode(sd webauthn.SessionData) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(c.aead.Seal(nonce, nonce, plaintext, nil)), nil
 }
 
-// decode reverses encode, refusing (ErrCeremonyInvalid) anything
-// malformed, tampered with, or sealed under another codec's key.
+// decode reverses encode, refusing (gauntlet.ErrPasskeyCeremonyInvalid)
+// anything malformed, tampered with, or sealed under another codec's
+// key.
 func (c *sessionCodec) decode(sealed string) (webauthn.SessionData, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(sealed)
 	if err != nil {
-		return webauthn.SessionData{}, ErrCeremonyInvalid
+		return webauthn.SessionData{}, errUnreadable
 	}
 	ns := c.aead.NonceSize()
 	if len(raw) < ns {
-		return webauthn.SessionData{}, ErrCeremonyInvalid
+		return webauthn.SessionData{}, errUnreadable
 	}
 	plaintext, err := c.aead.Open(nil, raw[:ns], raw[ns:], nil)
 	if err != nil {
-		return webauthn.SessionData{}, ErrCeremonyInvalid
+		return webauthn.SessionData{}, errUnreadable
 	}
 	var sd webauthn.SessionData
 	if err := json.Unmarshal(plaintext, &sd); err != nil {
-		return webauthn.SessionData{}, ErrCeremonyInvalid
+		return webauthn.SessionData{}, errUnreadable
 	}
 	return sd, nil
 }

@@ -41,17 +41,15 @@ type RelyingParty struct {
 
 var _ gauntlet.PasskeyCeremony = (*RelyingParty)(nil)
 
+// Sealed ceremony state that cannot be used -- expired, tampered with,
+// sealed for the other ceremony or by another process, or already used
+// -- is reported by wrapping gauntlet.ErrPasskeyCeremonyInvalid, so gate
+// can recognise it without importing this package. Which of those it
+// was reaches only the log.
 var (
 	// ErrNotReady is returned by the ceremony methods while Status is
 	// not gauntlet.PasskeyStatusReady.
 	ErrNotReady = errors.New("passkey: relying party is not ready")
-	// ErrCeremonyInvalid is returned by FinishRegistration and
-	// FinishLogin for sealed ceremony state that cannot be used: expired,
-	// tampered with, sealed for the other ceremony or by another
-	// process, or already used. One error rather than several -- which
-	// it was is nothing a caller, or someone probing, needs to tell
-	// apart.
-	ErrCeremonyInvalid = errors.New("passkey: ceremony expired, was tampered with, or belongs to the other ceremony")
 	// ErrNoUsablePasskey is returned by BeginLogin when the account
 	// holds no passkey registered under the current relying-party ID.
 	ErrNoUsablePasskey = errors.New("passkey: this account has no passkey registered for this relying party")

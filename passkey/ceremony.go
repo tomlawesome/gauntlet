@@ -114,14 +114,15 @@ func seal(c *sessionCodec, sd *webauthn.SessionData, options any) (json.RawMessa
 // open decodes sealed and refuses a ceremony past its expiry. The
 // library makes the same expiry check, but its error cannot be told
 // apart from any other refusal; checked here first, an expired ceremony
-// is reported as ErrCeremonyInvalid like every other unusable one.
+// is reported as gauntlet.ErrPasskeyCeremonyInvalid like every other
+// unusable one.
 func open(c *sessionCodec, sealed string) (webauthn.SessionData, error) {
 	sd, err := c.decode(sealed)
 	if err != nil {
 		return webauthn.SessionData{}, err
 	}
 	if sd.Expires.IsZero() || !time.Now().Before(sd.Expires) {
-		return webauthn.SessionData{}, ErrCeremonyInvalid
+		return webauthn.SessionData{}, fmt.Errorf("passkey: ceremony expired: %w", gauntlet.ErrPasskeyCeremonyInvalid)
 	}
 	return sd, nil
 }
@@ -165,7 +166,7 @@ func (rp *RelyingParty) FinishRegistration(u *gauntlet.User, sealed string, cred
 		return gauntlet.Passkey{}, fmt.Errorf("passkey: verifying the registration response: %w", err)
 	}
 	if !spent.claim(sd.Challenge, sd.Expires, time.Now()) {
-		return gauntlet.Passkey{}, fmt.Errorf("%w: its challenge was already used", ErrCeremonyInvalid)
+		return gauntlet.Passkey{}, fmt.Errorf("passkey: challenge already used: %w", gauntlet.ErrPasskeyCeremonyInvalid)
 	}
 	return credentialToPasskey(*cred, rp.rpID), nil
 }
@@ -223,7 +224,7 @@ func (rp *RelyingParty) FinishLogin(u *gauntlet.User, sealed string, assertion j
 		return out, nil
 	}
 	if !spent.claim(sd.Challenge, sd.Expires, time.Now()) {
-		return gauntlet.PasskeyAssertion{}, fmt.Errorf("%w: its challenge was already used", ErrCeremonyInvalid)
+		return gauntlet.PasskeyAssertion{}, fmt.Errorf("passkey: challenge already used: %w", gauntlet.ErrPasskeyCeremonyInvalid)
 	}
 	return out, nil
 }
