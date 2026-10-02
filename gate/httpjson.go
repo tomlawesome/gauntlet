@@ -58,8 +58,27 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 	return nil
 }
 
+// writeJSON is the only place gate writes a JSON response body -- every
+// handler goes through it (directly, or through writeAuthError's two
+// JSON cases) rather than setting headers of its own, so these three
+// headers only have to be right once (#46):
+//
+//   - Content-Type: application/json; charset=utf-8 -- the charset is
+//     explicit rather than assumed, the same reasoning RFC 8259 gives
+//     for naming it even though UTF-8 is JSON's only legal encoding.
+//   - Cache-Control: no-store -- every response here either carries
+//     this account's own state or says why a request failed; a shared
+//     or browser cache holding either across accounts or across a state
+//     change (a password just changed, a token just revoked) is wrong
+//     regardless of how short its TTL is.
+//   - X-Content-Type-Options: nosniff -- stops a browser that ignores
+//     Content-Type from sniffing a JSON body as HTML and rendering it,
+//     which would turn a reflected value into script execution.
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	// Best-effort: the status line is already on the wire, so a write
 	// failure here cannot become a different status code. There is

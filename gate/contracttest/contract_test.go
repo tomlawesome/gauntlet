@@ -184,6 +184,7 @@ func (tr contractTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if err := openapi3filter.ValidateResponse(req.Context(), out); err != nil {
 		t.Errorf("%s -> %d %q: response does not match %s: %v", what, resp.StatusCode, respBody, contractDocPath, err)
 	}
+	checkJSONResponseHeaders(t, what, resp)
 
 	op := route.Method + " " + route.Path
 	tr.c.mu.Lock()
@@ -193,6 +194,31 @@ func (tr contractTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	tr.c.seen[op][resp.StatusCode] = true
 	tr.c.mu.Unlock()
 	return resp, nil
+}
+
+// checkJSONResponseHeaders is gauntlet #46's guard: every JSON response
+// gate writes must carry Content-Type: application/json; charset=utf-8,
+// Cache-Control: no-store and X-Content-Type-Options: nosniff (see
+// gate/httpjson.go's writeJSON). It only looks at responses already
+// carrying an application/json Content-Type -- this document's own
+// "Errors" section (above) says every error body is text/plain except
+// the two writeJSON uses for a half-succeeded request, and text/plain
+// responses are not this issue's concern.
+func checkJSONResponseHeaders(t *testing.T, what string, resp *http.Response) {
+	t.Helper()
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		return
+	}
+	if ct != "application/json; charset=utf-8" {
+		t.Errorf("%s -> %d: Content-Type = %q, want \"application/json; charset=utf-8\"", what, resp.StatusCode, ct)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("%s -> %d: Cache-Control = %q, want \"no-store\"", what, resp.StatusCode, got)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("%s -> %d: X-Content-Type-Options = %q, want \"nosniff\"", what, resp.StatusCode, got)
+	}
 }
 
 // requireEveryOperationDriven fails for any documented operation the
