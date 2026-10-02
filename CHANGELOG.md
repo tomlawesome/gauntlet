@@ -33,7 +33,9 @@ All notable changes to this project are documented in this file.
   unusable one (`unset`, `ip`, `insecure`) is a reported status, not a
   startup failure. Wire it into `gate.Deps.Passkeys` to serve
   mikroview's passkey routes from `gate.Routes`: list, register
-  begin/finish, rename, delete, `POST /api/auth/login/factor/begin`, an
+  begin/finish (begin re-checks the password, as TOTP enrolment does,
+  and refuses an account with no local password), rename, delete,
+  `POST /api/auth/login/factor/begin`, an
   `assertion` on `POST /api/auth/login/factor`, and the admin
   `DELETE /api/auth/users/{id}/passkeys`. Left nil, every passkey route
   answers 404 and nothing links the WebAuthn library. Each login

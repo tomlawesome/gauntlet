@@ -147,7 +147,7 @@ func protectedStatus(t *testing.T, client *http.Client, ts *httptest.Server) int
 
 func passkeyRegisterBegin(t *testing.T, client *http.Client, ts *httptest.Server) *protocol.CredentialCreation {
 	t.Helper()
-	resp := postJSON(t, client, ts.URL+"/api/auth/passkeys/register/begin", struct{}{})
+	resp := postJSON(t, client, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: passkeyBilboPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -616,7 +616,7 @@ func TestPasskeyRoutesRefusedWhenRelyingPartyNotReady(t *testing.T) {
 		}
 	}
 	t.Run("register/begin", func(t *testing.T) {
-		expect409(t, postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/begin", struct{}{}))
+		expect409(t, postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: passkeyBilboPassword}))
 	})
 	t.Run("register/finish", func(t *testing.T) {
 		expect409(t, postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish", passkeyRegisterFinishRequest{Credential: json.RawMessage(`{}`)}))
@@ -1240,7 +1240,7 @@ func TestPasskeyRoutesAnswer404WhenPasskeysAreOff(t *testing.T) {
 		body         any
 	}{
 		{http.MethodGet, "/api/auth/passkeys", nil},
-		{http.MethodPost, "/api/auth/passkeys/register/begin", struct{}{}},
+		{http.MethodPost, "/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: passkeyBilboPassword}},
 		{http.MethodPost, "/api/auth/passkeys/register/finish", passkeyRegisterFinishRequest{Credential: json.RawMessage(`{}`)}},
 		{http.MethodPatch, "/api/auth/passkeys/" + credID, passkeyRenameRequest{Name: "x"}},
 		{http.MethodDelete, "/api/auth/passkeys/" + credID, passkeyDeleteRequest{Password: passkeyBilboPassword}},
@@ -1309,7 +1309,7 @@ func TestPasskeyRegisterCeremonySurvivesADuplicateRefusal(t *testing.T) {
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
 	fakeA, _ := registerPasskey(t, bilbo, ts, g, "A")
 
-	begin := postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/begin", struct{}{})
+	begin := postJSON(t, bilbo, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: passkeyBilboPassword})
 	var creation protocol.CredentialCreation
 	if err := json.NewDecoder(begin.Body).Decode(&creation); err != nil {
 		t.Fatal(err)
@@ -1376,7 +1376,7 @@ func TestPasskeyRegisterExpiredCeremony(t *testing.T) {
 				t.Fatalf("register returned %d", reg.StatusCode)
 			}
 
-			begin := postJSON(t, client, base+"/api/auth/passkeys/register/begin", struct{}{})
+			begin := postJSON(t, client, base+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "password123"})
 			var creation protocol.CredentialCreation
 			if err := json.NewDecoder(begin.Body).Decode(&creation); err != nil {
 				t.Fatal(err)
@@ -1645,5 +1645,62 @@ func TestPasskeyCounterSaveFailureDoesNotSpendBudget(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("after 5 backend failures and no wrong guess, the password step got %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestPasskeyRegisterBeginNeedsThePassword (ruling R1 on #20, from the
+// review's TestReviewSessionThiefPlantsPasskeyWithoutPassword): a caller
+// holding only the session cookie cannot start a registration. A wrong
+// password is 401 and no body is 400; neither sets a ceremony cookie,
+// stores a passkey, mints recovery codes or ends the owner's session.
+// Once the per-account re-check budget is spent the answer is 429.
+func TestPasskeyRegisterBeginNeedsThePassword(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	owner := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	thief := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword) // stands in for a stolen cookie
+	id := passkeyBilboID(t, g)
+
+	wrong := postJSON(t, thief, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "not-the-password"})
+	_ = wrong.Body.Close()
+	if wrong.StatusCode != http.StatusUnauthorized {
+		t.Errorf("register/begin with a wrong password got %d, want 401", wrong.StatusCode)
+	}
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/passkeys/register/begin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	noBody, err := thief.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = noBody.Body.Close()
+	if noBody.StatusCode != http.StatusBadRequest {
+		t.Errorf("register/begin with no body got %d, want 400", noBody.StatusCode)
+	}
+	for _, resp := range []*http.Response{wrong, noBody} {
+		for _, c := range resp.Cookies() {
+			if c.Name == passkeyRegisterCookieName && c.MaxAge > 0 {
+				t.Errorf("a refused register/begin set a ceremony cookie (%d)", resp.StatusCode)
+			}
+		}
+	}
+	if jarHolds(t, thief, ts, passkeyRegisterFinishPath, passkeyRegisterCookieName) {
+		t.Error("the thief holds a registration ceremony cookie")
+	}
+	u, ok := g.deps.Users.Get(id)
+	if !ok || len(u.Passkeys) != 0 || len(u.RecoveryCodes) != 0 {
+		t.Errorf("after refused begins the account holds %d passkeys and %d recovery codes, want none", len(u.Passkeys), len(u.RecoveryCodes))
+	}
+	if !sessionOf(t, owner, ts).Authenticated {
+		t.Error("the owner's session did not survive the refused begins")
+	}
+
+	g.deps.Limiter = mustNewLoginLimiter(t, 1, time.Minute)
+	_ = postJSON(t, thief, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "not-the-password"}).Body.Close()
+	limited := postJSON(t, thief, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: passkeyBilboPassword})
+	_ = limited.Body.Close()
+	if limited.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("register/begin after the re-check budget was spent got %d, want 429", limited.StatusCode)
 	}
 }

@@ -30,8 +30,9 @@ import (
 //     where mikroview answers 503: on every gate route 503 already means
 //     "setup required". Mikroview's frontend reads the reason from the
 //     session body's passkeys.status, not from this code.
-//   - register/begin and login/factor/begin decode no body: the
-//     document describes none, and a frontend's {} is ignored.
+//   - register/begin takes {password} and re-checks it (ruling R1 on
+//     #20), which mikroview does not: mikroview's add-passkey screen
+//     needs a password field first. login/factor/begin decodes no body.
 //   - The admin refusal does not name a console tool, as the TOTP one
 //     does not.
 //
@@ -136,9 +137,27 @@ func (g *Gate) handlePasskeysList(w http.ResponseWriter, r *http.Request) {
 
 // -- POST /api/auth/passkeys/register/begin -------------------------------
 
+type passkeyRegisterBeginRequest struct {
+	Password string `json:"password"`
+}
+
 // handlePasskeyRegisterBegin starts registering a passkey on the
 // caller's own account and answers the W3C creation options the browser
 // hands to navigator.credentials.create().
+//
+// Password-gated through recheckPassword, as TOTP enrolment is (ruling
+// R1 on #20): a factor planted by someone holding only a stolen session
+// cookie would lock the owner out at their next login, hand the planter
+// the recovery codes and end the owner's sessions, and the password is
+// the one thing a cookie does not carry. Checked here rather than at
+// finish so a refusal comes before anyone touches their key; finish's
+// sealed cookie is proof that this check passed within five minutes.
+//
+// The order is deliberate: an account with no local password is told
+// 409 before any body is read (ruling R4 -- its identity provider owns
+// its identity, and a local factor behind no local password protects
+// nothing); then the password, before readiness, so the refusal costs
+// the same whether or not passkeys work here.
 func (g *Gate) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -148,15 +167,24 @@ func (g *Gate) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request
 		writeUnauthorized(w, "sign in first")
 		return
 	}
-	if !g.passkeysReady() {
-		g.writePasskeysNotReady(w)
+	if !user.LocalPassword() {
+		http.Error(w, "this account signs in through your identity provider -- a passkey is not offered", http.StatusConflict)
 		return
 	}
-	// Re-read: the exclude list has to reflect this account's passkeys
-	// as of now, not as of Protect's session check.
-	current, ok := g.deps.Users.Get(user.ID)
+	var req passkeyRegisterBeginRequest
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	// The freshly authenticated copy is also the re-read the exclude
+	// list needs: this account's passkeys as of now, not as of Protect's
+	// session check.
+	current, ok := g.recheckPassword(w, user, req.Password, "incorrect password", g.now())
 	if !ok {
-		writeUnauthorized(w, "sign in first")
+		return
+	}
+	if !g.passkeysReady() {
+		g.writePasskeysNotReady(w)
 		return
 	}
 	options, sealed, err := g.deps.Passkeys.BeginRegistration(current)

@@ -93,7 +93,10 @@ mikroview's fake authenticator copies and this module reuses.
    presence required; user verification requested but not required
    (a second factor behind a password; requiring it shuts out
    security keys without a PIN); attestation `none`, not verified, no
-   metadata service; no discoverable or passwordless login. A login
+   metadata service; no discoverable or passwordless login.
+   Registration is password-gated at begin, as TOTP enrolment is, and
+   refused (409) for an account with no local password (rulings R1 and
+   R4 on #20). A login
    challenge is used once (the spent-challenge set); a registration
    ceremony ends when the cookie is cleared on success, and a replay is
    refused as a duplicate credential. Either ceremony expires five
@@ -107,7 +110,9 @@ mikroview's fake authenticator copies and this module reuses.
    completed sign-in, by begin's own server-side failure (500), and by
    a counter that could not be saved -- never by a refused assertion.
 
-6. **Routes and bodies are mikroview's** (`GET /api/auth/passkeys`,
+6. **Routes and bodies are mikroview's**, except that register/begin
+   takes `{password}` (decision 5), which mikroview's does not
+   (`GET /api/auth/passkeys`,
    `POST .../register/begin|finish`, `PATCH|DELETE
    /api/auth/passkeys/{id}`, `POST /api/auth/login/factor/begin`, the
    `{assertion}` branch of `POST /api/auth/login/factor`, `DELETE
@@ -147,7 +152,10 @@ mikroview's fake authenticator copies and this module reuses.
 
 - Mikroview's move (#1202) wires `Deps.Passkeys = passkey.New(...)`
   and swaps to `gate.Routes()`; its frontend sees the same paths and
-  bodies, and new cookie names it never reads.
+  bodies but one, and new cookie names it never reads. The one is
+  register/begin: its add-passkey screen asks for the password first,
+  as its TOTP enrolment screen already does. That closes a hole
+  mikroview has today (a stolen session can plant a passkey).
 - Birdcage changes nothing and links nothing new. If it ever offers
   passkeys, `BIRDCAGE_PUBLIC_URL` becomes `passkey.Config.PublicURL`.
 - `PasskeyCeremony` cannot gain a method without a major version; a

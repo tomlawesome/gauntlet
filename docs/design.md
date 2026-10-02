@@ -465,7 +465,8 @@ it. The data for all of this lives on `User`.
   app's public URL, two sealed cookies, the spent-challenge set) brings
   `github.com/go-webauthn/webauthn` v0.18.2 (owner, 2026-09-30) and is
   reached from `gate` only through `gauntlet.PasskeyCeremony`
-  ([ADR-0004](adr/0004-passkey-ceremony.md)). Birdcage does not wire it
+  ([ADR-0004](adr/0004-passkey-ceremony.md)). Registration is
+  password-gated at begin, as TOTP enrolment is. Birdcage does not wire it
   and does not link it. A missing or unusable public URL is a reported
   status (`unset`, `ip`, `insecure`), not a startup refusal: the
   ceremony routes answer 409 and the session body says why; mikroview's
@@ -641,7 +642,9 @@ Not done in this work; recorded so the API above is checked against it.
   `gauntlet/passkey` in place (G8), mikroview swaps to `gate.Routes()`
   and deletes its copies, wiring `Deps.Passkeys = passkey.New(
   passkey.Config{PublicURL: cfg.PublicURL, DisplayName: "MikroView"})`
-  in place of its own `NewRelyingParty`. `Server` fields `Auth,
+  in place of its own `NewRelyingParty`; its add-passkey screen asks
+  for the password first (register/begin re-checks it, #20 R1).
+  `Server` fields `Auth,
   Sessions, LoginLimiter, SecureCookie, Tokens, OIDC, OIDCState,
   OIDCPolicy, RelyingParty` (`server.go:354-458`) map one-to-one onto
   `gate.Deps`/`gate.Config`. Its startup refusal when accounts hold

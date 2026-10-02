@@ -653,10 +653,18 @@ paths:
         Answers the W3C creation options for `navigator.credentials.create()`,
         excluding the account's passkeys already registered for the current
         relying party, and sets the registration ceremony cookie (sealed,
-        path `/api/auth/passkeys`, five minutes). Reachable at the
-        must-enrol-factor door. Takes no body.
+        path `/api/auth/passkeys`, five minutes). Password-gated
+        (rate-limited re-check), as authenticator-app enrolment is; refused
+        for an account with no local password before the body is read.
+        Reachable at the must-enrol-factor door.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: The creation options; sets the registration ceremony cookie.
@@ -664,6 +672,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CredentialCreation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -671,7 +681,13 @@ paths:
         "404":
           $ref: "#/components/responses/PasskeysOff"
         "409":
-          $ref: "#/components/responses/PasskeysNotReady"
+          description: The relying party is not ready (the message names why), or the account has no local password (signs in through SSO).
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":

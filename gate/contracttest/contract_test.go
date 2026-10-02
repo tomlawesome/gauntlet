@@ -528,6 +528,8 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	// with the setup code); the first SSO sign-in is an ordinary user.
 	first := c.client()
 	contractSSOSignIn(t, c, codec, fp, first, u, "/api/auth/oidc/login", "/")
+	// An SSO-provisioned account has no local password: no passkey.
+	c.do(first, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{"anything"}}, 409, nil)
 	admin := c.client()
 	c.do(admin, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"setup-admin", "setup-admin-password"}}, 200, nil)
 
@@ -740,13 +742,16 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	register := func(client *http.Client, fake *passkeytest.FakeAuthenticator, name string, want int, out any) {
 		t.Helper()
 		var creation protocol.CredentialCreation
-		c.do(client, u, call{method: "POST", path: "/api/auth/passkeys/register/begin"}, 200, &creation)
+		c.do(client, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{bobPass}}, 200, &creation)
 		body, err := fake.RegisterResponse(&creation)
 		if err != nil {
 			t.Fatal(err)
 		}
 		c.do(client, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(body), name}}, want, out)
 	}
+
+	// Registration is password-gated at begin.
+	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{"wrong"}}, 401, nil)
 
 	// Refused registrations, then the first factor (codes minted), a
 	// second (alreadyIssued) and a duplicate.
@@ -861,7 +866,7 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 		t.Fatalf("session passkeys with no public URL = %+v, want unset", state.Passkeys)
 	}
 	c.do(unreadyAdmin, unready.URL, call{method: "GET", path: "/api/auth/passkeys"}, 200, &rows)
-	c.do(unreadyAdmin, unready.URL, call{method: "POST", path: "/api/auth/passkeys/register/begin"}, 409, nil)
+	c.do(unreadyAdmin, unready.URL, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{"contract-admin-password"}}, 409, nil)
 	c.do(unreadyAdmin, unready.URL, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), ""}}, 409, nil)
 
 	// No passkeys at all.
@@ -877,7 +882,7 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 		t.Fatalf("session with passkeys off carries %+v", state.Passkeys)
 	}
 	c.do(offAdmin, o, call{method: "GET", path: "/api/auth/passkeys"}, 404, nil)
-	c.do(offAdmin, o, call{method: "POST", path: "/api/auth/passkeys/register/begin"}, 404, nil)
+	c.do(offAdmin, o, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{"contract-admin-password"}}, 404, nil)
 	c.do(offAdmin, o, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), ""}}, 404, nil)
 	c.do(offAdmin, o, call{method: "PATCH", path: "/api/auth/passkeys/eA", body: passkeyRenameRequest{"x"}}, 404, nil)
 	c.do(offAdmin, o, call{method: "DELETE", path: "/api/auth/passkeys/eA", body: passwordRequest{"contract-admin-password"}}, 404, nil)

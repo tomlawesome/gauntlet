@@ -17,6 +17,7 @@ import (
 	"github.com/tomlawesome/gauntlet/internal/hashcost"
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/passkey"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -158,7 +159,13 @@ func newOIDCTestServer(t *testing.T) (*oidc.StateCodec, *httptest.Server, *testu
 		t.Fatalf("oidc.NewStateCodec: %v", err)
 	}
 	users, code := openStore(t, persist.NewMemory())
-	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec})
+	// Passkeys are wired too, so an SSO-provisioned account can be shown
+	// the 409 register/begin gives an account with no local password.
+	rp, err := passkey.New(passkey.Config{PublicURL: "https://passkeys.example.org", DisplayName: testProductName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec, Passkeys: rp})
 	ts := newTestServer(t, g)
 
 	b, err := json.Marshal(registerRequest{"setup-admin", "setup-admin-password", code})
