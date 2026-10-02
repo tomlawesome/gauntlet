@@ -19,9 +19,11 @@ go-webauthn, so an app that never imports it never links the library.
 **Belongs in the apps, not here:** a database-table backend (each app
 supplies its own `persist.Backend`), the public URL a relying party is
 built from, and anything that reaches back into birdcage's or
-mikroview's own types. File storage is the one exception: the encrypted
-file backend (`persist.EncryptedFileBackend`) lives here (#18) as the
-documented default; finding and reading the key file stays with the app.
+mikroview's own types. Encryption at rest is the one exception:
+`persist.Encrypt` seals the document before any app backend stores it,
+and the encrypted file backend (`persist.EncryptedFileBackend`) is that
+wrapper over a file (#18, #50, ADR-0005); finding and reading the key
+file stays with the app.
 
 **Mikroview's auth code is the reference this module is read against**,
 continuously, until mikroview actually moves onto it (birdcage ADR-0005

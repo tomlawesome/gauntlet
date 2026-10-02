@@ -49,8 +49,9 @@ github.com/tomlawesome/gauntlet
 ├── user.go  password.go  session.go  token.go  ratelimit.go  username.go
 ├── totp.go  recoverycodes.go  resetcode.go  passkeys.go   (storage + stdlib logic)
 ├── id.go
-├── persist/                    Backend, Snapshot, ErrConflict, VersionReader,
+├── persist/                    Backend, Snapshot, ErrConflict, VersionReader, AtRest,
 │                               Open, SaveWithRetry (deprecated), LoadDocument, Memory (tests),
+│                               Encrypt, Encrypted, EncryptOptions (#50, ADR-0005),
 │                               EncryptedFileBackend, MinKeyBytes (issue #18)
 ├── oidc/                       Config, Client, Identity, Policy, FlowState, StateCodec,
 │                               AllowIssuer, IsMultiTenantIssuer
@@ -86,7 +87,14 @@ interface in the root, so an application that never imports it -- birdcage
   authenticated-encryption file backend, so it moved into
   `gauntlet/persist` rather than staying duplicated, and gauntlet takes
   key bytes directly rather than a key file path -- reading the key
-  file stays each application's job (§1.7). The one thing that does not
+  file stays each application's job (§1.7). Since #50
+  ([ADR-0005](adr/0005-encryption-at-rest-on-every-backend.md)) that
+  backend is `persist.Encrypt` over the plain file, and the same wrapper
+  goes over any application backend -- mikroview's Postgres blob,
+  birdcage's table -- so the accounts document is ciphertext wherever
+  it is stored, and `OpenStore` refuses a backend that would hold it in
+  the clear unless the application says it accepts that
+  (`Options.AllowPlaintextAtRest`). The one thing that does not
   carry across a package boundary is the sentinel `ErrConflict`, so
   mikroview's `internal/persist` will assign `var ErrConflict =
   gpersist.ErrConflict` when it moves -- one line, no data change.
@@ -531,10 +539,10 @@ it. The data for all of this lives on `User`.
 - A SQL backend. Mikroview keeps its own (`internal/persist.PostgresBackend`);
   birdcage writes its own if it ever needs one. `persist.Memory` is for
   tests.
-- Reading the key file itself. `persist.EncryptedFileBackend` (issue #18,
-  see below) takes raw key bytes; finding, mounting and reading that
-  file -- and deciding a store has no key and therefore no persistence
-  -- stays each application's own job.
+- Reading the key file itself. `persist.Encrypt` and
+  `persist.EncryptedFileBackend` (#18, #50) take raw key bytes; finding,
+  mounting and reading that file -- and deciding a store has no key and
+  therefore no persistence -- stays each application's own job.
 - The recovery-key store (`recovery.go`, mikroview's CLI gate) and the
   `-recover-admin-account` tooling. They are mikroview's operational
   surface; birdcage gets a `birdcage user` CLI over the same `Store`
@@ -598,6 +606,17 @@ and `Describe` (`"birdcage db store 'accounts'"`). Uses `db.DB`'s
 `?`-rebinding `Exec/QueryRow`, so one implementation serves SQLite and
 Postgres like every other birdcage store.
 
+The backend `OpenStore` is given is that table wrapped in
+`persist.Encrypt(store.NewAuthBackend(database, "accounts"), key,
+persist.EncryptOptions{Label: "accounts"})` -- the same for `"tokens"`
+-- with `key` the bytes of `BIRDCAGE_AUTH_KEY_FILE` (§2.4), so the
+`payload` column only ever holds `{"sealed": "<base64>"}` (#50,
+[ADR-0005](adr/0005-encryption-at-rest-on-every-backend.md)). The column
+stays `TEXT`: the envelope is JSON text. `OpenStore` refuses the
+unwrapped table (`gauntlet.ErrPlaintextAtRest`). Birdcage has no
+plaintext accounts document to migrate, so it never needs
+`MigratePlaintext`.
+
 Why a document table rather than `users`/`tokens` rows: gauntlet's
 `Store` is an in-memory index that persists whole documents -- that is
 the shape [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) fixed by choosing mikroview's seams, and mikroview's
@@ -620,6 +639,7 @@ BIRDCAGE_SESSION_TTL          default 1h    (gauntlet.MaxSessionIdle; mikroview'
 BIRDCAGE_SESSION_MAX_LIFETIME default 24h   (gauntlet.MaxSessionLifetime; mikroview's old 168h default is refused by gate.New)
 BIRDCAGE_OIDC_ISSUER_URL, _CLIENT_ID, _CLIENT_SECRET_FILE, _SCOPES
 BIRDCAGE_OIDC_ALLOWED_GROUPS, _ALLOWED_EMAILS, _ALLOWED_EMAIL_DOMAINS
+BIRDCAGE_AUTH_KEY_FILE        a file of at least 32 random bytes (persist.MinKeyBytes), mounted like the OIDC secret; the accounts and tokens documents are sealed under it (§2.3, ADR-0005). Required once auth is configured: OpenStore refuses an unsealed table
 BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header); would be passkey.Config.PublicURL if birdcage ever wired passkeys (§1.6: it does not)
 ```
 
@@ -682,7 +702,13 @@ Not done in this work; recorded so the API above is checked against it.
   `internal/persist.EncryptedFileBackend` already moved to
   `gauntlet/persist` (issue #18); mikroview's stores can switch to the
   gauntlet one directly, passing `retention.Key`'s raw material rather
-  than the `*retention.Key` type.
+  than the `*retention.Key` type. Its Postgres mode wraps
+  `PostgresBackend` for the `auth` row in `persist.Encrypt` under the
+  same material, with `Label: "auth"` and `MigratePlaintext: true` for
+  the release that introduces it (the row holds plaintext JSON today;
+  the first open seals it in place), since `OpenStore` now refuses an
+  unsealed backend (#50, ADR-0005). `store_blob.payload` stays `text`:
+  the envelope is JSON text.
 - Constructor renames: `OpenWithBackend(b)` → `OpenStore(b, Options{Log:
   logging.New("auth")})`; `OpenTokenStoreWithBackend(b)` →
   `OpenTokenStore(b, TokenOptions{Kinds: […, TokenKindDroplistPull]})`;

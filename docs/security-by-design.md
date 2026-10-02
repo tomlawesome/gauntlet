@@ -53,16 +53,21 @@ fix is made, a test proves the flaw existed first.
 
 ## Trust boundary: the accounts store (issue #18)
 
-The accounts store this module persists (via `persist.EncryptedFileBackend`
-or otherwise) is a **trusted** input, not hostile data: it is refused
+The accounts store this module persists (via `persist.Encrypt`,
+`persist.EncryptedFileBackend` or otherwise) is a **trusted** input, not hostile data: it is refused
 outright on tamper (a wrong key, a flipped byte, a document moved to
 another store's path) rather than sanitised or partially accepted, because
 there is no safe partial reading of a corrupted or forged auth store.
 
 Gauntlet decides how a document is authenticated once opened; the
 *application* decides which `persist.Backend` to use and, for
-`EncryptedFileBackend`, where its key file lives and how it is mounted.
-Gauntlet never reads a key file itself.
+`persist.Encrypt` and `EncryptedFileBackend`, where its key file lives
+and how it is mounted. Gauntlet never reads a key file itself. Since #50
+([ADR-0005](adr/0005-encryption-at-rest-on-every-backend.md)) the accounts
+store refuses to open over a backend that would hold the document in the
+clear, unless the application sets `Options.AllowPlaintextAtRest`; the
+TOTP secrets inside it cannot be hashed, so sealing the document is the
+only way a database dump or backup carries none of them.
 
 The supported way to change accounts outside the UI is the application's
 own CLI (mikroview's `-recover-admin-account` and equivalents), never
@@ -301,18 +306,19 @@ post-quantum migration) starts from a list rather than a search:
 | Setup code | SHA-256, memory only, constant-time compare | `setupcode.go:73,140` |
 | TOTP | HMAC-SHA1 over a 160-bit secret, 30 s step, 6 digits (RFC 6238; SHA-1 inside HMAC is approved by SP 800-131A) | `totp.go:47-65`, `:206` |
 | Sealed cookies (OIDC flow, pending login, passkey ceremonies) | AES-256-GCM, 32-byte key from `crypto/rand` per process and per codec, 96-bit random nonce per value, strict base64url | `oidc/state.go`, `gate/pendinglogin.go`, `passkey/seal.go` |
-| Encrypted accounts and tokens files | AES-256-GCM; key = HKDF-SHA256(app key ≥ 32 bytes, 16-byte random salt per save); 96-bit random nonce; AAD = the store's logical path; envelope has magic and version bytes | `persist/encrypted_file.go:22,59-78,153-161` |
+| Sealed accounts and tokens documents, on every backend (#50) | AES-256-GCM; key = HKDF-SHA256(app key ≥ 32 bytes, 16-byte random salt per save); 96-bit random nonce; AAD = the store's label (a file's path); envelope has magic and version bytes, carried as `{"sealed": "<base64>"}` through a database backend | `persist/seal.go`, `persist/encrypted.go` |
 | Random values | `crypto/rand`: session and account ids 128 bits, token values 128 bits, TOTP secrets 160 bits, reset and setup codes 80 bits, recovery codes 50 bits, OIDC `state`/`nonce` 256 bits, WebAuthn challenge 256 bits | `id.go`, `totp.go`, `resetcode.go`, `recoverycodes.go`, `oidc/state.go`, go-webauthn |
 | Signature verification | ID tokens RS256/ES256/PS256 (go-oidc); WebAuthn assertions, library default COSE algorithms (go-webauthn v0.18.2) | `oidc/oidc.go:183`, `passkey/ceremony.go` |
 
 **Key lifecycle (11.1.1).** Per-process keys are made at start and die
 with the process; a restart ends in-flight ceremonies and pending
-logins, which is accepted. The encrypted-file key is the application's
+logins, which is accepted. The document key is the application's
 (trust boundary section above): gauntlet never reads it, and rotating
 it means loading with the old key and saving with the new, which an
-application can do with two backends. The TOTP secret is the one
-long-lived symmetric key gauntlet stores; it is only as protected as
-the backend (13.3.1 below).
+application can do with two `persist.Encrypt` wrappers over one
+backend. The TOTP secret is the one long-lived symmetric key gauntlet
+stores; it is sealed under that key on every backend, and `OpenStore`
+refuses a backend that would hold it in the clear (13.3.1 below, #50).
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
@@ -384,7 +390,7 @@ store, keep and protect:
 | 2.4.1 anti-automation | 2 | Met | Limiter on login, factor, setup code and re-checks; Argon2id semaphore (`password.go:66`) |
 | 4.1.1 `Content-Type` with charset | 1 | Gap | `application/json` without `charset` and no `nosniff`; #46 (no-store/nosniff headers) |
 | 4.1.3 proxy headers not user-overridable | 2 | App | `gate.Config.ClientIP` is the application's trusted-proxy policy (`docs/design.md` §1.7) |
-| 13.3.1 secrets management | 2 | Deviation | TOTP seeds and passkey public keys are plaintext inside the document; `persist.EncryptedFileBackend` is the documented default, a SQL backend stores them as the database protects them. #50 (TOTP seeds and passkey keys at rest); see 800-63B §3.1.4.2 |
+| 13.3.1 secrets management | 2 | Met | The accounts document -- TOTP seeds and passkey public keys inside it -- is sealed by `persist.Encrypt` before any backend stores it, and `OpenStore` refuses a backend that stores plaintext unless the application sets `AllowPlaintextAtRest` (#50, ADR-0005); the key is the application's secret, never the document's. See 800-63B §3.1.4.2 |
 | 14.2.1 no secrets in URLs | 1 | Met | Bearer token read from the header only (RFC 6750 section above); the OIDC code is consumed once from the callback query, as the protocol requires |
 | 14.3.2 `Cache-Control: no-store` | 2 | Gap | Not set; #46 (no-store/nosniff headers) |
 | 15.1.2 dependency inventory | 2 | Met | `go.sum`, `supply-chain/licence-policy.yml`, `govulncheck` in CI |
@@ -406,10 +412,10 @@ store, keep and protect:
 At L2 gauntlet meets every requirement except: password blocklists
 (6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
 decisions (16.2.1, 16.3.1–16.3.3), and a session list (7.5.2). Each has an issue; the password blocklist needs
-the owner. The lockout shape from the 800-63B review is settled (#44). Three
-deviations are recorded rather than fixed: the TOTP acceptance window,
-the SSO sign-in's reliance on the IdP's policy, and secrets at rest on
-backends other than the encrypted file.
+the owner. The lockout shape from the 800-63B review is settled (#44). Two
+deviations are recorded rather than fixed: the TOTP acceptance window and
+the SSO sign-in's reliance on the IdP's policy. Secrets at rest were a
+third until #50 sealed the document on every backend.
 
 Written by Fable 5.1, 2026-10-02.
 
@@ -467,7 +473,7 @@ already holds the evidence, the row points at it.
 | Rate limiting on the account (SHALL, §3.2.2) | Conforms | Below |
 | Password managers and paste allowed | Conforms | Nothing server-side interferes |
 | Salted and hashed with a password hashing scheme, cost as high as practical, parameters stored with each hash, salt at least 32 bits | Conforms | Argon2id, RFC 9106 §4 second profile, 128-bit salt, parameters in the hash string (`password.go:28-48`, `:94`). ASVS 11.4.2 |
-| Extra keyed hash with a verifier-only secret (SHOULD) | Deviation | No pepper. The encrypted file backend is the at-rest layer instead (trust boundary section above); a pepper would be one more key for the application to mount |
+| Extra keyed hash with a verifier-only secret (SHOULD) | Deviation | No pepper. The sealed document (`persist.Encrypt`, on every backend since #50) is the at-rest layer instead (trust boundary section above); a pepper would be one more key for the application to mount |
 
 ### Look-up secrets: recovery codes (§3.1.2, §4.2.1.1)
 
@@ -494,7 +500,7 @@ stand alone, which these never do.
 |---|---|---|
 | Key at least 112 bits of strength; approved hash | Conforms | 160-bit secret, HMAC-SHA1 (`totp.go:48-51`); SHA-1 inside HMAC is approved by SP 800-131A. Reasoned in the RFC 6238 section above |
 | Time nonce changes at least every two minutes | Conforms | 30 s step |
-| Keys protected by access controls limited to the components that need them (§3.1.4.2) | Deviation | The secret is plaintext in the accounts document; `persist.EncryptedFileBackend` is the documented default, and a SQL backend relies on the database's own controls. #50 (TOTP seeds and passkey keys at rest); ASVS 13.3.1 |
+| Keys protected by access controls limited to the components that need them (§3.1.4.2) | Conforms | The secret is sealed inside the accounts document before any backend stores it (`persist.Encrypt`), so only a process holding the application's key reads it; `OpenStore` refuses a backend that would hold it in the clear unless the application accepts that (#50, ADR-0005). ASVS 13.3.1 |
 | Approved key establishment at binding | Conforms | The secret reaches the authenticator app in the enrolment URI over the application's TLS, once, and is confirmed before activation (`ConfirmTOTP`) |
 | Collected over an authenticated protected channel | Application | TLS is the application's |
 | Accepted only once while valid (replay resistance, §3.2.7) | Conforms | `TOTPLastCounter`, advanced under the same lock as the check (`totp.go:394-434`); the enrolment code cannot also sign in (`totp.go:344`) |
@@ -507,7 +513,7 @@ stand alone, which these never do.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Challenge nonce at least 64 bits, statistically unique | Conforms | 32-byte library challenge, spent once (`passkey/challenges.go`, ADR-0004 decision 5) |
-| Public keys protected against modification | Conforms | Trusted accounts store (trust boundary section); AEAD-tagged on the encrypted backend |
+| Public keys protected against modification | Conforms | Trusted accounts store (trust boundary section); AEAD-tagged on every backend opened through `persist.Encrypt` (#50) |
 | Key and algorithm at least 112 bits; approved verification | Conforms | go-webauthn v0.18.2's default algorithm set (ES256, RS256 and the rest of its COSE list), left as the library ships it; a browser-made passkey is P-256 |
 | Phishing resistance by verifier name binding (§3.2.5.2); at least one phishing-resistant option offered at AAL2 (SHALL) | Conforms where wired | WebAuthn binds the credential to the relying-party id, taken from the application's public URL never the `Host` header (ADR-0004 decision 4). An application that leaves `Deps.Passkeys` nil offers none; that is its own call (birdcage today) |
 | Authentication intent (§3.2.8) | Conforms | User presence always required (`passkey/relyingparty.go:72`); TOTP and recovery codes are typed by hand |
@@ -560,8 +566,8 @@ stand alone, which these never do.
 Conforms on everything above except: the password blocklist (#43, owner
 decision on the list); refused attempts and binding sources not logged
 (#45). Documented
-deviations: no NFC normalisation, no pepper, TOTP secrets as protected as
-the backend, no out-of-band notifications, the custom-header CSRF defence,
+deviations: no NFC normalisation, no pepper, no out-of-band
+notifications, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),
 and the TOTP acceptance window. Each gap is one issue in the standards-gaps
 list, shared with the ASVS section where both standards ask for it.
