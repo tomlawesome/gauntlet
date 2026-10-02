@@ -36,7 +36,12 @@ itself, which ADR-0002 allows only in a new major version.
   documented success or redirect status must be seen at least once. The
   document closes each response body (`additionalProperties: false`),
   so a field the handler drops, renames or adds without the document
-  also fails. `TestContractRoutesMatchDocument` checks that the routes
+  also fails. One deliberate exception: on the passkey routes, the
+  WebAuthn options `register/begin` and `login/factor/begin` answer and
+  the `credential` and `assertion` request fields are open objects.
+  They are the W3C's `PublicKeyCredential` JSON, made and read by the
+  WebAuthn library and the browser, and a library update that adds a
+  W3C field must not fail the contract (ADR-0004 decision 6). `TestContractRoutesMatchDocument` checks that the routes
   `routes.go` registers (read from the source code and confirmed
   against the running router) are the same list as the document
   describes, in both directions. `TestContractRequestBodiesMatchHandlers`

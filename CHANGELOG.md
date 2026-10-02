@@ -27,7 +27,25 @@ All notable changes to this project are documented in this file.
   user-typed names should handle this error. An empty name is still
   allowed. Device ids already followed this rule.
 
-- New dependency for the coming `passkey` package (G8, #20; owner
+- Passkeys (G8, #20, [ADR-0004](docs/adr/0004-passkey-ceremony.md)).
+  The new `gauntlet/passkey` package runs the WebAuthn ceremony:
+  `passkey.New(passkey.Config{PublicURL, DisplayName})` builds the
+  relying party from the application's own public URL, and a missing or
+  unusable one (`unset`, `ip`, `insecure`) is a reported status, not a
+  startup failure. Wire it into `gate.Deps.Passkeys` to serve
+  mikroview's passkey routes from `gate.Routes`: list, register
+  begin/finish, rename, delete, `POST /api/auth/login/factor/begin`, an
+  `assertion` on `POST /api/auth/login/factor`, and the admin
+  `DELETE /api/auth/users/{id}/passkeys`. Left nil, every passkey route
+  answers 404 and nothing links the WebAuthn library. The root package
+  gains the seam both sides use (`PasskeyCeremony`, `PasskeyAssertion`,
+  `PasskeyStatus`).
+- `POST /api/auth/login` lists `passkey` (first) in `secondFactor`, with
+  `passkeyOrigin`, when the account holds a usable passkey;
+  `GET /api/auth/session` gains `passkeys: {count, status, origin}` when
+  the application wires passkeys; `GET /api/auth/users` rows gain
+  `passkeyCount`.
+- New dependency for the `passkey` package (G8, #20; owner
   approval 2026-09-30): `github.com/go-webauthn/webauthn` v0.18.2
   (BSD-3-Clause), the newest release, with no advisory in OSV or the Go
   vulnerability database as of 2026-10-02. It brings
