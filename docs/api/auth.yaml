@@ -1475,6 +1475,90 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/sign-ins:
+    get:
+      operationId: listSignIns
+      summary: The sign-in history (admin)
+      description: |
+        Every sign-in attempt the gate has seen, newest first: the password
+        step, the second-factor step, the SSO callback and every attempt the
+        login limiter refused (#53). Kept in the application's third sealed
+        document (`signins`, ADR-0006), the newest 10,000 rows by default
+        (`gauntlet.DefaultMaxSignInRows`; the application may set up to
+        50,000); `total` says how full it is and `since` how far back it
+        goes.
+
+        A row may stand for several attempts: one source repeating one
+        outcome against one name within 10 minutes is one row whose
+        `count` grows and `until` moves. Failed attempts may start at most
+        100 rows per 10-minute bucket; past that they are counted in one
+        `unrecorded` row for the bucket, which carries only the required
+        fields. A name that matched no account is shown masked: its first
+        two characters and one `•` per further character, except common
+        probe names (root, admin, postgres and the like), which are shown
+        as typed. A name that matched an account is the account's
+        username.
+
+        `404` when the application keeps no history (`Deps.SignIns` is
+        nil). Page by passing the last row's `seq` as `before` while
+        `more` is true.
+      parameters:
+        - name: user
+          in: query
+          required: false
+          description: Only rows for this account `id`.
+          schema:
+            type: string
+        - name: address
+          in: query
+          required: false
+          description: Only rows from this client address, exactly. At most 64 bytes.
+          schema:
+            type: string
+            maxLength: 64
+        - name: outcome
+          in: query
+          required: false
+          description: Only rows with this outcome.
+          schema:
+            $ref: "#/components/schemas/SignInOutcome"
+        - name: before
+          in: query
+          required: false
+          description: Only rows whose `seq` is below this.
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          description: How many rows, 1 to 200; 50 when absent.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: A page of the history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignInList"
+        "400":
+          description: A query value is out of range -- an unknown outcome, a `before` that is not a positive whole number, a `limit` outside 1 to 200, or an `address` over 64 bytes.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/SignInsOff"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/tokens:
     get:
       operationId: listTokens
@@ -1733,6 +1817,12 @@ components:
             $ref: "#/components/schemas/TextError"
     PasskeysOff:
       description: This application has no passkeys (`Deps.Passkeys` is nil).
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    SignInsOff:
+      description: This application keeps no sign-in history (`Deps.SignIns` is nil).
       content:
         text/plain:
           schema:
@@ -2110,6 +2200,85 @@ components:
         value:
           type: string
           description: The raw bearer token; only in the response that creates it.
+    SignInOutcome:
+      type: string
+      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded]
+      description: |
+        How an attempt ended. `password_ok` is the right password with a
+        second factor still owed; `factor_refused` a wrong or used code or a
+        refused passkey; `locked`, `disabled` and `rate_limited` the login
+        limiter refusing it before any credential was checked; `unrecorded`
+        the failed attempts past a bucket's row budget. New values may be
+        added.
+    SignInRow:
+      type: object
+      additionalProperties: false
+      required: [seq, at, until, count, outcome]
+      properties:
+        seq:
+          type: integer
+          minimum: 1
+          description: The row's number, rising in the order rows began; what `before` takes.
+        at:
+          type: string
+          format: date-time
+          description: The first attempt the row stands for.
+        until:
+          type: string
+          format: date-time
+          description: The last attempt the row stands for.
+        count:
+          type: integer
+          minimum: 1
+          description: How many attempts the row stands for.
+        outcome:
+          $ref: "#/components/schemas/SignInOutcome"
+        userId:
+          type: string
+          description: The account the attempts were on. Absent when the name matched none.
+        username:
+          type: string
+          description: The account's username, or the name typed, masked (see the operation). Absent on an `unrecorded` row, and for an empty name.
+        method:
+          type: string
+          enum: [password, code, passkey, sso]
+          description: What the attempt presented. New values may be added.
+        address:
+          type: string
+          maxLength: 64
+          description: The client address the application resolved, for the first attempt.
+        userAgent:
+          type: string
+          maxLength: 256
+          description: The first attempt's `User-Agent`, with control and formatting characters removed.
+        lockedUntil:
+          type: string
+          format: date-time
+          description: The end of the lockout this attempt started, or for `locked` the one in force.
+        disabled:
+          type: boolean
+          description: True on the failure that disabled the account's sign-in, and on a `disabled` refusal.
+    SignInList:
+      type: object
+      additionalProperties: false
+      required: [signIns, more, total]
+      properties:
+        signIns:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/SignInRow"
+        more:
+          type: boolean
+          description: More rows match beyond this page.
+        total:
+          type: integer
+          minimum: 0
+          description: How many rows the history holds.
+        since:
+          type: string
+          format: date-time
+          description: When the oldest row began. Absent while the history is empty.
     AdminLogoutAllRequest:
       type: object
       additionalProperties: false

@@ -7,7 +7,8 @@ import "net/http"
 // register, login (single- and second-factor step), logout, logout-all,
 // the caller's own session list and end-one-session route, password,
 // the lone-admin unlock-code route (#44),
-// users list/create/delete/reset-password/unlock/logout-all, TOTP enrol/confirm/delete
+// users list/create/delete/reset-password/unlock/logout-all, the
+// sign-in history (#53; 404 while Deps.SignIns is nil), TOTP enrol/confirm/delete
 // plus the admin clear route, recovery-codes regenerate, the passkey
 // list/register/rename/delete routes, the passkey login begin and the
 // admin clear route (G8, ADR-0004; all 404 while Deps.Passkeys is nil),
@@ -55,6 +56,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.Handle("POST /api/auth/users/{id}/logout-all", adminOnly(g, g.handleAdminLogoutAll))
 	mux.Handle("DELETE /api/auth/users/{id}/totp", adminOnly(g, g.handleTOTPAdminClear))
 	mux.Handle("DELETE /api/auth/users/{id}/passkeys", adminOnly(g, g.handlePasskeysAdminClear))
+	mux.Handle("GET /api/auth/sign-ins", adminOnly(g, g.handleSignInsList))
 
 	mux.Handle("GET /api/tokens", adminOnly(g, g.handleTokensList))
 	mux.Handle("POST /api/tokens", adminOnly(g, g.handleTokensCreate))

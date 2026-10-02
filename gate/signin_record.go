@@ -69,8 +69,9 @@ func limiterRefusal(o gauntlet.SignInOutcome) bool {
 // recordSignIn records one sign-in attempt: ev carries who and how, res
 // the limiter's reservation for it (the zero value for SSO, which the
 // limiter does not meter). It fills ev's Client, and for a failed
-// attempt the lockout or disable it started, hands ev to signInHook,
-// then writes the audit record or Warn line (see this file's header).
+// attempt the lockout or disable it started, appends ev to the sign-in
+// history (Deps.SignIns) when there is one, then writes the audit
+// record or Warn line (see this file's header).
 func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginReservation, now time.Time) {
 	ev.Client = g.signInClient(r, res.address)
 	failed := signInFailed(ev.Outcome)
@@ -87,6 +88,9 @@ func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginR
 	}
 	if g.signInHook != nil {
 		g.signInHook(ev, now)
+	}
+	if g.deps.SignIns != nil {
+		g.deps.SignIns.Record(ev, now)
 	}
 
 	from := fmt.Sprintf("from=%q", ev.Client.Address)

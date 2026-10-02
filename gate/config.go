@@ -123,6 +123,13 @@ type Deps struct {
 	// relying party that is not ready is a reported state, not a wiring
 	// mistake.
 	Passkeys gauntlet.PasskeyCeremony
+	// SignIns is the sign-in history (#53): every sign-in attempt is
+	// appended to it, and GET /api/auth/sign-ins lets an admin page
+	// through it. nil means no history: nothing is appended and the
+	// route answers 404. The audit records (Config.Audit) are written
+	// either way. Not checked by New; the application opens it
+	// (gauntlet.OpenSignInHistory) and closes it at shutdown.
+	SignIns *gauntlet.SignInHistory
 }
 
 // Gate is the middleware and handler set built by New.
@@ -151,9 +158,8 @@ type Gate struct {
 	notifying sync.WaitGroup
 
 	// signInHook, when set, receives every sign-in attempt recordSignIn
-	// handles, after its client and lockout fields are filled. It is
-	// where a sign-in history attaches (#53); nil records only the
-	// audit and the log.
+	// handles, after its client and lockout fields are filled, beside
+	// Deps.SignIns: a test seam.
 	signInHook func(ev gauntlet.SignInEvent, now time.Time)
 }
 
