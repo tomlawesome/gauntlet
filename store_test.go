@@ -1041,11 +1041,12 @@ func TestAuthenticateUnknownUserStillRunsTheHash(t *testing.T) {
 }
 
 // TestWritesPickUpAnotherProcessesAccountFirst covers the three write
-// paths that did not reload before saving. A whole-document save is
-// built from what this process holds; a store that has not refreshed
-// since a CLI tool (a second process) added an account writes that
-// account away again. Every other write method reloads first, so these
-// must too.
+// paths that once wrote away an account a CLI tool (a second process)
+// had added since this store last loaded: a whole-document save is built
+// from what this process holds. It checks the outcome -- the other
+// process's account survives the write -- not how: today each method
+// reloads before deciding, but the save-conflict replay (mutate) would
+// keep the account even without that reload, so this passes either way.
 func TestWritesPickUpAnotherProcessesAccountFirst(t *testing.T) {
 	cases := []struct {
 		name  string

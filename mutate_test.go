@@ -1146,17 +1146,15 @@ func TestMutateNoChangeSavesNothing(t *testing.T) {
 	}
 }
 
-// TestTokenStoreRevokeReplaysOnAConflictingWrite: the first store
-// revokes its token after the second store, unseen by it, added one.
-// The revoke must be replayed against the document holding both, so
-// the other store's token survives and the revoked one is gone.
+// TestTokenStoreRevokeReplaysOnAConflictingWrite: the second store adds
+// a token after the first store's staleness check and just before its
+// revoke is saved, so the save meets a newer document. The revoke must
+// be replayed against the document holding both, so the other store's
+// token survives and the revoked one is gone.
 func TestTokenStoreRevokeReplaysOnAConflictingWrite(t *testing.T) {
 	m := persist.NewMemory()
-	first, err := OpenTokenStore(m, TokenOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := OpenTokenStore(m, TokenOptions{})
+	b := &otherProcessBackend{Memory: m}
+	first, err := OpenTokenStore(b, TokenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1164,13 +1162,22 @@ func TestTokenStoreRevokeReplaysOnAConflictingWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawB, _, err := second.Create("b", TokenKindAPI, "", nil, time.Now())
+	second, err := OpenTokenStore(m, TokenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	var rawB string
+	b.beforeSave = func() {
+		if rawB, _, err = second.Create("b", TokenKindAPI, "", nil, time.Now()); err != nil {
+			t.Errorf("the other store's Create: %v", err)
+		}
+	}
 
 	if err := first.Revoke(a.ID); err != nil {
-		t.Fatalf("Revoke on a stale store: %v", err)
+		t.Fatalf("Revoke across a conflicting write: %v", err)
+	}
+	if rawB == "" {
+		t.Fatal("the other store wrote nothing, so the revoke met no conflict")
 	}
 	reopened, err := OpenTokenStore(m, TokenOptions{})
 	if err != nil {

@@ -130,11 +130,15 @@ func TestOIDCProvisioningKeepsAUsableHint(t *testing.T) {
 
 // TestOIDCFallbackUsernameAlwaysValidates drives uniqueUsername
 // down its fallback chain: a 64-character hint (the longest a username
-// may be) already taken, and every shorter hash-derived name taken too.
-// Whatever it lands on is written to the store without further checks,
-// so it has to pass ValidateUsername and fit maxUsernameLength -- the
-// longest hash-derived candidate, "oidc-" plus all 64 hex digits, does
-// not.
+// may be) already taken, then the hash-derived names in turn. Whatever
+// it lands on is written to the store without further checks, so it has
+// to pass ValidateUsername and fit maxUsernameLength -- the longest
+// hash-derived candidate, "oidc-" plus all 64 hex digits, does not.
+//
+// The walk is pinned here rather than derived from the same loop the
+// code runs: with the 8- to 48-digit names taken the answer is exactly
+// "oidc-" plus 56 digits (61 characters, the longest that fits), and
+// with that taken too it is the random fallback.
 func TestOIDCFallbackUsernameAlwaysValidates(t *testing.T) {
 	s := openTestStoreWithAdmin(t)
 	now := time.Now()
@@ -148,25 +152,42 @@ func TestOIDCFallbackUsernameAlwaysValidates(t *testing.T) {
 		t.Fatalf("username = %q, want the 64-character hint kept", first.Username)
 	}
 
-	// Occupy every hash-derived name the second identity could get
-	// before the longest one.
-	sum := sha256.Sum256([]byte("https://idp.example" + "\x00" + "subject-2"))
-	full := hex.EncodeToString(sum[:])
-	s.mu.Lock()
-	for n := 8; len("oidc-")+n <= maxUsernameLength; n += 8 {
-		s.byName["oidc-"+full[:n]] = "someone-else"
+	hashOf := func(subject string) string {
+		sum := sha256.Sum256([]byte("https://idp.example" + "\x00" + subject))
+		return hex.EncodeToString(sum[:])
 	}
-	s.mu.Unlock()
+	occupy := func(full string, lengths ...int) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, n := range lengths {
+			s.byName["oidc-"+full[:n]] = "someone-else"
+		}
+	}
+	signIn := func(subject string) string {
+		t.Helper()
+		u, created, err := s.FindOrCreateOIDCUser("https://idp.example", subject, hint, now)
+		if err != nil {
+			t.Fatalf("FindOrCreateOIDCUser(%s): %v", subject, err)
+		}
+		if !created {
+			t.Fatalf("FindOrCreateOIDCUser(%s): expected a new account", subject)
+		}
+		if err := ValidateUsername(u.Username); err != nil {
+			t.Errorf("fallback username %q (%d characters) does not validate: %v",
+				u.Username, utf8.RuneCountInString(u.Username), err)
+		}
+		return u.Username
+	}
 
-	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-2", hint, now)
-	if err != nil {
-		t.Fatalf("FindOrCreateOIDCUser: %v", err)
+	full := hashOf("subject-2")
+	occupy(full, 8, 16, 24, 32, 40, 48)
+	if got, want := signIn("subject-2"), "oidc-"+full[:56]; got != want {
+		t.Errorf("with the 8- to 48-digit names taken, username = %q, want %q", got, want)
 	}
-	if !created {
-		t.Fatal("expected a new account")
-	}
-	if err := ValidateUsername(u.Username); err != nil {
-		t.Errorf("fallback username %q (%d characters) does not validate: %v",
-			u.Username, utf8.RuneCountInString(u.Username), err)
+
+	full = hashOf("subject-3")
+	occupy(full, 8, 16, 24, 32, 40, 48, 56)
+	if got := signIn("subject-3"); strings.Contains(got, full[:8]) {
+		t.Errorf("with every name that fits taken, username = %q, want the random fallback, not a longer slice of the hash", got)
 	}
 }

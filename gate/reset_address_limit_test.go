@@ -2,6 +2,8 @@ package gate
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,5 +185,56 @@ func TestOwnPasswordChangeGetsNoAddressPass(t *testing.T) {
 	}
 	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusTooManyRequests {
 		t.Errorf("bob's login after changing his own password at a full address got %d, want 429", got)
+	}
+}
+
+// TestLoginRefusedByTheAccountLimitHandsBackTheAddressReservation: an
+// attempt the account's own limit refuses has already reserved one
+// attempt on its address, and must hand it back -- otherwise anyone
+// retrying a locked-out account fills their own address's budget and is
+// then refused for every other account as well. Here one address makes
+// twice the threshold's worth of refused attempts at the locked-out
+// admin, then signs bob in.
+func TestLoginRefusedByTheAccountLimitHandsBackTheAddressReservation(t *testing.T) {
+	g := newTestGate(t)
+	const threshold = 5
+	g.deps.Limiter = mustNewLoginLimiter(t, threshold, time.Minute)
+	g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", "password123")
+	if _, err := g.deps.Users.CreateUser("bob", "password456", gauntlet.RoleUser, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	loginAttempt := func(ip, username, password string) int {
+		t.Helper()
+		body := `{"username":"` + username + `","password":"` + password + `"}`
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/login", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(csrfHeaderName, testCSRFValue)
+		req.Header.Set("X-Test-IP", ip)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Lock the admin out from addresses that are then done with.
+	for i := range threshold {
+		loginAttempt("198.51.100."+strconv.Itoa(i+1), "admin", "wrong")
+	}
+	const ip = "198.51.100.99"
+	for range 2 * threshold {
+		if got := loginAttempt(ip, "admin", "password123"); got != http.StatusTooManyRequests {
+			t.Fatalf("an attempt at the locked-out admin got %d, want 429", got)
+		}
+	}
+	if got := loginAttempt(ip, "bob", "password456"); got != http.StatusOK {
+		t.Errorf("bob's sign-in from an address whose only attempts the admin's limit refused got %d, want 200", got)
 	}
 }

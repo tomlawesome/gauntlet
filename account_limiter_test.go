@@ -493,6 +493,15 @@ func TestPasswordChangeDropsAnUnsavedLockout(t *testing.T) {
 	if got := s.LoginLockedUntil(id); !got.IsZero() {
 		t.Fatalf("a lockout from before the password change was saved after it, until %v", got)
 	}
+	// Checked on the limiter itself: nothing a caller can do next would
+	// reach a retry of the old lockout before a new count replaced it,
+	// so the record alone cannot show whether it was dropped.
+	l.mu.Lock()
+	p, pending := l.wantLockout[id]
+	l.mu.Unlock()
+	if pending {
+		t.Errorf("the limiter still holds the old password's unsaved lockout (until %v) for a later retry to save", p.until)
+	}
 }
 
 // A lockout whose save lands just after a password change -- decided
