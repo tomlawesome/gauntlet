@@ -4,9 +4,13 @@
 // wires in place of its own copy.
 //
 // It carries the middleware, the bootstrap and CSRF gates, bearer-token
-// dispatch, and the account, session, second-factor, admin-reset, OIDC
-// and token handlers -- mikroview's whole route table except passkeys,
-// which join when passkey/ lands (routes.go is the list).
+// dispatch, and the account, session, second-factor (authenticator app
+// and passkey), admin-reset, OIDC and token handlers -- mikroview's
+// whole route table (routes.go is the list). The passkey routes drive
+// the WebAuthn ceremony through Deps.Passkeys, a
+// gauntlet.PasskeyCeremony; gate never imports gauntlet/passkey or the
+// WebAuthn library, so an application without passkeys never links
+// either (ADR-0004).
 //
 // docs/design.md §1.5 is this package's specification; a divergence
 // from it is called out where it happens, not left to be inferred from

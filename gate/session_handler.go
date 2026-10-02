@@ -3,11 +3,12 @@ package gate
 import (
 	"net/http"
 	"time"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // sessionResponse is GET /api/auth/session's body -- mikroview's own
-// shape (internal/api/auth.go) minus the passkey fields, which join
-// when passkey/ lands. The booleans below are emitted even when false,
+// shape (internal/api/auth.go). The booleans below are emitted even when false,
 // as mikroview emits them: its frontend reads them as answers, not as
 // keys that may be absent.
 type sessionResponse struct {
@@ -34,9 +35,24 @@ type sessionResponse struct {
 	// HasTOTP reports gauntlet.User.HasActiveTOTP: a confirmed
 	// authenticator-app factor, not a pending enrolment.
 	HasTOTP bool `json:"hasTOTP"`
+	// Passkeys reports the caller's own passkey count and whether this
+	// deployment can offer passkeys, and why not -- a frontend explains
+	// an unavailable state from it rather than hiding the feature.
+	// Omitted while unauthenticated, and whenever the application has no
+	// passkeys at all (Deps.Passkeys nil).
+	Passkeys *sessionPasskeysInfo `json:"passkeys,omitempty"`
 	// SignedInSince is the current session's IssuedAt, RFC3339 --
 	// present only while Authenticated.
 	SignedInSince string `json:"signedInSince,omitempty"`
+}
+
+// sessionPasskeysInfo is sessionResponse.Passkeys.
+type sessionPasskeysInfo struct {
+	// Count is read through Store.PasskeyCount.
+	Count  int                    `json:"count"`
+	Status gauntlet.PasskeyStatus `json:"status"`
+	// Origin is set only when Status is ready.
+	Origin string `json:"origin,omitempty"`
 }
 
 // handleSession always answers 200: it reports state, it does not gate
@@ -58,6 +74,13 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp.MustChangePassword = user.MustChangePassword
 		resp.MustEnrolSecondFactor = g.cfg.RequireSecondFactor && user.LocalPassword() && !user.HasSecondFactor()
 		resp.HasTOTP = user.HasActiveTOTP()
+		if g.deps.Passkeys != nil {
+			resp.Passkeys = &sessionPasskeysInfo{
+				Count:  g.deps.Users.PasskeyCount(user.ID),
+				Status: g.deps.Passkeys.Status(),
+				Origin: g.deps.Passkeys.Origin(),
+			}
+		}
 		// sessionUser already validated the cookie once; re-reading it
 		// here just for IssuedAt rather than widening sessionUser's own
 		// signature for a field only this handler needs.

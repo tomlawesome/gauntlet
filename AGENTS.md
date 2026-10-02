@@ -5,15 +5,20 @@ delivery and credential rules live there).
 
 ## What this is
 
-A shared Go library: local accounts, sessions, tokens, OIDC and the HTTP
-auth middleware birdcage and (later) mikroview both need, so a security
-fix lands once instead of being copied between the two. See
-[docs/design.md](docs/design.md) and
+A shared Go library: local accounts, sessions, tokens, OIDC, the passkey
+(WebAuthn) ceremony and the HTTP auth middleware birdcage and (later)
+mikroview both need, so a security fix lands once instead of being
+copied between the two. See [docs/design.md](docs/design.md) and
 [docs/adr/0001-shared-auth-module.md](docs/adr/0001-shared-auth-module.md).
 
+`passkey/` (G8, [ADR-0004](docs/adr/0004-passkey-ceremony.md)) is a leaf:
+no non-test file in `gate` or the root package may import it or
+go-webauthn, so an app that never imports it never links the library.
+`go list -deps ./gate | grep -i webauthn` must print nothing.
+
 **Belongs in the apps, not here:** a database-table backend (each app
-supplies its own `persist.Backend`), the WebAuthn ceremony (`passkey/`,
-deferred to G8), and anything that reaches back into birdcage's or
+supplies its own `persist.Backend`), the public URL a relying party is
+built from, and anything that reaches back into birdcage's or
 mikroview's own types. File storage is the one exception: the encrypted
 file backend (`persist.EncryptedFileBackend`) lives here (#18) as the
 documented default; finding and reading the key file stays with the app.
@@ -49,7 +54,8 @@ owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. For v0.2.0
 (owner 2026-09-30): `golang.org/x/exp/cmd/apidiff` in CI only and
 `github.com/getkin/kin-openapi` v0.149.0 (MIT) in tests only, both for
 #22 and ADR-0002; `github.com/go-webauthn/webauthn` v0.18.2 in `passkey/`
-for G8 (#20). Anything else goes to the owner first.
+for G8 (#20), and in its test fake (`internal/passkeytest`) and the
+contract module. Anything else goes to the owner first.
 
 ## Checks
 

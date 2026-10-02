@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -158,15 +159,23 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// real login only happens in handleLoginFactor below, once that
 	// code (or a recovery code) checks out too.
 	//
-	// HasSecondFactor, not HasActiveTOTP: User carries a Passkeys field
-	// (round-tripped from mikroview's documents, docs/design.md
-	// Summary) even though the passkey ceremony itself is deferred to
-	// G8. An account whose only factor is a passkey still gets the
-	// pending cookie -- so a recovery code can still complete the login
-	// below -- but an empty factors list, since gate has no passkey
-	// verification to offer yet.
+	// HasSecondFactor, not HasActiveTOTP: an account may hold a passkey
+	// instead of, or alongside, an authenticator app. The factor list
+	// names only what is usable now, passkey first (mikroview's order):
+	// "passkey" when the relying party is ready and the account holds at
+	// least one passkey under its current RP ID, with passkeyOrigin
+	// beside it; "totp" when that is active. An account whose only
+	// passkeys are stale, or whose application has no passkeys
+	// (Deps.Passkeys nil), still gets the pending cookie -- so a
+	// recovery code can complete the login below -- but may get an
+	// empty list.
 	if user.HasSecondFactor() {
 		factors := []string{}
+		passkeyOrigin := ""
+		if g.usablePasskeyCount(user) > 0 {
+			factors = append(factors, "passkey")
+			passkeyOrigin = g.deps.Passkeys.Origin()
+		}
 		if user.HasActiveTOTP() {
 			factors = append(factors, "totp")
 		}
@@ -179,7 +188,11 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"secondFactor": factors})
+		resp := map[string]any{"secondFactor": factors}
+		if passkeyOrigin != "" {
+			resp["passkeyOrigin"] = passkeyOrigin
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -196,35 +209,40 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 type loginFactorRequest struct {
 	Code string `json:"code"`
+	// Assertion is the passkey branch (G8): the browser's
+	// PublicKeyCredential JSON from navigator.credentials.get(), for the
+	// ceremony login/factor/begin started. A frontend sends this or
+	// Code, and the branch follows whichever is present.
+	Assertion json.RawMessage `json:"assertion,omitempty"`
 }
 
 // handleLoginFactor completes a login that handleLogin stopped short of a
 // session for: the pending-login cookie names the account whose password
 // already checked out, and this checks one more credential against it --
-// a live TOTP code, or, since that can be lost too, one of the account's
-// ten recovery codes, burned the moment it works.
+// a live TOTP code, a passkey assertion (verifyPasskeyAssertion), or,
+// since either can be lost too, one of the account's ten recovery codes,
+// burned the moment it works.
 //
 // Rate-limited on the exact same LoginLimiter buckets handleLogin itself
-// reserves against (the address and the account) -- a wrong code
-// here is exactly as good a brute-force move as a wrong password there,
-// so both share one budget rather than each getting their own.
+// reserves against (the address and the account) -- a wrong code or a
+// refused assertion here is exactly as good a brute-force move as a
+// wrong password there, so all of them share one budget rather than each
+// getting their own.
 func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	var req loginFactorRequest
 	if err := decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	cookie, err := r.Cookie(pendingLoginCookieName)
-	if err != nil {
-		writeUnauthorized(w, "sign in again")
+	// An assertion where the application has no passkeys is a request
+	// for a route that does not exist here, as every passkey route is.
+	if len(req.Assertion) > 0 && g.passkeysOff(w, r) {
 		return
 	}
+
 	now := g.now()
-	st, err := pendingLoginCodec.decode(cookie.Value, now)
-	if err != nil {
-		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+	st, ok := g.pendingLogin(w, r, now)
+	if !ok {
 		return
 	}
 
@@ -245,6 +263,22 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	}
 	defer g.releaseAfterReset(res)
 
+	if len(req.Assertion) > 0 {
+		if g.verifyPasskeyAssertion(w, r, user, req.Assertion, res, now) {
+			// login/factor/begin reserved one attempt on each key for
+			// the challenge this assertion answered; a completed sign-in
+			// hands that back too, so a passkey sign-in costs none of
+			// the budget a wrong guess is limited by. completeLoginFactor
+			// releases this request's own; begin's goes back only once
+			// the sign-in has actually completed, so a replay refused
+			// there keeps both.
+			if g.completeLoginFactor(w, user, res, st, now) {
+				g.releaseLogin(res, now)
+			}
+		}
+		return
+	}
+
 	// Verified and recorded in one call, under the store's lock, so two
 	// concurrent submissions of the same code can't both check against
 	// the same not-yet-advanced counter -- see VerifyAndRecordTOTP's own
@@ -261,7 +295,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if matched {
-		g.completeLoginFactor(w, user, res, now)
+		g.completeLoginFactor(w, user, res, st, now)
 		return
 	}
 
@@ -274,7 +308,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
 		return
 	} else if burned {
-		g.completeLoginFactor(w, user, res, now)
+		g.completeLoginFactor(w, user, res, st, now)
 		return
 	}
 
@@ -287,10 +321,25 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	writeUnauthorized(w, "invalid code")
 }
 
-// completeLoginFactor is handleLoginFactor's success path: release the
-// reservations a wrong guess would have kept, drop the now-spent pending
-// cookie, and issue the real session handleLogin withheld.
-func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, res loginReservation, now time.Time) {
+// completeLoginFactor is handleLoginFactor's success path: spend the
+// pending login, release the reservations a wrong guess would have kept,
+// drop the pending cookie, and issue the real session handleLogin
+// withheld. It reports whether it did.
+//
+// The pending login is claimed first, under spentPendingLogins' lock, so
+// of two completions racing on one cookie exactly one wins (ruling R2 on
+// #20). The loser is a replay, not a success: it keeps its reservations
+// and is told to sign in again. The forget time is IssuedAt plus
+// pendingLoginCookieMaxAge -- the same expiry pendingLoginCodec.decode
+// refuses the cookie at, so the claim and the decode share one expiry by
+// construction, on the same wall clock.
+func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, res loginReservation, st pendingLoginState, now time.Time) bool {
+	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
+		g.endAfterReset(res)
+		g.clearPendingLoginCookie(w)
+		writeUnauthorized(w, "sign in again")
+		return false
+	}
 	g.releaseLogin(res, now)
 	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
@@ -298,4 +347,5 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, r
 	g.setSessionCookie(w, sess.ID)
 	g.audit(user.Username, "user.login", user.Username, "via second factor")
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
+	return true
 }

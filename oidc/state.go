@@ -131,7 +131,9 @@ func (c *StateCodec) Encode(fs FlowState) (string, error) {
 // (ErrFlowStateInvalid) if it's malformed, fails the AEAD auth check, or
 // is older than maxAge as measured from FlowState.IssuedAt.
 func (c *StateCodec) Decode(cookieValue string, maxAge time.Duration, now time.Time) (FlowState, error) {
-	sealed, err := base64.RawURLEncoding.DecodeString(cookieValue)
+	// Strict: only the spelling Encode wrote opens, so a sealed value has
+	// one cookie string.
+	sealed, err := base64.RawURLEncoding.Strict().DecodeString(cookieValue)
 	if err != nil {
 		return FlowState{}, ErrFlowStateInvalid
 	}

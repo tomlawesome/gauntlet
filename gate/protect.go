@@ -32,6 +32,11 @@ const (
 	oidcCallbackPath = "/api/auth/oidc/callback"
 	totpEnrolPath    = "/api/auth/totp/enrol"
 	totpConfirmPath  = "/api/auth/totp/confirm"
+
+	passkeysPath              = "/api/auth/passkeys"
+	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"
+	passkeyRegisterFinishPath = "/api/auth/passkeys/register/finish"
+	loginFactorBeginPath      = "/api/auth/login/factor/begin"
 )
 
 // exemptPaths lists routes reachable without a session once an account
@@ -44,7 +49,8 @@ const (
 // at handleLogin because the account holds an active second factor --
 // reached with the short-lived pending-login cookie, never a session, so
 // it has to work before one exists, same reasoning as /api/auth/login
-// itself. GET /api/auth/oidc/login and /callback are a top-level
+// itself. POST /api/auth/login/factor/begin, which starts the passkey
+// half of that step (G8), is reached the same way for the same reason. GET /api/auth/oidc/login and /callback are a top-level
 // browser redirect/navigation the provider issues, not a fetch() an
 // application's frontend controls -- being listed here is what exempts
 // them from requiring an existing session (state/nonce/PKCE, oidc.go, is
@@ -52,14 +58,15 @@ const (
 // session check); isSafeMethod already exempts both from the CSRF-header
 // check since they're GET.
 var exemptPaths = map[string]bool{
-	"/api/healthz":   true,
-	sessionPath:      true,
-	registerPath:     true,
-	loginPath:        true,
-	logoutPath:       true,
-	loginFactorPath:  true,
-	oidcLoginPath:    true,
-	oidcCallbackPath: true,
+	"/api/healthz":       true,
+	sessionPath:          true,
+	registerPath:         true,
+	loginPath:            true,
+	logoutPath:           true,
+	loginFactorPath:      true,
+	loginFactorBeginPath: true,
+	oidcLoginPath:        true,
+	oidcCallbackPath:     true,
 }
 
 // bootstrapExemptPaths is the narrower set reachable while no account
@@ -83,16 +90,21 @@ var bootstrapExemptPaths = map[string]bool{
 
 // secondFactorEnrolPaths are the routes a session may still reach while
 // stuck at the forced-enrolment door (Config.RequireSecondFactor) --
-// enrolling a TOTP factor, and nothing else. Named once here, the same
-// reasoning changePasswordPath is, so Protect's gate and this list
-// cannot drift apart silently.
+// enrolling a TOTP factor or registering a passkey, and nothing else, as
+// mikroview's requireAuth has it. Named once here, the same reasoning
+// changePasswordPath is, so Protect's gate and this list cannot drift
+// apart silently. With Deps.Passkeys nil the passkey pair answers 404,
+// so admitting it opens nothing.
 //
-// Deliberately excludes DELETE /api/auth/totp: there is nothing yet
-// enrolled for it to act on while this gate holds, and admitting it
-// would be surface this door has no reason to open.
+// Deliberately excludes DELETE /api/auth/totp and the passkey list,
+// rename and delete routes: there is nothing yet enrolled for them to
+// act on while this gate holds, and admitting them would be surface this
+// door has no reason to open.
 var secondFactorEnrolPaths = map[string]bool{
-	totpEnrolPath:   true,
-	totpConfirmPath: true,
+	totpEnrolPath:             true,
+	totpConfirmPath:           true,
+	passkeyRegisterBeginPath:  true,
+	passkeyRegisterFinishPath: true,
 }
 
 func isSafeMethod(method string) bool {
@@ -334,7 +346,8 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// request from that account able to escape (mikroview's own fix
 		// for exactly this, gitlab/dev 683704c4).
 		//
-		// secondFactorEnrolPaths (TOTP enrol/confirm) stays reachable
+		// secondFactorEnrolPaths (TOTP enrol/confirm, passkey register
+		// begin/finish) stays reachable
 		// while this door holds -- without it, an account with
 		// RequireSecondFactor set and no factor yet would have no route
 		// left to enrol one on.

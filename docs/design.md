@@ -55,12 +55,18 @@ github.com/tomlawesome/gauntlet
 │                               AllowIssuer, IsMultiTenantIssuer
 ├── gate/                       Config, Deps, Gate, Protect, Routes, RequireRole,
 │                               UserFromContext, TokenFromContext
+├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrNoUsablePasskey
+│                               (G8, ADR-0004; the one importer of go-webauthn)
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
-└── internal/testutil/          fake OIDC provider (mikroview's fake_provider_test.go)
+├── internal/testutil/          fake OIDC provider (mikroview's fake_provider_test.go)
+└── internal/passkeytest/       fake WebAuthn authenticator (mikroview's webauthnfake_test.go)
 ```
 
 `passkey/` (the WebAuthn ceremony, `github.com/go-webauthn/webauthn`) is
-a fifth package that is *not* in v0.1.0 -- §1.6.
+the fifth package, added in G8 (#20, [ADR-0004](adr/0004-passkey-ceremony.md)).
+It is a leaf: `gate` reaches it only through the `gauntlet.PasskeyCeremony`
+interface in the root, so an application that never imports it -- birdcage
+-- never compiles the library in.
 
 ### 1.1 Why these boundaries
 
@@ -200,7 +206,18 @@ func (s *Store) List() []User                                              // se
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
 // Passkeys: AddPasskey, RenamePasskey, DeletePasskey, RecordPasskeyAssertionIfFresh, ClearPasskeys,
-// ClearAllSecondFactors, PasskeyCount -- storage methods only; no WebAuthn import.
+// ClearAllSecondFactors, PasskeyCount, AnyPasskeysExist -- storage methods only; no WebAuthn import.
+// The ceremony seam (G8, ADR-0004), implemented by gauntlet/passkey and driven by gate:
+type PasskeyStatus string // PasskeyStatusReady "ready", PasskeyStatusUnset "unset", PasskeyStatusIP "ip", PasskeyStatusInsecure "insecure"
+type PasskeyCeremony interface {
+    Status() PasskeyStatus; RPID() string; Origin() string           // RPID and Origin are "" unless ready
+    BeginRegistration(u *User) (options json.RawMessage, sealed string, err error)
+    FinishRegistration(u *User, sealed string, credential json.RawMessage) (Passkey, error) // Name, CreatedAt left to the caller
+    BeginLogin(u *User) (options json.RawMessage, sealed string, err error)
+    FinishLogin(u *User, sealed string, assertion json.RawMessage) (PasskeyAssertion, error)
+}
+type PasskeyAssertion struct { CredentialID []byte; SignCount uint32; CloneWarning bool } // what RecordPasskeyAssertionIfFresh consumes
+var ErrPasskeyCeremonyInvalid error // wrapped by passkey's Finish methods for a dead ceremony: unreadable, other ceremony, expired, already used
 
 func HashPassword(password string) (string, error)   // argon2id, m=64MiB t=3 p=4, 16-byte salt, 32-byte key
 func VerifyPassword(password, encoded string) bool   // constant-time; parameters read from the encoded string
@@ -373,6 +390,7 @@ type Deps struct {
     OIDC       *oidc.Client      // nil = SSO off; login/callback answer 404
     OIDCState  *oidc.StateCodec
     OIDCPolicy oidc.Policy
+    Passkeys   gauntlet.PasskeyCeremony // nil = no passkeys in this app: passkey routes answer 404 (G8, ADR-0004)
 }
 
 func New(cfg Config, deps Deps) (*Gate, error)
@@ -400,12 +418,17 @@ status code and error body, carried over from mikroview's
 `internal/api/server.go` route table -- is
 [`docs/api/auth.yaml`](api/auth.yaml) (OpenAPI 3.1, ADR-0002), not a
 list here. The contract tests in `gate/contracttest` fail when a
-handler and that document disagree. Passkey routes join when `passkey/` lands.
+handler and that document disagree. The passkey routes (G8, #20) are
+mikroview's own paths and bodies; [ADR-0004](adr/0004-passkey-ceremony.md)
+has the seam, the cookies and the policy.
 
 What stays fixed inside `gate` because it is security behaviour, not
 taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
 `SameSite=Lax`, path `/`, browser `Max-Age` 30 days; the OIDC flow cookie
-scoped to `/api/auth/oidc` with a 5-minute life; the 503 "setup required"
+scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
+cookies (`gate_passkey_register` on `/api/auth/passkeys`,
+`gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by
+`passkey` under two independent keys and opened only in the spelling they were written in; a login challenge is usable once, one registration begin stores at most one passkey, and a finish the library refuses leaves that registration usable within its five minutes); the pending login is spent by the sign-in that completes it; the 503 "setup required"
 state while `Count()==0` with only healthz, session and register
 reachable (the OIDC pair is not: SSO cannot create the first account,
 #37); identical 401 bodies for unknown and revoked tokens;
@@ -435,15 +458,19 @@ it. The data for all of this lives on `User`.
   base32, crypto/rand), already inseparable from `Authenticate`, and
   ~800 lines that exist and are tested. Leaving them out would mean
   building a `gate` that cannot run mikroview's login flow.
-- **Passkeys: the ceremony is not in v0.1.0.** The `Passkey` struct is
+- **Passkeys: data in v0.1.0, ceremony in G8.** The `Passkey` struct is
   plain fields (`[]byte`, `uint32`, `[]string`, a flags struct mirrored
   from `webauthn.CredentialFlags`), so storing them costs no dependency.
-  The ceremony (`RelyingParty`, two sealed cookies, the spent-challenge
-  map, `internal/api/{webauthn,passkey}.go`) brings
-  `github.com/go-webauthn/webauthn` and needs a public URL to derive the
-  RP id. Birdcage does not need it to gate #134. Recommend `gauntlet/
-  passkey` as the first post-v1 slice, and before mikroview's #1202,
-  which cannot ship without it (its users have passkeys).
+  The ceremony (`gauntlet/passkey`: the relying party built from the
+  app's public URL, two sealed cookies, the spent-challenge set) brings
+  `github.com/go-webauthn/webauthn` v0.18.2 (owner, 2026-09-30) and is
+  reached from `gate` only through `gauntlet.PasskeyCeremony`
+  ([ADR-0004](adr/0004-passkey-ceremony.md)). Registration is
+  password-gated at begin, as TOTP enrolment is. Birdcage does not wire it
+  and does not link it. A missing or unusable public URL is a reported
+  status (`unset`, `ip`, `insecure`), not a startup refusal: the
+  ceremony routes answer 409 and the session body says why; mikroview's
+  deployments reached by IP keep starting.
 - **`RequireSecondFactor` for birdcage: recommend on.** Birdcage changes
   firewall state and holds credentials, so [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md)'s "the case for
   gating it is stronger than mikroview's" applies to the second factor
@@ -548,7 +575,7 @@ BIRDCAGE_SESSION_TTL          default 24h   (mikroview default)
 BIRDCAGE_SESSION_MAX_LIFETIME default 168h  (mikroview default)
 BIRDCAGE_OIDC_ISSUER_URL, _CLIENT_ID, _CLIENT_SECRET_FILE, _SCOPES
 BIRDCAGE_OIDC_ALLOWED_GROUPS, _ALLOWED_EMAILS, _ALLOWED_EMAIL_DOMAINS
-BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header) and, later, the passkey RP id
+BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header); would be passkey.Config.PublicURL if birdcage ever wired passkeys (§1.6: it does not)
 ```
 
 Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
@@ -611,11 +638,19 @@ Not done in this work; recorded so the API above is checked against it.
 - `internal/oidc` → `gauntlet/oidc`, no other change (`main.go:1733`).
 - Handlers: two steps. First mikroview keeps `internal/api/{auth,oidc,
   tokens}.go` over gauntlet's stores -- everything they call is in §1.3
-  by the same name, so the frontend sees identical JSON. Second, once
-  `gauntlet/passkey` exists, mikroview swaps to `gate.Routes()` and
-  deletes its copies. `Server` fields `Auth, Sessions, LoginLimiter,
-  SecureCookie, Tokens, OIDC, OIDCState, OIDCPolicy, RelyingParty`
-  (`server.go:354-458`) map one-to-one onto `gate.Deps`/`gate.Config`.
+  by the same name, so the frontend sees identical JSON. Second, with
+  `gauntlet/passkey` in place (G8), mikroview swaps to `gate.Routes()`
+  and deletes its copies, wiring `Deps.Passkeys = passkey.New(
+  passkey.Config{PublicURL: cfg.PublicURL, DisplayName: "MikroView"})`
+  in place of its own `NewRelyingParty`; its add-passkey screen asks
+  for the password first (register/begin re-checks it, #20 R1).
+  `Server` fields `Auth,
+  Sessions, LoginLimiter, SecureCookie, Tokens, OIDC, OIDCState,
+  OIDCPolicy, RelyingParty` (`server.go:354-458`) map one-to-one onto
+  `gate.Deps`/`gate.Config`. Its startup refusal when accounts hold
+  passkeys but the relying party is not ready stays its own decision,
+  made from `Status()` and `Store.AnyPasskeysExist()` in place of its
+  own copy of that method (#20, question 5).
 - `DeriveKey`/`KDFParams` stay exported so mikroview's retention
   encryption keeps importing them from the same place its passwords
   come from.
@@ -683,10 +718,16 @@ once, which is the price of sharing and the reason fixes land once.
 
 TOTP replay is guarded by `TOTPLastCounter`; recovery codes are
 Argon2id-hashed and single-use; the reset code is Argon2id-hashed,
-24-hour, single-use, and replaces the password outright. Passkey
-sign-count regression is recorded to flag clones. `github.com/go-webauthn/
-webauthn` has no entry in either advisory database today; that is
-re-checked when the `passkey` slice is filed.
+24-hour, single-use, and replaces the password outright. A passkey
+sign-count that fails to advance refuses the login (the library's clone
+warning, then `RecordPasskeyAssertionIfFresh` under the store's lock)
+and never moves the stored count; each login challenge is used once,
+a registration replay is refused as a duplicate credential, and every
+ceremony expires five minutes after begin; user verification is requested, not
+required, and attestation is `none` (ADR-0004 decision 5).
+`github.com/go-webauthn/webauthn` v0.18.2 is the newest release and has
+no entry in the OSV or Go vulnerability databases (re-checked
+2026-10-02 for G8); `govulncheck` in CI watches it from here on.
 
 ### Fail-closed list
 
@@ -764,8 +805,11 @@ once G4 is tagged.
 - **B7 First write feature: #134** on `writeRoutes` behind
   `RequireRole(RoleUser)`. *Done when:* a viewer gets 403, a user 200, an
   API token 404 (it never reaches that mux).
-- **G8 `passkey` package** (after B4, before mikroview #1202). *Done
-  when:* mikroview's `webauthn_test.go` cases pass against it.
+- **G8 `passkey` package** (before mikroview #1202; owner, 2026-10-01:
+  it starts before B4, since birdcage does not need it and mikroview
+  cannot ship without it). *Done when:* mikroview's `webauthn_test.go`
+  and `passkey_test.go` cases pass against it, and no tag carries
+  `passkey/` until they do.
 
 ## 6. What the owner has to do
 
