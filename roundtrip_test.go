@@ -12,14 +12,14 @@ import (
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// accountsFixture is a version-1 accounts document, written out by hand
+// accountsFixture is a version-2 accounts document, written out by hand
 // and frozen: it is the stored format as birdcage and mikroview hold it
 // on disk, not what this build's structs happen to produce. A renamed
 // or dropped JSON tag changes what loading it and saving it back
 // writes, so TestMikroviewUsersJSONFixtureRoundTripsByteIdentical fails
 // -- which a fixture marshalled from the structs themselves, as this
-// one was before #29, could never do. Change it only alongside a change
-// to the stored format (see docversion.go).
+// one was before #29, could never do. Change it only alongside a new
+// document version (see docversion.go).
 //
 // Mikroview users.json-shaped, plus gauntlet's own sessionsEndedAt and
 // loginLockedUntil, never real user data: an admin with every field
@@ -32,7 +32,7 @@ import (
 // not hashes of anything: nothing here authenticates. Users are in the
 // username order a save writes them in.
 const accountsFixture = `{
-  "version": 1,
+  "version": 2,
   "users": [
     {
       "id": "admin-id-0001",
@@ -160,6 +160,51 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if !bytes.Equal(resaved, snap.Payload) {
 		t.Errorf("reloaded document differs from the saved one:\n--- saved ---\n%s\n--- reloaded ---\n%s",
 			snap.Payload, resaved)
+	}
+}
+
+// TestAVersion1AccountsDocumentOpensAndSavesAsVersion2: version 2
+// (#28) only added sessionsEndedAt, which a version-1 document --
+// gauntlet v0.2.0's, or mikroview's -- does not carry and which reads
+// correctly as zero, so no migration code exists. The every-field
+// fixture without that field, at version 1, opens with SessionsEndedAt
+// zero and the session cutoff at passwordChangedAt, and its next save
+// writes exactly the fixture without that field, now at version 2.
+func TestAVersion1AccountsDocumentOpensAndSavesAsVersion2(t *testing.T) {
+	const sessionsLine = "      \"sessionsEndedAt\": \"2026-01-02T03:06:05Z\",\n"
+	if !strings.Contains(accountsFixture, sessionsLine) || !strings.Contains(accountsFixture, `"version": 2,`) {
+		t.Fatal("the every-field fixture no longer has the shape this test edits")
+	}
+	want := strings.Replace(accountsFixture, sessionsLine, "", 1)
+	v1 := strings.Replace(want, `"version": 2,`, `"version": 1,`, 1)
+
+	m := persist.NewMemory()
+	primeMemory(t, m, v1)
+	s, err := OpenStore(m, Options{})
+	if err != nil {
+		t.Fatalf("OpenStore refused a version-1 document: %v", err)
+	}
+	admin, ok := s.Get("admin-id-0001")
+	if !ok {
+		t.Fatal("the admin did not load")
+	}
+	if !admin.SessionsEndedAt.IsZero() {
+		t.Errorf("SessionsEndedAt = %v from a document without it, want zero", admin.SessionsEndedAt)
+	}
+	if !admin.SessionCutoff().Equal(admin.PasswordChangedAt) {
+		t.Errorf("SessionCutoff() = %v, want passwordChangedAt %v", admin.SessionCutoff(), admin.PasswordChangedAt)
+	}
+
+	if err := s.mutate(func(*storeState) error { return nil }); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snap.Payload) != want {
+		t.Errorf("a saved version-1 document differs from the fixture at version 2 without sessionsEndedAt:\n--- want ---\n%s\n--- saved ---\n%s",
+			want, snap.Payload)
 	}
 }
 

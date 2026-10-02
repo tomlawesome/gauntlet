@@ -63,6 +63,14 @@ All notable changes to this project are documented in this file.
   cannot load it and silently drop what only the newer build knows,
   such as TOTP secrets or passkeys. There is no migration code yet; it
   is added with the first format change that needs one.
+- The accounts document is now version 2: it adds `sessionsEndedAt`
+  (#28), and any change to what a stored document carries now raises
+  its version (ADR-0002 decision 1). Version-1 documents, from v0.2.0
+  or mikroview, open unchanged with the new field empty and are written
+  as version 2 on their next save; no migration is needed. v0.2.0
+  cannot open an accounts document once this version has saved it, so
+  keep a copy before upgrading if a rollback is possible. The tokens
+  document stays version 1.
 - If the CLI and the running server save at the same moment, both
   changes are now kept (#21). Before, the second save to land wrote its
   whole accounts or tokens document on top of the first, and the first
