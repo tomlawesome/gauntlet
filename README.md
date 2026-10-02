@@ -61,3 +61,7 @@ The HTTP layer that wires these into a `net/http` middleware is
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+The common-password list in `gauntlet/blocklist` is built from
+[Have I Been Pwned](https://haveibeenpwned.com)'s Pwned Passwords. HIBP
+places no licence terms on that data; the attribution is ours to give.

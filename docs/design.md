@@ -59,6 +59,10 @@ github.com/tomlawesome/gauntlet
 │                               UserFromContext, TokenFromContext
 ├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrNoUsablePasskey
 │                               (G8, ADR-0004; the one importer of go-webauthn)
+├── blocklist/                  List, Parse, Embedded, Refresher, RefreshConfig, NewRefresher,
+│                               DefaultURL (#52, ADR-0005; the common-password list)
+├── cmd/pwlist/                 builds, signs, verifies and publishes that list (CI only)
+├── internal/listsig/           the list's Ed25519 signature format
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
 ├── internal/testutil/          fake OIDC provider (mikroview's fake_provider_test.go)
 └── internal/passkeytest/       fake WebAuthn authenticator (mikroview's webauthnfake_test.go)
@@ -425,6 +429,20 @@ budget, memory only.
 
 Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
+
+**Common passwords** (#43, #52, [ADR-0005](adr/0005-common-password-list.md)).
+`gauntlet/blocklist` holds the SHA-1 hashes of the 10,000 most
+prevalent Pwned Passwords. `blocklist.Embedded()` is the copy compiled
+into the release and makes no network request; it is an empty list
+until the first signed CI run, which a release refuses to tag without.
+An application that wants newer lists between releases runs a
+`blocklist.Refresher`, which fetches the published list from the
+public GitHub mirror's `pwned-top10k-current` release, adopts it only
+if its checksum, Ed25519 signature (keys in `blocklist/keys/`) and
+format check out and it is newer than the list in use, and keeps it in
+a directory the app names. `cmd/pwlist` builds the list from HIBP's
+range API in a monthly scheduled pipeline. #43 wires it into password
+checks.
 
 ### 1.4 `gauntlet/oidc`
 
@@ -845,6 +863,19 @@ required, and attestation is `none` (ADR-0004 decision 5).
 `github.com/go-webauthn/webauthn` v0.18.2 is the newest release and has
 no entry in the OSV or Go vulnerability databases (re-checked
 2026-10-02 for G8); `govulncheck` in CI watches it from here on.
+
+### Common-password list (#52, ADR-0005)
+
+| Pitfall | Module does |
+|---|---|
+| A tampered list served to applications | Ed25519 signature over the exact bytes, keys compiled in from `blocklist/keys/`; no key, no list adopted; SHA-256 checked too |
+| A replayed or rolled-back older list | adopted only if built later than the list in use, and never older than the embedded copy |
+| A list dated far ahead to block every later one | refused if built more than 24 hours in the future |
+| A hostile or broken server exhausting memory | 256 B checksum, 1 MiB list and 4 KiB signature caps; per-request timeouts |
+| The stored copy altered on disk | verified again on every start; written 0600 by rename |
+| The signing key leaking | a file on one protected, project-locked runner that talks to nobody, never a CI variable; publishing credentials sit on a different runner |
+| A sample or partial build published | `# sample:` header refused by `Parse`, `sign` and every refresher; a full build must see 500 M hashes with a 10,000th count of at least 1,000 |
+| An outbound call the application did not ask for | `Embedded()` never touches the network; refreshing is opt-in |
 
 ### Fail-closed list
 
