@@ -201,6 +201,10 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// on a login that just completed through the ordinary one-step path.
 	g.clearPendingLoginCookie(w)
 	g.endAfterReset(res)
+	// The session this browser already held for the account ends here:
+	// the cookie below replaces it, and nothing else would (ASVS 7.2.4;
+	// see revokeReplacedSession).
+	g.revokeReplacedSession(r, user.ID, now)
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)
 	g.audit(user.Username, "user.login", user.Username, "")
@@ -272,7 +276,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 			// releases this request's own; begin's goes back only once
 			// the sign-in has actually completed, so a replay refused
 			// there keeps both.
-			if g.completeLoginFactor(w, user, res, st, now) {
+			if g.completeLoginFactor(w, r, user, res, st, now) {
 				g.releaseLogin(res, now)
 			}
 		}
@@ -295,7 +299,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if matched {
-		g.completeLoginFactor(w, user, res, st, now)
+		g.completeLoginFactor(w, r, user, res, st, now)
 		return
 	}
 
@@ -308,7 +312,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
 		return
 	} else if burned {
-		g.completeLoginFactor(w, user, res, st, now)
+		g.completeLoginFactor(w, r, user, res, st, now)
 		return
 	}
 
@@ -333,7 +337,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // pendingLoginCookieMaxAge -- the same expiry pendingLoginCodec.decode
 // refuses the cookie at, so the claim and the decode share one expiry by
 // construction, on the same wall clock.
-func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, res loginReservation, st pendingLoginState, now time.Time) bool {
+func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, now time.Time) bool {
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
@@ -343,6 +347,10 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, r
 	g.releaseLogin(res, now)
 	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
+	// As in handleLogin: the session this browser held for the account
+	// is replaced by the cookie below, so it ends here (ASVS 7.2.4). Only
+	// here, not at the password step, which issues no session.
+	g.revokeReplacedSession(r, user.ID, now)
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)
 	g.audit(user.Username, "user.login", user.Username, "via second factor")

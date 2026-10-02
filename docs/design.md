@@ -431,7 +431,14 @@ has the seam, the cookies and the policy.
 
 What stays fixed inside `gate` because it is security behaviour, not
 taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
-`SameSite=Lax`, path `/`, browser `Max-Age` 30 days; the OIDC flow cookie
+`SameSite=Lax`, path `/`, browser `Max-Age` equal to the session store's
+lifetime ceiling (so the browser forgets the cookie when the session can
+no longer be valid), the name prefixed `__Host-` while `SecureCookie` is
+on (a browser then refuses the cookie unless it is `Secure`, has no
+`Domain` and is on path `/`; the bare name under plain HTTP, where a
+browser would drop a `__Host-` cookie), `gate.New` warning once when
+`SecureCookie` is off, and a login ending the same account's session the
+browser already held, since the new cookie replaces it (#47); the OIDC flow cookie
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by
@@ -449,8 +456,9 @@ moves onto the module (owner, 2026-09-27, on #7).
 
 Hard-coded strings that are mikroview's today and must not leak into
 birdcage: the product name in TOTP enrolment URIs and passkey display
-names, the `?ssoError=` redirect target, the 30-day cookie constant's
-name. `Config` gains `ProductName` and `LoginPath` for the first two.
+names, the `?ssoError=` redirect target. `Config` gains `ProductName`
+and `LoginPath` for them. Mikroview's 30-day cookie constant is gone:
+the cookie's lifetime is the session ceiling (#47).
 
 ### 1.6 Second factors and passkeys -- always required, since #49
 
@@ -583,12 +591,19 @@ a second ingest credential would be a second door.
 
 ```
 BIRDCAGE_AUTH_SECURE_COOKIE   default: true when the dashboard listener has TLS, else false with a startup warning
-BIRDCAGE_SESSION_TTL          default 24h   (mikroview default)
-BIRDCAGE_SESSION_MAX_LIFETIME default 168h  (mikroview default)
+BIRDCAGE_SESSION_TTL          default 1h    (gauntlet.MaxSessionIdle; mikroview's old 24h default is refused by gate.New)
+BIRDCAGE_SESSION_MAX_LIFETIME default 24h   (gauntlet.MaxSessionLifetime; mikroview's old 168h default is refused by gate.New)
 BIRDCAGE_OIDC_ISSUER_URL, _CLIENT_ID, _CLIENT_SECRET_FILE, _SCOPES
 BIRDCAGE_OIDC_ALLOWED_GROUPS, _ALLOWED_EMAILS, _ALLOWED_EMAIL_DOMAINS
 BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header); would be passkey.Config.PublicURL if birdcage ever wired passkeys (§1.6: it does not)
 ```
+
+`gate.New` fails closed on a `Deps.Sessions` built with an idle timeout
+above `gauntlet.MaxSessionIdle` or a lifetime ceiling above
+`gauntlet.MaxSessionLifetime`, or with no ceiling at all -- NIST SP
+800-63B-4 AAL2's own limits, adopted by the owner 2026-10-02
+(gauntlet#51, `docs/security-by-design.md`'s Sessions table). An app
+passing more than that is refused at start-up, not just logged.
 
 Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
 listening, as mikroview's `main.go:1723` does -- `oidc.New` refuses it
@@ -704,7 +719,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt` |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
-| Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener |
+| Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
 | Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept |
 
 ### OIDC

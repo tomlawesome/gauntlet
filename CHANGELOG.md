@@ -89,6 +89,36 @@ All notable changes to this project are documented in this file.
   §3.1.1.2 allows 8 characters only behind a mandatory second factor,
   and the minimum stays 8 rather than rising to 15 because the door can
   no longer be left off (#49, `docs/security-by-design.md`).
+- **Breaking.** `gate.New` now refuses a `Deps.Sessions` store whose
+  idle timeout exceeds the new `MaxSessionIdle` (1 hour), whose
+  lifetime ceiling exceeds the new `MaxSessionLifetime` (24 hours), or
+  which has no ceiling at all -- NIST SP 800-63B-4's AAL2 session
+  limits (§2.2.3, §5.2), adopted by the owner on 2026-10-02 over the
+  consumers' previous, longer values (#51). `SessionStore` itself is
+  unchanged and still accepts any values; the new
+  `(*SessionStore).Limits` method and the two exported constants are
+  what `gate.New` checks them against. Mikroview and birdcage both
+  pass 24 h idle / 7-day ceiling today and will fail at start-up until
+  they change those values to within the new caps.
+- The session cookie is hardened (#47; ASVS 3.3.1, 3.3.3, 7.2.4; NIST SP
+  800-63B-4 §5.1.1). While `gate.Config.SecureCookie` is true the cookie
+  is written and read as `__Host-` plus `CookieName`, which makes a
+  browser refuse it unless it is `Secure`, has no `Domain` and is on
+  path `/`; under plain HTTP the bare name is kept, since a browser
+  drops a `__Host-` cookie that is not `Secure`. Its `Max-Age` is now the
+  session store's lifetime ceiling (24 hours at most, #51) instead of a
+  fixed 30 days, so the browser forgets it when the session can no
+  longer be valid. `gate.New` logs one warning naming `SecureCookie`
+  when it is left false, and refuses a `CookieName` that already starts
+  with `__Host-` or `__Secure-`. A login -- password, second factor or
+  SSO -- from a browser that still holds a live session for the same
+  account now ends that session before issuing the new one; another
+  account's session in the same browser is left alone. Not breaking for
+  mikroview or birdcage: neither reads the session cookie by name
+  outside the code `gate` replaces, and neither uses a prefixed name.
+  What each app should expect: with TLS on, browsers signed in before
+  the upgrade hold the old, unprefixed cookie and are simply asked to
+  sign in again (an in-memory session dies with the restart anyway).
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

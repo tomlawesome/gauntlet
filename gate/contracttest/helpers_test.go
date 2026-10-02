@@ -100,7 +100,7 @@ func newGate(t *testing.T, deps gate.Deps) *gate.Gate {
 		deps.Limiter = limiter
 	}
 	if deps.Sessions == nil {
-		deps.Sessions = gauntlet.NewSessionStore(24*time.Hour, 0)
+		deps.Sessions = gauntlet.NewSessionStore(gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime)
 	}
 	g, err := gate.New(gate.Config{
 		CookieName:      testCookieName,

@@ -57,7 +57,7 @@ func bogusRoleFixture(t *testing.T) (*Gate, *httptest.Server, *http.Cookie) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := gauntlet.NewSessionStore(time.Hour, 0)
+	sessions := gauntlet.NewSessionStore(gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime)
 	limiter := mustNewLoginLimiter(t, 5, time.Minute)
 	g, err := New(Config{
 		CookieName:      testCookieName,

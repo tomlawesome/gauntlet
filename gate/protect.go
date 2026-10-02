@@ -149,7 +149,7 @@ func bearerToken(r *http.Request) (string, bool) {
 // fails that check is proactively revoked here rather than left to
 // expire naturally, since it is already known to be invalid.
 func (g *Gate) sessionUser(r *http.Request, now time.Time) (*gauntlet.User, bool) {
-	cookie, err := r.Cookie(g.cfg.CookieName)
+	cookie, err := r.Cookie(g.sessionCookieName())
 	if err != nil {
 		return nil, false
 	}

@@ -2,16 +2,57 @@ package gate
 
 import (
 	"net/http"
+	"strings"
 	"time"
 )
 
-// cookieMaxAge is how long the browser itself remembers the session
-// cookie -- fixed here, not in Config, because it is security behaviour
-// mikroview chose deliberately (docs/design.md §1.5), not an
-// application preference: deliberately longer than the server-side idle
-// timeout (SessionStore's ttl), which slides forward on use, so the
-// cookie just needs to outlast any realistic idle gap.
-const cookieMaxAge = 30 * 24 * time.Hour
+// hostCookiePrefix is the name prefix that makes a browser refuse the
+// session cookie unless it is Secure, carries no Domain and has Path=/
+// -- all of which writeCookie already sets, so the prefix costs only
+// the name and buys a guarantee the attributes alone cannot: no
+// sibling host or plain-http origin can plant a cookie of that name
+// (ASVS 3.3.3, SP 800-63B-4 §5.1.1). It is applied only while
+// Config.SecureCookie is true, because a __Host- cookie without Secure
+// is dropped by every browser, which under plain HTTP (development)
+// would sign nobody in. gate.New refuses a CookieName that already
+// carries this prefix or __Secure-; see New.
+const hostCookiePrefix = "__Host-"
+
+// sessionCookieName is the name the session cookie is written and read
+// under: hostCookiePrefix plus Config.CookieName once the cookie is
+// Secure, the bare name otherwise. Every reader goes through this so the
+// name is decided in one place -- a reader using cfg.CookieName
+// directly would accept, under TLS, a cookie that lacks the prefix's
+// guarantees.
+func (g *Gate) sessionCookieName() string {
+	if g.cfg.SecureCookie {
+		return hostCookiePrefix + g.cfg.CookieName
+	}
+	return g.cfg.CookieName
+}
+
+// hasReservedCookiePrefix reports whether name starts with a prefix the
+// browser gives special meaning to (RFC 6265bis §4.1.3), which gate
+// manages itself.
+func hasReservedCookiePrefix(name string) bool {
+	return strings.HasPrefix(name, hostCookiePrefix) || strings.HasPrefix(name, "__Secure-")
+}
+
+// sessionCookieMaxAge is how long the browser itself remembers the
+// session cookie: the session store's lifetime ceiling, read from the
+// store each time so it has one source of truth. The cookie thus
+// expires exactly when the session can no longer be valid (SP
+// 800-63B-4 §5.1.1: at or soon after the session). It is deliberately
+// not the idle timeout: that slides forward on every use server-side,
+// and tying the cookie to it would mean re-setting the cookie on every
+// request to keep an active browser signed in. mikroview's 30-day
+// constant, which this replaces, predated the ceiling. gate.New has
+// already refused a store with no ceiling, so Limits never reports zero
+// here.
+func (g *Gate) sessionCookieMaxAge() time.Duration {
+	_, ceiling := g.deps.Sessions.Limits()
+	return ceiling
+}
 
 // writeCookie is the only place a cookie is handed to the client, so the
 // three fixed security attributes -- HttpOnly, SameSite=Lax, path -- are
@@ -32,9 +73,37 @@ func (g *Gate) writeCookie(w http.ResponseWriter, name, value, path string, maxA
 }
 
 func (g *Gate) setSessionCookie(w http.ResponseWriter, sessionID string) {
-	g.writeCookie(w, g.cfg.CookieName, sessionID, "/", int(cookieMaxAge.Seconds()))
+	g.writeCookie(w, g.sessionCookieName(), sessionID, "/", int(g.sessionCookieMaxAge().Seconds()))
 }
 
 func (g *Gate) clearSessionCookie(w http.ResponseWriter) {
-	g.writeCookie(w, g.cfg.CookieName, "", "/", -1)
+	g.writeCookie(w, g.sessionCookieName(), "", "/", -1)
+}
+
+// revokeReplacedSession ends the session r's cookie names when it is
+// live and belongs to userID, the account a sign-in is about to issue a
+// new session for. The new cookie overwrites the old one in the
+// browser, so without this the old id would stay valid -- invisible to
+// its owner, absent from any logout they do from this browser -- until
+// it idled out (ASVS 7.2.4: the current token is terminated on
+// re-authentication). Another account's session in the same browser is
+// left alone: that person did not sign in, and this request proved
+// nothing about them; a stray cookie is not authority to end a session
+// it does not own.
+//
+// Called by every path that issues a session for a login (password,
+// second factor, SSO callback) and not by the ones that already end
+// every session of the account first (password change, factor enrolment,
+// SSO link, sign out everywhere), nor by first-account registration,
+// which runs while no account exists.
+func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Time) {
+	cookie, err := r.Cookie(g.sessionCookieName())
+	if err != nil {
+		return
+	}
+	sess, ok := g.deps.Sessions.Validate(cookie.Value, now)
+	if !ok || sess.UserID != userID {
+		return
+	}
+	g.deps.Sessions.Revoke(sess.ID)
 }
