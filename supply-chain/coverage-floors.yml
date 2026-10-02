@@ -38,8 +38,9 @@
 # internal/hashcost is new with #24, at 75.0%: the one statement no
 # test can reach is its refusal outside a test binary.
 # G8 (issue #20): passkey is new, at 39.9% from its relying-party and
-# sealing tests alone; the ceremony tests that drive the fake
-# authenticator land with internal/passkeytest.
+# sealing tests alone, then 90.8% once its ceremony tests could drive
+# the fake authenticator; internal/passkeytest (that fake) is new at
+# 91.6%. What neither reaches is a failing crypto/rand or JSON encoder.
 
 floors:
   persist: 90
@@ -49,4 +50,5 @@ floors:
   internal/evict: 100
   gate: 91
   internal/hashcost: 75
-  passkey: 39
+  passkey: 90
+  internal/passkeytest: 91
