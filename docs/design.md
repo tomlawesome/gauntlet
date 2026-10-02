@@ -25,7 +25,7 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 2 (#28) and
+  version 1 unchanged, gauntlet writes accounts as version 3 (#28, #44) and
   tokens as version 1, and a document newer than the running build is
   refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
@@ -176,6 +176,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     ID, Username, PasswordHash string; Role Role
     CreatedAt, LastLogin, PasswordChangedAt, RoleChangedAt time.Time
     SessionsEndedAt, LoginLockedUntil time.Time // new (#28, #19): gauntlet's own, zero in mikroview's documents
+    LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
@@ -205,6 +206,7 @@ func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (*User, bool, error)
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
+func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
@@ -259,6 +261,9 @@ func (l *LoginLimiter) RecordFailure(key string, now time.Time)
 func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only; prefer Reserve before a slow check
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
+func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time)           // #44: completed sign-in resets the count
+func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword
+const MaxConsecutiveLoginFailures = 50                                                             // #44: disables local sign-in
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
 func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
@@ -334,14 +339,34 @@ count, entries leave only by expiring), and only addresses and unknown
 names share the capped map, which drops every expired key before
 evicting a live one and logs, once per window, when it has to. A login
 lockout is written to the account (`User.LoginLockedUntil`) so it
-survives a restart, but only as it begins and as it clears: one save per
-lockout episode, not one per wrong guess. A lockout whose save fails
+survives a restart, but only as it begins and as it clears: one save as
+a lockout starts and one as the first attempt after it clears it, never
+one per wrong guess.
+
+Lockouts escalate (#44, owner 2026-10-02). Each lasts three times the
+one before, from the attempt that starts it: 5, 15, 45, 135, 405 and
+1215 minutes at 5 attempts per 5 minutes, then 24 hours each (never
+less than one window). Their count, `User.LoginLockoutCount`, is
+written in the same save that starts one. `MaxConsecutiveLoginFailures`
+(50) failures in a row -- each lockout's attempts plus those in the
+window, password and second-factor steps alike -- disable the account's
+local sign-in (`User.LoginDisabledAt`), in that same save: refused with
+exactly the locked response, with no end, until `Store.UnlockLogin`. At
+5 per lockout the fiftieth failure comes after about 102 hours of
+lockouts. The count resets only on a completed sign-in (`SignedIn`,
+called wherever gate issues a session) or a new password (`SetPassword`,
+`IssueResetCode`); not on a correct password alone, and not as a lockout
+runs out. A new password does not lift a disable. Separately, five
+failed second-factor steps in a row since the last completed sign-in
+mean the password is known to someone else, so `SecondFactorFailed`
+sets `MustChangePassword` (one save); that run is kept in memory only. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A clear whose save fails -- the owner signed in and
 ended a lockout the record still holds -- is retried the same way, but
 that retry lives only in memory: a restart before it succeeds reloads
-the record's lockout, and the owner waits it out (at most one window)
-or resets the password (#28). A new password or reset code ends the lockout, and
+the record's lockout, and the owner waits it out or resets the
+password (#28). An escalated lockout or a disable whose save fails is
+enforced from memory and retried the same way. A new password or reset code ends the lockout, and
 guesses from before it stop counting (#24); linking the admin to SSO,
 which ends its sessions but keeps its password, does not. The reset
 account also gets past the per-address limit (#32; owner, 2026-10-01:
@@ -725,7 +750,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
-| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save per lockout, not per guess); addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
+| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19, #44): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save as it starts and one as it clears, not per guess); each lockout lasts three times the last (5 min up to 24 h) and 50 failures in a row disable sign-in until an unlock; addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
 | `golang.org/x/crypto` advisories | all 30 entries are in `ssh`, `ssh/agent` or `openpgp`; none touches `argon2` | import only `argon2`; birdcage already carries this module at 0.57.0 |
 
 ### Second factors (data in v1; ceremonies per §1.6)

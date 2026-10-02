@@ -76,6 +76,34 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Login lockouts now escalate, and too many failures in a row disable
+  an account's sign-in (#44). Each lockout lasts three times the one
+  before, from the attempt that starts it: 5, 15, 45, 135, 405 and 1215
+  minutes at 5 attempts per 5 minutes, then 24 hours each. The first
+  lockout now runs a full window from its last attempt, not until the
+  oldest attempt in the window ages out. 50 failures in a row
+  (`MaxConsecutiveLoginFailures`), password and second-factor steps
+  together, disable the account's local sign-in: the right password is
+  then refused exactly as during a lockout, with no end, until
+  `Store.UnlockLogin` clears it (the admin route that calls it comes
+  later). Only a completed sign-in or a new password resets the count,
+  not a correct password alone and not a lockout running out; a new
+  password does not lift a disable. Applications that issue a session
+  themselves after `ReserveAccount` should call the new
+  `LoginLimiter.SignedIn` in place of `ReleaseAccount` when the sign-in
+  completes; `gate` does. Five failed second-factor steps in a row --
+  wrong codes or refused passkeys, which only someone with the password
+  can make -- now set `MustChangePassword`, so the owner must change the
+  password at their next sign-in (`LoginLimiter.SecondFactorFailed`).
+  That run is kept in memory and starts again after a restart. Still
+  one save as a lockout starts and one as it clears, never one per
+  guess.
+- The accounts document is now version 3: it adds `loginLockoutCount`
+  and `loginDisabledAt` (#44). Version-1 and version-2 documents open
+  unchanged with both empty and are written as version 3 on their next
+  save; no migration is needed. An earlier build cannot open an
+  accounts document once this version has saved it, so keep a copy
+  before upgrading if a rollback is possible.
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its
