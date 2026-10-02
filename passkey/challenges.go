@@ -26,8 +26,19 @@ type spentChallenges struct {
 }
 
 // claim reports whether challenge is being used for the first time, and
-// marks it used. Expired entries are dropped on the way, so the map only
-// ever holds the ceremonies of the last few minutes.
+// marks it used until expires -- the sealed ceremony's own Expires.
+// Expired entries are dropped on the way, so the map only ever holds the
+// ceremonies of the last few minutes.
+//
+// The entry must live exactly as long as open would still accept the
+// ceremony, and open compares the sealed Expires, which has been through
+// JSON and so carries only a wall-clock reading, against time.Now. The
+// entry's expiry is therefore that same wall-clock instant, stripped of
+// any monotonic reading (Round(0)), so dropping it is decided on the same
+// clock. An expiry computed as now.Add(...) would carry time.Now's
+// monotonic reading, and if the wall clock stepped back the entry could
+// be dropped while the ceremony still looked unexpired -- reopening
+// replay for an authenticator whose count stays at 0.
 func (c *spentChallenges) claim(challenge string, expires, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -42,10 +53,7 @@ func (c *spentChallenges) claim(challenge string, expires, now time.Time) bool {
 	if _, used := c.seen[challenge]; used {
 		return false
 	}
-	if expires.Before(now.Add(ceremonyLifetime)) {
-		expires = now.Add(ceremonyLifetime)
-	}
-	c.seen[challenge] = expires
+	c.seen[challenge] = expires.Round(0)
 	return true
 }
 
