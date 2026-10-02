@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -83,6 +84,10 @@ type Config struct {
 	// Audit receives account and token events (register, login,
 	// password change, user/token create/delete). nil means no audit.
 	Audit Auditor
+	// Notify is told when an admin ends another account's sessions
+	// (POST /api/auth/users/{id}/logout-all), so the application can
+	// tell the account's owner. nil means nobody is told. See Notifier.
+	Notify Notifier
 	// ClientIP resolves the address the login limiter is keyed on
 	// (mikroview's clientIP -- its own trusted-proxy policy is the
 	// application's, not gate's). Required.
@@ -141,6 +146,9 @@ type Gate struct {
 
 	// warns rates the Warn lines refused requests leave (warnrate.go).
 	warns warnRater
+	// notifying counts Notifier calls still running (notify.go), so a
+	// test can wait for them.
+	notifying sync.WaitGroup
 
 	// signInHook, when set, receives every sign-in attempt recordSignIn
 	// handles, after its client and lockout fields are filled. It is

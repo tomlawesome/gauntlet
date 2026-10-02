@@ -425,6 +425,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(anon, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"nobody", "x"}}, 503, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/users"}, 503, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/unlock", body: unlockCodeRequest{"admin", "AAAA-AAAA-AAAA-AAAA"}}, 503, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/users/no-such-id/logout-all"}, 503, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, ""}, noCSRF: true}, 403, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: "not json", bad: true}, 400, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
@@ -562,6 +563,22 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock", body: unlockSelfRequest{Password: adminPass, Code: adminRecovery[0]}}, 200, &unlocked)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/unlock"}, 404, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/unlock"}, 401, nil)
+
+	// The admin's sign-out of another account (#53): every status but
+	// 503, which the setup section above drives.
+	var loggedOut adminLogoutAllResponse
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", body: adminLogoutAllRequest{Reason: "contract test"}}, 200, &loggedOut)
+	if loggedOut.Username != "bob" || loggedOut.Notified {
+		t.Fatalf("admin logout-all = %+v, want bob's, not notified", loggedOut)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all"}, 200, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", body: adminLogoutAllRequest{Reason: "line\nbreak"}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", body: "{", bad: true}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/logout-all"}, 409, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/logout-all"}, 404, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all", noCSRF: true}, 403, nil)
+	c.do(vic, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all"}, 403, nil)
+	c.do(anon, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/logout-all"}, 401, nil)
 	bob = c.client()
 	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", reset.Code}}, 200, nil)
 	resp := c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all"}, 403, nil)
