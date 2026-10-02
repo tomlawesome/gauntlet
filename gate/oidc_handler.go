@@ -170,8 +170,12 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 
 	// LinkOIDCIdentity sets SessionsEndedAt, which invalidates every
 	// session issued before it -- including the one that just made this
-	// request. A fresh session is issued so the person stays signed in
-	// on this browser, while any other session they had is now dead.
+	// request. The live ones are dropped here too, as the password,
+	// reset and second-factor handlers drop theirs: the stored cutoff is
+	// the only record of the link's, and an older build saving the
+	// document while this one runs would drop it (#28). A fresh session
+	// is issued so the person stays signed in on this browser.
+	g.deps.Sessions.RevokeAllForUser(caller.ID)
 	sess := g.deps.Sessions.Create(caller.ID, now)
 	g.setSessionCookie(w, sess.ID)
 	http.Redirect(w, r, "/?ssoLinked=1", http.StatusFound)
