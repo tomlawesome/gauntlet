@@ -230,7 +230,7 @@ it says so instead of repeating the reasoning.
 | 7.2.2 dynamic reference tokens | 1 | Met | Opaque id per login (`session.go:108`) |
 | 7.2.3 CSPRNG, 128 bits | 1 | Met | `id.go:14`: 16 bytes from `crypto/rand` |
 | 7.2.4 new token on every authentication, old one ended | 1 | Met, one gap | New session per login and after `logout-all` (`gate/logout_handler.go:32`); the pending-login cookie is never a session. Gap: a login made from a browser that still holds a live session leaves that old session alive until it idles out; part of #47 (session cookie hardening) |
-| 7.3.1, 7.3.2 inactivity and absolute timeouts | 2 | Met, one gap | Both enforced in `Validate` (`session.go:208-217`). Gap: `maxLifetime` 0 means no ceiling and `gate.New` accepts it; the same issue, #47 (session cookie hardening) |
+| 7.3.1, 7.3.2 inactivity and absolute timeouts | 2 | Met | Both enforced in `Validate` (`session.go:208-217`); `gate.New` refuses a store with no ceiling or above `MaxSessionIdle`/`MaxSessionLifetime` (#51) |
 | 7.4.1 terminated session unusable | 1 | Met | Server-side delete (`Revoke`, `RevokeAllForUser`); `SessionCutoff` catches sessions from another process (`gate/protect.go:163`) |
 | 7.4.2 sessions ended when an account is disabled or deleted | 1 | Met | A deleted user no longer resolves, so every session dies on its next request; `DeleteUser` also revokes the tokens it created |
 | 7.4.3 option to end other sessions after a factor change | 2 | Met | A password change and a reset end every session (`SessionsEndedAt`, `store.go:1556`, `resetcode.go:185`); TOTP and passkey changes do not, and `POST /api/auth/logout-all` is the option |
