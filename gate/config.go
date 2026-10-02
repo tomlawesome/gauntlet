@@ -94,6 +94,16 @@ type Deps struct {
 	OIDC       *oidc.Client
 	OIDCState  *oidc.StateCodec
 	OIDCPolicy oidc.Policy
+	// Passkeys runs the WebAuthn ceremonies -- in practice
+	// gauntlet/passkey's RelyingParty, built by the application from its
+	// own public URL (ADR-0004). nil means this application has no
+	// passkeys: Routes still registers every passkey route, and each
+	// answers 404, the session body leaves out "passkeys", and the
+	// password step never offers "passkey" -- the same shape as OIDC
+	// being nil. Not checked by New: nil is a valid choice, and a
+	// relying party that is not ready is a reported state, not a wiring
+	// mistake.
+	Passkeys gauntlet.PasskeyCeremony
 }
 
 // Gate is the middleware and handler set built by New.

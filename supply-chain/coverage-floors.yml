@@ -41,6 +41,7 @@
 # sealing tests alone, then 90.8% once its ceremony tests could drive
 # the fake authenticator; internal/passkeytest (that fake) is new at
 # 91.6%. What neither reaches is a failing crypto/rand or JSON encoder.
+# gate re-measured with the passkey routes and their tests: 92.0%.
 
 floors:
   persist: 90
@@ -48,7 +49,7 @@ floors:
   oidc: 86
   internal/testutil: 0
   internal/evict: 100
-  gate: 91
+  gate: 92
   internal/hashcost: 75
   passkey: 90
   internal/passkeytest: 91

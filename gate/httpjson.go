@@ -100,6 +100,9 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrTOTPAlreadyActive:     gauntlet.ErrTOTPAlreadyActive.Error(), // already phrased for an end user
 	gauntlet.ErrNoPendingTOTP:         gauntlet.ErrNoPendingTOTP.Error(),     // already phrased for an end user
 	gauntlet.ErrNoLocalPassword:       gauntlet.ErrNoLocalPassword.Error(),   // already phrased for an end user
+	gauntlet.ErrPasskeyDuplicate:      "this passkey is already registered to this account",
+	gauntlet.ErrPasskeyLimitReached:   gauntlet.ErrPasskeyLimitReached.Error(), // already phrased for an end user
+	gauntlet.ErrPasskeyNotFound:       "no such passkey on this account",
 }
 
 // writeAuthError translates err into a safe, user-facing message via
