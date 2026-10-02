@@ -60,7 +60,7 @@ func TestLocalCreationRefusesAnEmailShapedUsername(t *testing.T) {
 // what makes the two namespaces disjoint, so sanitiseUsernameHint must
 // go on running ValidateUsername rather than ValidateLocalUsername.
 func TestSSOProvisioningKeepsAnEmailClaimAsTheUsername(t *testing.T) {
-	s := openTestStore(t)
+	s := openTestStoreWithAdmin(t)
 
 	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", "tom@example.com", time.Now())
 	if err != nil {

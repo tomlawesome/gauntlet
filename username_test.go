@@ -87,7 +87,7 @@ func TestRegisterAndCreateUserRejectAHostileUsername(t *testing.T) {
 // must be dropped in favour of the generated name, never turned into a
 // failed login.
 func TestOIDCProvisioningFallsBackRatherThanFailingOnAHostileHint(t *testing.T) {
-	s := openTestStore(t)
+	s := openTestStoreWithAdmin(t)
 
 	u, created, err := s.FindOrCreateOIDCUser(
 		"https://idp.example", "subject-1", "victim\x1b[2K\radmin", time.Now())
@@ -117,7 +117,7 @@ func TestOIDCProvisioningFallsBackRatherThanFailingOnAHostileHint(t *testing.T) 
 }
 
 func TestOIDCProvisioningKeepsAUsableHint(t *testing.T) {
-	s := openTestStore(t)
+	s := openTestStoreWithAdmin(t)
 
 	u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", "tom@example.com", time.Now())
 	if err != nil {
@@ -136,7 +136,7 @@ func TestOIDCProvisioningKeepsAUsableHint(t *testing.T) {
 // longest hash-derived candidate, "oidc-" plus all 64 hex digits, does
 // not.
 func TestOIDCFallbackUsernameAlwaysValidates(t *testing.T) {
-	s := openTestStore(t)
+	s := openTestStoreWithAdmin(t)
 	now := time.Now()
 	hint := strings.Repeat("a", maxUsernameLength)
 

@@ -177,11 +177,13 @@ func (u *User) LocalPassword() bool
 func (u *User) HasActiveTOTP() bool
 func (u *User) HasSecondFactor() bool
 
-type Options struct { Log *slog.Logger }                                   // new
+type Options struct { Log *slog.Logger; OnSetupCode SetupCodeHandler }     // new; OnSetupCode #37
+type SetupCodeHandler interface { SetupCode(code string) }; type SetupCodeFunc func(code string) // adapter, as http.HandlerFunc
 func OpenStore(b persist.Backend, opts Options) (*Store, error)            // = OpenWithBackend
 func (s *Store) Persisted() bool
 func (s *Store) Count() int
-func (s *Store) Register(username, password string, now time.Time) (*User, error)          // first account only, becomes admin
+func (s *Store) Register(username, password string, now time.Time) (*User, error)          // first account only, becomes admin; host-side -- gate checks the setup code first
+func (s *Store) CheckSetupCode(code string) error                                           // new (#37, ADR-0003): the one-time code an empty store announced
 func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error)
 func (s *Store) DeleteUser(id string) (*User, error)
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error)
@@ -265,7 +267,8 @@ const ResetCodeTTL = 24 * time.Hour
 
 // Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
 // ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
-// ErrPasswordTooShort, ErrInvalidRole, ErrRegistrationClosed, ErrNoAdmin, ErrSingleAdmin,
+// ErrPasswordTooShort, ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
+// ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin,
 // ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
 // ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
 // ErrPasskeyLimitReached, ErrPasskeyNotFound, ErrTokenNotFound, ErrTokenKindInvalid,
@@ -276,10 +279,22 @@ const ResetCodeTTL = 24 * time.Hour
 // or restart the process to start afresh).
 ```
 
-Reasons for the three *new* items:
+Reasons for the *new* items:
 
 - `Options`/`TokenOptions` carry the logger instead of a package-level
   `persistLog`, because a module cannot call an app's `logging.New`.
+- `Options.OnSetupCode` and `CheckSetupCode` are the first-admin setup
+  code (#37, [ADR-0003](adr/0003-first-admin-setup-code.md), owner
+  2026-10-01): an empty persisted store makes a one-time 80-bit code,
+  keeps only its hash in memory, and announces it once -- through the
+  hook, or as one `Warn` line on `Log` -- so that creating the first
+  admin needs the server's log, not just its address. It is inert once
+  any account exists and dies with the process; a reload that applies
+  an emptied document issues a new one. `Register` stays the host-side
+  primitive; `gate` checks the code before calling it, rate-limited per
+  address like login. SSO never creates the first account
+  (`ErrSetupRequired`): the first admin is local and links SSO
+  afterwards, the end state #1252 requires anyway.
 - `TokenOptions.Kinds` replaces the hard-coded `TokenKind.Valid()`.
   Mikroview has a third kind, `droplist-pull`, that is its own business;
   its tokens document already contains such rows, and they must keep
@@ -388,8 +403,9 @@ What stays fixed inside `gate` because it is security behaviour, not
 taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
 `SameSite=Lax`, path `/`, browser `Max-Age` 30 days; the OIDC flow cookie
 scoped to `/api/auth/oidc` with a 5-minute life; the 503 "setup required"
-state while `Count()==0` with only healthz, session, register and the
-OIDC pair reachable; identical 401 bodies for unknown and revoked tokens;
+state while `Count()==0` with only healthz, session and register
+reachable (the OIDC pair is not: SSO cannot create the first account,
+#37); identical 401 bodies for unknown and revoked tokens;
 login limiter keyed on both client IP and the account (its ID when the
 name matches one, the name otherwise; §1.3) with reserve-then-release so
 a correct password does not count as a failure.
@@ -551,7 +567,9 @@ request, so a locked-out admin does not need a restart.
 ### 2.6 Frontend
 
 Svelte screens copied from mikroview's, in this order: login (password,
-then TOTP/recovery code), first-run register, forced change-password,
+then TOTP/recovery code), first-run register (which also asks for the
+setup code from the server log and shows no SSO button, #37), forced
+change-password,
 forced second-factor enrolment (QR + confirm, recovery codes shown once),
 users admin, tokens admin, SSO button and `?ssoError=` handling. `api.ts`
 gains the `X-Requested-With: birdcage` header on every request and a 401
@@ -602,8 +620,9 @@ Not done in this work; recorded so the API above is checked against it.
 Checked and fits without a data change: `User` (all 19 fields), `Token`
 (9 fields, `droplist-pull` via `Kinds`), `Session` semantics
 (`IssuedAt` vs `PasswordChangedAt`, sliding ttl with ceiling), the
-(issuer, subject) index, `FindOrCreateOIDCUser`'s first-user-is-admin
-rule, `LinkOIDCIdentity`'s admin-keeps-password rule (#1252),
+(issuer, subject) index, `LinkOIDCIdentity`'s admin-keeps-password
+rule (#1252) -- but not `FindOrCreateOIDCUser`'s first-user-is-admin
+rule, which #37 closes (mikroview's own copy closes the same way),
 `Authenticate`'s reset-code path (#1251), the username rules (#1252's
 no-`@` for new local accounts only).
 
@@ -638,7 +657,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Code interception / replay | Authorization Code + PKCE S256, `state` and `nonce` compared constant-time, verifier held in an AES-256-GCM cookie the browser cannot read or forge | all of it; the flow-state key is per process |
 | Algorithm confusion (`alg:none`, HS256 with the public key) | explicit allowlist RS256/ES256/PS256 on the verifier | kept explicit rather than relying on go-oidc's default |
 | Account takeover by email match | identity is (issuer, subject); email and `preferred_username` are display hints only | kept; the index is a struct key |
-| Public IdP hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | kept, not configurable |
+| Public IdP hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | multi-tenant refusal kept; since #37 SSO never creates the first account -- the first admin is local, created with the setup code from the server's log (ADR-0003) |
 | Redirect URL from `Host` | built from `publicBaseUrl` only | birdcage: `BIRDCAGE_PUBLIC_URL` |
 | Slow or hung IdP blocks login or startup | 10 s HTTP timeout on discovery, JWKS and exchange | kept |
 | Group/claim policy failing open | every missing or unreadable claim is a refusal; policy re-checked on every login | kept |

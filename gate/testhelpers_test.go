@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,12 +50,46 @@ func mustNewLoginLimiter(t *testing.T, threshold int, window time.Duration) *gau
 // Memory is the one persist.Backend this module carries; see
 // persist/memory.go), so every fixture starts from persist.NewMemory()
 // rather than mikroview's own auth.Open(tempFile) pattern.
-func newTestGate(t *testing.T) *Gate {
+// testSetupCodes keeps the setup code each test store announced at
+// open (gauntlet.Options.OnSetupCode), by store, so registerAdmin and
+// setupCodeFor can present it the way an operator reading the log
+// would. testServerGates maps a test server back to its gate for
+// registerAdmin, which is handed only the server.
+var (
+	testSetupCodes  sync.Map // *gauntlet.Store -> string
+	testServerGates sync.Map // *httptest.Server -> *Gate
+)
+
+// setupCodeFor is the code g's store announced when it opened.
+func setupCodeFor(t *testing.T, g *Gate) string {
 	t.Helper()
-	users, err := gauntlet.OpenStore(persist.NewMemory(), gauntlet.Options{})
+	code, ok := testSetupCodes.Load(g.deps.Users)
+	if !ok {
+		t.Fatal("this gate's store announced no setup code -- open it through newTestGate")
+	}
+	return code.(string)
+}
+
+// openTrackedStore opens a store over backend and records the setup
+// code it announces, so a gate given this store can still be set up
+// through registerAdmin.
+func openTrackedStore(t *testing.T, backend persist.Backend) *gauntlet.Store {
+	t.Helper()
+	var code string
+	users, err := gauntlet.OpenStore(backend, gauntlet.Options{
+		OnSetupCode: gauntlet.SetupCodeFunc(func(c string) { code = c }),
+	})
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	testSetupCodes.Store(users, code)
+	t.Cleanup(func() { testSetupCodes.Delete(users) })
+	return users
+}
+
+func newTestGate(t *testing.T) *Gate {
+	t.Helper()
+	users := openTrackedStore(t, persist.NewMemory())
 	tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{})
 	if err != nil {
 		t.Fatalf("OpenTokenStore: %v", err)
@@ -124,7 +159,8 @@ func newTestServer(t *testing.T, g *Gate) *httptest.Server {
 	appMux.Handle("/", g.Routes())
 
 	ts := httptest.NewServer(g.Protect(appMux))
-	t.Cleanup(ts.Close)
+	testServerGates.Store(ts, g)
+	t.Cleanup(func() { testServerGates.Delete(ts); ts.Close() })
 	return ts
 }
 
@@ -174,8 +210,12 @@ func mustCookieJar(t *testing.T) http.CookieJar {
 // returns a client whose cookie jar carries its session.
 func registerAdmin(t *testing.T, ts *httptest.Server, username, password string) *http.Client {
 	t.Helper()
+	g, ok := testServerGates.Load(ts)
+	if !ok {
+		t.Fatal("registerAdmin needs a server from newTestServer")
+	}
 	client := &http.Client{Jar: mustCookieJar(t)}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", credentialsRequest{Username: username, Password: password})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: username, Password: password, SetupCode: setupCodeFor(t, g.(*Gate))})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("registering %q: status = %d, want %d", username, resp.StatusCode, http.StatusCreated)

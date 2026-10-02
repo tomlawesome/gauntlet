@@ -175,20 +175,23 @@ func TestTransferAdminRedecidesTheCurrentAdminOnReplay(t *testing.T) {
 	}
 }
 
-// TestFindOrCreateOIDCUserRedecidesRoleAndUsernameOnReplay: this store
-// is empty when an identity signs in for the first time, so the new
-// account would be the admin and the hint "alice" is free. Another
-// process registers alice -- the admin -- first. The replay must make an
-// ordinary user under a name that is not alice.
-func TestFindOrCreateOIDCUserRedecidesRoleAndUsernameOnReplay(t *testing.T) {
-	s, b, other := openRacingStores(t, nil)
+// TestFindOrCreateOIDCUserRedecidesUsernameOnReplay: the hint "bob" is
+// free when an identity signs in for the first time. Another process
+// creates bob first. The replay must make the account under a name that
+// is not bob.
+func TestFindOrCreateOIDCUserRedecidesUsernameOnReplay(t *testing.T) {
+	s, b, other := openRacingStores(t, func(s *Store) {
+		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	})
 	b.beforeSave = func() {
-		if _, err := other.Register("alice", "password123", time.Now()); err != nil {
-			t.Errorf("the other process's Register: %v", err)
+		if _, err := other.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
+			t.Errorf("the other process's CreateUser: %v", err)
 		}
 	}
 
-	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "alice", time.Now())
+	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", time.Now())
 	if err != nil {
 		t.Fatalf("FindOrCreateOIDCUser across a conflicting write: %v", err)
 	}
@@ -196,17 +199,45 @@ func TestFindOrCreateOIDCUserRedecidesRoleAndUsernameOnReplay(t *testing.T) {
 		t.Error("created = false for an identity nobody had provisioned")
 	}
 	if u.Role != RoleUser {
-		t.Errorf("role = %q, want %q: the other process's account is the admin", u.Role, RoleUser)
+		t.Errorf("role = %q, want %q", u.Role, RoleUser)
 	}
-	if strings.EqualFold(u.Username, "alice") {
+	if strings.EqualFold(u.Username, "bob") {
 		t.Errorf("username = %q, which the other process had already taken", u.Username)
 	}
 	reopened := reopenAccounts(t, b)
-	if n := reopened.Count(); n != 2 {
-		t.Errorf("saved document holds %d accounts, want 2", n)
+	if n := reopened.Count(); n != 3 {
+		t.Errorf("saved document holds %d accounts, want 3", n)
 	}
 	if got, ok := reopened.ByOIDCIdentity("https://idp.example", "sub-1"); !ok || got.ID != u.ID {
 		t.Errorf("the identity does not resolve to the account returned (%+v, %v)", got, ok)
+	}
+}
+
+// TestFindOrCreateOIDCUserRefusesOnReplayAgainstAnEmptiedDocument: this
+// store holds the admin when an identity signs in, so the cheap check
+// before the hash lets it through. Another process empties the document
+// first (a restore of an empty file). The replay must refuse against
+// that document -- the first account is never an SSO one (#37) -- rather
+// than carry over the "not the first account" decision and save an
+// SSO-only user into a document with no admin.
+func TestFindOrCreateOIDCUserRefusesOnReplayAgainstAnEmptiedDocument(t *testing.T) {
+	s, b, other := openRacingStores(t, func(s *Store) {
+		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	b.beforeSave = func() {
+		if _, err := b.Memory.Save(t.Context(), []byte(`{"version":1,"users":[]}`), other.version); err != nil {
+			t.Errorf("the other process emptying the document: %v", err)
+		}
+	}
+
+	_, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", time.Now())
+	if !errors.Is(err, ErrSetupRequired) {
+		t.Fatalf("FindOrCreateOIDCUser against an emptied document = (created=%v, %v), want ErrSetupRequired", created, err)
+	}
+	if n := reopenAccounts(t, b).Count(); n != 0 {
+		t.Errorf("saved document holds %d accounts, want 0: the refused provisioning was saved", n)
 	}
 }
 

@@ -47,19 +47,23 @@ func TestHasLocalAdminFollowsTheAdminsPassword(t *testing.T) {
 	}
 }
 
-// An SSO-provisioned first account is an admin with no password, which
-// is exactly the state #1252 exists to keep a deployment out of -- and,
-// since linking no longer costs the admin its password, the only way
-// left to reach it.
+// An SSO-provisioned account holding the admin role is an admin with no
+// password, which is exactly the state #1252 exists to keep a deployment
+// out of. SSO never creates the first account (#37) and linking no
+// longer costs the admin its password, so the only way left to reach it
+// is transferring the role to an SSO-provisioned user.
 func TestHasLocalAdminIsFalseForAnSSOProvisionedAdmin(t *testing.T) {
-	s := openTestStore(t)
+	s := openTestStoreWithAdmin(t)
 
-	u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", "carol", time.Now())
-	if err != nil {
+	if _, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", "carol", time.Now()); err != nil {
 		t.Fatalf("FindOrCreateOIDCUser: %v", err)
 	}
-	if u.Role != RoleAdmin {
-		t.Fatalf("Role = %q, want admin -- this test is not set up as it thinks", u.Role)
+	if _, _, err := s.TransferAdmin("carol", time.Now()); err != nil {
+		t.Fatalf("TransferAdmin: %v", err)
+	}
+	u, _ := s.ByUsername("carol")
+	if u == nil || u.Role != RoleAdmin {
+		t.Fatalf("carol = %+v, want admin -- this test is not set up as it thinks", u)
 	}
 	if s.HasLocalAdmin() {
 		t.Error("an SSO-provisioned admin counts as a local way in")

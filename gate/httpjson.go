@@ -79,6 +79,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // can actually produce.
 var gateErrorMessages = map[error]string{
 	gauntlet.ErrRegistrationClosed:    "registration is closed -- an account already exists",
+	gauntlet.ErrSetupCodeInvalid:      "invalid setup code -- the current one is in the server's log",
+	gauntlet.ErrSetupRequired:         "no account exists yet -- create the first admin with the setup code before signing in through SSO",
 	gauntlet.ErrNotPersisted:          "this deployment has no persistent storage configured -- an administrator needs to set one up before an account can be created",
 	gauntlet.ErrUsernameTaken:         "that username is already taken",
 	gauntlet.ErrPasswordTooShort:      gauntlet.ErrPasswordTooShort.Error(), // already phrased for an end user
