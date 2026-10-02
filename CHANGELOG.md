@@ -239,6 +239,13 @@ All notable changes to this project are documented in this file.
   after listing them (#28).
 - The release job's `release-cli` image is pinned by tag and digest
   instead of `:latest` (#28).
+- A request whose `Authorization` header is not a well-formed
+  `Bearer <token>` -- another scheme such as `Basic`, a bare `Bearer`,
+  a tab for the space -- is refused with 401 and
+  `WWW-Authenticate: Bearer realm="gate"`, as an unknown token is.
+  Before, the header was ignored and the request went through on its
+  session cookie. A request with no `Authorization` header is
+  unchanged (#41).
 - Linking the admin to SSO no longer ends a login lockout whose save
   had failed (#28). The link used to record itself in
   `PasswordChangedAt`, which the login limiter reads as a password

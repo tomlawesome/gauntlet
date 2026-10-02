@@ -113,7 +113,8 @@ func (g *Gate) csrfOK(w http.ResponseWriter, r *http.Request) bool {
 const bearerPrefix = "Bearer "
 
 // bearerToken extracts the raw token value from an Authorization: Bearer
-// <token> header. The scheme name is matched case-insensitively --
+// <token> header, reporting false for a header that is missing or not
+// in that form (Protect refuses the latter). The scheme name is matched case-insensitively --
 // RFC 7235 §2.1 defines auth-scheme as a token compared case-
 // insensitively, so "bearer x" and "BEARER x" are both bearer
 // authentication, not "no token" falling through to the session-cookie
@@ -242,7 +243,8 @@ func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 //     registered with Handle, in that order; a match dispatches to that
 //     kind's handler and never to next, and an Authorization header that
 //     matches no registered kind is rejected outright (never silently
-//     treated as "no token" and passed on to the session-cookie check).
+//     treated as "no token" and passed on to the session-cookie check),
+//     as is one that is not a well-formed Bearer credential at all.
 //     Otherwise: the CSRF header on unsafe methods, exempt paths, the
 //     session cookie, the MustChangePassword door, then -- when
 //     Config.RequireSecondFactor is set -- the second-factor door, then
@@ -282,6 +284,16 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 					return
 				}
 			}
+			writeUnauthorized(w, "invalid or revoked token")
+			return
+		}
+		// An Authorization header that is there but is not a
+		// well-formed "Bearer <token>" -- another scheme, a bare
+		// "Bearer", a tab for the space -- is refused the same way,
+		// not skipped: skipping it let the request through on its
+		// session cookie instead (#41). Only a request with no
+		// Authorization header at all goes on to the cookie.
+		if _, sent := r.Header["Authorization"]; sent {
 			writeUnauthorized(w, "invalid or revoked token")
 			return
 		}

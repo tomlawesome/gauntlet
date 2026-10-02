@@ -98,6 +98,27 @@ func TestRFC6750InvalidTokenIsRefusedWithTheChallenge(t *testing.T) {
 	}
 }
 
+// TestMalformedAuthorizationIsRefusedNotSkipped is #41: an
+// Authorization header that is present but is not a well-formed
+// "Bearer <token>" is refused with the same 401 and challenge an
+// unknown token gets, never ignored so that the request falls back to
+// its session cookie. "Bearer " arrives as "Bearer": the server trims
+// trailing spaces from a header value. Only a request with no
+// Authorization header at all is judged by its cookie.
+func TestMalformedAuthorizationIsRefusedNotSkipped(t *testing.T) {
+	_, base, admin, _ := rfc6750Fixture(t)
+	for _, header := range []string{"Bearer", "Bearer ", "Basic YWRtaW46cGFzc3dvcmQxMjM=", "Bearer\tabc"} {
+		status, challenge, _ := sendAuthorization(t, admin, base, "/api/protected", header)
+		if status != http.StatusUnauthorized || challenge != bearerChallenge {
+			t.Errorf("Authorization %q with a signed-in cookie: got %d with WWW-Authenticate %q, want 401 with %q",
+				header, status, challenge, bearerChallenge)
+		}
+	}
+	if status, _, _ := sendAuthorization(t, admin, base, "/api/protected", ""); status != http.StatusOK {
+		t.Errorf("no Authorization header with a signed-in cookie got %d, want 200", status)
+	}
+}
+
 // TestRFC6750NoCredentialsGetTheChallenge: a request with no token and
 // no session gets 401 with the same challenge and, as RFC 6750 §3.1
 // asks of a request with no authentication information, no error code.

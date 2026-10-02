@@ -102,7 +102,8 @@ against Appendix B's SHA-1 vectors), and a code accepted at most once
 
 **Bearer tokens, RFC 6750.** Gauntlet reads a token only from the
 `Authorization` header, matches the `Bearer` scheme name in any case
-(RFC 7235 §2.1), and answers every 401 with
+(RFC 7235 §2.1), refuses any other `Authorization` header rather than
+ignoring it, and answers every 401 with
 `WWW-Authenticate: Bearer realm="gate"`. Deliberate differences:
 
 - **No token in the query string or form body.** §2.2 and §2.3 allow
@@ -117,9 +118,15 @@ against Appendix B's SHA-1 vectors), and a code accepted at most once
   or a token, carries the same fixed challenge, and
   `docs/api/auth.yaml` fixes that value. Adding the attribute changes
   the API contract, so it goes through ADR-0002.
-- **No 400 `invalid_request`.** Gauntlet does not check that a token is
-  `b64token` syntax. A malformed token is just a token that matches
-  nothing: 401.
+- **No 400 `invalid_request`.** §3.1 answers a malformed request 400.
+  Gauntlet answers 401 with the same challenge instead, for an
+  `Authorization` header in any other form (another scheme, a bare
+  `Bearer`, a tab for the space) as for a token that matches nothing,
+  so a refused credential always looks the same and the API contract
+  needs no second error shape (#41; a 400 was considered and not
+  chosen). It does not check that a token is `b64token` syntax either:
+  a malformed token is just one that matches nothing. A request with
+  no `Authorization` header at all is judged by its session cookie.
 - **No 403 `insufficient_scope`.** A token reaches only the handler its
   kind was registered with (`Gate.Handle`), so a route outside that
   handler is never offered to it. The handler answers, typically 404.
