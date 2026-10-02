@@ -2,7 +2,8 @@
 
 Each `*.pub` file here is the public half of an Ed25519 key that signs
 the common-password list (#52, [ADR-0007](../../docs/adr/0007-common-password-list.md)):
-a PEM `PUBLIC KEY` block (PKIX), as `pwlist keygen` writes it. They are
+a PEM `PUBLIC KEY` block (the standard public-key file format
+`openssl` and most tools read), as `pwlist keygen` writes it. They are
 compiled into gauntlet, and a list -- fetched by a `Refresher` or
 embedded -- is accepted only when one of these keys signed it.
 
