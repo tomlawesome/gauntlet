@@ -48,6 +48,26 @@ All notable changes to this project are documented in this file.
   signs in with their existing password and second factor. The code
   works once, and stops working if the admin is unlocked any other
   way. The accounts document is unchanged.
+- The known-browser allowance (#44): a browser that completes a sign-in
+  now gets a `gate_known_browser` cookie (`HttpOnly`, `SameSite=Lax`,
+  `Secure` per `SecureCookie`, path `/api/auth/login`, 45 days), set at
+  every session issue and replaced at each one, and while the account
+  is locked out, or the client's address is at its limit, that browser
+  keeps an allowance of its own -- the limiter's attempts per window --
+  so a stranger who knows a username can no longer lock its owner out.
+  It is refused once the account is disabled, and every failure through
+  it counts toward the 50. The cookie's value is 32 random bytes; the
+  account keeps only its SHA-256 (new `User.KnownBrowsers`,
+  `KnownBrowser`), at most `MaxKnownBrowsers` (3) per account, the
+  oldest evicted, each for `KnownBrowserLifetime` (45 days) from its
+  latest sign-in there, checked on the server. Sign out everywhere and
+  an admin's reset code forget every browser; a password change, an
+  unlock and the forced change after second-factor failures do not.
+  New API: `Store.RememberBrowser`, `Store.ClearKnownBrowsers`,
+  `Store.KnowsBrowser`, `LoginLimiter.ReserveKnownBrowser` and
+  `ReleaseKnownBrowser`. `Store.List` blanks each hash. An application
+  with its own sign-in path should call `RememberBrowser` where it
+  issues a session; gate does so in `issueSession`.
 - `docs/api/auth.yaml` (OpenAPI 3.1) describes every route `gate.Routes`
   serves -- each request body, response body and status -- as the one
   copy a frontend can build against (ADR-0002, #22). `docs/design.md`
@@ -162,8 +182,8 @@ All notable changes to this project are documented in this file.
   upgrading: an older gauntlet reads a sealed document as an empty
   store and its first write would overwrite it, while this build
   refuses a sealed document that reaches a store unwrapped. The
-  accounts document itself is unchanged (still version 3): the
-  envelope sits below it.
+  envelope does not change the accounts document's own version (#44
+  does, below): it sits below it.
 - A second factor (TOTP or a passkey) is now always required for every
   local-password account; `gate` no longer offers a way to turn the
   forced-enrolment door off (#49). `gate.Config.RequireSecondFactor` is
@@ -233,12 +253,14 @@ All notable changes to this project are documented in this file.
   That run is kept in memory and starts again after a restart. Still
   one save as a lockout starts and one as it clears, never one per
   guess.
-- The accounts document is now version 3: it adds `loginLockoutCount`
-  and `loginDisabledAt` (#44). Version-1 and version-2 documents open
-  unchanged with both empty and are written as version 3 on their next
-  save; no migration is needed. An earlier build cannot open an
-  accounts document once this version has saved it, so keep a copy
-  before upgrading if a rollback is possible.
+- The accounts document is now version 4 (#44): version 3 added
+  `loginLockoutCount` and `loginDisabledAt`, and version 4
+  `knownBrowsers`. Version-1, -2 and -3 documents open unchanged with
+  the fields they lack empty, and are written as version 4 on their
+  next save; no migration is needed. No earlier build -- v0.1.0, or a
+  development build that wrote version 3 -- can open an accounts
+  document once this version has saved it, so keep a copy before
+  upgrading if a rollback is possible.
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

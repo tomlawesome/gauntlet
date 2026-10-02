@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"slices"
 	"strconv"
@@ -13,7 +14,7 @@ import (
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// accountsFixture is a version-3 accounts document, written out by hand
+// accountsFixture is a version-4 accounts document, written out by hand
 // and frozen: it is the stored format as birdcage and mikroview hold it
 // on disk, not what this build's structs happen to produce. A renamed
 // or dropped JSON tag changes what loading it and saving it back
@@ -23,11 +24,11 @@ import (
 // document version (see docversion.go).
 //
 // Mikroview users.json-shaped, plus gauntlet's own sessionsEndedAt,
-// loginLockedUntil, loginLockoutCount and loginDisabledAt, never real
-// user data: an admin with every field populated, including every
-// second-factor kind (TOTP, two recovery codes, a passkey, an
-// outstanding reset code, a lockout, a count of lockouts, a disabled
-// sign-in --
+// loginLockedUntil, loginLockoutCount, loginDisabledAt and
+// knownBrowsers, never real user data: an admin with every field
+// populated, including every second-factor kind (TOTP, two recovery
+// codes, a passkey, an outstanding reset code, a lockout, a count of
+// lockouts, a disabled sign-in, a remembered browser --
 // data shape only; a real account would not carry all of these live at
 // once), a plain local user, an SSO-linked account with no local
 // password, and a roleless legacy account (loads as-is; see
@@ -35,7 +36,7 @@ import (
 // not hashes of anything: nothing here authenticates. Users are in the
 // username order a save writes them in.
 const accountsFixture = `{
-  "version": 3,
+  "version": 4,
   "users": [
     {
       "id": "admin-id-0001",
@@ -54,6 +55,12 @@ const accountsFixture = `{
       "loginLockedUntil": "2026-01-02T03:19:05Z",
       "loginLockoutCount": 2,
       "loginDisabledAt": "2026-01-02T03:20:05Z",
+      "knownBrowsers": [
+        {
+          "hash": "fixture-known-browser-hash",
+          "issuedAt": "2026-01-02T04:04:05Z"
+        }
+      ],
       "totpSecret": "JBSWY3DPEHPK3PXP",
       "totpConfirmedAt": "2026-01-02T03:04:05Z",
       "totpLastCounter": 99,
@@ -125,7 +132,7 @@ const accountsFixture = `{
 func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	assertFixtureCoversEveryField(t, accountsFixture,
 		reflect.TypeFor[storeFile](), reflect.TypeFor[User](), reflect.TypeFor[RecoveryCode](),
-		reflect.TypeFor[Passkey](), reflect.TypeFor[PasskeyFlags]())
+		reflect.TypeFor[Passkey](), reflect.TypeFor[PasskeyFlags](), reflect.TypeFor[KnownBrowser]())
 
 	m := persist.NewMemory()
 	primeMemory(t, m, accountsFixture)
@@ -173,6 +180,15 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 const lockoutLines = "      \"loginLockoutCount\": 2,\n" +
 	"      \"loginDisabledAt\": \"2026-01-02T03:20:05Z\",\n"
 
+// knownBrowserLines is the field accounts version 4 (#44) added, as the
+// every-field fixture spells it.
+const knownBrowserLines = "      \"knownBrowsers\": [\n" +
+	"        {\n" +
+	"          \"hash\": \"fixture-known-browser-hash\",\n" +
+	"          \"issuedAt\": \"2026-01-02T04:04:05Z\"\n" +
+	"        }\n" +
+	"      ],\n"
+
 // fixtureAtVersion is the every-field fixture without the given lines
 // and with its version set to version: an older document, as the build
 // that wrote it would have.
@@ -185,9 +201,9 @@ func fixtureAtVersion(t *testing.T, version int, without ...string) string {
 		}
 		doc = strings.Replace(doc, line, "", 1)
 	}
-	const current = `"version": 3,`
+	const current = `"version": 4,`
 	if !strings.Contains(doc, current) {
-		t.Fatal("the every-field fixture is no longer at version 3")
+		t.Fatal("the every-field fixture is no longer at version 4")
 	}
 	return strings.Replace(doc, current, `"version": `+strconv.Itoa(version)+`,`, 1)
 }
@@ -210,24 +226,25 @@ func openSaveAndCompare(t *testing.T, doc, want string) *Store {
 		t.Fatal(err)
 	}
 	if string(snap.Payload) != want {
-		t.Errorf("a saved older document differs from the fixture at version 3 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
+		t.Errorf("a saved older document differs from the fixture at version 4 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
 			want, snap.Payload)
 	}
 	return s
 }
 
-// TestAVersion1AccountsDocumentOpensAndSavesAsVersion3: version 2
-// (#28) only added sessionsEndedAt, and version 3 (#44) only
-// loginLockoutCount and loginDisabledAt, none of which a version-1
-// document -- gauntlet v0.2.0's, or mikroview's -- carries, and all of
-// which read correctly as zero, so no migration code exists. The
-// every-field fixture without them, at version 1, opens with them zero
-// and the session cutoff at passwordChangedAt, and its next save writes
-// exactly the fixture without them, now at version 3.
-func TestAVersion1AccountsDocumentOpensAndSavesAsVersion3(t *testing.T) {
+// TestAVersion1AccountsDocumentOpensAndSavesAsVersion4: version 2
+// (#28) only added sessionsEndedAt, version 3 (#44) only
+// loginLockoutCount and loginDisabledAt, and version 4 (#44) only
+// knownBrowsers, none of which a version-1 document -- gauntlet
+// v0.2.0's, or mikroview's -- carries, and all of which read correctly
+// as zero, so no migration code exists. The every-field fixture without
+// them, at version 1, opens with them zero and the session cutoff at
+// passwordChangedAt, and its next save writes exactly the fixture
+// without them, now at version 4.
+func TestAVersion1AccountsDocumentOpensAndSavesAsVersion4(t *testing.T) {
 	const sessionsLine = "      \"sessionsEndedAt\": \"2026-01-02T03:06:05Z\",\n"
-	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines)
-	want := fixtureAtVersion(t, 3, sessionsLine, lockoutLines)
+	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines, knownBrowserLines)
+	want := fixtureAtVersion(t, 4, sessionsLine, lockoutLines, knownBrowserLines)
 
 	s := openSaveAndCompare(t, v1, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -246,16 +263,17 @@ func TestAVersion1AccountsDocumentOpensAndSavesAsVersion3(t *testing.T) {
 	}
 }
 
-// TestAVersion2AccountsDocumentOpensAndSavesAsVersion3: version 3 (#44)
+// TestAVersion2AccountsDocumentOpensAndSavesAsVersion4: version 3 (#44)
 // added loginLockoutCount and loginDisabledAt, which a version-2
 // document does not carry and which read correctly as zero -- no
 // lockouts counted, sign-in not disabled: no build that wrote version 2
-// counted either. The every-field fixture without them, at version 2,
-// opens with both zero, its lockout still in force, and saves back as
-// exactly the fixture without them at version 3.
-func TestAVersion2AccountsDocumentOpensAndSavesAsVersion3(t *testing.T) {
-	v2 := fixtureAtVersion(t, 2, lockoutLines)
-	want := fixtureAtVersion(t, 3, lockoutLines)
+// counted either. The every-field fixture without them (or version 4's
+// knownBrowsers), at version 2, opens with both zero, its lockout still
+// in force, and saves back as exactly the fixture without them at
+// version 4.
+func TestAVersion2AccountsDocumentOpensAndSavesAsVersion4(t *testing.T) {
+	v2 := fixtureAtVersion(t, 2, lockoutLines, knownBrowserLines)
+	want := fixtureAtVersion(t, 4, lockoutLines, knownBrowserLines)
 
 	s := openSaveAndCompare(t, v2, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -268,6 +286,34 @@ func TestAVersion2AccountsDocumentOpensAndSavesAsVersion3(t *testing.T) {
 	}
 	if admin.LoginLockedUntil.IsZero() {
 		t.Error("the version-2 document's lockout did not load")
+	}
+}
+
+// TestAVersion3AccountsDocumentOpensAndSavesAsVersion4: version 4 (#44)
+// added knownBrowsers, which a version-3 document does not carry and
+// which reads correctly as none remembered: no browser carries a token
+// a build without the field issued. The every-field fixture without it,
+// at version 3, opens with no browser remembered and everything else
+// intact, and saves back as exactly the fixture without it at version 4
+// -- after which a build reading only up to version 3 refuses it
+// (errNewerDocument).
+func TestAVersion3AccountsDocumentOpensAndSavesAsVersion4(t *testing.T) {
+	v3 := fixtureAtVersion(t, 3, knownBrowserLines)
+	want := fixtureAtVersion(t, 4, knownBrowserLines)
+
+	s := openSaveAndCompare(t, v3, want)
+	admin, ok := s.Get("admin-id-0001")
+	if !ok {
+		t.Fatal("the admin did not load")
+	}
+	if len(admin.KnownBrowsers) != 0 {
+		t.Errorf("KnownBrowsers = %+v from a version-3 document, want none", admin.KnownBrowsers)
+	}
+	if admin.LoginLockoutCount != 2 || admin.LoginDisabledAt.IsZero() {
+		t.Error("the version-3 document's lockout fields did not load")
+	}
+	if err := checkDocumentVersion("accounts", accountsDocumentVersion, 3); !errors.Is(err, errNewerDocument) {
+		t.Errorf("a version-3 build reading what this one saves: %v, want errNewerDocument", err)
 	}
 }
 

@@ -45,6 +45,24 @@ info:
     cookie" issue a fresh one, and a login ends the same account's
     session the browser already held; logout clears it.
 
+    **Known-browser cookie.** Every route that sets the session cookie
+    also sets `gate_known_browser` (#44): `HttpOnly`, `SameSite=Lax`,
+    `Secure` while `Config.SecureCookie` is true, path `/api/auth/login`
+    (so it is sent only to `login`, `login/factor` and
+    `login/factor/begin`), no `__Host-` prefix (that needs path `/`),
+    `Max-Age` 45 days. Its value is 32 random bytes, base64url, and names
+    nothing; the account's record holds only its SHA-256, and a fresh
+    value replaces it at every sign-in. While the account is locked out,
+    or the client's address is at its limit, a browser carrying a value
+    the named account remembers keeps a small allowance of its own (the
+    limiter's attempts per window), where any other browser gets `429`.
+    It never signs anyone in by itself, is refused while the account's
+    sign-in is disabled, and every failure through it counts toward the
+    disable. An account remembers at most three browsers, each for 45
+    days from its latest sign-in there; sign out everywhere and an
+    admin's password reset forget them all. A frontend does nothing with
+    it: the browser keeps and sends it.
+
     **Errors.** Every error body is `text/plain` holding one human-readable
     line, except two `application/json` bodies for a step that half
     succeeded: `DELETE /api/auth/users/{id}` when the account was deleted
@@ -170,6 +188,8 @@ paths:
         releases the attempt. An account whose password was reset after
         its address reached the limit gets past that address limit (not
         its own) until its next sign-in finishes or a guess fails (#32).
+        A browser the account remembers (the known-browser cookie) keeps
+        an allowance of its own past either limit (#44).
         On an account with no second factor this
         signs in and sets the session cookie. On an account holding one it
         does not: it sets a short-lived pending-login cookie and names the
@@ -334,7 +354,7 @@ paths:
     post:
       operationId: logoutAll
       summary: Sign out everywhere
-      description: Ends every session the caller's account holds, then issues this browser a fresh one (sets the session cookie). Takes no body.
+      description: Ends every session the caller's account holds and forgets every browser it remembers (the known-browser cookie), then issues this browser a fresh session (sets the session cookie) and remembers it again. Takes no body.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       responses:

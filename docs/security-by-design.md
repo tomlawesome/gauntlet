@@ -183,7 +183,7 @@ it says so instead of repeating the reasoning.
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
-| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44) |
+| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44); a browser that completed a sign-in keeps a small allowance of its own during a lockout, so a stranger cannot cheaply lock the owner out, and its failures count toward the 50 (`knownbrowser.go`, `LoginLimiter.ReserveKnownBrowser`, #44) |
 | 6.1.2, 6.2.11 context-specific word list | 2 | Gap | #43 (password blocklist). See 800-63B §3.1.1.2 |
 | 6.1.3, 6.3.4 all pathways documented, strength consistent | 2 | Met, with one deviation | Pathways: password then TOTP/passkey/recovery code; reset code then the same second factor (`gate/login_handler.go:129-172`); SSO; bearer token; setup code. All in `docs/api/auth.yaml`. Deviation: an SSO sign-in creates a session with no local second factor (`gate/oidc_handler.go:292`); see 6.8.4 |
 | 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met | `store.go:39` `minPasswordLength = 8`, conforming because a second factor is mandatory for every local-password account (#49); see 800-63B §3.1.1.2 |
@@ -196,7 +196,7 @@ it says so instead of repeating the reasoning.
 | 6.2.9 at least 64 characters permitted | 2 | Met | No maximum; the 64 KiB body limit (`gate/httpjson.go:37`) is the only bound |
 | 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, or five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44) |
 | 6.2.12 breached-password check | 2 | Gap | #43 (password blocklist) |
-| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `stall_test.go` |
+| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `knownbrowser_test.go`, `gate/knownbrowser_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
 | 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
 | 6.3.5 notify suspicious attempts | 3 | Not targeted | No notification channel; see 800-63B §4.6 |
@@ -253,7 +253,7 @@ it says so instead of repeating the reasoning.
 |---|---|---|---|
 | 8.1.1 function-level rules documented | 1 | Met | `docs/design.md` §2.1 (roles) and `docs/api/auth.yaml` (which routes need `admin`); token kinds reach only the handler registered for them (`Gate.Handle`) |
 | 8.1.2 field-level rules documented | 2 | Met | `Store.List` and `blankCredentials` define what leaves the store (`user.go:193`); the API document closes every response body |
-| 8.1.3, 8.1.4, 8.2.4 contextual or adaptive decisions | 3 | N/A | None made; the client address feeds only the login limiter |
+| 8.1.3, 8.1.4, 8.2.4 contextual or adaptive decisions | 3 | N/A | None made on access; the client address feeds only the login limiter, and a known-browser token (#44) only that limiter's allowance during a lockout -- it never grants or widens access |
 | 8.2.1 function-level enforcement | 1 | Met | `RequireRole` (`gate/routes.go:50-59`), unknown role denied everything (`user.go:51`, `gate/protect.go:338`) |
 | 8.2.2 object-level enforcement | 1 | Met | Passkey rename and delete take the caller's own account id; user and token routes are admin only; `logout-all` acts on the cookie's account, never a body field |
 | 8.2.3 field-level enforcement | 2 | Met | Secrets blanked before any copy leaves the store; hashes never serialised to HTTP |
@@ -401,9 +401,9 @@ store, keep and protect:
 | 15.4.1–15.4.3 safe concurrency | 3 | Met | Store and session mutexes, copy-then-save (`mutate.go`), `-race` in CI, check-and-spend under one lock for TOTP, recovery codes and ceremonies |
 | 3.3.1 cookie `Secure` | 1 | Met, conditional | `gate.Config.SecureCookie`; the application must set it where TLS terminates, and `gate.New` logs one warning naming the setting when it is left false (#47) |
 | 3.3.2 `SameSite` fits the purpose | 2 | Met | `Lax` on every cookie (`gate/cookie.go` `writeCookie`) |
-| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies are scoped to their routes, which the prefix forbids |
+| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies and the known-browser cookie (`gate_known_browser`, path `/api/auth/login`, #44) are scoped to their routes, which the prefix forbids |
 | 3.3.4 `HttpOnly` | 2 | Met | Every cookie |
-| 3.3.5 cookie under 4096 bytes | 3 | Met | Session id 32 characters; sealed values a few hundred bytes |
+| 3.3.5 cookie under 4096 bytes | 3 | Met | Session id 32 characters; known-browser token 43; sealed values a few hundred bytes |
 | 3.5.1 CSRF | 1 | Met | `X-Requested-With` on unsafe methods plus `SameSite=Lax` (`gate/protect.go:118-123`, `:313`); bearer requests skip it because no cookie is involved |
 | 3.5.3 state-changing routes use unsafe methods | 1 | Met | Every mutation is POST, PATCH or DELETE (`docs/api/auth.yaml`); the OIDC callback is GET but creates nothing without the sealed flow cookie |
 
@@ -531,7 +531,7 @@ stand alone, which these never do.
 | Limit failed attempts on a subscriber account (SHALL) | Conforms | Per-account counter keyed by account id, never evicted; lockout and the count of lockouts written to `User.LoginLockedUntil` and `User.LoginLockoutCount` so a restart does not lift them (`LoginLimiter.ReserveAccount`, `docs/design.md` §1.3). Address counter alongside |
 | No more than 100 consecutive failures per authenticator, then disable it until rebound (SHALL) | Conforms, lower and wider | `MaxConsecutiveLoginFailures` = 50 consecutive failures, password and second-factor steps on one count, disable the account's local sign-in (`User.LoginDisabledAt`) until `Store.UnlockLogin`, rather than one authenticator until rebound (owner, 2026-10-02). Lockouts before that escalate, so the fiftieth arrives after about 102 hours. Only a completed sign-in or a new password resets the count (#44). Unlocked by an admin (`POST /api/auth/users/{id}/unlock`; an admin's own only with their password and a current second factor re-entered, not by the session alone), by an admin-issued reset code, or, for the lone admin, by a one-time unlock code written to the server's log at startup that lifts only the disable (`unlockcode.go`, `POST /api/auth/unlock`) |
 | Disregard earlier failures after a success (SHOULD) | Conforms | `LoginLimiter.SignedIn` on a completed sign-in drops the window and the count of lockouts (`gate/login_handler.go`, `completeLogin`); a correct password alone hands back only its own attempt (`ReleaseAccount`), since the second factor is still to come |
-| Increasing delays, bot challenges, risk signals (MAY) | Partly | Increasing delays: each lockout three times the last, 5 min up to 24 h (#44). No bot challenges or risk signals |
+| Increasing delays, bot challenges, risk signals (MAY) | Partly | Increasing delays: each lockout three times the last, 5 min up to 24 h (#44). One risk signal: a browser that has completed a sign-in on the account (a 32-byte token whose SHA-256 is on the record, at most 3 per account, 45 days from its latest sign-in) keeps the limiter's attempts per window during a lockout, refused once the account is disabled and counted toward it (`knownbrowser.go`, #44). Nothing keyed on the client address. No bot challenges |
 | Password and second factor both throttled when both are tried | Conforms | One budget for the password step and the code step (`gate/login_handler.go:226-231`); the signed-in password re-check has its own (`ReserveRecheck`) |
 
 ### Binding, recovery and invalidation (§4)
