@@ -12,7 +12,7 @@ has to meet.
 | Licence gate | `go-licenses` against `supply-chain/licence-policy.yml` | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
-| HTTP contract | `gate/contract_test.go` against `docs/api/auth.yaml` | `test:go` |
+| HTTP contract | `gate/contracttest` (its own Go module) against `docs/api/auth.yaml` | `test:contract` |
 | Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag | `lint:apidiff` |
 
 There is no frontend, no shipped image and no live-stack e2e stage here
@@ -34,8 +34,15 @@ that line (#22):
   drops, renames or adds without the document fails.
   `TestContractRoutesMatchDocument` compares the patterns `routes.go`
   registers (read from source, confirmed against the live mux) with the
-  document's operations, both ways. To add a route or field: change the
-  handler and the document in the same commit.
+  document's operations, both ways, and
+  `TestContractRequestBodiesMatchHandlers` compares the fields each
+  handler's request type decodes (also read from source) with the
+  document's request body. To add a route or field: change the handler
+  and the document in the same commit. These tests are their own Go
+  module, `gate/contracttest`, so `kin-openapi` stays out of the
+  library's `go.mod` (#30); run them with
+  `cd gate/contracttest && go test ./...`. From there they reach `gate`
+  only through its exported API, as an application does.
 - **Go API.** `scripts/apidiff.sh [BASE_REF]` compares the module's
   exported API with the newest `v*` tag reachable from `HEAD` (or
   `BASE_REF`), using `golang.org/x/exp/cmd/apidiff` via `go run` at a

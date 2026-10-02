@@ -210,6 +210,33 @@ test:go:
     paths:
       - coverage.out
 
+# The OpenAPI contract tests (ADR-0002) live in their own Go module,
+# gate/contracttest, so their validator, kin-openapi, stays out of the
+# library's go.mod and out of every app that imports gauntlet (#30).
+# Commands run from the repository root never enter a nested module, so
+# none of the jobs above reach it; this one vets, lints and runs it. The
+# coverage floor, apidiff and the licence check are about the library
+# itself and do not look here.
+test:contract:
+  stage: test
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 15m
+  cache:
+    key:
+      prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+      files:
+        - gate/contracttest/go.sum
+        - .gitlab-ci.yml
+    paths:
+      - .gocache/
+  script:
+    - cd gate/contracttest
+    - go vet ./...
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+    - golangci-lint run ./...
+    - go test ./... -race
+
 # ---------------------------------------------------------------------------
 # RELEASE
 # ---------------------------------------------------------------------------

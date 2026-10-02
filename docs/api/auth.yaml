@@ -9,7 +9,7 @@ info:
     Every route `gate.Routes` serves: `/api/auth/*` and `/api/tokens[/{id}]`.
     This document is the source of truth both frontends build from
     (docs/adr/0002-api-standards-and-compatibility.md). The contract tests
-    in `gate/contract_test.go` drive every route through it, and fail when
+    in `gate/contracttest` drive every route through it, and fail when
     a handler and this document disagree or when a route exists on one
     side only.
 

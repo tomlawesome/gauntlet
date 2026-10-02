@@ -587,9 +587,9 @@ func TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail(t *testing.T)
 // TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn: when the factor
 // is committed but the recovery codes are not, the 500 has to say so in
 // a field a frontend can branch on (auth.yaml forbids reading the
-// message), and that body has to be the one the document describes.
+// message). gate/contracttest's copy of this test checks that body is
+// the one the document describes.
 func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
-	c := newContractChecker(t)
 	g := newTestGate(t)
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
 	users := openTrackedStore(t, backend)
@@ -599,10 +599,8 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 
-	bob := c.client()
-	c.do(bob, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{totpBobUsername, totpBobPassword}}, 200, nil)
-	var enrolled totpEnrolResponse
-	c.do(bob, ts.URL, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: totpBobPassword}}, 200, &enrolled)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	enrolled := totpEnrol(t, bob, ts)
 	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
 	if err != nil {
 		t.Fatal(err)
@@ -611,7 +609,12 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 
 	// One save left: ConfirmTOTP lands, the recovery-code save does not.
 	backend.left = 1
-	resp, raw := c.send(bob, ts.URL, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}})
+	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500: %s", resp.StatusCode, raw)
 	}

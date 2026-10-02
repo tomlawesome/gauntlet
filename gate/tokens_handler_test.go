@@ -210,9 +210,9 @@ func TestCreateTokenWithoutStorageSaysWhatToDo(t *testing.T) {
 // TestRevokeTokenStorageFailureIsNotReportedAsGone: a revoke whose save
 // fails leaves the token working, so answering 404 ("already revoked")
 // would tell an admin revoking a leaked token that it is dead when it
-// is not. The refusal must be a 5xx the document describes.
+// is not. The refusal must be a 5xx; gate/contracttest's copy of this
+// test checks the document describes it.
 func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
-	c := newContractChecker(t)
 	g := newTestGate(t)
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
 	tokens, err := gauntlet.OpenTokenStore(backend, gauntlet.TokenOptions{})
@@ -227,11 +227,22 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 	}
 	g.Handle(gauntlet.TokenKindAPI, kindEchoHandler("/api/readonly"))
 	ts := newTestServer(t, g)
-	admin := c.client()
-	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{Username: "admin", Password: "password123"}}, 200, nil)
+	admin := loggedInClient(t, ts, "admin", "password123")
 
 	backend.left = 0
-	c.do(admin, ts.URL, call{method: "DELETE", path: "/api/tokens/" + tok.ID}, http.StatusInternalServerError, nil)
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/tokens/"+tok.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	revoke, err := admin.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = revoke.Body.Close()
+	if revoke.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("a revoke whose save failed answered %d, want 500", revoke.StatusCode)
+	}
 
 	resp := bearerRequest(t, ts.URL, "/api/readonly", raw)
 	defer func() { _ = resp.Body.Close() }()
@@ -240,12 +251,12 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 	}
 }
 
-// TestContractTokenRegisteredKinds: an application may register its own
-// token kinds (TokenOptions.Kinds), so the document must accept any of
-// them, not only api and ingest. Leaving kind out still means api, which
-// is refused when the application did not register api.
-func TestContractTokenRegisteredKinds(t *testing.T) {
-	c := newContractChecker(t)
+// TestTokenRegisteredKinds: an application may register its own token
+// kinds (TokenOptions.Kinds), and gate serves any of them, not only api
+// and ingest. Leaving kind out still means api, which is refused when
+// the application did not register api. gate/contracttest's
+// TestContractTokenRegisteredKinds checks the document accepts them.
+func TestTokenRegisteredKinds(t *testing.T) {
 	g := newTestGate(t)
 	const custom gauntlet.TokenKind = "droplist-pull"
 	tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{Kinds: []gauntlet.TokenKind{custom}})
@@ -254,20 +265,35 @@ func TestContractTokenRegisteredKinds(t *testing.T) {
 	}
 	g.deps.Tokens = tokens
 	ts := newTestServer(t, g)
-	u := ts.URL
-	admin := c.client()
-	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{Username: "admin", Password: "contract-admin-password", SetupCode: setupCodeFor(t, g)}}, 201, nil)
+	admin := registerAdmin(t, ts, "admin", "password123")
+	expect := func(resp *http.Response, want int, out any) {
+		t.Helper()
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != want {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status %d, want %d: %s", resp.StatusCode, want, body)
+		}
+		if out != nil {
+			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 
 	var created tokenResponse
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom)}}, 201, &created)
+	expect(postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "pull", Kind: string(custom)}), http.StatusCreated, &created)
 	if created.Kind != custom {
 		t.Errorf("created kind = %q, want %q", created.Kind, custom)
 	}
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "default"}}, 400, nil)
+	expect(postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "default"}), http.StatusBadRequest, nil)
 	var list struct {
 		Tokens []tokenResponse `json:"tokens"`
 	}
-	c.do(admin, u, call{method: "GET", path: "/api/tokens"}, 200, &list)
+	listed, err := admin.Get(ts.URL + "/api/tokens")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(listed, http.StatusOK, &list)
 	if len(list.Tokens) != 1 || list.Tokens[0].Kind != custom {
 		t.Errorf("listed tokens = %+v, want one of kind %q", list.Tokens, custom)
 	}
