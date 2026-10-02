@@ -19,29 +19,34 @@ There is no frontend, no shipped image and no live-stack e2e stage here
 (unlike birdcage/mikroview): gauntlet ships a tag, not a running service,
 and every behaviour it has is reachable from a Go test.
 
-## Compatibility is checked, not reviewed
+## Compatibility checks
 
-ADR-0002 promises additive-only change from v0.1.0. Two checks hold
-that line (#22):
+ADR-0002 promises that from v0.1.0 nothing callers rely on is removed
+or changed, only added. Two CI checks enforce most of this. One gap is
+left to review: a field removed or renamed in `docs/api/auth.yaml`
+itself, which ADR-0002 allows only in a new major version.
 
-- **HTTP contract.** `docs/api/auth.yaml` (OpenAPI 3.1) describes every
-  route `gate.Routes` serves. `TestContractEveryRoute` drives each route
+- **HTTP contract.** To add a route or a response field, change the
+  handler and `docs/api/auth.yaml` in the same commit.
+  `docs/api/auth.yaml` (OpenAPI 3.1) describes every route
+  `gate.Routes` serves. `TestContractEveryRoute` drives each route
   through its success path and the refusals a test can reach, and
   validates every request and response against the document with
   `kin-openapi` (test scope only). An undocumented status fails, and each
-  documented success or redirect status must be seen at least once. JSON
-  response bodies are closed in the document, so a field the handler
-  drops, renames or adds without the document fails.
-  `TestContractRoutesMatchDocument` compares the patterns `routes.go`
-  registers (read from source, confirmed against the live mux) with the
-  document's operations, both ways. To add a route or field: change the
-  handler and the document in the same commit.
-- **Go API.** `scripts/apidiff.sh [BASE_REF]` compares the module's
+  documented success or redirect status must be seen at least once. The
+  document closes each response body (`additionalProperties: false`),
+  so a field the handler drops, renames or adds without the document
+  also fails. `TestContractRoutesMatchDocument` checks that the routes
+  `routes.go` registers (read from the source code and confirmed
+  against the running router) are the same list as the document
+  describes, in both directions.
+- **Go API.** The only way past a breaking change is to raise the first
+  number in `VERSION` (0.x.y to 1.0.0). A minor bump such as 0.1 to 0.2
+  is not enough. `scripts/apidiff.sh [BASE_REF]` compares the module's
   exported API with the newest `v*` tag reachable from `HEAD` (or
   `BASE_REF`), using `golang.org/x/exp/cmd/apidiff` via `go run` at a
   pinned pseudo-version, never in `go.mod`. Internal packages are
-  skipped. A major-version bump in `VERSION` is the only way past an
-  incompatible change.
+  skipped.
 
 What each check fails on:
 
@@ -52,10 +57,6 @@ What each check fails on:
 | Changed response field (renamed, removed, retyped) | `TestContractEveryRoute` |
 | New status code the document lacks | `TestContractEveryRoute` |
 | Added identifier, route or response field, with the document updated | passes both |
-
-Renaming a field in the document along with the handler passes the
-contract test, so a removal or rename in `docs/api/auth.yaml` itself is
-a review point: ADR-0002 allows it only across a major version.
 
 ## Coverage is a ratchet, not a target
 
