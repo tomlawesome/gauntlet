@@ -3,20 +3,21 @@
 // document does not describe fails here, and so does a route that exists
 // on one side only -- so a handler that drifts from the document fails
 // CI instead of a frontend.
-package gate
+//
+// This is its own Go module (#30) so the validator, kin-openapi, stays
+// out of the library's go.mod and so out of every app that imports
+// gauntlet. Being outside package gate, it reaches the gate only through
+// its exported API, exactly as an application does.
+package contracttest
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,12 +31,14 @@ import (
 	legacyrouter "github.com/getkin/kin-openapi/routers/legacy"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/gate"
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // contractDocPath is the OpenAPI document, relative to this package.
-const contractDocPath = "../docs/api/auth.yaml"
+const contractDocPath = "../../docs/api/auth.yaml"
 
 // loadContractDoc loads and validates the document itself before any
 // request is checked against it.
@@ -298,27 +301,33 @@ func TestContractEveryRoute(t *testing.T) {
 
 // contractNoStorage covers the 503 an admin gets creating an account
 // when the store has no persistent storage. A store with no backend can
-// never hold the admin account Protect and RequireRole need, so the
-// handler is mounted on its own with the admin already in the request's
-// context; the traffic is still checked against the document.
+// never hold the admin account Protect and RequireRole need, so two
+// gates share one server: one with storage signs the admin in (its
+// Protect puts the admin in the request's context, which any gate's
+// RequireRole reads), and one over a store with no backend answers the
+// account creation. The traffic is still checked against the document.
 func contractNoStorage(t *testing.T, c *contractChecker) {
-	g := newTestGate(t)
-	users, err := gauntlet.OpenStore(nil, gauntlet.Options{})
+	stored := newTestGate(t)
+	noBackend, err := gauntlet.OpenStore(nil, gauntlet.Options{})
 	if err != nil {
 		t.Fatalf("OpenStore(nil): %v", err)
 	}
-	g.deps.Users = users
-	admin := &gauntlet.User{ID: "admin-id", Username: "admin", Role: gauntlet.RoleAdmin}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		g.handleCreateUser(w, r.WithContext(withUser(r.Context(), admin)))
-	}))
+	unstored := newGate(t, gate.Deps{Users: noBackend})
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /api/auth/users", unstored.Routes())
+	mux.Handle("/", stored.g.Routes())
+	ts := httptest.NewServer(stored.g.Protect(mux))
 	t.Cleanup(ts.Close)
 
-	c.do(c.client(), ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "operator", Password: "contract-operator-password"}}, 503, nil)
+	admin := c.client()
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", stored.setupCode}}, 201, nil)
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "operator", Password: "contract-operator-password"}}, 503, nil)
 }
 
 func contractLocalAccounts(t *testing.T, c *contractChecker) {
-	g := newTestGate(t)
+	f := newTestGate(t)
+	g := f.g
 	g.Handle(gauntlet.TokenKindAPI, testProtectedHandler())
 	ts := newTestServer(t, g)
 	u := ts.URL
@@ -338,7 +347,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
 
 	admin := c.client()
-	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, setupCodeFor(t, g)}}, 201, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, f.setupCode}}, 201, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"second", adminPass, ""}}, 409, nil)
 	c.do(admin, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
 	if !state.Authenticated || state.Role != "admin" || state.SignedInSince == "" {
@@ -393,7 +402,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	// with a passkey does) is the only answer carrying alreadyIssued. The
 	// document's closed bodies only catch a renamed optional field when
 	// the test makes the handler send it.
-	if _, err := g.deps.Users.GenerateRecoveryCodes(vicID, time.Now()); err != nil {
+	if _, err := f.users.GenerateRecoveryCodes(vicID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	vic := c.client()
@@ -507,13 +516,13 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 }
 
 func contractSSO(t *testing.T, c *contractChecker) {
-	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	codec, ts, fp := newOIDCTestServer(t)
 	u := ts.URL
 
-	// The first admin is local (newOIDCTestGate registered "setup-admin"
+	// The first admin is local (newOIDCTestServer registered "setup-admin"
 	// with the setup code); the first SSO sign-in is an ordinary user.
 	first := c.client()
-	contractSSOSignIn(t, c, g, fp, first, u, "/api/auth/oidc/login", "/")
+	contractSSOSignIn(t, c, codec, fp, first, u, "/api/auth/oidc/login", "/")
 	admin := c.client()
 	c.do(admin, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"setup-admin", "setup-admin-password"}}, 200, nil)
 
@@ -524,7 +533,7 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	// carol links her local account to a second identity.
 	carol := c.client()
 	c.do(carol, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"carol", "contract-carol-password"}}, 200, nil)
-	contractSSOSignIn(t, c, g, fp, carol, u, "/api/auth/oidc/link", "/?ssoLinked=1")
+	contractSSOSignIn(t, c, codec, fp, carol, u, "/api/auth/oidc/link", "/?ssoLinked=1")
 	c.do(carol, u, call{method: "POST", path: "/api/auth/oidc/link"}, 409, nil)
 
 	// A callback with no flow cookie goes back to the login page.
@@ -537,7 +546,7 @@ func contractSSO(t *testing.T, c *contractChecker) {
 // contractSSOSignIn starts a flow at start (the SSO login or link route),
 // has the fake provider answer for the next subject, and finishes it at
 // the callback, which must redirect to wantLocation.
-func contractSSOSignIn(t *testing.T, c *contractChecker, g *Gate, fp *testutil.FakeProvider, client *http.Client, base, start, wantLocation string) {
+func contractSSOSignIn(t *testing.T, c *contractChecker, codec *oidc.StateCodec, fp *testutil.FakeProvider, client *http.Client, base, start, wantLocation string) {
 	t.Helper()
 	if start == "/api/auth/oidc/login" {
 		c.do(client, base, call{method: "GET", path: start}, 302, nil)
@@ -548,15 +557,17 @@ func contractSSOSignIn(t *testing.T, c *contractChecker, g *Gate, fp *testutil.F
 	if err != nil {
 		t.Fatal(err)
 	}
-	var flow string
+	// The flow cookie is the one this gate's codec can open; it is
+	// seconds old, so a minute's allowance is plenty.
+	var fs oidc.FlowState
+	found := false
 	for _, ck := range client.Jar.Cookies(target.URL) {
-		if ck.Name == oidcFlowCookieName {
-			flow = ck.Value
+		if got, err := codec.Decode(ck.Value, time.Minute, time.Now()); err == nil {
+			fs, found = got, true
 		}
 	}
-	fs, err := g.deps.OIDCState.Decode(flow, oidcFlowCookieMaxAge, time.Now())
-	if err != nil {
-		t.Fatalf("decoding the flow cookie: %v", err)
+	if !found {
+		t.Fatalf("%s set no flow cookie this gate's codec can open", start)
 	}
 	claims := fp.DefaultClaims(oidcTestClientID, fs.Nonce)
 	claims.Subject = fmt.Sprintf("contract-subject-%d", time.Now().UnixNano())
@@ -567,136 +578,112 @@ func contractSSOSignIn(t *testing.T, c *contractChecker, g *Gate, fp *testutil.F
 	}
 }
 
-// TestContractRoutesMatchDocument checks the route table itself: every
-// pattern Routes registers is an operation in the document, and every
-// operation in the document is a pattern Routes registers. The patterns
-// are read from routes.go's source (a ServeMux cannot list what it
-// holds), then each is confirmed against the live mux, so the source
-// reading cannot drift from what is actually served.
-func TestContractRoutesMatchDocument(t *testing.T) {
-	doc := loadContractDoc(t)
-	registered := registeredRoutePatterns(t)
-
-	mux, ok := newTestGate(t).Routes().(*http.ServeMux)
-	if !ok {
-		t.Fatal("Routes no longer returns an *http.ServeMux; update this test's live check")
-	}
-	for _, pattern := range registered {
-		method, path, _ := strings.Cut(pattern, " ")
-		req := httptest.NewRequest(method, strings.NewReplacer("{id}", "some-id").Replace(path), nil)
-		if _, got := mux.Handler(req); got != pattern {
-			t.Errorf("routes.go registers %q but the live mux serves %s %s as %q", pattern, method, req.URL.Path, got)
-		}
-	}
-
-	documented := documentedOperations(doc)
-	for _, op := range registered {
-		if !slices.Contains(documented, op) {
-			t.Errorf("Routes serves %s, which %s does not describe", op, contractDocPath)
-		}
-	}
-	for _, op := range documented {
-		if !slices.Contains(registered, op) {
-			t.Errorf("%s describes %s, which Routes does not serve", contractDocPath, op)
-		}
-	}
-	if len(registered) == 0 {
-		t.Fatal("read no route patterns from routes.go")
-	}
-}
-
-// registeredRoutePatterns reads the first argument of every
-// mux.Handle/mux.HandleFunc call in Routes, resolving the package's
-// string constants (sessionPath and the rest), and returns them sorted.
-func registeredRoutePatterns(t *testing.T) []string {
-	t.Helper()
-	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+// TestRevokeTokenStorageFailureIsNotReportedAsGone: a revoke whose save
+// fails leaves the token working, so answering 404 ("already revoked")
+// would tell an admin revoking a leaked token that it is dead when it
+// is not. The refusal must be a 5xx the document describes. Package
+// gate's test of the same name checks the behaviour without the
+// document.
+func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
+	c := newContractChecker(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	tokens, err := gauntlet.OpenTokenStore(backend, gauntlet.TokenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	consts := map[string]string{}
-	var routes *ast.FuncDecl
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, decl := range f.Decls {
-			switch d := decl.(type) {
-			case *ast.GenDecl:
-				if d.Tok != token.CONST {
-					continue
-				}
-				for _, spec := range d.Specs {
-					vs := spec.(*ast.ValueSpec)
-					for i, id := range vs.Names {
-						if i >= len(vs.Values) {
-							continue
-						}
-						if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-							v, err := strconv.Unquote(lit.Value)
-							if err != nil {
-								t.Fatal(err)
-							}
-							consts[id.Name] = v
-						}
-					}
-				}
-			case *ast.FuncDecl:
-				if d.Name.Name == "Routes" && d.Recv != nil {
-					routes = d
-				}
-			}
-		}
+	f := newTestGateWith(t, persist.NewMemory(), tokens)
+	if _, err := f.users.Register("admin", "password123", time.Now()); err != nil {
+		t.Fatal(err)
 	}
-	if routes == nil {
-		t.Fatal("no Routes method found in package gate")
+	raw, tok, err := tokens.Create("leaked", gauntlet.TokenKindAPI, "", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
 	}
+	f.g.Handle(gauntlet.TokenKindAPI, testProtectedHandler())
+	ts := newTestServer(t, f.g)
+	admin := c.client()
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{Username: "admin", Password: "password123"}}, 200, nil)
 
-	var eval func(ast.Expr) string
-	eval = func(e ast.Expr) string {
-		switch e := e.(type) {
-		case *ast.BasicLit:
-			v, err := strconv.Unquote(e.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return v
-		case *ast.Ident:
-			v, ok := consts[e.Name]
-			if !ok {
-				t.Fatalf("route pattern uses %s, which is not a string constant in package gate", e.Name)
-			}
-			return v
-		case *ast.BinaryExpr:
-			if e.Op == token.ADD {
-				return eval(e.X) + eval(e.Y)
-			}
-		}
-		t.Fatalf("cannot read route pattern at %s", fset.Position(e.Pos()))
-		return ""
-	}
+	backend.left = 0
+	c.do(admin, ts.URL, call{method: "DELETE", path: "/api/tokens/" + tok.ID}, http.StatusInternalServerError, nil)
 
-	var patterns []string
-	ast.Inspect(routes.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || (sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc") || len(call.Args) != 2 {
-			return true
-		}
-		if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "mux" {
-			return true
-		}
-		patterns = append(patterns, eval(call.Args[0]))
-		return true
-	})
-	slices.Sort(patterns)
-	return patterns
+	resp := bearerRequest(t, ts.URL, "/api/protected", raw)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the token stopped working although its revoke was refused: got %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestContractTokenRegisteredKinds: an application may register its own
+// token kinds (TokenOptions.Kinds), so the document must accept any of
+// them, not only api and ingest. Leaving kind out still means api, which
+// is refused when the application did not register api.
+func TestContractTokenRegisteredKinds(t *testing.T) {
+	c := newContractChecker(t)
+	const custom gauntlet.TokenKind = "droplist-pull"
+	tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{Kinds: []gauntlet.TokenKind{custom}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newTestGateWith(t, persist.NewMemory(), tokens)
+	ts := newTestServer(t, f.g)
+	u := ts.URL
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{Username: "admin", Password: "contract-admin-password", SetupCode: f.setupCode}}, 201, nil)
+
+	var created tokenResponse
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom)}}, 201, &created)
+	if created.Kind != custom {
+		t.Errorf("created kind = %q, want %q", created.Kind, custom)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "default"}}, 400, nil)
+	var list struct {
+		Tokens []tokenResponse `json:"tokens"`
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/tokens"}, 200, &list)
+	if len(list.Tokens) != 1 || list.Tokens[0].Kind != custom {
+		t.Errorf("listed tokens = %+v, want one of kind %q", list.Tokens, custom)
+	}
+}
+
+// TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn: when the factor
+// is committed but the recovery codes are not, the 500 has to say so in
+// a field a frontend can branch on (auth.yaml forbids reading the
+// message), and that body has to be the one the document describes.
+func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
+	const bobName, bobPass = "bob", "bob-password-123"
+	c := newContractChecker(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	f := newTestGateWith(t, backend, nil)
+	ts := newTestServer(t, f.g)
+	admin := c.client()
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "password123", f.setupCode}}, 201, nil)
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: bobName, Password: bobPass, Role: "user"}}, 201, nil)
+
+	bob := c.client()
+	c.do(bob, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{bobName, bobPass}}, 200, nil)
+	var enrolled totpEnrolResponse
+	c.do(bob, ts.URL, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 200, &enrolled)
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+
+	// One save left: ConfirmTOTP lands, the recovery-code save does not.
+	backend.left = 1
+	resp, raw := c.send(bob, ts.URL, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}})
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500: %s", resp.StatusCode, raw)
+	}
+	var body struct {
+		Error      string `json:"error"`
+		TOTPActive bool   `json:"totpActive"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("the 500 body is not JSON: %v: %s", err, raw)
+	}
+	if !body.TOTPActive || body.Error == "" {
+		t.Errorf("the 500 body = %+v, want totpActive true and an error message", body)
+	}
 }

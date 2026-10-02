@@ -12,7 +12,7 @@ has to meet.
 | Licence gate | `go-licenses` against `supply-chain/licence-policy.yml` | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
-| HTTP contract | `gate/contract_test.go` against `docs/api/auth.yaml` | `test:go` |
+| HTTP contract | `gate/contracttest` (its own Go module) against `docs/api/auth.yaml` | `test:contract` |
 | Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag | `lint:apidiff` |
 
 There is no frontend, no shipped image and no live-stack e2e stage here
@@ -39,7 +39,13 @@ itself, which ADR-0002 allows only in a new major version.
   also fails. `TestContractRoutesMatchDocument` checks that the routes
   `routes.go` registers (read from the source code and confirmed
   against the running router) are the same list as the document
-  describes, in both directions.
+  describes, in both directions. `TestContractRequestBodiesMatchHandlers`
+  does the same for the fields each handler reads from a request body
+  (also read from the source code) and the document's request bodies.
+  These tests are a separate Go module, `gate/contracttest`, so
+  `kin-openapi` stays out of the library's `go.mod` (#30). Run them
+  with `cd gate/contracttest && go test ./...`. They use `gate` only
+  through its exported API, the same way an application does.
 - **Go API.** The only way past a breaking change is to raise the first
   number in `VERSION` (0.x.y to 1.0.0). A minor bump such as 0.1 to 0.2
   is not enough. `scripts/apidiff.sh [BASE_REF]` compares the module's

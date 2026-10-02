@@ -399,8 +399,8 @@ The HTTP contract `Routes` serves -- every route, request, response,
 status code and error body, carried over from mikroview's
 `internal/api/server.go` route table -- is
 [`docs/api/auth.yaml`](api/auth.yaml) (OpenAPI 3.1, ADR-0002), not a
-list here. `gate/contract_test.go` fails when a handler and that
-document disagree. Passkey routes join when `passkey/` lands.
+list here. The contract tests in `gate/contracttest` fail when a
+handler and that document disagree. Passkey routes join when `passkey/` lands.
 
 What stays fixed inside `gate` because it is security behaviour, not
 taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
