@@ -51,6 +51,9 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 	}
 	if ok {
 		if accountID != "" {
+			// #44 follow-up: the known-browser allowance -- a browser
+			// that has completed a sign-in keeps a small budget of its
+			// own while the account is locked out -- belongs here.
 			ok = g.deps.Limiter.ReserveAccount(g.deps.Users, accountID, now)
 		} else {
 			ok = g.deps.Limiter.Reserve(res.nameKey, now)
@@ -78,6 +81,35 @@ func (g *Gate) releaseLogin(res loginReservation, now time.Time) {
 	} else {
 		g.deps.Limiter.Release(res.nameKey, now)
 	}
+}
+
+// completeLogin is releaseLogin for an attempt that completed a sign-in
+// -- a session is about to be issued -- rather than only passing the
+// password step: it returns the address reservation, and resets the
+// account's whole count (gauntlet.LoginLimiter.SignedIn, #44): its
+// lockouts, the attempts in its window and its run of second-factor
+// failures. A correct password on an account that still owes a second
+// factor is releaseLogin, which resets none of that.
+func (g *Gate) completeLogin(res loginReservation, now time.Time) {
+	if res.accountID == "" {
+		// The name matched no account when the attempt was reserved --
+		// one created since -- so there is no account count to reset.
+		g.releaseLogin(res, now)
+		return
+	}
+	if !res.afterReset && !res.pendingAfterReset {
+		g.deps.Limiter.Release(res.ipKey, now)
+	}
+	g.deps.Limiter.SignedIn(g.deps.Users, res.accountID, now)
+}
+
+// secondFactorFailed counts a refused second-factor step toward the
+// account's run of them (gauntlet.LoginLimiter.SecondFactorFailed, #44),
+// on top of the reservation the attempt keeps. Only the pending login's
+// owner reaches that step, and only with the right password, so enough
+// of them in a row require a new password at the next sign-in.
+func (g *Gate) secondFactorFailed(user *gauntlet.User, now time.Time) {
+	g.deps.Limiter.SecondFactorFailed(g.deps.Users, user.ID, now)
 }
 
 // endAfterReset uses up the account's pass past the address limit, if
@@ -148,8 +180,9 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Only a success releases, so ordinary repeated logins never
-	// accumulate toward the threshold.
-	g.releaseLogin(res, now)
+	// accumulate toward the threshold: releaseLogin for a password that
+	// still owes a second factor, completeLogin for a sign-in it
+	// completes.
 
 	// A correct password on an account holding an active second factor
 	// must NOT create a session -- see docs/design.md §1.6 and the
@@ -170,6 +203,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// recovery code can complete the login below -- but may get an
 	// empty list.
 	if user.HasSecondFactor() {
+		g.releaseLogin(res, now)
 		factors := []string{}
 		passkeyOrigin := ""
 		if g.usablePasskeyCount(user) > 0 {
@@ -199,6 +233,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// A leftover pending-login cookie from an earlier, abandoned attempt
 	// (this account or another one on the same browser) has no bearing
 	// on a login that just completed through the ordinary one-step path.
+	g.completeLogin(res, now)
 	g.clearPendingLoginCookie(w)
 	g.endAfterReset(res)
 	// The session this browser already held for the account ends here:
@@ -322,13 +357,15 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	// recovery-code guess: which kind was tried is not information a
 	// caller needs back.
 	g.endAfterReset(res)
+	g.secondFactorFailed(user, now)
 	writeUnauthorized(w, "invalid code")
 }
 
 // completeLoginFactor is handleLoginFactor's success path: spend the
-// pending login, release the reservations a wrong guess would have kept,
-// drop the pending cookie, and issue the real session handleLogin
-// withheld. It reports whether it did.
+// pending login, release the reservations a wrong guess would have kept
+// and reset the account's count (completeLogin), drop the pending
+// cookie, and issue the real session handleLogin withheld. It reports
+// whether it did.
 //
 // The pending login is claimed first, under spentPendingLogins' lock, so
 // of two completions racing on one cookie exactly one wins (ruling R2 on
@@ -344,7 +381,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		writeUnauthorized(w, "sign in again")
 		return false
 	}
-	g.releaseLogin(res, now)
+	g.completeLogin(res, now)
 	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
 	// As in handleLogin: the session this browser held for the account

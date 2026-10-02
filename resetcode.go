@@ -186,8 +186,11 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		// The reset code is the account's password now, so a lockout
 		// earned by guessing at the old one ends here, as in
 		// SetPassword: otherwise the owner could not use the code until
-		// it ran out.
+		// it ran out. So does the count of lockouts before it (#44). A
+		// disabled sign-in stays disabled, as in SetPassword: the code
+		// is refused like any password until UnlockLogin lifts it.
 		u.LoginLockedUntil = time.Time{}
+		u.LoginLockoutCount = 0
 		issued = *u
 		return nil
 	})

@@ -178,20 +178,20 @@ it says so instead of repeating the reasoning.
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
-| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`) |
+| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44) |
 | 6.1.2, 6.2.11 context-specific word list | 2 | Gap | #43 (password blocklist). See 800-63B §3.1.1.2 |
 | 6.1.3, 6.3.4 all pathways documented, strength consistent | 2 | Met, with one deviation | Pathways: password then TOTP/passkey/recovery code; reset code then the same second factor (`gate/login_handler.go:129-172`); SSO; bearer token; setup code. All in `docs/api/auth.yaml`. Deviation: an SSO sign-in creates a session with no local second factor (`gate/oidc_handler.go:292`); see 6.8.4 |
 | 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met | `store.go:39` `minPasswordLength = 8`, conforming because a second factor is mandatory for every local-password account (#49); see 800-63B §3.1.1.2 |
 | 6.2.2 users can change their password | 1 | Met | `POST /api/auth/password`, `gate/password_handler.go` |
-| 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code just proved the account |
+| 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code, or (since #44) a sign-in with both factors, just proved the account |
 | 6.2.4 checked against the top 3000 passwords | 1 | Gap | #43 (password blocklist) |
 | 6.2.5 no composition rules | 1 | Met | Length is the only rule (`store.go:962`, `:1532`) |
 | 6.2.6, 6.2.7 masking, paste, password managers | 1 | App | Frontend; gauntlet imposes nothing that blocks them |
 | 6.2.8 verified exactly as received | 1 | Met | `password.go:92`, `:159`: raw bytes to Argon2id, no trimming or case change. See 800-63B §3.1.1.2 on NFC |
 | 6.2.9 at least 64 characters permitted | 2 | Met | No maximum; the 64 KiB body limit (`gate/httpjson.go:37`) is the only bound |
-| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only by an admin reset |
+| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, or five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44) |
 | 6.2.12 breached-password check | 2 | Gap | #43 (password blocklist) |
-| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `gate/reset_address_limit_test.go`, `stall_test.go` |
+| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
 | 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
 | 6.3.5 notify suspicious attempts | 3 | Not targeted | No notification channel; see 800-63B §4.6 |
@@ -405,9 +405,8 @@ store, keep and protect:
 
 At L2 gauntlet meets every requirement except: password blocklists
 (6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
-decisions (16.2.1, 16.3.1–16.3.3), response headers (4.1.1, 14.3.2),
-and a session list (7.5.2). Each has an issue; the password blocklist and
-the lockout shape (from the 800-63B review) need the owner. Three
+decisions (16.2.1, 16.3.1–16.3.3), and a session list (7.5.2). Each has an issue; the password blocklist needs
+the owner. The lockout shape from the 800-63B review is settled (#44). Three
 deviations are recorded rather than fixed: the TOTP acceptance window,
 the SSO sign-in's reliance on the IdP's policy, and secrets at rest on
 backends other than the encrypted file.
@@ -459,13 +458,13 @@ already holds the evidence, the row points at it.
 | 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms | `minPasswordLength = 8` (`store.go:39`), conforming unconditionally because a second factor is mandatory for every local-password account and cannot be turned off (#49) |
 | Permit at least 64 characters; accept printing ASCII, space and Unicode; count code points (SHOULD) | Conforms | No maximum, no character rules; length counted in characters (`store.go:962`, `:1532`) |
 | No other composition rules (SHALL NOT) | Conforms | None |
-| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`) |
+| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too (`LoginLimiter.SecondFactorFailed`, #44) |
 | No hints, no knowledge-based questions | Conforms | None exist |
 | Verify the whole password, no truncation | Conforms | `password.go:92`, `:159` |
 | NFC normalisation before hashing (SHOULD) | Deviation | Not applied: ASVS 6.2.8 asks for the bytes exactly as received, and both consumers' operators type on their own devices. A password typed on a device that composes accented characters differently will not match; documented, not fixed |
 | Blocklist of common, expected and compromised passwords, whole-password match, reason given on refusal (SHALL) | Gap | None. #43 (password blocklist); owner decision on the list |
 | Guidance on choosing a strong password (SHALL) | Application | Frontend copy; gauntlet returns a plain "too short" |
-| Rate limiting on the account (SHALL, §3.2.2) | Conforms, with the #44 (consecutive-failure cap) gap | Below |
+| Rate limiting on the account (SHALL, §3.2.2) | Conforms | Below |
 | Password managers and paste allowed | Conforms | Nothing server-side interferes |
 | Salted and hashed with a password hashing scheme, cost as high as practical, parameters stored with each hash, salt at least 32 bits | Conforms | Argon2id, RFC 9106 §4 second profile, 128-bit salt, parameters in the hash string (`password.go:28-48`, `:94`). ASVS 11.4.2 |
 | Extra keyed hash with a verifier-only secret (SHOULD) | Deviation | No pepper. The encrypted file backend is the at-rest layer instead (trust boundary section above); a pepper would be one more key for the application to mount |
@@ -500,7 +499,7 @@ stand alone, which these never do.
 | Collected over an authenticated protected channel | Application | TLS is the application's |
 | Accepted only once while valid (replay resistance, §3.2.7) | Conforms | `TOTPLastCounter`, advanced under the same lock as the check (`totp.go:394-434`); the enrolment code cannot also sign in (`totp.go:344`) |
 | Defined lifetime from clock drift plus entry delay | Conforms, and the ASVS 6.5.5 deviation | One step either side of now, never two (`totp.go:64`, `TestVerifyTOTPRejectsTwoStepsAway`): the drift allowance NIST describes, and the 90 s ASVS counts against |
-| Rate limiting SHALL for outputs under 64 bits (§3.2.2) | Conforms, with the #44 (consecutive-failure cap) gap | 6 digits; shares the account budget |
+| Rate limiting SHALL for outputs under 64 bits (§3.2.2) | Conforms | 6 digits; shares the account budget, so at most 50 consecutive guesses before sign-in is disabled (#44) |
 | Warn on a duplicate OTP (MAY) | Not done | A replay is refused silently; #45 (log failed sign-ins) would at least record it |
 
 ### Cryptographic authenticators: passkeys (§3.1.6, §3.1.7, §3.2.5, Appendix B)
@@ -521,10 +520,10 @@ stand alone, which these never do.
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Limit failed attempts on a subscriber account (SHALL) | Conforms | Per-account counter keyed by account id, never evicted; lockout written to `User.LoginLockedUntil` so a restart does not lift it (`ratelimit.go:399-402`, `docs/design.md` §1.3). Address counter alongside |
-| No more than 100 consecutive failures per authenticator, then disable it until rebound (SHALL) | Gap, design call | A lockout lasts one window and then the count starts again; nothing accumulates across windows and no authenticator is ever disabled. At the consumers' 5 per 5 minutes that is 1,440 guesses a day against a six-digit code, forever. #44 (consecutive-failure cap); owner question: escalate or disable |
-| Disregard earlier failures after a success (SHOULD) | Conforms | `Release`/`ReleaseAccount` on success (`gate/login_handler.go:152`, `:276`) |
-| Increasing delays, bot challenges, risk signals (MAY) | Not done | #44 (consecutive-failure cap) is the first of these |
+| Limit failed attempts on a subscriber account (SHALL) | Conforms | Per-account counter keyed by account id, never evicted; lockout and the count of lockouts written to `User.LoginLockedUntil` and `User.LoginLockoutCount` so a restart does not lift them (`LoginLimiter.ReserveAccount`, `docs/design.md` §1.3). Address counter alongside |
+| No more than 100 consecutive failures per authenticator, then disable it until rebound (SHALL) | Conforms, lower and wider | `MaxConsecutiveLoginFailures` = 50 consecutive failures, password and second-factor steps on one count, disable the account's local sign-in (`User.LoginDisabledAt`) until `Store.UnlockLogin`, rather than one authenticator until rebound (owner, 2026-10-02). Lockouts before that escalate, so the fiftieth arrives after about 102 hours. Only a completed sign-in or a new password resets the count (#44). The admin unlock route and the lone-admin unlock code are still to come under #44 |
+| Disregard earlier failures after a success (SHOULD) | Conforms | `LoginLimiter.SignedIn` on a completed sign-in drops the window and the count of lockouts (`gate/login_handler.go`, `completeLogin`); a correct password alone hands back only its own attempt (`ReleaseAccount`), since the second factor is still to come |
+| Increasing delays, bot challenges, risk signals (MAY) | Partly | Increasing delays: each lockout three times the last, 5 min up to 24 h (#44). No bot challenges or risk signals |
 | Password and second factor both throttled when both are tried | Conforms | One budget for the password step and the code step (`gate/login_handler.go:226-231`); the signed-in password re-check has its own (`ReserveRecheck`) |
 
 ### Binding, recovery and invalidation (§4)
@@ -559,8 +558,7 @@ stand alone, which these never do.
 ### Summary of findings
 
 Conforms on everything above except: the password blocklist (#43, owner
-decision on the list); the consecutive-failure cap (#44, design call on
-escalate-versus-disable); refused attempts and binding sources not logged
+decision on the list); refused attempts and binding sources not logged
 (#45). Documented
 deviations: no NFC normalisation, no pepper, TOTP secrets as protected as
 the backend, no out-of-band notifications, the custom-header CSRF defence,
