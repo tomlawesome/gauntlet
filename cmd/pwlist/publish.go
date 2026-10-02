@@ -175,7 +175,7 @@ func (g *github) publish(ctx context.Context, tag, name, target, built, in strin
 	if rel == nil {
 		body := "gauntlet's common-password list: the SHA-1 hashes of the 10,000 most prevalent " +
 			"Pwned Passwords, built " + built + ". Data from haveibeenpwned.com (no licence terms; " +
-			"attribution voluntary). Signed in GitLab CI; verify with `pwlist verify`. See ADR-0005."
+			"attribution voluntary). Signed in GitLab CI; verify with `pwlist verify`. See ADR-0007."
 		if rel, err = g.createRelease(ctx, tag, name, target, body); err != nil {
 			return err
 		}

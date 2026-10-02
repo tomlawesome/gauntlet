@@ -241,7 +241,7 @@ type Options struct {
 	// compiled into this release; pass a *blocklist.Refresher to use the
 	// newest published list instead. There is no way to turn the check
 	// off. Until the first signed list ships, Embedded is empty and
-	// blocks nothing (ADR-0005).
+	// blocks nothing (ADR-0007).
 	PasswordBlocklist PasswordList
 	// ProductName is the application's name, which no password may be
 	// (ASVS 5.0 V6.2.11), any more than the account's own username may:

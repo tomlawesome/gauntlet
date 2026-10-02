@@ -1,5 +1,5 @@
 // Command pwlist builds, signs and verifies gauntlet's common-password
-// list (#52, ADR-0005): the SHA-1 hashes of the 10,000 most prevalent
+// list (#52, ADR-0007): the SHA-1 hashes of the 10,000 most prevalent
 // passwords in Have I Been Pwned's Pwned Passwords corpus, the list
 // package blocklist embeds and refreshes.
 //
