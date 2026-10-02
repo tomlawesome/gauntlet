@@ -10,9 +10,9 @@ contributors.
 ## Branching
 
 Branch from `dev` and send merge requests to `dev`, the default branch.
-There are no `preview` or `main` branches. A release is a version tag,
-created by a button in the `dev` pipeline; see
-[docs/releasing.md](docs/releasing.md).
+Nothing is promoted through `preview` or `main` here, as it is in other
+projects. A release is a version tag, created by a button in the `dev`
+pipeline; see [docs/releasing.md](docs/releasing.md).
 
 ## Before starting work
 
