@@ -27,6 +27,15 @@ All notable changes to this project are documented in this file.
   user-typed names should handle this error. An empty name is still
   allowed. Device ids already followed this rule.
 
+- New dependency for the coming `passkey` package (G8, #20; owner
+  approval 2026-09-30): `github.com/go-webauthn/webauthn` v0.18.2
+  (BSD-3-Clause), the newest release, with no advisory in OSV or the Go
+  vulnerability database as of 2026-10-02. It brings
+  `github.com/go-webauthn/x` and eight more modules (CBOR, TPM, JWT,
+  msgp, mapstructure, uuid, float16, fwd). Only `gauntlet/passkey`
+  imports it, so an application that never imports that package never
+  compiles it in.
+
 ### Changed
 
 - The first admin is created only with a one-time setup code the server
