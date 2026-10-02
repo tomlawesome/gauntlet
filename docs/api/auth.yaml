@@ -45,6 +45,26 @@ info:
     cookie" issue a fresh one, and a login ends the same account's
     session the browser already held; logout clears it.
 
+    **Known-browser cookie.** Every route that sets the session cookie
+    also sets `gate_known_browser` (#44): `HttpOnly`, `SameSite=Lax`,
+    `Secure` while `Config.SecureCookie` is true, path `/api/auth` (every
+    route that sets the session cookie is under it, so each one replaces
+    the browser's value instead of adding another; only `login`,
+    `login/factor` and `login/factor/begin` use it for the allowance),
+    no `__Host-` prefix (that needs path `/`),
+    `Max-Age` 45 days. Its value is 32 random bytes, base64url, and names
+    nothing; the account's record holds only its SHA-256, and a fresh
+    value replaces it at every sign-in. While the account is locked out,
+    or the client's address is at its limit, a browser carrying a value
+    the named account remembers keeps a small allowance of its own (the
+    limiter's attempts per window), where any other browser gets `429`.
+    It never signs anyone in by itself, is refused while the account's
+    sign-in is disabled, and every failure through it counts toward the
+    disable. An account remembers at most three browsers, each for 45
+    days from its latest sign-in there; sign out everywhere and an
+    admin's password reset forget them all. A frontend does nothing with
+    it: the browser keeps and sends it.
+
     **Errors.** Every error body is `text/plain` holding one human-readable
     line, except two `application/json` bodies for a step that half
     succeeded: `DELETE /api/auth/users/{id}` when the account was deleted
@@ -170,6 +190,8 @@ paths:
         releases the attempt. An account whose password was reset after
         its address reached the limit gets past that address limit (not
         its own) until its next sign-in finishes or a guess fails (#32).
+        A browser the account remembers (the known-browser cookie) keeps
+        an allowance of its own past either limit (#44).
         On an account with no second factor this
         signs in and sets the session cookie. On an account holding one it
         does not: it sets a short-lived pending-login cookie and names the
@@ -334,7 +356,7 @@ paths:
     post:
       operationId: logoutAll
       summary: Sign out everywhere
-      description: Ends every session the caller's account holds, then issues this browser a fresh one (sets the session cookie). Takes no body.
+      description: Ends every session the caller's account holds and forgets every browser it remembers (the known-browser cookie), then issues this browser a fresh session (sets the session cookie) and remembers it again. Takes no body.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       responses:
@@ -1240,18 +1262,33 @@ paths:
   /api/auth/users/{id}/unlock:
     post:
       operationId: unlockUser
-      summary: Lift another account's disabled sign-in or lockout (admin)
+      summary: Lift an account's disabled sign-in or lockout (admin)
       description: |
         Lifts a disabled sign-in (fifty failed sign-ins in a row, #44),
         ends any login lockout and clears the count of lockouts, so the
         account signs in as one that never failed, with the password and
         second factor it already has. Nothing else changes. Answers `200`
-        whether or not anything was lifted. Refused for the caller's own
-        account: an admin whose own sign-in is disabled uses the unlock
-        code in the server's log (`POST /api/auth/unlock`). Takes no body.
+        whether or not anything was lifted.
+
+        Another account's unlock takes no body. The caller's own takes
+        `UnlockSelfRequest`: an admin whose sign-in is disabled but who
+        still holds a session must enter their password and a current
+        second factor (an authenticator-app code or a recovery code)
+        again; the session alone is not enough. Either missing is `400`;
+        either wrong is `401` and counts against the account's
+        password re-check budget (`429` once it is spent), and nothing
+        is unlocked. An admin with no session left uses the unlock code
+        in the server's log (`POST /api/auth/unlock`).
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: false
+        description: Only for the caller's own account.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnlockSelfRequest"
       responses:
         "200":
           description: Unlocked, or there was nothing to lift.
@@ -1278,12 +1315,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NoSuchUser"
-        "409":
-          description: The account is the caller's own.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1700,6 +1733,17 @@ components:
         unlockCode:
           type: string
           description: The one-time code from the server's log, with or without dashes, in either case.
+    UnlockSelfRequest:
+      type: object
+      additionalProperties: false
+      required: [password, code]
+      properties:
+        password:
+          type: string
+          description: The caller's current password.
+        code:
+          type: string
+          description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here).
     PasswordRequest:
       type: object
       additionalProperties: false

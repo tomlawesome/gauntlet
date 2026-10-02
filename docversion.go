@@ -22,9 +22,14 @@ import (
 // added User.LoginLockoutCount and User.LoginDisabledAt; an older
 // document reads them as zero -- no lockouts counted since the last
 // sign-in, sign-in not disabled -- which is what it meant, since no
-// build that wrote it counted either.
+// build that wrote it counted either. Version 4 (#44) added
+// User.KnownBrowsers; an older document reads it as none remembered,
+// which is what it meant: no browser carries a token a build without
+// the field issued, so the allowance starts at each browser's next
+// completed sign-in. A build that reads up to version 3 refuses a
+// version-4 document rather than drop the field on its next save.
 const (
-	accountsDocumentVersion = 3
+	accountsDocumentVersion = 4
 	tokensDocumentVersion   = 1
 )
 

@@ -261,9 +261,18 @@ type unlockUserResponse struct {
 	WasLockedOut bool `json:"wasLockedOut"`
 }
 
+// unlockSelfRequest is the body of the admin unlock route when the
+// account is the caller's own: the password and a current second factor
+// -- a TOTP code or a recovery code -- entered again (owner,
+// 2026-10-02). Another account's unlock takes no body.
+type unlockSelfRequest struct {
+	Password string `json:"password"`
+	Code     string `json:"code"`
+}
+
 // handleUnlockUser is the admin's way to lift a disabled sign-in on
-// another account (#44), and with it any lockout and the count of
-// lockouts: the account then signs in as one that never failed, with
+// another account (#44), or on their own (recheckUnlockSelf), and with
+// it any lockout and the count of lockouts: the account then signs in as one that never failed, with
 // the password and second factor it already has. Nothing else about the
 // account changes -- not its password, factors, sessions or a pending
 // forced password change.
@@ -274,23 +283,28 @@ type unlockUserResponse struct {
 // save, go too; otherwise the account could stay refused here until that
 // window passed.
 //
-// The caller's own account is refused with 409, as the other admin
-// routes that act on an account refuse it: the admin's way back from
-// their own disabled sign-in is the one-time unlock code in the server's
-// log (POST /api/auth/unlock), since by the time it matters they cannot
-// sign in to reach this route. 404 for an unknown account.
+// The caller's own account takes the password and a current second
+// factor as well (recheckUnlockSelf). 404 for an unknown account.
 func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "user id is required", http.StatusBadRequest)
 		return
 	}
+	now := g.now()
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
-		http.Error(w, "an administrator cannot unlock their own account here -- use the unlock code in the server's log", http.StatusConflict)
-		return
+		// Only the caller's own unlock reads a body; another account's
+		// takes none, as before.
+		var req unlockSelfRequest
+		if err := decodeJSONBody(w, r, &req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if !g.recheckUnlockSelf(w, caller, req, now) {
+			return
+		}
 	}
 
-	now := g.now()
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
 		http.Error(w, "no such user", http.StatusNotFound)
@@ -310,7 +324,41 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	how := "sign-in unlocked by admin"
+	if caller := UserFromContext(r); caller != nil && caller.ID == id {
+		how = "own sign-in unlocked by admin, password and second factor re-entered"
+	}
 	g.audit(auditActor(r), "user.unlock", target.Username,
-		fmt.Sprintf("sign-in unlocked by admin; wasDisabled=%t wasLockedOut=%t; lockout count cleared", resp.WasDisabled, resp.WasLockedOut))
+		fmt.Sprintf("%s; wasDisabled=%t wasLockedOut=%t; lockout count cleared", how, resp.WasDisabled, resp.WasLockedOut))
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// recheckUnlockSelf is the admin unlock route's extra step when the
+// account is the caller's own (owner, 2026-10-02): an admin whose
+// sign-in is disabled may still hold a live session -- the disable stops
+// new sign-ins, not sessions -- and may lift it from there, but only by
+// entering their password and a current second factor again. The
+// session alone is what a stolen cookie gives, and it must not be enough
+// to undo a disable that a run of guesses at this very account brought
+// on: the password and the code are the two things the cookie does not
+// carry.
+//
+// The password is checked first (recheckPassword), then the code
+// (recheckSecondFactor), each on the account's re-check budget: a wrong
+// one is refused with 401 and counted there, and nothing is unlocked. A
+// request missing either is 400 and checks nothing. Writes every
+// refusal itself; the caller has already refused a body that does not
+// decode.
+//
+// The one-time unlock code in the server's log (POST /api/auth/unlock)
+// remains the way back for an admin with no session left.
+func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, caller *gauntlet.User, req unlockSelfRequest, now time.Time) bool {
+	if req.Password == "" || req.Code == "" {
+		http.Error(w, "unlocking your own account needs your password and a code from your authenticator app or a recovery code", http.StatusBadRequest)
+		return false
+	}
+	if _, ok := g.recheckPassword(w, caller, req.Password, "incorrect password or code", now); !ok {
+		return false
+	}
+	return g.recheckSecondFactor(w, caller, req.Code, "incorrect password or code", now)
 }

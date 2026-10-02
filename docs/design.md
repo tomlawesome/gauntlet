@@ -25,7 +25,7 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 3 (#28, #44) and
+  version 1 unchanged, gauntlet writes accounts as version 4 (#28, #44) and
   tokens as version 1, and a document newer than the running build is
   refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
@@ -189,6 +189,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     CreatedAt, LastLogin, PasswordChangedAt, RoleChangedAt time.Time
     SessionsEndedAt, LoginLockedUntil time.Time // new (#28, #19): gauntlet's own, zero in mikroview's documents
     LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
+    KnownBrowsers []KnownBrowser // new (#44): accounts version 4; none in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
@@ -220,6 +221,11 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
 func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout (no limiter: a CLI)
+type KnownBrowser struct { Hash string; IssuedAt time.Time } // new (#44): SHA-256 of a browser's token, never the token
+const MaxKnownBrowsers = 3; const KnownBrowserLifetime = 45 * 24 * time.Hour // #44 (owner, 2026-10-02)
+func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (string, error) // #44: new token, old one's entry dropped, oldest evicted past 3
+func (s *Store) ClearKnownBrowsers(accountID string) error                                 // #44: sign out everywhere; IssueResetCode does it in its own write
+func (s *Store) KnowsBrowser(accountID, token string, now time.Time) bool                  // #44: hash on the record, under 45 days old
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
@@ -283,6 +289,8 @@ func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string
 func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time)           // #44: completed sign-in resets the count
 func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword, end every session
 func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) error                // #44: Store.UnlockLogin plus this limiter's own count
+func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time) bool // #44: a known browser's own budget once the ordinary path refuses
+func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time)
 const MaxConsecutiveLoginFailures = 50                                                             // #44: disables local sign-in
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
 func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
@@ -389,8 +397,12 @@ Unlocking (#44). An admin lifts another account's disable, lockout and
 count with `POST /api/auth/users/{id}/unlock`, through
 `LoginLimiter.UnlockLogin`, which also drops the limiter's own count of
 the window's guesses and any lockout decision it has yet to save;
-`Store.UnlockLogin` alone is for a process with no limiter. The admin's
-own account is refused there (409). When the store opens with the
+`Store.UnlockLogin` alone is for a process with no limiter. An admin
+whose own sign-in is disabled but who still holds a session may unlock
+it on the same route only by entering their password and a current
+second factor (a TOTP or recovery code) again, each checked on the
+account's password re-check budget (`ReserveRecheck`); the session
+alone is not enough (owner, 2026-10-02). When the store opens with the
 admin disabled and no admin left who could unlock it, it makes a
 one-time unlock code and announces it (`Options.OnUnlockCode`, else one
 Warn line on `Options.Log`), with the setup code's shape: 80 bits, only
@@ -426,6 +438,36 @@ between cannot take it; the account's own limit still applies. Other
 names tried from that address stay refused.
 Re-checking a signed-in caller's own password has its own per-account
 budget, memory only.
+
+The known-browser allowance (#44) keeps a stranger from locking the
+owner out. A browser that completes a sign-in on an account is
+remembered on its record (`RememberBrowser`): it gets a 32-byte random
+token, base64url, and the record keeps only the token's SHA-256 and when
+it was issued -- a hash needs no key, unlike gate's per-process
+pending-login codec, so the token survives a deploy, and each browser
+can be forgotten on its own. Each completed sign-in rotates the token,
+dropping the browser's old entry in the same write. An account
+remembers at most three browsers, the oldest evicted, each for 45 days
+from its latest sign-in there, checked on the server from `IssuedAt`
+(owner, 2026-10-02). Once the ordinary path refuses an attempt -- the
+account locked out, or the address at its limit -- and the browser's
+token matches the named account (`KnowsBrowser`), the attempt goes ahead
+on `ReserveKnownBrowser`: the limiter's threshold per window, per
+account, no escalation, refused outright while the account is disabled.
+Its bucket is created only after a match, so there is at most one per
+account. Each failure through it counts toward the 50: the attempt that
+fills the budget closes it for one window and adds one lockout's worth
+to `LoginLockoutCount` (which also lengthens the next ordinary lockout),
+so the fiftieth disables as an ordinary failure would. A success hands
+the count back (`ReleaseKnownBrowser`, `SignedIn`). Sign out everywhere
+(`ClearKnownBrowsers`, the calling browser then remembered again) and an
+admin's reset code forget every browser; a signed-in password change, an
+SSO link, an unlock and the forced change after second-factor failures
+do not -- that is when the owner needs the allowance. Nothing is keyed
+on the client's address. A stolen token gains its holder the allowance
+during a lockout, ending at the disable, and never a session. SSO never
+reaches the limiter, so the token is harmless there; it is issued all
+the same.
 
 Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
@@ -520,7 +562,15 @@ on (a browser then refuses the cookie unless it is `Secure`, has no
 `Domain` and is on path `/`; the bare name under plain HTTP, where a
 browser would drop a `__Host-` cookie), `gate.New` warning once when
 `SecureCookie` is off, and a login ending the same account's session the
-browser already held, since the new cookie replaces it (#47); the OIDC flow cookie
+browser already held, since the new cookie replaces it (#47); the
+known-browser cookie `gate_known_browser` set at every session issue
+(`issueSession`, #44), `HttpOnly`, `SameSite=Lax`, `Secure` per
+`SecureCookie`, path `/api/auth` -- every route that issues a session
+is under it, so each issue sees the browser's old token and replaces
+it rather than adding a second entry against the cap of three -- and
+no `__Host-` prefix (which needs path `/`), `Max-Age` 45 days to match
+the server's own check (§1.3), read for the allowance only once the
+limiter has refused an attempt; the OIDC flow cookie
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by

@@ -15,8 +15,8 @@
 // PasskeyCount. The stored fields are
 // mikroview's, byte for byte, plus gauntlet's own that mikroview's
 // documents lack and read as zero: loginLockedUntil (#19),
-// sessionsEndedAt (#28), and loginLockoutCount and loginDisabledAt
-// (#44). User carries every field mikroview's own
+// sessionsEndedAt (#28), and loginLockoutCount, loginDisabledAt and
+// knownBrowsers (#44). User carries every field mikroview's own
 // User carries -- including TOTP, recovery codes, reset codes and
 // passkeys -- because Store persists the whole document on every save
 // (docs/design.md Summary): a field this package didn't know about would
@@ -164,6 +164,15 @@ type User struct {
 	// not lift it. Only UnlockLogin does. It disables the local password sign-in, not
 	// the account's sessions, its SSO identity or its second factors.
 	LoginDisabledAt time.Time `json:"loginDisabledAt,omitzero"`
+	// KnownBrowsers are the browsers that have completed a sign-in on
+	// this account and keep a small allowance of their own while it is
+	// locked out (#44; knownbrowser.go): at most MaxKnownBrowsers, each
+	// for KnownBrowserLifetime after its latest sign-in. Each holds the
+	// SHA-256 of the token its browser carries, never the token.
+	// RememberBrowser adds and renews them; sign out everywhere
+	// (ClearKnownBrowsers) and IssueResetCode clear them. Gauntlet's own
+	// field: older documents lack it and read it as none remembered.
+	KnownBrowsers []KnownBrowser `json:"knownBrowsers,omitempty"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
@@ -239,6 +248,18 @@ func (u *User) blankCredentials() {
 	// still answer truly on the copy (see blankedPasskeyCount).
 	u.blankedPasskeyCount += len(u.Passkeys)
 	u.Passkeys = nil
+	// A known browser's hash is a verifier for the token that browser
+	// carries, so it goes too; when each was remembered stays, which is
+	// what an account list would show. A new slice, never the stored
+	// one's backing array: List's copies share it with the account
+	// itself until here.
+	if u.KnownBrowsers != nil {
+		blanked := make([]KnownBrowser, len(u.KnownBrowsers))
+		for i, b := range u.KnownBrowsers {
+			blanked[i] = KnownBrowser{IssuedAt: b.IssuedAt}
+		}
+		u.KnownBrowsers = blanked
+	}
 }
 
 // clone deep-copies the account, including the slices a plain struct
@@ -246,6 +267,7 @@ func (u *User) blankCredentials() {
 func (u *User) clone() *User {
 	cp := *u
 	cp.RecoveryCodes = slices.Clone(u.RecoveryCodes)
+	cp.KnownBrowsers = slices.Clone(u.KnownBrowsers)
 	if u.Passkeys != nil {
 		cp.Passkeys = make([]Passkey, len(u.Passkeys))
 		for i := range u.Passkeys {

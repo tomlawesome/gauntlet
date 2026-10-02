@@ -142,7 +142,9 @@ func FormatResetCode(code string) string {
 //
 // The account's lockout, its count of lockouts and a disabled sign-in
 // (#44) are all cleared in the same write, so the owner can use the code
-// at once. A running LoginLimiter drops its own count of the guesses
+// at once. So are the browsers it remembers (KnownBrowsers, #44): a
+// browser the old credentials reached keeps no allowance past the
+// reset. A running LoginLimiter drops its own count of the guesses
 // before it by PasswordChangedAt. The one thing it can still hold is a
 // disable it decided but has not managed to save (only while saves are
 // failing): that survives the code, failing closed, until
@@ -208,6 +210,12 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		u.LoginLockedUntil = time.Time{}
 		u.LoginLockoutCount = 0
 		u.LoginDisabledAt = time.Time{}
+		// Every remembered browser is forgotten (#44): an admin resets
+		// an account because its credentials may be in the wrong hands,
+		// and a browser remembered before the reset may be too. The
+		// owner's browser is remembered again at the sign-in the code
+		// leads to.
+		u.KnownBrowsers = nil
 		issued = *u
 		return nil
 	})

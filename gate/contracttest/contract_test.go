@@ -444,7 +444,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	// can reach any of them -- done now, not before the re-login above,
 	// which needs a full session rather than the pending login a
 	// confirmed factor would leave it with.
-	enrolTOTPFactor(t, c, u, admin, adminPass)
+	adminRecovery := enrolTOTPFactor(t, c, u, admin, adminPass)
 
 	// Accounts.
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "bob", Password: bobPass}}, 201, nil)
@@ -547,13 +547,19 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/reset-password"}, 404, nil)
 
 	// The admin unlock route (#44): 200 whether or not anything was
-	// locked, 409 for the caller's own account, 404 for none.
+	// locked, 404 for no account. The caller's own takes the password
+	// and a current second factor again: 400 without them, 401 with a
+	// wrong one, 200 with both right (adminRecovery: the admin's own
+	// recovery codes, from their enrolment above).
 	var unlocked unlockUserResponse
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/unlock"}, 200, &unlocked)
 	if unlocked.WasDisabled || unlocked.WasLockedOut {
 		t.Fatalf("unlocking an account with nothing to lift = %+v", unlocked)
 	}
-	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock"}, 409, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock"}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock", body: unlockSelfRequest{Password: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock", body: unlockSelfRequest{Password: "wrong-password", Code: adminRecovery[0]}}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/unlock", body: unlockSelfRequest{Password: adminPass, Code: adminRecovery[0]}}, 200, &unlocked)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/unlock"}, 404, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/unlock"}, 401, nil)
 	bob = c.client()
