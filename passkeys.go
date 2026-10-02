@@ -1,12 +1,14 @@
 // Copied from mikroview's internal/auth/passkeys.go, names kept
-// (docs/design.md §1.3). This file is the store-layer half only -- it
-// holds what a WebAuthn registration or login ceremony produced, and
-// never performs the ceremony itself. That work (talking to
-// go-webauthn, building the RP config, sealing session data into
-// cookies) is deferred to the gauntlet/passkey package (G8, per
-// docs/design.md §1.6); this package does not import go-webauthn and
-// must not gain a reason to. Passkey.Transports and Passkey.Flags below
-// reproduce the shapes of two go-webauthn types for exactly that
+// (docs/design.md §1.3). This file is the store-layer half, plus the
+// seam the ceremony half is driven through. The ceremony itself
+// (talking to go-webauthn, building the relying party from the
+// application's public URL, sealing ceremony state for the browser to
+// carry) lives in the gauntlet/passkey package (G8, ADR-0004), which
+// implements PasskeyCeremony below; gate drives it through that
+// interface. This package does not import go-webauthn and must not gain
+// a reason to: every value crossing PasskeyCeremony is a type from this
+// package, a string or raw JSON. Passkey.Transports and Passkey.Flags
+// below reproduce the shapes of two go-webauthn types for exactly that
 // reason -- see their doc comments.
 //
 // One divergence from mikroview: RecordPasskeyAssertion, the two-step
@@ -19,12 +21,12 @@
 // reason for a new caller to have the unsafe two-step option. Likewise
 // not carried over: AnyPasskeysExist, mikroview's own start-up check for
 // whether its RelyingParty configuration can still serve existing
-// credentials -- an application concern once the passkey ceremony
-// exists (G8), not this package's.
+// credentials -- an application concern, not this package's.
 package gauntlet
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -62,6 +64,92 @@ var (
 	// the account happens to be full.
 	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
 )
+
+// PasskeyStatus reports whether an application can offer passkeys at
+// all, and why not when it cannot -- the answer
+// PasskeyCeremony.Status gives. A passkey is bound to a domain name
+// (the relying-party ID) and an origin, so it needs the application to
+// have a usable public web address; an application reached only by IP
+// address has none, and that is a reported state rather than a startup
+// failure (ADR-0004 decision 4).
+type PasskeyStatus string
+
+const (
+	// PasskeyStatusReady: the public URL is an https address (or http
+	// on localhost) with a domain-name host. Passkeys work.
+	PasskeyStatusReady PasskeyStatus = "ready"
+	// PasskeyStatusUnset: no public URL was configured, or it is not an
+	// absolute URL.
+	PasskeyStatusUnset PasskeyStatus = "unset"
+	// PasskeyStatusIP: the public URL's host is an IP address. Browsers
+	// refuse to create a passkey for one.
+	PasskeyStatusIP PasskeyStatus = "ip"
+	// PasskeyStatusInsecure: the public URL's scheme is not https (and
+	// it is not http on localhost). Browsers run a passkey ceremony only
+	// from a secure context.
+	PasskeyStatusInsecure PasskeyStatus = "insecure"
+)
+
+// PasskeyCeremony runs the two WebAuthn ceremonies -- registration,
+// which makes a passkey, and login (assertion), which proves one -- for
+// an application with one relying party. gauntlet/passkey implements it
+// (passkey.New); gate drives it through Deps.Passkeys, and never sees
+// the WebAuthn library's own types. It is not meant to be implemented
+// anywhere else, and a method added to it would break every
+// implementer, so it will not grow: a later need is a second, optional
+// interface (ADR-0004).
+//
+// Each Begin returns the options to hand the browser (the W3C
+// PublicKeyCredential creation or request options, as JSON) and the
+// ceremony state sealed into an opaque string the browser carries back
+// unchanged, in a cookie; the matching Finish takes that sealed string
+// and the browser's response. Ceremony state never touches the store.
+// Every method except Status, RPID and Origin refuses while Status is
+// not PasskeyStatusReady.
+type PasskeyCeremony interface {
+	// Status says whether passkeys work here, and why not when they
+	// do not.
+	Status() PasskeyStatus
+	// RPID is the relying-party ID (a domain name) passkeys are
+	// registered under, and the value stored on Passkey.RPID. "" unless
+	// Status is PasskeyStatusReady.
+	RPID() string
+	// Origin is the one origin (scheme://host[:port]) ceremonies are
+	// accepted from. "" unless Status is PasskeyStatusReady.
+	Origin() string
+	// BeginRegistration starts registering a new passkey on u, excluding
+	// every passkey u already holds under the current RPID.
+	BeginRegistration(u *User) (options json.RawMessage, sealed string, err error)
+	// FinishRegistration verifies the browser's response to
+	// BeginRegistration's options and returns the new credential for
+	// Store.AddPasskey. Name and CreatedAt are left for the caller.
+	FinishRegistration(u *User, sealed string, credential json.RawMessage) (Passkey, error)
+	// BeginLogin starts a login ceremony allowing only u's passkeys
+	// registered under the current RPID.
+	BeginLogin(u *User) (options json.RawMessage, sealed string, err error)
+	// FinishLogin verifies the browser's assertion against the ceremony
+	// BeginLogin started. A nil error means the signature checked out;
+	// the caller still refuses a CloneWarning and records the count
+	// through Store.RecordPasskeyAssertionIfFresh.
+	FinishLogin(u *User, sealed string, assertion json.RawMessage) (PasskeyAssertion, error)
+}
+
+// PasskeyAssertion is what a verified login assertion reports -- the
+// arguments Store.RecordPasskeyAssertionIfFresh takes, plus whether the
+// WebAuthn library suspects a cloned authenticator.
+type PasskeyAssertion struct {
+	// CredentialID is the ID of the passkey that signed.
+	CredentialID []byte
+	// SignCount is the counter the authenticator presented in this
+	// assertion -- the value RecordPasskeyAssertionIfFresh checks for
+	// freshness and stores. With CloneWarning set it is the presented
+	// (regressed) value; the stored one is still on the User's Passkey.
+	SignCount uint32
+	// CloneWarning is set when the presented counter is at or below the
+	// stored one and either is non-zero -- never for 0 -> 0, which is how
+	// most platform passkeys behave. A caller refuses the login on it.
+	CloneWarning bool
+}
 
 // Passkey is one registered WebAuthn credential, held on User.Passkeys.
 type Passkey struct {
@@ -157,9 +245,9 @@ func findPasskeyIndex(u *User, credID []byte) int {
 }
 
 // AddPasskey registers a new WebAuthn credential on userID's account --
-// the store-layer half of the registration ceremony an application's
-// own WebAuthn wiring drives (G8). pk arrives fully populated by the
-// caller.
+// the store-layer half of the registration ceremony gauntlet/passkey
+// runs (PasskeyCeremony.FinishRegistration). pk arrives fully populated
+// by the caller.
 //
 // The credential ID is checked against every passkey already on the
 // account before the account's capacity is: ErrPasskeyDuplicate takes
@@ -328,8 +416,8 @@ func (s *Store) DeletePasskey(userID string, credID []byte) (Passkey, error) {
 // with a nil error. accepted is never true alongside an error.
 //
 // The caller is expected to have already verified the assertion's
-// signature (an application's own WebAuthn wiring, G8) before calling
-// this -- this method only decides freshness and records the outcome.
+// signature (PasskeyCeremony.FinishLogin) before calling this -- this
+// method only decides freshness and records the outcome.
 func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, signCount uint32, now time.Time) (accepted bool, err error) {
 	if !s.Persisted() {
 		return false, ErrNotPersisted
