@@ -510,6 +510,37 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	enrolTOTPFactor(t, c, u, bob, bobPass+"-2")
 	c.do(bob, u, call{method: "POST", path: "/api/auth/password", body: changePasswordRequest{CurrentPassword: "wrong", NewPassword: bobPass}}, 401, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all"}, 200, nil)
+
+	// The caller's own sessions (#48). Sign out everywhere left bob one
+	// session, listed with the address and agent the closed row schema
+	// allows; ending it signs this client out, which the logout below
+	// then finds already done.
+	var sessions struct {
+		Sessions []struct {
+			Ref       string `json:"ref"`
+			Current   bool   `json:"current"`
+			UserAgent string `json:"userAgent"`
+			Address   string `json:"address"`
+		} `json:"sessions"`
+		Total int `json:"total"`
+	}
+	c.do(bob, u, call{method: "GET", path: "/api/auth/sessions"}, 200, &sessions)
+	if sessions.Total != 1 || len(sessions.Sessions) != 1 || !sessions.Sessions[0].Current || sessions.Sessions[0].UserAgent == "" || sessions.Sessions[0].Address == "" {
+		t.Fatalf("bob's sessions after sign out everywhere = %+v", sessions)
+	}
+	c.do(anon, u, call{method: "GET", path: "/api/auth/sessions"}, 401, nil)
+	c.do(bob, u, call{method: "DELETE", path: "/api/auth/sessions/" + strings.Repeat("0", 32)}, 404, nil)
+	c.do(bob, u, call{method: "DELETE", path: "/api/auth/sessions/" + sessions.Sessions[0].Ref, noCSRF: true}, 403, nil)
+	var ended struct {
+		Ended     bool `json:"ended"`
+		SignedOut bool `json:"signedOut"`
+	}
+	c.do(bob, u, call{method: "DELETE", path: "/api/auth/sessions/" + sessions.Sessions[0].Ref}, 200, &ended)
+	if !ended.Ended || !ended.SignedOut {
+		t.Fatalf("ending bob's only session = %+v, want ended and signed out", ended)
+	}
+	c.do(bob, u, call{method: "GET", path: "/api/auth/sessions"}, 401, nil)
+
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout"}, 200, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout", noCSRF: true}, 403, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/logout-all"}, 401, nil)

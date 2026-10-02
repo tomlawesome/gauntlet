@@ -74,8 +74,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	g.audit(user.Username, "account.password_changed", user.Username, detail)
 
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, user.ID, now)
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "otherSessionsEnded": true})
 }
 

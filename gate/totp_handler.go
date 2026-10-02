@@ -183,8 +183,7 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// not leave a session from before the factor alive against an
 	// account that now requires it.
 	g.deps.Sessions.RevokeAllForUser(user.ID)
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, user.ID, now)
 
 	// Mint-if-absent, atomically under the store's lock: a snapshot
 	// taken before this call and a separate unconditional

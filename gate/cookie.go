@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // hostCookiePrefix is the name prefix that makes a browser refuse the
@@ -91,11 +93,13 @@ func (g *Gate) clearSessionCookie(w http.ResponseWriter) {
 // nothing about them; a stray cookie is not authority to end a session
 // it does not own.
 //
-// Called by every path that issues a session for a login (password,
-// second factor, SSO callback) and not by the ones that already end
-// every session of the account first (password change, factor enrolment,
-// SSO link, sign out everywhere), nor by first-account registration,
-// which runs while no account exists.
+// Called only through issueSession, so every path that issues a
+// session runs it. Where the path has already ended every session of the
+// account (password change, factor enrolment, SSO link, sign out
+// everywhere) the cookie's session is gone and this finds nothing; at
+// first-account registration no session can belong to the new account
+// yet. Both are harmless, and one route through issueSession means a
+// new sign-in path cannot forget it.
 func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Time) {
 	cookie, err := r.Cookie(g.sessionCookieName())
 	if err != nil {
@@ -106,4 +110,24 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 		return
 	}
 	g.deps.Sessions.Revoke(sess.ID)
+}
+
+// issueSession starts a session for userID and hands the browser its
+// cookie -- the one way gate issues a session, so the three things every
+// issue must do happen together at every one of them: end the session
+// this browser already held for the account (revokeReplacedSession,
+// #47), record the client so the account's owner can recognise the
+// session in their own list (gauntlet.SessionStore.CreateFrom, #48),
+// and set the cookie under sessionCookieName with the ceiling's Max-Age
+// (#47).
+//
+// The address is Config.ClientIP's, the same resolution the login
+// limiter is keyed on, so the list shows what the application's own
+// proxy policy believes; the agent is the request's User-Agent header.
+// Both are the client's word, cleaned and capped by CreateFrom.
+func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, now time.Time) {
+	g.revokeReplacedSession(r, userID, now)
+	client := gauntlet.SessionClient{Address: g.cfg.ClientIP(r), UserAgent: r.UserAgent()}
+	sess := g.deps.Sessions.CreateFrom(userID, client, now)
+	g.setSessionCookie(w, sess.ID)
 }

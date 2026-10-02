@@ -331,8 +331,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// them later, since begin now excludes this passkey.
 	if wasFirstFactor {
 		g.deps.Sessions.RevokeAllForUser(current.ID)
-		sess := g.deps.Sessions.Create(current.ID, now)
-		g.setSessionCookie(w, sess.ID)
+		g.issueSession(w, r, current.ID, now)
 	}
 	g.clearPasskeyRegisterCookie(w)
 	detail := "name=" + stored.Name

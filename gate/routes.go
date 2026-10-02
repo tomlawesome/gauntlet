@@ -9,12 +9,12 @@ import (
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's
 // paths, request and response bodies (docs/design.md §1.5): session,
 // register, login (single- and second-factor step), logout, logout-all,
-// password, users list/create/delete/reset-password, TOTP enrol/
-// confirm/delete plus the admin clear route, recovery-codes regenerate,
-// the passkey list/register/rename/delete routes, the passkey login
-// begin and the admin clear route (G8, ADR-0004; all 404 while
-// Deps.Passkeys is nil), the OIDC login/callback/link trio, and tokens
-// list/create/revoke.
+// the caller's own session list and end-one-session route, password,
+// users list/create/delete/reset-password, TOTP enrol/confirm/delete
+// plus the admin clear route, recovery-codes regenerate, the passkey
+// list/register/rename/delete routes, the passkey login begin and the
+// admin clear route (G8, ADR-0004; all 404 while Deps.Passkeys is nil),
+// the OIDC login/callback/link trio, and tokens list/create/revoke.
 //
 // Mount the result under the same Protect that guards the rest of the
 // application: Routes does not call Protect itself, and the admin-only
@@ -30,6 +30,8 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("POST "+logoutPath, g.handleLogout)
 	mux.HandleFunc("POST /api/auth/logout-all", g.handleLogoutAll)
 	mux.HandleFunc("POST "+changePasswordPath, g.handleChangePassword)
+	mux.HandleFunc("GET "+sessionsPath, g.handleSessionsList)
+	mux.HandleFunc("DELETE "+sessionsPath+"/{ref}", g.handleSessionEnd)
 
 	mux.HandleFunc("POST "+totpEnrolPath, g.handleTOTPEnrol)
 	mux.HandleFunc("POST "+totpConfirmPath, g.handleTOTPConfirm)
