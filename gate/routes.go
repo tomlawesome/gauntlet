@@ -1,17 +1,13 @@
 package gate
 
-import (
-	"net/http"
-
-	"github.com/tomlawesome/gauntlet"
-)
+import "net/http"
 
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's
 // paths, request and response bodies (docs/design.md §1.5): session,
 // register, login (single- and second-factor step), logout, logout-all,
 // the caller's own session list and end-one-session route, password,
 // the lone-admin unlock-code route (#44),
-// users list/create/delete/reset-password/unlock, TOTP enrol/confirm/delete
+// users list/create/delete/reset-password/unlock/logout-all, TOTP enrol/confirm/delete
 // plus the admin clear route, recovery-codes regenerate, the passkey
 // list/register/rename/delete routes, the passkey login begin and the
 // admin clear route (G8, ADR-0004; all 404 while Deps.Passkeys is nil),
@@ -51,17 +47,18 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("GET "+oidcCallbackPath, g.handleOIDCCallback)
 	mux.HandleFunc("POST /api/auth/oidc/link", g.handleOIDCLinkStart)
 
-	mux.Handle("GET /api/auth/users", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleListUsers)))
-	mux.Handle("POST /api/auth/users", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleCreateUser)))
-	mux.Handle("DELETE /api/auth/users/{id}", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleDeleteUser)))
-	mux.Handle("POST /api/auth/users/{id}/reset-password", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleResetPassword)))
-	mux.Handle("POST /api/auth/users/{id}/unlock", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleUnlockUser)))
-	mux.Handle("DELETE /api/auth/users/{id}/totp", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleTOTPAdminClear)))
-	mux.Handle("DELETE /api/auth/users/{id}/passkeys", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handlePasskeysAdminClear)))
+	mux.Handle("GET /api/auth/users", adminOnly(g, g.handleListUsers))
+	mux.Handle("POST /api/auth/users", adminOnly(g, g.handleCreateUser))
+	mux.Handle("DELETE /api/auth/users/{id}", adminOnly(g, g.handleDeleteUser))
+	mux.Handle("POST /api/auth/users/{id}/reset-password", adminOnly(g, g.handleResetPassword))
+	mux.Handle("POST /api/auth/users/{id}/unlock", adminOnly(g, g.handleUnlockUser))
+	mux.Handle("POST /api/auth/users/{id}/logout-all", adminOnly(g, g.handleAdminLogoutAll))
+	mux.Handle("DELETE /api/auth/users/{id}/totp", adminOnly(g, g.handleTOTPAdminClear))
+	mux.Handle("DELETE /api/auth/users/{id}/passkeys", adminOnly(g, g.handlePasskeysAdminClear))
 
-	mux.Handle("GET /api/tokens", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleTokensList)))
-	mux.Handle("POST /api/tokens", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleTokensCreate)))
-	mux.Handle("DELETE /api/tokens/{id}", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleTokensRevoke)))
+	mux.Handle("GET /api/tokens", adminOnly(g, g.handleTokensList))
+	mux.Handle("POST /api/tokens", adminOnly(g, g.handleTokensCreate))
+	mux.Handle("DELETE /api/tokens/{id}", adminOnly(g, g.handleTokensRevoke))
 
 	return mux
 }

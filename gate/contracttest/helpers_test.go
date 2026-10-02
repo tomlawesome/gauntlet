@@ -389,6 +389,16 @@ type unlockSelfRequest struct {
 	Code     string `json:"code"`
 }
 
+type adminLogoutAllRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+type adminLogoutAllResponse struct {
+	Username string `json:"username"`
+	Ended    int    `json:"ended"`
+	Notified bool   `json:"notified"`
+}
+
 type unlockCodeRequest struct {
 	Username   string `json:"username"`
 	UnlockCode string `json:"unlockCode"`

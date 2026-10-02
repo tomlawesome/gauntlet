@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -123,9 +124,11 @@ func isSafeMethod(method string) bool {
 
 // csrfOK requires the CSRF header on an unsafe method, writing the 403
 // itself when it is missing -- the one check Protect makes in both its
-// undecided and active states.
+// undecided and active states. A refusal leaves a rated Warn line
+// (#45, ASVS 16.3.3).
 func (g *Gate) csrfOK(w http.ResponseWriter, r *http.Request) bool {
 	if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
+		g.warnRefused(r, "csrf", "gate: refused a request without the CSRF header")
 		http.Error(w, "missing required header", http.StatusForbidden)
 		return false
 	}
@@ -315,6 +318,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// session cookie instead (#41). Only a request with no
 		// Authorization header at all goes on to the cookie.
 		if _, sent := r.Header["Authorization"]; sent {
+			g.warnRefused(r, "authorization", "gate: refused a malformed Authorization header")
 			writeUnauthorized(w, "invalid or revoked token")
 			return
 		}
@@ -345,6 +349,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// through; only a RequireRole-wrapped route ever consulted
 		// Role.AtLeast (issue #14).
 		if !isKnownRole(user.Role) {
+			g.warnRefused(r, "role", fmt.Sprintf("gate: refused account %q: its role is not recognized", user.Username))
 			http.Error(w, "account role is not recognized", http.StatusForbidden)
 			return
 		}
@@ -354,6 +359,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// #44). The account carries no record of which, so the message
 		// names neither.
 		if user.MustChangePassword && path != changePasswordPath {
+			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustChangePassword))
 			writeForcedAuthGate(w, authGateMustChangePassword, "this account's password must be changed -- set a new password before going any further")
 			return
 		}
@@ -379,6 +385,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// it, a newly created local account with no factor yet would have
 		// no route left to enrol one on.
 		if !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
+			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustEnrolFactor))
 			writeForcedAuthGate(w, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")
 			return
 		}
@@ -418,15 +425,49 @@ func isKnownRole(r gauntlet.Role) bool {
 // failing loudly at startup rather than quietly admitting nothing to a
 // route no request could ever satisfy (issue #14).
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler {
+	return requireRole(min, next, nil)
+}
+
+// requireRole is RequireRole, calling refused (when set) before it
+// writes a 403.
+func requireRole(min gauntlet.Role, next http.Handler, refused func(r *http.Request, min gauntlet.Role)) http.Handler {
 	if !isKnownRole(min) {
 		panic("gate: RequireRole given an unrecognized role: " + string(min))
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := UserFromContext(r)
 		if user == nil || !user.Role.AtLeast(min) {
+			if refused != nil {
+				refused(r, min)
+			}
 			http.Error(w, "insufficient role", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// adminOnly is RequireRole(gauntlet.RoleAdmin, next) for Routes' own
+// admin routes: a refusal also leaves a rated Warn line (#45, ASVS
+// 16.3.2). An application's own RequireRole wrapping writes none -- it
+// has no Gate to log through. A function rather than a Gate method so
+// each route line names exactly one method of g, the handler (the
+// contract test reads routes.go for it).
+func adminOnly(g *Gate, next http.HandlerFunc) http.Handler {
+	return requireRole(gauntlet.RoleAdmin, next, func(r *http.Request, min gauntlet.Role) {
+		who := "a request with no signed-in account"
+		if u := UserFromContext(r); u != nil {
+			who = fmt.Sprintf("account %q", u.Username)
+		}
+		g.warnRefused(r, "role", fmt.Sprintf("gate: insufficient role: refused %s at a %s route", who, min))
+	})
+}
+
+// warnRefused writes a rated Warn line (warnRated) for a refused
+// request: kind names the refusal, and with the client address makes
+// the key. msg gains the method, the path and the address, all quoted:
+// each is the client's to choose.
+func (g *Gate) warnRefused(r *http.Request, kind, msg string) {
+	address := g.cfg.ClientIP(r)
+	g.warnRated(kind+" "+address, fmt.Sprintf("%s: %q %q from=%q", msg, r.Method, r.URL.EscapedPath(), address))
 }

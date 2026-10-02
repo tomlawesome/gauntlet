@@ -62,7 +62,7 @@ info:
     sign-in is disabled, and every failure through it counts toward the
     disable. An account remembers at most three browsers, each for 45
     days from its latest sign-in there; sign out everywhere and an
-    admin's password reset forget them all. A frontend does nothing with
+    admin's password reset or sign-out forget them all. A frontend does nothing with
     it: the browser keeps and sends it.
 
     **Errors.** Every error body is `text/plain` holding one human-readable
@@ -1335,6 +1335,60 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/users/{id}/logout-all:
+    post:
+      operationId: adminLogoutAll
+      summary: Sign another account out everywhere (admin)
+      description: |
+        Ends every gauntlet session the account holds and forgets every
+        browser it remembers (the known-browser cookie), as the account's
+        own sign out everywhere does, without issuing it a new one. The
+        identity provider's own session is not touched. All of the
+        account's sessions or none: there is no admin route to end one
+        session, or to list another account's sessions (#53).
+
+        The body is optional. `reason` is at most 200 bytes of plain text
+        (no control or format characters); it goes into the audit record
+        and to the application's `Config.Notify`, which may mail the
+        account's owner. `notified` is true when the application was
+        asked -- after this response, in the background -- not that a
+        message was delivered.
+
+        `409` for the caller's own account: use `POST
+        /api/auth/logout-all`, which keeps this browser signed in.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLogoutAllRequest"
+      responses:
+        "200":
+          description: Every session the account held has ended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminLogoutAllResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NoSuchUser"
+        "409":
+          description: The account is the caller's own; nothing ends.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/users/{id}/totp:
     delete:
       operationId: clearUserTOTP
@@ -2056,3 +2110,25 @@ components:
         value:
           type: string
           description: The raw bearer token; only in the response that creates it.
+    AdminLogoutAllRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+          description: Why, for the audit and the account owner's notice. At most 200 bytes (the length shown here counts characters); control and format characters are refused with `400`.
+    AdminLogoutAllResponse:
+      type: object
+      additionalProperties: false
+      required: [username, ended, notified]
+      properties:
+        username:
+          type: string
+        ended:
+          type: integer
+          minimum: 0
+          description: How many live sessions ended.
+        notified:
+          type: boolean
+          description: The application's notifier was asked to tell the account's owner. Asked, not delivered.

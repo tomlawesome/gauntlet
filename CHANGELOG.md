@@ -6,6 +6,37 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Failed sign-ins, lockouts and refused requests are recorded, with the
+  client address (#45). Through `gate.Config.Audit`: `user.login_failed`
+  for each failed password, code, passkey assertion or refused SSO
+  identity the login limiter admitted (detail
+  `outcome=... method=... from="..."`; actor and target the account's
+  username, or `unknown` with the name masked when it matched no
+  account), and `account.locked` (`until=... lockouts=n from=...`) or
+  `account.disabled` beside the failure that started a lockout or
+  disabled sign-in. A refusal by the limiter (429), a missing CSRF
+  header, a malformed `Authorization` header, a role refusal on gate's
+  admin routes and the two door 403s are Warn lines on `Config.Log`
+  carrying `from=`, at most one per kind and address per minute. The
+  name typed for an attempt that matched no account never reaches the
+  audit or the log: `gauntlet.MaskUnknownUsername` keeps its first two
+  characters and its length (`Hunter2024` is `Hu••••••••`), and names
+  that probes try (`root`, `admin`, `postgres` and the like) in full.
+  `LoginLimiter.ReserveAccountDecision` (`AccountDecision`) is
+  `ReserveAccount` saying why it refused or what the attempt started;
+  `SignInOutcome`, `SignInMethod` and `SignInEvent` name an attempt for
+  the sign-in history to come (#53).
+- `POST /api/auth/users/{id}/logout-all` lets an admin sign another
+  account out everywhere (#53): every gauntlet session it holds ends and
+  every browser it remembers is forgotten; its password and factors are
+  untouched. An optional `reason` (at most 200 bytes, no control or
+  format characters) goes into the `user.sessions_ended` audit record.
+  409 for the caller's own account, 404 for none. gauntlet sends no
+  mail: an application that sets the new `gate.Config.Notify` (a
+  `gate.Notifier`) is handed a `gate.SessionsEndedNotice` after the
+  response, in the background with a 10-second deadline, to mail the
+  account's owner; its failure is one log line and never changes the
+  admin's answer.
 - `persist.Encrypt(backend, key, persist.EncryptOptions{Label: "accounts"})`
   wraps any `persist.Backend` so every document is sealed before the
   backend stores it and opened after it is read: the AES-256-GCM
@@ -204,6 +235,13 @@ All notable changes to this project are documented in this file.
   changes.
 
 ### Changed
+
+- The `user.login` audit record's detail now carries the client address
+  (`from="<address>"`, after `via second factor; ` on the code and
+  passkey step), where a one-step sign-in's was empty, and a completed
+  SSO sign-in now writes `user.login` too (`via sso; from=...`), which
+  it never did (#45). An audit consumer matching on the old detail
+  needs updating.
 
 - release:version lets v0.2.0, and only v0.2.0, ship with the
   common-password list still the placeholder, so `Embedded()` blocks
