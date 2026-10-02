@@ -139,6 +139,10 @@ func (b *budgetBackend) Save(ctx context.Context, payload []byte, expect int64) 
 func (b *budgetBackend) Close() error     { return b.inner.Close() }
 func (b *budgetBackend) Describe() string { return "budget test backend" }
 
+// ProtectedAtRest: a test backend over persist.Memory has no storage
+// to copy (persist.AtRest), so OpenStore accepts it as it does Memory.
+func (b *budgetBackend) ProtectedAtRest() bool { return true }
+
 // newOIDCTestServer serves a gate with SSO on against a fake provider,
 // with "setup-admin" already registered as the local admin. It returns
 // the gate's flow-cookie codec, so a test can read the nonce the way the

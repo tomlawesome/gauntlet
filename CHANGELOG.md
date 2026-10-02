@@ -6,6 +6,26 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `persist.Encrypt(backend, key, persist.EncryptOptions{Label: "accounts"})`
+  wraps any `persist.Backend` so every document is sealed before the
+  backend stores it and opened after it is read: the AES-256-GCM
+  envelope `persist.EncryptedFileBackend` has used since #18 (HKDF from
+  the application's key of at least 32 bytes, a fresh salt and nonce
+  per save, the label authenticated with the document), stored through
+  the backend as the JSON text `{"sealed": "<base64>"}` so a `text`
+  column or a JSON-validating backend holds it unchanged (#50,
+  [ADR-0005](docs/adr/0005-encryption-at-rest-on-every-backend.md)). A
+  dump or backup of the database then carries no TOTP secret and no
+  passkey public key, and a document altered in the database fails to
+  open rather than being read. `EncryptedFileBackend` is now this
+  wrapper over the plain file and is otherwise unchanged; files it
+  wrote before still open, and still open in mikroview.
+  `EncryptOptions.MigratePlaintext` accepts a document the backend
+  already holds in the clear and seals it in place on the first load,
+  for the one release that introduces the wrapper. The new
+  `persist.AtRest` capability (`ProtectedAtRest() bool`) is how a
+  backend says a copy of its storage carries no plaintext;
+  `persist.Encrypted`, `EncryptedFileBackend` and `Memory` implement it.
 - `docs/api/auth.yaml` (OpenAPI 3.1) describes every route `gate.Routes`
   serves -- each request body, response body and status -- as the one
   copy a frontend can build against (ADR-0002, #22). `docs/design.md`
@@ -95,6 +115,33 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Breaking.** `OpenStore` now refuses a backend that stores the
+  accounts document in the clear -- one that does not implement
+  `persist.AtRest`, which is every application database backend
+  written so far -- with the new `ErrPlaintextAtRest`, unless
+  `Options.AllowPlaintextAtRest` is set (#50,
+  [ADR-0005](docs/adr/0005-encryption-at-rest-on-every-backend.md)).
+  The document holds every account's TOTP secret, which cannot be
+  hashed, so the choice is refuse or warn, and a warning is read once
+  while a backup is copied for years. `persist.Memory`, `Encrypt` and
+  `EncryptedFileBackend` need no permission; a nil backend stores
+  nothing. `OpenTokenStore` is unchanged: the tokens document holds
+  only hashes of random values. What each application must do:
+  provision a key file of at least 32 random bytes (`persist.MinKeyBytes`;
+  mikroview's retention key material already qualifies, birdcage has
+  none yet and gains `BIRDCAGE_AUTH_KEY_FILE`), wrap the accounts
+  backend -- and, recommended, the tokens backend -- in
+  `persist.Encrypt` with a fixed `Label` per store, and for the release
+  that first ships the wrapper set `MigratePlaintext: true` where a
+  plaintext document already exists (mikroview's Postgres `auth` row);
+  the first start seals it in place and the option can then be removed.
+  A backend that wraps another (a write-behind queue) must forward
+  `ProtectedAtRest`. Take a copy of the plaintext document before
+  upgrading: an older gauntlet reads a sealed document as an empty
+  store and its first write would overwrite it, while this build
+  refuses a sealed document that reaches a store unwrapped. The
+  accounts document itself is unchanged (still version 3): the
+  envelope sits below it.
 - A second factor (TOTP or a passkey) is now always required for every
   local-password account; `gate` no longer offers a way to turn the
   forced-enrolment door off (#49). `gate.Config.RequireSecondFactor` is

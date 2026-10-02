@@ -532,6 +532,9 @@ func (b *vanishingBackend) Save(ctx context.Context, payload []byte, expect int6
 func (b *vanishingBackend) Close() error     { return nil }
 func (b *vanishingBackend) Describe() string { return "vanishing test backend" }
 
+// ProtectedAtRest: see failingSaveBackend (testhelpers_test.go).
+func (b *vanishingBackend) ProtectedAtRest() bool { return true }
+
 // removedLine is the part of the #39 log line both stores share.
 const removedLine = "has been removed since this process loaded it; writes are refused until it is restored or the process restarts"
 

@@ -15,10 +15,13 @@
 // its own ErrConflict = gpersist.ErrConflict when it moves, rather than
 // gauntlet importing mikroview's error value.
 //
-// This package ships only the interface and a Memory backend for tests
-// (see memory.go). A real backend -- a file, a database table -- is each
-// application's own code, deliberately kept out of the module (ADR-0005
-// decision 2: "the module never owns a database").
+// This package ships the interface, a Memory backend for tests
+// (memory.go), the Encrypt wrapper that seals a document before any
+// backend stores it (encrypted.go, #50, docs/adr/0005) and the
+// encrypted file backend built on it (encrypted_file.go, #18). A
+// database backend is each application's own code, deliberately kept
+// out of the module (birdcage ADR-0005 decision 2: "the module never
+// owns a database"), and the application wraps it in Encrypt.
 package persist
 
 import (

@@ -65,6 +65,10 @@ func (failingSaveBackend) Save(ctx context.Context, payload []byte, expect int64
 func (failingSaveBackend) Close() error     { return nil }
 func (failingSaveBackend) Describe() string { return "failing test backend" }
 
+// ProtectedAtRest: a test backend has no storage to copy, as
+// persist.Memory has none (persist.AtRest).
+func (failingSaveBackend) ProtectedAtRest() bool { return true }
+
 // saveBudgetBackend allows a fixed number of Saves and then fails every
 // one after, for the rollback cases where the change under test has to
 // land on a store that already holds something.
@@ -82,6 +86,9 @@ func (b *saveBudgetBackend) Save(ctx context.Context, payload []byte, expect int
 }
 func (b *saveBudgetBackend) Close() error     { return nil }
 func (b *saveBudgetBackend) Describe() string { return "save-budget test backend" }
+
+// ProtectedAtRest: see failingSaveBackend.
+func (b *saveBudgetBackend) ProtectedAtRest() bool { return true }
 
 // setSecondFactorForTest enrols userID in every kind of second factor
 // through the real enrolment methods, as mikroview's own

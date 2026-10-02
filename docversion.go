@@ -36,16 +36,32 @@ const (
 // and with them a newer build's TOTP secrets or passkeys.
 var errNewerDocument = errors.New("it was written by a newer gauntlet, and this build would drop what it does not know on the next save")
 
+// errSealedDocument is the decode error for a document that is
+// persist.Encrypt's sealed envelope rather than an accounts or tokens
+// document (#50): the backend holds ciphertext and was opened without
+// the wrapper -- an application that dropped persist.Encrypt from a
+// backend whose document it had already sealed. Without this check the
+// envelope, a JSON object with no "users" or "tokens" member, would
+// read as an empty store, and the first write would seal nothing and
+// write a plaintext document of no accounts over the ciphertext.
+var errSealedDocument = errors.New("it is sealed (persist.Encrypt), and this backend was opened without the wrapper or its key")
+
 // documentVersion reads the version field of a stored document's
 // top-level object, without parsing the rest: a newer document must be
 // reported as newer even when the rest no longer parses as this build's
 // shape. A document without the field is version 0, which reads as 1.
+// A sealed envelope is refused here, before any shape is read, for both
+// stores at once -- see errSealedDocument.
 func documentVersion(data []byte) (int, error) {
 	var head struct {
-		Version int `json:"version"`
+		Version int             `json:"version"`
+		Sealed  json.RawMessage `json:"sealed"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
 		return 0, err
+	}
+	if head.Sealed != nil {
+		return 0, errSealedDocument
 	}
 	return head.Version, nil
 }
