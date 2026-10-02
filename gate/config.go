@@ -132,6 +132,14 @@ type Gate struct {
 // to report and exit on, not a crash inside a library.
 var errMissingDep = errors.New("gate: missing required dependency")
 
+// errSessionLimits is New's fail-closed refusal for a Deps.Sessions
+// store configured outside gauntlet.MaxSessionIdle/MaxSessionLifetime
+// (the NIST SP 800-63B-4 AAL2 caps the owner adopted on 2026-10-02,
+// gauntlet#51) -- a Gate that started despite a longer-lived session
+// store would silently keep a session alive past the limit the rest of
+// the module is now built to.
+var errSessionLimits = errors.New("gate: Deps.Sessions session limits exceed AAL2 caps")
+
 // New builds a Gate from cfg and deps, failing closed on anything it
 // cannot safely default: a Gate that started despite a missing store or
 // CSRF value would either panic on the first request or -- worse, for
@@ -154,6 +162,19 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	}
 	if deps.Sessions == nil {
 		return nil, fmt.Errorf("%w: Deps.Sessions", errMissingDep)
+	}
+	idle, ceiling := deps.Sessions.Limits()
+	if idle <= 0 {
+		return nil, fmt.Errorf("%w: idle %s must be positive", errSessionLimits, idle)
+	}
+	if idle > gauntlet.MaxSessionIdle {
+		return nil, fmt.Errorf("%w: idle %s exceeds MaxSessionIdle %s", errSessionLimits, idle, gauntlet.MaxSessionIdle)
+	}
+	if ceiling <= 0 {
+		return nil, fmt.Errorf("%w: no lifetime ceiling configured (MaxSessionLifetime is %s)", errSessionLimits, gauntlet.MaxSessionLifetime)
+	}
+	if ceiling > gauntlet.MaxSessionLifetime {
+		return nil, fmt.Errorf("%w: ceiling %s exceeds MaxSessionLifetime %s", errSessionLimits, ceiling, gauntlet.MaxSessionLifetime)
 	}
 	if deps.Tokens == nil {
 		return nil, fmt.Errorf("%w: Deps.Tokens", errMissingDep)

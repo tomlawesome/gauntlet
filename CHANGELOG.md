@@ -76,6 +76,17 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Breaking.** `gate.New` now refuses a `Deps.Sessions` store whose
+  idle timeout exceeds the new `MaxSessionIdle` (1 hour), whose
+  lifetime ceiling exceeds the new `MaxSessionLifetime` (24 hours), or
+  which has no ceiling at all -- NIST SP 800-63B-4's AAL2 session
+  limits (§2.2.3, §5.2), adopted by the owner on 2026-10-02 over the
+  consumers' previous, longer values (#51). `SessionStore` itself is
+  unchanged and still accepts any values; the new
+  `(*SessionStore).Limits` method and the two exported constants are
+  what `gate.New` checks them against. Mikroview and birdcage both
+  pass 24 h idle / 7-day ceiling today and will fail at start-up until
+  they change those values to within the new caps.
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

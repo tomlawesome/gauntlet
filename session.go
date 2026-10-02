@@ -16,6 +16,27 @@ import (
 	"time"
 )
 
+// MaxSessionIdle is the longest a session may go unused before gate.New
+// refuses to start: NIST SP 800-63B-4 AAL2 caps inactivity at one hour
+// (§2.2.3, §5.2). The owner adopted this over the consumers' previous
+// 24-hour idle value on 2026-10-02 (gauntlet#51) -- see
+// docs/security-by-design.md's Sessions table.
+//
+// This is a cap gate.New enforces on Deps.Sessions, not a limit
+// SessionStore itself imposes -- a caller using SessionStore directly
+// (the CLI tooling, this package's own tests) is unaffected.
+const MaxSessionIdle = time.Hour
+
+// MaxSessionLifetime is the longest a session may live from IssuedAt,
+// however often it is used, before gate.New refuses to start: NIST SP
+// 800-63B-4 AAL2 caps the overall session at 24 hours (§2.2.3, §5.2).
+// The owner adopted this over the consumers' previous 7-day ceiling on
+// 2026-10-02 (gauntlet#51).
+//
+// As with MaxSessionIdle, this is a cap gate.New enforces, not one
+// SessionStore itself imposes.
+const MaxSessionLifetime = 24 * time.Hour
+
 // Session is deliberately an opaque random ID (see newID), not a JWT --
 // easy to revoke (delete it server-side) and needs no signing-key
 // management. Sessions are in-memory only, unlike accounts themselves:
@@ -99,6 +120,15 @@ func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore {
 		maxLifetime = 0
 	}
 	return &SessionStore{sessions: make(map[string]Session), byUser: make(map[string]map[string]struct{}), ttl: ttl, maxLifetime: maxLifetime}
+}
+
+// Limits returns the store's configured idle timeout and lifetime
+// ceiling (0 meaning no ceiling, as NewSessionStore and maxLifetime's
+// doc comment describe) -- what gate.New reads to refuse a
+// Deps.Sessions store configured outside MaxSessionIdle/
+// MaxSessionLifetime, without exposing the fields themselves.
+func (s *SessionStore) Limits() (idle, ceiling time.Duration) {
+	return s.ttl, s.maxLifetime
 }
 
 // Create starts a new session for userID.

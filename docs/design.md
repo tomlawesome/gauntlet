@@ -578,12 +578,19 @@ a second ingest credential would be a second door.
 
 ```
 BIRDCAGE_AUTH_SECURE_COOKIE   default: true when the dashboard listener has TLS, else false with a startup warning
-BIRDCAGE_SESSION_TTL          default 24h   (mikroview default)
-BIRDCAGE_SESSION_MAX_LIFETIME default 168h  (mikroview default)
+BIRDCAGE_SESSION_TTL          default 1h    (gauntlet.MaxSessionIdle; mikroview's old 24h default is refused by gate.New)
+BIRDCAGE_SESSION_MAX_LIFETIME default 24h   (gauntlet.MaxSessionLifetime; mikroview's old 168h default is refused by gate.New)
 BIRDCAGE_OIDC_ISSUER_URL, _CLIENT_ID, _CLIENT_SECRET_FILE, _SCOPES
 BIRDCAGE_OIDC_ALLOWED_GROUPS, _ALLOWED_EMAILS, _ALLOWED_EMAIL_DOMAINS
 BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header); would be passkey.Config.PublicURL if birdcage ever wired passkeys (§1.6: it does not)
 ```
+
+`gate.New` fails closed on a `Deps.Sessions` built with an idle timeout
+above `gauntlet.MaxSessionIdle` or a lifetime ceiling above
+`gauntlet.MaxSessionLifetime`, or with no ceiling at all -- NIST SP
+800-63B-4 AAL2's own limits, adopted by the owner 2026-10-02
+(gauntlet#51, `docs/security-by-design.md`'s Sessions table). An app
+passing more than that is refused at start-up, not just logged.
 
 Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
 listening, as mikroview's `main.go:1723` does -- `oidc.New` refuses it

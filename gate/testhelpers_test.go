@@ -102,7 +102,7 @@ func newTestGateWithUsers(t *testing.T, users *gauntlet.Store) *Gate {
 	if err != nil {
 		t.Fatalf("OpenTokenStore: %v", err)
 	}
-	sessions := gauntlet.NewSessionStore(24*time.Hour, 0)
+	sessions := gauntlet.NewSessionStore(gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime)
 	limiter := mustNewLoginLimiter(t, 5, 5*time.Minute)
 
 	g, err := New(Config{

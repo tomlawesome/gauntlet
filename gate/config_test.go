@@ -24,7 +24,7 @@ func validDeps(t *testing.T) Deps {
 	}
 	return Deps{
 		Users:    users,
-		Sessions: gauntlet.NewSessionStore(time.Hour, 0),
+		Sessions: gauntlet.NewSessionStore(gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime),
 		Tokens:   tokens,
 		Limiter:  mustNewLoginLimiter(t, 5, time.Minute),
 	}
@@ -85,6 +85,44 @@ func TestNewFailsClosedOnMissingDeps(t *testing.T) {
 				t.Error("expected New to refuse an incomplete Deps")
 			}
 		})
+	}
+}
+
+// TestNewRefusesSessionLimitsOutsideAAL2Caps pins New's refusal of a
+// Deps.Sessions store configured looser than gauntlet.MaxSessionIdle/
+// MaxSessionLifetime (the NIST SP 800-63B-4 AAL2 caps, gauntlet#51):
+// an application wiring its own, longer-lived store must fail at
+// start-up, not silently outlive the limit the rest of the module
+// assumes.
+func TestNewRefusesSessionLimitsOutsideAAL2Caps(t *testing.T) {
+	cases := []struct {
+		name          string
+		idle, ceiling time.Duration
+	}{
+		{"idle exceeds MaxSessionIdle", gauntlet.MaxSessionIdle + time.Minute, gauntlet.MaxSessionLifetime},
+		{"ceiling exceeds MaxSessionLifetime", gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime + time.Hour},
+		{"no ceiling", gauntlet.MaxSessionIdle, 0},
+		{"idle not positive", 0, gauntlet.MaxSessionLifetime},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := validDeps(t)
+			deps.Sessions = gauntlet.NewSessionStore(tc.idle, tc.ceiling)
+			if _, err := New(validConfig(), deps); err == nil {
+				t.Error("expected New to refuse a Deps.Sessions store outside the AAL2 caps")
+			}
+		})
+	}
+}
+
+// TestNewAcceptsSessionLimitsAtExactlyTheAAL2Caps pins the boundary:
+// exactly MaxSessionIdle/MaxSessionLifetime is within the cap, not
+// over it.
+func TestNewAcceptsSessionLimitsAtExactlyTheAAL2Caps(t *testing.T) {
+	deps := validDeps(t)
+	deps.Sessions = gauntlet.NewSessionStore(gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime)
+	if _, err := New(validConfig(), deps); err != nil {
+		t.Errorf("expected New to accept session limits exactly at the AAL2 caps, got %v", err)
 	}
 }
 
