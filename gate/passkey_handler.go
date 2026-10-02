@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -509,9 +510,11 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 	}
 
 	if verified.CloneWarning {
+		// "unknown" when the passkey was removed between FinishLogin's
+		// read of the account and this one.
 		stored := "unknown"
 		for _, pk := range user.Passkeys {
-			if string(pk.ID) == string(verified.CredentialID) {
+			if bytes.Equal(pk.ID, verified.CredentialID) {
 				stored = fmt.Sprint(pk.SignCount)
 			}
 		}
