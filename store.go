@@ -1567,11 +1567,14 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		u.ResetCodeHash = ""
 		u.ResetCodeExpiresAt = time.Time{}
 		u.MustChangePassword = false
-		// And it ends any login lockout: the guesses that caused it were
-		// at the old password, and whoever set the new one should be
-		// able to use it at once. The limiter drops its own count of
-		// those guesses by PasswordChangedAt (see lockoutRecorder).
+		// And it ends any login lockout and the count of lockouts before
+		// it (#44): the guesses that caused them were at the old
+		// password, and whoever set the new one should be able to use it
+		// at once. The limiter drops its own count of those guesses by
+		// PasswordChangedAt (see lockoutRecorder). A disabled sign-in
+		// (LoginDisabledAt) stays disabled: only UnlockLogin lifts it.
 		u.LoginLockedUntil = time.Time{}
+		u.LoginLockoutCount = 0
 		return nil
 	})
 }

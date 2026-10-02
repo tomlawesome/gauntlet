@@ -13,9 +13,10 @@
 // totpSecretBlanked mark and blankedPasskeyCount count that let a
 // blanked copy still answer HasActiveTOTP, HasSecondFactor and
 // PasskeyCount. The stored fields are
-// mikroview's, byte for byte, plus two of gauntlet's own that
-// mikroview's documents lack and read as zero: loginLockedUntil (#19)
-// and sessionsEndedAt (#28). User carries every field mikroview's own
+// mikroview's, byte for byte, plus gauntlet's own that mikroview's
+// documents lack and read as zero: loginLockedUntil (#19),
+// sessionsEndedAt (#28), and loginLockoutCount and loginDisabledAt
+// (#44). User carries every field mikroview's own
 // User carries -- including TOTP, recovery codes, reset codes and
 // passkeys -- because Store persists the whole document on every save
 // (docs/design.md Summary): a field this package didn't know about would
@@ -128,8 +129,10 @@ type User struct {
 	// issued. Checked against, never the only check -- see
 	// User.resetCodeLive.
 	ResetCodeExpiresAt time.Time `json:"resetCodeExpiresAt,omitzero"`
-	// MustChangePassword is set by an admin reset, and cleared only where
-	// that reset ends: SetPassword (a real password is chosen), or
+	// MustChangePassword is set by an admin reset, and by a LoginLimiter
+	// once a run of second-factor failures shows someone else knows the
+	// password (SecondFactorFailed, #44). It is cleared only where a new
+	// password ends it: SetPassword (a real password is chosen), or
 	// LinkOIDCIdentity voiding it for a non-admin going SSO-only, where
 	// there is no local password left to force a change on. Recorded on
 	// the account rather than on the session: the flag has to survive the
@@ -144,6 +147,23 @@ type User struct {
 	// in the same write; LinkOIDCIdentity, which ends sessions but leaves
 	// the admin's password working, does not.
 	LoginLockedUntil time.Time `json:"loginLockedUntil,omitzero"`
+	// LoginLockoutCount is how many login lockouts this account has had
+	// since its last completed sign-in (#44): each lasts three times as
+	// long as the one before (ReserveAccount). Written in the same write
+	// that starts a lockout, never per attempt. A completed sign-in
+	// (LoginLimiter.SignedIn), a new password (SetPassword,
+	// IssueResetCode) and UnlockLogin set it back to zero; a lockout
+	// running out does not. Gauntlet's own field: older documents lack
+	// it and read it as zero.
+	LoginLockoutCount int `json:"loginLockoutCount,omitempty"`
+	// LoginDisabledAt is when this account's local sign-in was disabled
+	// after MaxConsecutiveLoginFailures failures in a row (#44), zero
+	// while it is not. A disabled account is refused at the password step
+	// exactly as a locked one is, for good: it does not time out, no
+	// sign-in can complete while it is in force, and a new password does
+	// not lift it. Only UnlockLogin does. It disables the local password sign-in, not
+	// the account's sessions, its SSO identity or its second factors.
+	LoginDisabledAt time.Time `json:"loginDisabledAt,omitzero"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
