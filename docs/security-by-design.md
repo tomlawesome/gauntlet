@@ -395,6 +395,7 @@ store, keep and protect:
 | 14.3.2 `Cache-Control: no-store` | 2 | Gap | Not set; #46 (no-store/nosniff headers) |
 | 15.1.2 dependency inventory | 2 | Met | `go.sum`, `supply-chain/licence-policy.yml`, `govulncheck` in CI |
 | 15.2.2 resource-heavy functions bounded | 2 | Met | At most 4 concurrent Argon2id (`password.go:66`), limiter before hashing, 64 KiB bodies |
+| Request floods (no ASVS row) | -- | App | Gauntlet limits every route that checks a guessable secret (above) and nothing else: session IDs and bearer tokens are 128 random bits (`id.go`), out of reach of guessing at any rate. A general per-address request limit across all routes belongs in the application's reverse proxy, which sees every request before the application does (owner, 2026-10-02) |
 | 15.3.1 only the needed fields returned | 1 | Met | `blankCredentials`; closed response schemas |
 | 15.3.3 mass assignment | 2 | Met | Each handler decodes a named request struct |
 | 15.3.4 client IP from a trusted field | 2 | App | `ClientIP` |
