@@ -227,6 +227,18 @@ All notable changes to this project are documented in this file.
   never locked out and only changed its own password. New
   `LoginLimiter.AllowAfterReset`, `ReleaseAfterReset` and
   `EndAfterReset` carry this.
+- The token-name and device-id errors say the limit is 64 bytes (fewer
+  characters for non-Latin letters), not 64 characters, so a name
+  refused for length no longer seems to meet the limit it names (#28).
+- `Store.AddPasskey` copies the passkey it is given and the one it
+  returns, so a caller reusing either buffer cannot change the stored
+  credential (#28).
+- A returning SSO sign-in saves `LastLogin` at most hourly, as a
+  password login does, instead of rewriting the accounts document on
+  every sign-in; `GET /api/auth/users` no longer re-reads each account
+  after listing them (#28).
+- The release job's `release-cli` image is pinned by tag and digest
+  instead of `:latest` (#28).
 
 ## [0.1.0] - 2026-09-30
 
