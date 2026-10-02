@@ -1,8 +1,8 @@
-// Runnable usage example for godoc. persist.Memory is the only Backend
-// this module ships (a real one -- file, database table -- is each
-// application's own code; see persist.go's package doc). The example
-// exists to show the version/conflict contract every Backend implementer
-// must honour, not just NewMemory's signature.
+// Runnable usage examples for godoc. A database Backend is each
+// application's own code (see persist.go's package doc); the first
+// example shows the version/conflict contract every implementer must
+// honour, the second how an application wraps its backend so the
+// document is sealed before the backend stores it (#50).
 package persist_test
 
 import (
@@ -40,4 +40,32 @@ func ExampleNewMemory() {
 	// existed: false
 	// version: 1
 	// stale save: true
+}
+
+// ExampleEncrypt wraps a backend -- here Memory, in an application its
+// own database table -- so everything the backend stores is ciphertext
+// under the application's key, and shows the stored form.
+func ExampleEncrypt() {
+	ctx := context.Background()
+	key := make([]byte, persist.MinKeyBytes) // the application reads this from its key file
+	table := persist.NewMemory()
+
+	backend, err := persist.Encrypt(table, key, persist.EncryptOptions{Label: "accounts"})
+	if err != nil {
+		fmt.Println("encrypt:", err)
+		return
+	}
+	if _, err := backend.Save(ctx, []byte(`{"version":3,"users":[]}`), 0); err != nil {
+		fmt.Println("save:", err)
+		return
+	}
+
+	stored, _ := table.Load(ctx)
+	fmt.Println("stored starts with:", string(stored.Payload[:10]))
+	opened, _ := backend.Load(ctx)
+	fmt.Println("opened:", string(opened.Payload))
+
+	// Output:
+	// stored starts with: {"sealed":
+	// opened: {"version":3,"users":[]}
 }

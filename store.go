@@ -86,6 +86,16 @@ var (
 	// ErrNoAdmin is returned by TransferAdmin when no account holds the
 	// role -- nothing to transfer.
 	ErrNoAdmin = errors.New("gauntlet: this deployment has no admin account")
+	// ErrPlaintextAtRest is returned by OpenStore for a backend that
+	// stores the accounts document in the clear -- one that does not
+	// implement persist.AtRest, or answers false -- unless
+	// Options.AllowPlaintextAtRest says the application accepts that
+	// (#50). The document holds every account's TOTP secret, which
+	// cannot be hashed (totp.go), so a dump or backup of such a
+	// backend carries them all; wrapping the backend in persist.Encrypt
+	// is the fix, and the default is to refuse rather than warn because
+	// a warning is read once and a backup is copied for years.
+	ErrPlaintextAtRest = errors.New("gauntlet: the accounts backend stores the document in the clear, TOTP secrets included -- wrap it in persist.Encrypt, or set Options.AllowPlaintextAtRest to accept that")
 
 	// errMultipleAdmins is the decode error for an accounts document
 	// holding more than one admin. No write in this package produces
@@ -206,6 +216,15 @@ type Options struct {
 	// store's lock, but before OpenStore returns, so it must not depend
 	// on the returned *Store.
 	OnSetupCode SetupCodeHandler
+	// AllowPlaintextAtRest accepts a backend that stores the accounts
+	// document in the clear (see ErrPlaintextAtRest): the application
+	// takes on that the TOTP secrets and passkey public keys are only as
+	// protected as that backend's own access controls and backups are.
+	// Not a key, not a migration switch: persist.Encrypt and its
+	// MigratePlaintext option are the way to stop needing this. Memory
+	// and the encrypting backends need no permission, and a nil backend
+	// stores nothing.
+	AllowPlaintextAtRest bool
 }
 
 // Store persists user accounts through a persist.Backend -- an
@@ -513,6 +532,9 @@ var saveTimeout = 5 * time.Second
 // install, silently reopening registration to whoever loads the page
 // next. See persist.Open.
 func OpenStore(b persist.Backend, opts Options) (*Store, error) {
+	if b != nil && !opts.AllowPlaintextAtRest && !protectedAtRest(b) {
+		return nil, ErrPlaintextAtRest
+	}
 	s := &Store{
 		backend:     b,
 		log:         opts.Log,
@@ -545,6 +567,16 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	s.mu.Unlock()
 	s.announceSetupCode(code)
 	return s, nil
+}
+
+// protectedAtRest reports whether b says, through persist.AtRest, that
+// a copy of its storage carries no plaintext. A backend that does not
+// say is taken to store plaintext: the fail-closed reading, since the
+// question is asked before anything is read and the cost of a wrong
+// "yes" is every TOTP secret in a backup.
+func protectedAtRest(b persist.Backend) bool {
+	ar, ok := b.(persist.AtRest)
+	return ok && ar.ProtectedAtRest()
 }
 
 // applyLoaded installs the state decodeAccounts made from a loaded
