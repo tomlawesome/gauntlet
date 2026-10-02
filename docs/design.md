@@ -201,6 +201,11 @@ func (u *User) HasActiveTOTP() bool
 func (u *User) HasSecondFactor() bool
 
 type Options struct { Log *slog.Logger; OnSetupCode SetupCodeHandler }     // new; OnSetupCode #37
+//   ...; PasswordBlocklist PasswordList; ProductName string; BreachCheck BreachChecker  // #43
+type PasswordList interface { Contains(password string) bool }             // *blocklist.List, *blocklist.Refresher
+type BreachChecker interface { Breached(ctx context.Context, password string) (bool, error) } // *blocklist.PwnedChecker
+func PasswordMatchesContext(password string, words ...string) bool        // #43
+const BreachCheckTimeout = 5 * time.Second                                 // #43
 type SetupCodeHandler interface { SetupCode(code string) }; type SetupCodeFunc func(code string) // adapter, as http.HandlerFunc
 func OpenStore(b persist.Backend, opts Options) (*Store, error)            // = OpenWithBackend
 func (s *Store) Persisted() bool
@@ -213,7 +218,7 @@ func (s *Store) DeleteUser(id string) (*User, error)
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error)
 func (s *Store) Admin() *User
 func (s *Store) HasLocalAdmin() bool
-func (s *Store) Authenticate(username, password string, now time.Time) (*User, error)     // also redeems a live reset code
+func (s *Store) Authenticate(username, password string, now time.Time) (*User, error)     // also redeems a live reset code; rechecks a BreachCheckPending account (#43)
 func (s *Store) Get(id string) (*User, bool)
 func (s *Store) ByUsername(username string) (*User, bool)
 func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
@@ -320,7 +325,7 @@ const ResetCodeTTL = 24 * time.Hour
 
 // Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
 // ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
-// ErrPasswordTooShort, ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
+// ErrPasswordTooShort, ErrPasswordBlocked, ErrPasswordContext (#43), ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
 // ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin,
 // ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
 // ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
@@ -483,8 +488,33 @@ public GitHub mirror's `pwned-top10k-current` release, adopts it only
 if its checksum, Ed25519 signature (keys in `blocklist/keys/`) and
 format check out and it is newer than the list in use, and keeps it in
 a directory the app names. `cmd/pwlist` builds the list from HIBP's
-range API in a monthly scheduled pipeline. #43 wires it into password
-checks.
+range API in a monthly scheduled pipeline.
+
+**New-password checks** (#43, `passwordcheck.go`). `Register`,
+`CreateUser` and `SetPassword` -- the only places a local password is
+set -- run the same checks, cheapest first, before the Argon2id hash:
+the 8-character minimum; the account's username and
+`Options.ProductName`, whole-password, ignoring case, punctuation and
+digits around them (`PasswordMatchesContext`; gate adds its own
+`Config.ProductName` on its routes) -> `ErrPasswordContext`; the
+common-password list, as typed and in lower case
+(`Options.PasswordBlocklist`, default `blocklist.Embedded()`) ->
+`ErrPasswordBlocked`; and, only when the application sets
+`Options.BreachCheck`, HIBP's range API by k-anonymity
+(`blocklist.PwnedChecker`: the first 5 hex characters of the SHA-1
+sent with `Add-Padding`, suffixes compared locally, padding entries of
+count 0 ignored) -> `ErrPasswordBlocked`. The live check is bounded by
+`BreachCheckTimeout` (5 s) even if the checker ignores its context.
+When it cannot answer, the password is accepted against the local
+list, the miss is logged, and `User.BreachCheckPending` is set (accounts
+document version 5). `Authenticate`, after the password verifies,
+rechecks a marked account: a hit sets `MustChangePassword` and
+`SessionsEndedAt` in one write, as `requirePasswordChange` does, since
+the change-password door then asks for no current password; a clean
+answer clears the mark; no answer leaves it. A new password, a reset
+code and an SSO link that removes the local password all settle the
+mark. SSO-provisioned accounts never reach any of this (owner,
+2026-10-02, on #43).
 
 ### 1.4 `gauntlet/oidc`
 

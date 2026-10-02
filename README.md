@@ -44,6 +44,24 @@ admin, err := store.Register("alice", password, time.Now()) // first account -> 
 user, err := store.Authenticate("alice", password, time.Now())
 ```
 
+Every new local password is checked before it is set (#43): not the
+username or the product's name (`Options.ProductName`), not on the
+common-password list (`Options.PasswordBlocklist`, by default the one
+built into the release, `blocklist.Embedded()`), and -- only if the app
+opts in, since it is an outbound call -- not in Have I Been Pwned's
+breach corpus:
+
+```go
+hibp, err := blocklist.NewPwnedChecker(blocklist.PwnedConfig{}) // only a 5-character hash prefix leaves the process
+store, err := gauntlet.OpenStore(myBackend, gauntlet.Options{
+	Log: logger, ProductName: "birdcage", BreachCheck: hibp,
+})
+```
+
+If HIBP cannot be reached the password is accepted against the built-in
+list and checked again at the account's next sign-in; a hit then forces
+a password change. See [docs/design.md](docs/design.md) §1.3.
+
 Runnable, checked examples for the entry points above, plus
 `NewSessionStore`, `OpenTokenStore` and `NewLoginLimiter`, are in
 [example_test.go](example_test.go) and

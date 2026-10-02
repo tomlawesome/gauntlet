@@ -56,9 +56,16 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if g.refuseProductName(w, r, req.NewPassword) {
+		return
+	}
 	if err := g.deps.Users.SetPassword(user.Username, req.NewPassword, now); err != nil {
-		if err == gauntlet.ErrPasswordTooShort {
+		switch err {
+		case gauntlet.ErrPasswordTooShort:
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		case gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext:
+			g.writeAuthError(w, r, err, http.StatusBadRequest)
 			return
 		}
 		// The 500 tells the caller nothing by design; the log is the
@@ -149,5 +156,19 @@ func (g *Gate) recheckSecondFactor(w http.ResponseWriter, user *gauntlet.User, c
 		return false
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
+	return true
+}
+
+// refuseProductName writes ErrPasswordContext's 400, and reports true,
+// for a new password that is Config.ProductName or a simple derivative
+// of it (gauntlet.PasswordMatchesContext, #43). The store checks the
+// account's own username and gauntlet.Options.ProductName itself; an
+// application that left that empty still has the name refused here. Every
+// route that sets a password calls it before the store.
+func (g *Gate) refuseProductName(w http.ResponseWriter, r *http.Request, password string) bool {
+	if !gauntlet.PasswordMatchesContext(password, g.cfg.ProductName) {
+		return false
+	}
+	g.writeAuthError(w, r, gauntlet.ErrPasswordContext, http.StatusBadRequest)
 	return true
 }

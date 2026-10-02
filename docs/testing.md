@@ -29,6 +29,15 @@ approved one as a fixture. What only the real producer can show -- the
 real corpus's size and counts -- is checked by the build's own sanity
 bars on every scheduled run.
 
+The new-password checks (#43) are tested the same way: the live check's
+`blocklist.PwnedChecker` against an `httptest` fake of the range API
+(including that a request carries only the 5-character prefix), and the
+store and gate with an injected list and an injected breach checker,
+since the embedded list is still the empty placeholder. The range
+response's shape in those fakes is from HIBP's API documentation, not a
+recorded response; a test against the real API would be the only proof
+that shape still holds.
+
 ## Compatibility checks
 
 ADR-0002 promises that from v0.1.0 nothing callers rely on is removed

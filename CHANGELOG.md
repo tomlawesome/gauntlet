@@ -59,8 +59,36 @@ All notable changes to this project are documented in this file.
   checksum and signature verify and it is newer than the one in use,
   and keeps it in a directory the application names. Until the first
   signed list is published, `Embedded()` is empty and blocks nothing,
-  and a release refuses to tag. #43 will use it to refuse common
-  passwords.
+  and a release refuses to tag. `Refresher.Contains` lets a refresher
+  stand wherever a list is expected.
+- New passwords are checked before they are set (#43): `Register`,
+  `CreateUser` and `SetPassword`, and so gate's register, create-user
+  and change-password routes, refuse a password that is on the
+  common-password list (`Options.PasswordBlocklist`, by default
+  `blocklist.Embedded()`; a `*blocklist.Refresher` works too), in any
+  case, with `ErrPasswordBlocked`, and one that is the account's
+  username or the product's name, give or take case, punctuation and
+  digits around it, with `ErrPasswordContext` (`PasswordMatchesContext`;
+  new `Options.ProductName`, and gate adds its `Config.ProductName`
+  itself). gate answers both with `400` and a plain reason. The new
+  `PasswordList` interface is what the list option takes. Until the
+  first signed list ships, the embedded list blocks nothing.
+- An optional live breach check (#43): set `Options.BreachCheck` to a
+  `blocklist.PwnedChecker` (`NewPwnedChecker`, `PwnedConfig`,
+  `DefaultPwnedURL`) and every new password that passed the local
+  checks is looked up in Have I Been Pwned's Pwned Passwords by
+  k-anonymity -- only the first five hex characters of its SHA-1 are
+  sent, with padding requested -- and refused with
+  `ErrPasswordBlocked` on a hit. Each check is bounded by
+  `BreachCheckTimeout` (5 s), whatever the checker does. When HIBP
+  cannot answer, the password is accepted against the embedded list,
+  the miss is logged, and the account is marked (new
+  `User.BreachCheckPending`); its next sign-in rechecks the password,
+  and a hit sets `MustChangePassword` and ends every session on the
+  account, while a clean answer clears the mark. SSO accounts are never
+  checked. Off by default: gauntlet makes no outbound call the
+  application did not ask for. `BreachChecker` is the interface the
+  option takes.
 - `cmd/pwlist` and three CI jobs, run by a monthly pipeline schedule,
   build that list from HIBP, sign it on a dedicated runner, and publish
   it to the GitLab package registry and the GitHub mirror's releases.
@@ -279,14 +307,15 @@ All notable changes to this project are documented in this file.
   That run is kept in memory and starts again after a restart. Still
   one save as a lockout starts and one as it clears, never one per
   guess.
-- The accounts document is now version 4 (#44): version 3 added
-  `loginLockoutCount` and `loginDisabledAt`, and version 4
-  `knownBrowsers`. Version-1, -2 and -3 documents open unchanged with
-  the fields they lack empty, and are written as version 4 on their
-  next save; no migration is needed. No earlier build -- v0.1.0, or a
-  development build that wrote version 3 -- can open an accounts
-  document once this version has saved it, so keep a copy before
-  upgrading if a rollback is possible.
+- The accounts document is now version 5: version 3 (#44) added
+  `loginLockoutCount` and `loginDisabledAt`, version 4 (#44)
+  `knownBrowsers`, and version 5 (#43) `breachCheckPending`.
+  Version-1 to -4 documents open unchanged with the fields they lack
+  empty, and are written as version 5 on their next save; no migration
+  is needed. No earlier build -- v0.1.0, or a development build that
+  wrote version 3 or 4 -- can open an accounts document once this
+  version has saved it, so keep a copy before upgrading if a rollback
+  is possible.
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

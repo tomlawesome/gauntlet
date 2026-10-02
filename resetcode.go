@@ -196,6 +196,9 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		u.MustChangePassword = true
 		u.PasswordChangedAt = now
 		u.SessionsEndedAt = now
+		// The password a breach recheck was owed for is gone; the one
+		// chosen after the code gets its own check (#43).
+		u.BreachCheckPending = false
 		// The reset code is the account's password now, so a lockout
 		// earned by guessing at the old one ends here, as in
 		// SetPassword: otherwise the owner could not use the code until

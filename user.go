@@ -139,6 +139,16 @@ type User struct {
 	// login that redeems the code, and outlive a restart (sessions do
 	// not).
 	MustChangePassword bool `json:"mustChangePassword,omitempty"`
+	// BreachCheckPending marks an account whose password was accepted
+	// while the live breach check (Options.BreachCheck) could not
+	// answer (#43). The next sign-in with the password checks it again
+	// (Authenticate): a hit sets MustChangePassword, a clean answer
+	// clears this. A new password (SetPassword) sets or clears it by its
+	// own check; a reset code and an SSO link that removes the local
+	// password clear it. Gauntlet's own field: older documents lack it
+	// and read it as false, since no build that wrote them deferred a
+	// check.
+	BreachCheckPending bool `json:"breachCheckPending,omitempty"`
 	// LoginLockedUntil is when a login lockout on this account ends, zero
 	// when none is in force. Written by a LoginLimiter only as a lockout
 	// begins or clears, never per failed attempt (see ReserveAccount), so

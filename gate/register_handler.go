@@ -67,6 +67,9 @@ func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	g.deps.Limiter.Release(ipKey, now)
 
+	if g.refuseProductName(w, r, req.Password) {
+		return
+	}
 	user, err := g.deps.Users.Register(req.Username, req.Password, now)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -75,7 +78,8 @@ func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusConflict
 		case gauntlet.ErrNotPersisted:
 			status = http.StatusServiceUnavailable
-		case gauntlet.ErrPasswordTooShort, gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
+		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
+			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
 			status = http.StatusBadRequest
 		}
 		g.writeAuthError(w, r, err, status)

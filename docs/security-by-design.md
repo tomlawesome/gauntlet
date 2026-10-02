@@ -184,18 +184,18 @@ it says so instead of repeating the reasoning.
 | Req | Level | Status | Evidence |
 |---|---|---|---|
 | 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44); a browser that completed a sign-in keeps a small allowance of its own during a lockout, so a stranger cannot cheaply lock the owner out, and its failures count toward the 50 (`knownbrowser.go`, `LoginLimiter.ReserveKnownBrowser`, #44) |
-| 6.1.2, 6.2.11 context-specific word list | 2 | Gap | #43 (password blocklist). See 800-63B §3.1.1.2 |
+| 6.1.2, 6.2.11 context-specific word list | 2 | Met | The list is the account's username and the product's name (`Options.ProductName`; gate adds `Config.ProductName` on its routes), matched whole-password, ignoring case, punctuation and digits around it (`PasswordMatchesContext`, `passwordcheck.go`), refused with `ErrPasswordContext` (#43). See 800-63B §3.1.1.2 |
 | 6.1.3, 6.3.4 all pathways documented, strength consistent | 2 | Met, with one deviation | Pathways: password then TOTP/passkey/recovery code; reset code then the same second factor (`gate/login_handler.go:129-172`); SSO; bearer token; setup code. All in `docs/api/auth.yaml`. Deviation: an SSO sign-in creates a session with no local second factor (`gate/oidc_handler.go:292`); see 6.8.4 |
 | 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met | `store.go:39` `minPasswordLength = 8`, conforming because a second factor is mandatory for every local-password account (#49); see 800-63B §3.1.1.2 |
 | 6.2.2 users can change their password | 1 | Met | `POST /api/auth/password`, `gate/password_handler.go` |
 | 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code, or (since #44) a sign-in with both factors, just proved the account: both causes end every earlier session in the write that sets the flag |
-| 6.2.4 checked against the top 3000 passwords | 1 | Gap | #43 (password blocklist) |
+| 6.2.4 checked against the top 3000 passwords | 1 | Partial | The check is built: every new password is checked, as typed and in lower case, against `Options.PasswordBlocklist`, by default `blocklist.Embedded()`, the 10,000 most prevalent Pwned Passwords (#43, ADR-0005), and refused with `ErrPasswordBlocked`. Until the first signed list ships (#52's owner setup) the embedded copy is empty and blocks nothing; v0.2.0 alone may ship so, and every later release refuses to tag without a list (`scripts/blocklist-age-check.sh`) |
 | 6.2.5 no composition rules | 1 | Met | Length is the only rule (`store.go:962`, `:1532`) |
 | 6.2.6, 6.2.7 masking, paste, password managers | 1 | App | Frontend; gauntlet imposes nothing that blocks them |
 | 6.2.8 verified exactly as received | 1 | Met | `password.go:92`, `:159`: raw bytes to Argon2id, no trimming or case change. See 800-63B §3.1.1.2 on NFC |
 | 6.2.9 at least 64 characters permitted | 2 | Met | No maximum; the 64 KiB body limit (`gate/httpjson.go:37`) is the only bound |
-| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, or five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44) |
-| 6.2.12 breached-password check | 2 | Gap | #43 (password blocklist) |
+| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44), or a sign-in recheck that finds the password in a breach (#43) |
+| 6.2.12 breached-password check | 2 | Met, opt-in | `Options.BreachCheck` with `blocklist.PwnedChecker`: HIBP's range API by k-anonymity (only the first 5 hex characters of the SHA-1 are sent, with `Add-Padding`), bounded by `BreachCheckTimeout` (5 s), refused with `ErrPasswordBlocked`. An outbound call, so the application turns it on. When HIBP cannot answer, the password is accepted against the embedded list, the miss logged, and the account marked (`User.BreachCheckPending`); the next sign-in rechecks, and a hit sets `MustChangePassword` and ends every session (owner, 2026-10-02, #43). SSO accounts have no local password and are never checked |
 | 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `knownbrowser_test.go`, `gate/knownbrowser_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
 | 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
@@ -409,10 +409,11 @@ store, keep and protect:
 
 ### Summary
 
-At L2 gauntlet meets every requirement except: password blocklists
-(6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
-decisions (16.2.1, 16.3.1–16.3.3). Each has an issue; the password
-blocklist needs the owner. The lockout shape from the 800-63B review is
+At L2 gauntlet meets every requirement except: the common-password
+list's data (6.2.4: the check is built, the first signed list is #52's
+owner setup), logging of refused attempts and decisions (16.2.1,
+16.3.1–16.3.3). Each has an issue. The breached-password check (6.2.12)
+is met where the application turns on the live HIBP check. The lockout shape from the 800-63B review is
 settled (#44). Three deviations are recorded rather than fixed: the TOTP
 acceptance window, the SSO sign-in's reliance on the IdP's policy, and
 ending one session without re-authentication (7.5.2, owner 2026-10-02).
@@ -466,12 +467,12 @@ already holds the evidence, the row points at it.
 | 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms | `minPasswordLength = 8` (`store.go:39`), conforming unconditionally because a second factor is mandatory for every local-password account and cannot be turned off (#49) |
 | Permit at least 64 characters; accept printing ASCII, space and Unicode; count code points (SHOULD) | Conforms | No maximum, no character rules; length counted in characters (`store.go:962`, `:1532`) |
 | No other composition rules (SHALL NOT) | Conforms | None |
-| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too and sign the account out everywhere (`LoginLimiter.SecondFactorFailed`, #44) |
+| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too and sign the account out everywhere (`LoginLimiter.SecondFactorFailed`, #44); so does a sign-in whose breach recheck finds the password in HIBP (`Store.Authenticate`, #43) |
 | No hints, no knowledge-based questions | Conforms | None exist |
 | Verify the whole password, no truncation | Conforms | `password.go:92`, `:159` |
 | NFC normalisation before hashing (SHOULD) | Deviation | Not applied: ASVS 6.2.8 asks for the bytes exactly as received, and both consumers' operators type on their own devices. A password typed on a device that composes accented characters differently will not match; documented, not fixed |
-| Blocklist of common, expected and compromised passwords, whole-password match, reason given on refusal (SHALL) | Gap | None. #43 (password blocklist); owner decision on the list |
-| Guidance on choosing a strong password (SHALL) | Application | Frontend copy; gauntlet returns a plain "too short" |
+| Blocklist of common, expected and compromised passwords, whole-password match, reason given on refusal (SHALL) | Partial | Built (#43): context words (username, product name), the embedded common-password list, and the opt-in live HIBP check, each whole-password, each refusal a plain reason (`ErrPasswordContext`, `ErrPasswordBlocked`, mapped to `400` by gate). The embedded list is empty until the first signed list ships (#52's owner setup, ADR-0005); an application that turns on the HIBP check is covered meanwhile |
+| Guidance on choosing a strong password (SHALL) | Application | Frontend copy; gauntlet returns a plain reason for each refusal: too short, common or breached, too close to the username or product name |
 | Rate limiting on the account (SHALL, §3.2.2) | Conforms | Below |
 | Password managers and paste allowed | Conforms | Nothing server-side interferes |
 | Salted and hashed with a password hashing scheme, cost as high as practical, parameters stored with each hash, salt at least 32 bits | Conforms | Argon2id, RFC 9106 §4 second profile, 128-bit salt, parameters in the hash string (`password.go:28-48`, `:94`). ASVS 11.4.2 |
@@ -565,9 +566,9 @@ stand alone, which these never do.
 
 ### Summary of findings
 
-Conforms on everything above except: the password blocklist (#43, owner
-decision on the list); refused attempts and binding sources not logged
-(#45). Documented
+Conforms on everything above except: the common-password list's data
+(the check is built, #43; the first signed list is #52's owner setup);
+refused attempts and binding sources not logged (#45). Documented
 deviations: no NFC normalisation, no pepper, no out-of-band
 notifications, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),

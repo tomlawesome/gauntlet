@@ -169,18 +169,7 @@ func newRefresher(cfg RefreshConfig, keys func() (listsig.Keyring, error), embed
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{
-			Timeout: 2 * time.Minute,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if req.URL.Scheme != "https" {
-					return errors.New("blocklist: refused a redirect away from https")
-				}
-				if len(via) >= 5 {
-					return errors.New("blocklist: too many redirects")
-				}
-				return nil
-			},
-		}
+		client = &http.Client{Timeout: 2 * time.Minute, CheckRedirect: httpsRedirectsOnly}
 	}
 	log := cfg.Log
 	if log == nil {
@@ -199,6 +188,18 @@ func newRefresher(cfg RefreshConfig, keys func() (listsig.Keyring, error), embed
 	r.current.Store(embedded)
 	r.loadStored()
 	return r, nil
+}
+
+// httpsRedirectsOnly is the default clients' redirect policy: follow
+// up to five redirects, each to https.
+func httpsRedirectsOnly(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return errors.New("blocklist: refused a redirect away from https")
+	}
+	if len(via) >= 5 {
+		return errors.New("blocklist: too many redirects")
+	}
+	return nil
 }
 
 // Current returns the list in use: the newest one adopted, or the copy

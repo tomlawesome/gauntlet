@@ -69,6 +69,9 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if g.refuseProductName(w, r, req.Password) {
+		return
+	}
 	user, err := g.deps.Users.CreateUser(req.Username, req.Password, role, g.now())
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -77,7 +80,8 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusConflict
 		case gauntlet.ErrNotPersisted:
 			status = http.StatusServiceUnavailable
-		case gauntlet.ErrPasswordTooShort, gauntlet.ErrSingleAdmin, gauntlet.ErrInvalidRole,
+		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
+			gauntlet.ErrSingleAdmin, gauntlet.ErrInvalidRole,
 			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
 			status = http.StatusBadRequest
 		}

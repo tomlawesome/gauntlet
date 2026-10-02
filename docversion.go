@@ -28,8 +28,13 @@ import (
 // the field issued, so the allowance starts at each browser's next
 // completed sign-in. A build that reads up to version 3 refuses a
 // version-4 document rather than drop the field on its next save.
+// Version 5 (#43) added User.BreachCheckPending; an older document reads
+// it as false -- no breach recheck owed -- which is what it meant, since
+// no build that wrote it accepted a password the live check had not
+// answered for. A build that reads up to version 4 refuses a version-5
+// document rather than drop a recheck that is owed.
 const (
-	accountsDocumentVersion = 4
+	accountsDocumentVersion = 5
 	tokensDocumentVersion   = 1
 )
 

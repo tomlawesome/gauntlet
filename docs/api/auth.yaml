@@ -130,7 +130,9 @@ paths:
         address by the login limiter (`429` at the limit), and nothing is
         created. The code is typed with or without its dashes, in either
         case. Refused once any account exists. Reachable while no account
-        exists; still needs the CSRF header.
+        exists; still needs the CSRF header. The password is checked as
+        every new password is (see `changePassword`); a refused one is
+        `400`, with the reason.
       security:
         - {}
       parameters:
@@ -502,11 +504,22 @@ paths:
       summary: Change the caller's own password
       description: |
         Needs `currentPassword` unless the account must change its password
-        -- an administrator reset it, or five second-factor steps in a row
-        failed -- (then only `newPassword`; this is the one route such a
-        session can reach, and both causes ended every earlier session, so
+        -- an administrator reset it, five second-factor steps in a row
+        failed, or a sign-in found the password in a known breach --
+        (then only `newPassword`; this is the one route such a
+        session can reach, and every cause ended every earlier session, so
         it was opened by a sign-in made since). The re-check is rate-limited per account. Ends every
         session on the account and sets a fresh session cookie.
+
+        A new password is refused with `400`, and a plain-text reason, when
+        it is under 8 characters; on the common-password list, in any
+        case; found in a known breach by the live Have I Been Pwned check,
+        where the application turned that on; or the account's username
+        or the product's name, give or take case, punctuation and digits
+        around it (#43). When the live check cannot be reached the
+        password is accepted and checked again at the next sign-in, which
+        sets `mustChangePassword` on a hit. The same checks apply to
+        `register` and `createUser`.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1100,7 +1113,7 @@ paths:
     post:
       operationId: createUser
       summary: Create an account (admin)
-      description: The only way to add an account once registration has closed. `role` defaults to `user`; `admin` is refused (one admin per deployment).
+      description: The only way to add an account once registration has closed. `role` defaults to `user`; `admin` is refused (one admin per deployment). The password is checked as every new password is (see `changePassword`); a refused one is `400`, with the reason.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1618,9 +1631,10 @@ components:
         X-Auth-Gate:
           description: |
             Present only when the session is stopped at a door:
-            `must-change-password` (an administrator reset the account, or
+            `must-change-password` (an administrator reset the account,
             five second-factor steps in a row failed, which says someone
-            else knows the password; only `POST /api/auth/password` is
+            else knows the password, or a sign-in found the password in a
+            known breach; only `POST /api/auth/password` is
             reachable) or
             `must-enrol-factor` (the account has no second factor yet --
             every local-password account must hold one; only the TOTP
@@ -1962,7 +1976,7 @@ components:
           type: boolean
         mustChangePassword:
           type: boolean
-          description: The session is stopped at the change-password door -- an administrator reset the account, or five second-factor steps in a row failed. The account records which of the two in neither case, so a frontend should not say.
+          description: The session is stopped at the change-password door -- an administrator reset the account, five second-factor steps in a row failed, or a sign-in found the password in a known breach. The account does not record which, so a frontend should not say.
         mustEnrolSecondFactor:
           type: boolean
           description: True only when the account has no second factor yet -- every local-password account must hold one.
