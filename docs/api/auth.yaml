@@ -27,7 +27,8 @@ info:
       value.
     - `401` "unauthorized" on every route that needs a session and has
       none. Exempt from that: session, register, login, login/factor,
-      login/factor/begin, logout and the two `GET /api/auth/oidc/*` routes.
+      login/factor/begin, logout, unlock and the two `GET /api/auth/oidc/*`
+      routes.
     - `403` on a session-gated route when the account's role is not one
       gauntlet knows, when it is stopped at one of two doors (see the
       `X-Auth-Gate` header), or, on the admin routes, when the caller is
@@ -409,14 +410,80 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/unlock:
+    post:
+      operationId: unlockWithCode
+      summary: Lift the admin's disabled sign-in with the one-time code
+      description: |
+        When fifty failed sign-ins in a row have disabled the admin's
+        sign-in and no other admin can unlock it, a server that starts in
+        that state writes a one-time unlock code to its log (#44). This
+        lifts the disable, and nothing else: it issues no session and does
+        not touch the password, the second factors or the sessions. The
+        admin then signs in as normal with their existing password and
+        second factor. The code is single use -- it stops working once
+        the disable is lifted by any means -- and is typed with or without
+        its dashes, in either case. Every refusal of the username or code
+        is the same `401`, whatever was wrong, counted against the client
+        address by the login limiter (`429` at the limit). Reachable
+        without a session; still needs the CSRF header.
+      security:
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnlockCodeRequest"
+      responses:
+        "200":
+          description: The disable is lifted; the admin can now sign in.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, unlocked]
+                properties:
+                  username:
+                    type: string
+                  unlocked:
+                    const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: The username or unlock code is wrong, or no code is outstanding.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "403":
+          $ref: "#/components/responses/CSRFRefused"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/password:
     post:
       operationId: changePassword
       summary: Change the caller's own password
       description: |
-        Needs `currentPassword` unless an administrator reset the account
-        (then only `newPassword`; this is the one route such a session can
-        reach). The re-check is rate-limited per account. Ends every
+        Needs `currentPassword` unless the account must change its password
+        -- an administrator reset it, or five second-factor steps in a row
+        failed -- (then only `newPassword`; this is the one route such a
+        session can reach, and both causes ended every earlier session, so
+        it was opened by a sign-in made since). The re-check is rate-limited per account. Ends every
         session on the account and sets a fresh session cookie.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
@@ -1170,6 +1237,58 @@ paths:
               schema:
                 $ref: "#/components/schemas/TextError"
 
+  /api/auth/users/{id}/unlock:
+    post:
+      operationId: unlockUser
+      summary: Lift another account's disabled sign-in or lockout (admin)
+      description: |
+        Lifts a disabled sign-in (fifty failed sign-ins in a row, #44),
+        ends any login lockout and clears the count of lockouts, so the
+        account signs in as one that never failed, with the password and
+        second factor it already has. Nothing else changes. Answers `200`
+        whether or not anything was lifted. Refused for the caller's own
+        account: an admin whose own sign-in is disabled uses the unlock
+        code in the server's log (`POST /api/auth/unlock`). Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Unlocked, or there was nothing to lift.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, wasDisabled, wasLockedOut]
+                properties:
+                  username:
+                    type: string
+                  wasDisabled:
+                    type: boolean
+                    description: The account's sign-in had been disabled.
+                  wasLockedOut:
+                    type: boolean
+                    description: A login lockout was in force.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NoSuchUser"
+        "409":
+          description: The account is the caller's own.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/users/{id}/totp:
     delete:
       operationId: clearUserTOTP
@@ -1466,8 +1585,10 @@ components:
         X-Auth-Gate:
           description: |
             Present only when the session is stopped at a door:
-            `must-change-password` (an administrator reset the account;
-            only `POST /api/auth/password` is reachable) or
+            `must-change-password` (an administrator reset the account, or
+            five second-factor steps in a row failed, which says someone
+            else knows the password; only `POST /api/auth/password` is
+            reachable) or
             `must-enrol-factor` (the account has no second factor yet --
             every local-password account must hold one; only the TOTP
             enrol and confirm routes and the passkey register begin and
@@ -1567,6 +1688,16 @@ components:
         password:
           type: string
         setupCode:
+          type: string
+          description: The one-time code from the server's log, with or without dashes, in either case.
+    UnlockCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [username, unlockCode]
+      properties:
+        username:
+          type: string
+        unlockCode:
           type: string
           description: The one-time code from the server's log, with or without dashes, in either case.
     PasswordRequest:
@@ -1787,6 +1918,7 @@ components:
           type: boolean
         mustChangePassword:
           type: boolean
+          description: The session is stopped at the change-password door -- an administrator reset the account, or five second-factor steps in a row failed. The account records which of the two in neither case, so a frontend should not say.
         mustEnrolSecondFactor:
           type: boolean
           description: True only when the account has no second factor yet -- every local-password account must hold one.

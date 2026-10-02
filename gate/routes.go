@@ -10,7 +10,8 @@ import (
 // paths, request and response bodies (docs/design.md §1.5): session,
 // register, login (single- and second-factor step), logout, logout-all,
 // the caller's own session list and end-one-session route, password,
-// users list/create/delete/reset-password, TOTP enrol/confirm/delete
+// the lone-admin unlock-code route (#44),
+// users list/create/delete/reset-password/unlock, TOTP enrol/confirm/delete
 // plus the admin clear route, recovery-codes regenerate, the passkey
 // list/register/rename/delete routes, the passkey login begin and the
 // admin clear route (G8, ADR-0004; all 404 while Deps.Passkeys is nil),
@@ -32,6 +33,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("POST "+changePasswordPath, g.handleChangePassword)
 	mux.HandleFunc("GET "+sessionsPath, g.handleSessionsList)
 	mux.HandleFunc("DELETE "+sessionsPath+"/{ref}", g.handleSessionEnd)
+	mux.HandleFunc("POST "+unlockPath, g.handleUnlockCode)
 
 	mux.HandleFunc("POST "+totpEnrolPath, g.handleTOTPEnrol)
 	mux.HandleFunc("POST "+totpConfirmPath, g.handleTOTPConfirm)
@@ -53,6 +55,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.Handle("POST /api/auth/users", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleCreateUser)))
 	mux.Handle("DELETE /api/auth/users/{id}", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleDeleteUser)))
 	mux.Handle("POST /api/auth/users/{id}/reset-password", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleResetPassword)))
+	mux.Handle("POST /api/auth/users/{id}/unlock", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleUnlockUser)))
 	mux.Handle("DELETE /api/auth/users/{id}/totp", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handleTOTPAdminClear)))
 	mux.Handle("DELETE /api/auth/users/{id}/passkeys", RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(g.handlePasskeysAdminClear)))
 

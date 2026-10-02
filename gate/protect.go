@@ -33,6 +33,7 @@ const (
 	totpEnrolPath    = "/api/auth/totp/enrol"
 	totpConfirmPath  = "/api/auth/totp/confirm"
 	sessionsPath     = "/api/auth/sessions"
+	unlockPath       = "/api/auth/unlock"
 
 	passkeysPath              = "/api/auth/passkeys"
 	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"
@@ -58,6 +59,12 @@ const (
 // the callback's real protection against a forged request, not the
 // session check); isSafeMethod already exempts both from the CSRF-header
 // check since they're GET.
+//
+// POST /api/auth/unlock is how the admin, disabled after a run of failed
+// sign-ins with no other admin to unlock them, redeems the one-time code
+// from the server's log (#44): by definition they cannot sign in to
+// reach it. It only lifts the disable; it issues no session. Not in
+// bootstrapExemptPaths: with no account there is nothing to unlock.
 var exemptPaths = map[string]bool{
 	"/api/healthz":       true,
 	sessionPath:          true,
@@ -68,6 +75,7 @@ var exemptPaths = map[string]bool{
 	loginFactorBeginPath: true,
 	oidcLoginPath:        true,
 	oidcCallbackPath:     true,
+	unlockPath:           true,
 }
 
 // bootstrapExemptPaths is the narrower set reachable while no account
@@ -340,8 +348,13 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			http.Error(w, "account role is not recognized", http.StatusForbidden)
 			return
 		}
+		// Two things set MustChangePassword: an administrator's reset,
+		// and a run of failed second-factor steps that says someone else
+		// knows the password (gauntlet.LoginLimiter.SecondFactorFailed,
+		// #44). The account carries no record of which, so the message
+		// names neither.
 		if user.MustChangePassword && path != changePasswordPath {
-			writeForcedAuthGate(w, authGateMustChangePassword, "an administrator reset this account -- set a new password before going any further")
+			writeForcedAuthGate(w, authGateMustChangePassword, "this account's password must be changed -- set a new password before going any further")
 			return
 		}
 		// The forced-enrolment door (mikroview's #1253), always shut for

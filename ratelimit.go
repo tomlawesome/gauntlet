@@ -621,6 +621,46 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 	}
 }
 
+// UnlockLogin is Store.UnlockLogin for a process running this limiter:
+// it lifts a disabled sign-in on accountID and clears its lockout and
+// count of lockouts on the record, in one write, and also drops what
+// this limiter holds about the account that the record does not -- its
+// count of attempts in the current window, and any lockout decision it
+// has yet to save (#44). Without that, the account would stay refused
+// by this process's count until the window passed, or have a disable
+// that failed to save written back over the unlock by the next refused
+// attempt's retry.
+//
+// The run of second-factor failures is kept: an unlock is not a
+// completed sign-in, and the password those failures followed has not
+// changed.
+//
+// For the *Store the write is the same one Store.UnlockLogin makes, and
+// refused the same way: ErrUserNotFound for an account that does not
+// exist, nothing written when there is nothing to clear. With nil or any
+// other AccountLockouts, the lockout's end is cleared there and the rest
+// in this limiter's memory (memoryLockouts).
+//
+// Taken under persistMu, so a save this limiter already had in flight
+// lands before the unlock rather than after it. An attempt that read the
+// record just before the unlock can still decide a lockout over the
+// account's old count and save it just after: that fails closed -- the
+// account is locked again, never opened wider -- and another unlock
+// clears it.
+//
+// Deciding who may unlock whom is the caller's job, as for the store.
+func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) error {
+	rec := l.recorder(lockouts)
+
+	l.persistMu.Lock()
+	defer l.persistMu.Unlock()
+	l.mu.Lock()
+	delete(l.accounts, loginBucket+accountID)
+	delete(l.wantLockout, accountID)
+	l.mu.Unlock()
+	return rec.setLockoutRecord(accountID, lockoutState{})
+}
+
 // SecondFactorFailed records that a second-factor step on accountID was
 // refused -- a wrong TOTP or recovery code, a passkey assertion that did
 // not verify -- after the right password had brought the caller there.
@@ -630,8 +670,11 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 //
 // At secondFactorFailuresForPasswordChange of them someone other than
 // the owner very likely knows the password, so the account is set to
-// MustChangePassword (#44), in one write: the owner, once they next
-// sign in, must replace it before going any further. That write takes
+// MustChangePassword (#44), in one write that also ends every session
+// the account holds (SessionsEndedAt): the owner, once they next sign in
+// with both factors, must replace it before going any further, and no
+// session from before the run reaches the change-password door, which
+// asks for no current password. That write takes
 // lockouts being the *Store (passwordChangeRequirer); with any other,
 // nothing is set. A password changed since the run began starts it
 // again: those failures followed the old one.
@@ -664,7 +707,7 @@ func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID st
 	if !due || !ok {
 		return
 	}
-	err := pc.requirePasswordChange(accountID)
+	err := pc.requirePasswordChange(accountID, now)
 	if err != nil {
 		// Not marked done: the next failure in the run tries again.
 		if log != nil && !errors.Is(err, ErrUserNotFound) {

@@ -225,6 +225,15 @@ type Options struct {
 	// and the encrypting backends need no permission, and a nil backend
 	// stores nothing.
 	AllowPlaintextAtRest bool
+	// OnUnlockCode receives the one-time unlock code (CheckUnlockCode)
+	// that lifts a disabled sign-in on the admin's account when no other
+	// admin can (#44), with the admin's username, whenever a persisted
+	// store opens to find it so. When nil the code goes to Log instead,
+	// as one Warn line. A CLI that opens the store for one command
+	// passes one that does nothing, as for OnSetupCode: a code its own
+	// process makes is no use to the running server. Called outside the
+	// store's lock, before OpenStore returns.
+	OnUnlockCode UnlockCodeHandler
 }
 
 // Store persists user accounts through a persist.Backend -- an
@@ -284,6 +293,16 @@ type Store struct {
 	// (reloadIfStale). Memory only: never part of the document.
 	setupCodeHash []byte
 	onSetupCode   SetupCodeHandler
+
+	// unlockCodeHash is the SHA-256 of the one-time code that lifts a
+	// disabled sign-in on the admin's account when no other admin can
+	// (unlockcode.go), nil when none is outstanding; unlockCodeFor is
+	// that account's ID. Issued under mu at OpenStore, and retired
+	// wherever a state is installed (retireUnlockCodeLocked) once that
+	// account is no longer disabled. Memory only, like setupCodeHash.
+	unlockCodeHash []byte
+	unlockCodeFor  string
+	onUnlockCode   UnlockCodeHandler
 }
 
 // storeState is the in-memory index over the accounts document: the
@@ -440,6 +459,9 @@ func (s *Store) mutateLocked(op func(*storeState) error) error {
 		// earlier refusal no longer describes it (same as applyLoaded).
 		s.refusedVersion, s.hasRefusedVersion = 0, false
 		s.removalLogged = false
+		// A write that unlocked the admin, by any route, ends the
+		// unlock code with it.
+		s.retireUnlockCodeLocked()
 	}
 	if errors.Is(err, errNoChange) {
 		return nil
@@ -536,10 +558,11 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 		return nil, ErrPlaintextAtRest
 	}
 	s := &Store{
-		backend:     b,
-		log:         opts.Log,
-		onSetupCode: opts.OnSetupCode,
-		storeState:  indexUsers(storeFile{}),
+		backend:      b,
+		log:          opts.Log,
+		onSetupCode:  opts.OnSetupCode,
+		onUnlockCode: opts.OnUnlockCode,
+		storeState:   indexUsers(storeFile{}),
 	}
 
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
@@ -564,8 +587,10 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	// rule reads the same way here as on a reload.
 	s.mu.Lock()
 	code := s.issueSetupCodeLocked()
+	admin, unlockCode := s.issueUnlockCodeLocked()
 	s.mu.Unlock()
 	s.announceSetupCode(code)
+	s.announceUnlockCode(admin, unlockCode)
 	return s, nil
 }
 
@@ -591,6 +616,8 @@ func (s *Store) applyLoaded(st *storeState, version int64) {
 	// no longer describes what's out there.
 	s.refusedVersion, s.hasRefusedVersion = 0, false
 	s.removalLogged = false
+	// The admin unlocked by another process ends the unlock code here.
+	s.retireUnlockCodeLocked()
 }
 
 // reloadIfStale re-reads the document if the backend has moved on since
