@@ -189,6 +189,17 @@ func (rp *RelyingParty) BeginLogin(u *gauntlet.User) (json.RawMessage, string, e
 	if err != nil {
 		return nil, "", fmt.Errorf("passkey: beginning login: %w", err)
 	}
+	// The allowed list goes to the browser in the options, where it does
+	// its work, but not into the sealed state (ruling R3 on #20). A
+	// credential ID may be up to 1023 bytes, so a sealed list would cap
+	// an account at a handful of passkeys before the cookie outgrew a
+	// browser's limit, and it is a copy of what the store already holds.
+	// With no sealed list the library requires the asserted credential
+	// to be one the user adapter supplies (validateLogin, step 3), and
+	// FinishLogin supplies exactly the account's usable passkeys, read at
+	// finish -- the same check, and fresher: a passkey deleted mid-
+	// ceremony is refused.
+	sd.AllowedCredentialIDs = nil
 	return seal(assertCodec, sd, assertion)
 }
 

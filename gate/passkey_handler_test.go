@@ -1704,3 +1704,54 @@ func TestPasskeyRegisterBeginNeedsThePassword(t *testing.T) {
 		t.Errorf("register/begin after the re-check budget was spent got %d, want 429", limited.StatusCode)
 	}
 }
+
+// TestPasskeyAssertionFromAnotherAccountIsRefused (ruling R3 on #20):
+// with no allowed-credential list sealed into the ceremony, a passkey
+// that belongs to another account is still refused at login/factor --
+// paired with that passkey signing its own account in.
+func TestPasskeyAssertionFromAnotherAccountIsRefused(t *testing.T) {
+	g, ts, admin := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	registerPasskey(t, bilbo, ts, g, "bilbo's key")
+	const frodoPassword = "frodo-passkey-password-placeholder"
+	_ = postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: "frodo", Password: frodoPassword, Role: "user"}).Body.Close()
+	frodo := loggedInClient(t, ts, "frodo", frodoPassword)
+	creation := passkeyRegisterBeginAs(t, frodo, ts, frodoPassword)
+	frodoKey := newFake(g)
+	passkeyRegisterFinishOK(t, frodo, ts, frodoKey, creation, "frodo's key")
+
+	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	resp := submitPasskeyAssertion(t, pending, ts, frodoKey, passkeyLoginFactorBegin(t, pending, ts))
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(raw), passkeyNotVerified) {
+		t.Errorf("frodo's passkey on bilbo's sign-in got %d %q, want 401 %q", resp.StatusCode, raw, passkeyNotVerified)
+	}
+	if sessionOf(t, pending, ts).Authenticated {
+		t.Fatal("another account's passkey signed bilbo in")
+	}
+
+	own := startPasskeyLogin(t, ts, "frodo", frodoPassword)
+	ok := submitPasskeyAssertion(t, own, ts, frodoKey, passkeyLoginFactorBegin(t, own, ts))
+	_ = ok.Body.Close()
+	if ok.StatusCode != http.StatusOK {
+		t.Errorf("frodo's passkey on frodo's own sign-in got %d, want 200", ok.StatusCode)
+	}
+}
+
+// passkeyRegisterBeginAs is passkeyRegisterBegin for an account other
+// than bilbo.
+func passkeyRegisterBeginAs(t *testing.T, client *http.Client, ts *httptest.Server, password string) *protocol.CredentialCreation {
+	t.Helper()
+	resp := postJSON(t, client, ts.URL+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: password})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("register/begin returned %d: %s", resp.StatusCode, body)
+	}
+	var out protocol.CredentialCreation
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return &out
+}

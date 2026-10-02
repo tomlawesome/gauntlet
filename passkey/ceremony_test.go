@@ -345,3 +345,58 @@ func TestCeremonyRefusals(t *testing.T) {
 		}
 	})
 }
+
+// TestSealedLoginStateIsSmallWhateverTheAccountHolds (ruling R3 on #20):
+// the sealed login state carries no allowed-credential list, so its size
+// does not grow with the account's passkeys -- a credential ID may be up
+// to 1023 bytes, and a list sealed into a cookie would cap an account at
+// a handful. The library then requires the asserted credential to be one
+// of the account's usable passkeys, read at finish: a login still round
+// trips, and an assertion from a credential on another account is
+// refused, paired with that same credential succeeding on its own
+// account.
+func TestSealedLoginStateIsSmallWhateverTheAccountHolds(t *testing.T) {
+	rp := mustReady(t)
+	u := testUser()
+	fake := passkeytest.New(rp.RPID(), rp.Origin())
+	registerOn(t, rp, u, fake)
+	for i := range 10 {
+		id := bytes.Repeat([]byte{byte(i + 1)}, 256)
+		u.Passkeys = append(u.Passkeys, gauntlet.Passkey{ID: id, PublicKey: []byte{0xa0}, RPID: rp.RPID()})
+	}
+
+	options, sealed := beginLogin(t, rp, u)
+	if n := len(options.Response.AllowedCredentials); n != 11 {
+		t.Fatalf("the browser's options allow %d credentials, want all 11", n)
+	}
+	if len(sealed) >= 1024 {
+		t.Errorf("the sealed login state is %d bytes with eleven passkeys on the account, want under 1 KB", len(sealed))
+	}
+	body, err := fake.AssertionResponse(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.FinishLogin(u, sealed, body); err != nil {
+		t.Fatalf("a login on the account's own passkey: %v", err)
+	}
+
+	// Another account's passkey, asserted on this account's ceremony.
+	other := &gauntlet.User{ID: "user-0002", Username: "frodo"}
+	foreign := passkeytest.New(rp.RPID(), rp.Origin())
+	registerOn(t, rp, other, foreign)
+	options, sealed = beginLogin(t, rp, u)
+	body, err = foreign.AssertionResponse(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.FinishLogin(u, sealed, body); err == nil || errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+		t.Errorf("an assertion from another account's passkey: error = %v, want it refused", err)
+	}
+	options, sealed = beginLogin(t, rp, other)
+	if body, err = foreign.AssertionResponse(options); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.FinishLogin(other, sealed, body); err != nil {
+		t.Errorf("the same passkey on its own account: %v", err)
+	}
+}
