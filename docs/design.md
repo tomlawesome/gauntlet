@@ -289,7 +289,9 @@ func (l *LoginLimiter) Reserve(key string, now time.Time) bool     // addresses,
 func (l *LoginLimiter) Release(key string, now time.Time)
 func (l *LoginLimiter) RecordFailure(key string, now time.Time)
 func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only; prefer Reserve before a slow check
-func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
+func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19; ReserveAccountDecision's Allowed
+func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision // new (#45): why it refused or what it started
+type AccountDecision struct { Allowed, Locked, Disabled bool; LockedUntil time.Time; LockoutStarted, DisabledNow bool; Lockouts int }
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
 func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time)           // #44: completed sign-in resets the count
 func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword, end every session
@@ -306,6 +308,11 @@ type AccountLockouts interface {                                    // *Store im
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
 }
+
+type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
+type SignInMethod string  // password, code, passkey, sso
+type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool }
+func MaskUnknownUsername(typed string) string // new (#53): first two runes + one • per further rune; probe names (root, admin, ...) kept
 
 func ValidateUsername(username string) error       // 1–64 runes, no control/format chars
 func ValidateLocalUsername(username string) error  // additionally: no "@"
@@ -539,7 +546,8 @@ type Config struct {
     RequireSecondFactor bool          // deprecated, ignored: see §1.6
     Log                 *slog.Logger
     Audit               Auditor       // nil = no audit
-    ClientIP            func(*http.Request) string // limiter key; app owns trusted-proxy policy
+    Notify              Notifier      // new (#53): told after an admin ends another account's sessions; nil = nobody told
+    ClientIP            func(*http.Request) string // limiter key and from= in sign-in records; app owns trusted-proxy policy
     Now                 func() time.Time
 }
 
@@ -572,7 +580,44 @@ func (g *Gate) Routes() http.Handler
 func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below min
+
+// new (#53): the application mails the owner; gauntlet sends nothing.
+type Notifier interface { SessionsEnded(ctx context.Context, n SessionsEndedNotice) error }
+type SessionsEndedNotice struct { UserID, Username, EndedBy, Reason string; Ended int; At time.Time }
+const MaxSessionEndReason = 200 // bytes
 ```
+
+**Sign-in records (#45).** Every sign-in attempt -- the password step,
+the code or passkey step, the SSO callback -- goes through one helper,
+`recordSignIn` (`gate/signin_record.go`), which writes through `Auditor`:
+`user.login` on a completed sign-in, detail `from="<address>"` (quoted:
+`ClientIP` may read a client-set header), prefixed `via second factor; `
+or `via sso; `; `user.login_failed` for each failed attempt the limiter
+admitted, actor and target the account's username or `unknown`, detail
+`outcome=<outcome> method=<method> from="..."` plus `name="Hu••••"`
+(`MaskUnknownUsername`) when no account matched -- the typed name never
+reaches the audit or the log; and `account.locked` (`until=... lockouts=n
+from=...`) or `account.disabled` beside the failure whose limiter
+decision started a lockout or the disable. An attempt that starts one
+but succeeds hands it back and writes neither. A limiter refusal (429)
+is no audit record but a rated Warn line, as are a missing CSRF header,
+a malformed `Authorization` header, a role refusal on `Routes`' admin
+routes and the two door 403s: at most one line per kind and address per
+minute, the next counting what was left out, 4,096 sources tracked
+before the rest share one line (`gate/warnrate.go`). A right password
+with a factor still owed, a "sign in again" refusal and a backend
+failure write nothing. Each event also goes to an internal hook where
+the sign-in history (#53) will attach.
+
+**Admin sign-out (#53).** `POST /api/auth/users/{id}/logout-all` ends
+every gauntlet session the account holds and forgets its remembered
+browsers -- all or nothing, no per-session admin route and no admin list
+of another account's sessions (owner, 2026-10-02). 409 for the caller's
+own account, 404 for none, 400 for a reason over 200 bytes or holding a
+control or format character. Audited as `user.sessions_ended`. Once the
+response is written, `Config.Notify` is called in its own goroutine with
+a 10-second deadline and `recover()`; an error or panic is one log line,
+and the response's `notified` means asked, not delivered.
 
 The HTTP contract `Routes` serves -- every route, request, response,
 status code and error body, carried over from mikroview's
@@ -900,7 +945,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
-| Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept |
+| Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept; new (#53): an admin's `POST /api/auth/users/{id}/logout-all` revokes every session of another account and forgets its remembered browsers |
 | Sessions their owner cannot see | none: logout-all only | new (#48): `GET /api/auth/sessions` lists the caller's own live sessions (address and agent from sign-in, capped at 100 rows with a `total`) by a one-way `ref`, never the ID; `DELETE /api/auth/sessions/{ref}` ends one, with no password (owner, 2026-10-02: signing out is a safe direction), and 404 for any ref not the caller's. Own sessions only: no admin view of anyone else's |
 
 ### OIDC
@@ -926,6 +971,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
+| Unseen failures | only successes audited | new (#45): every failed sign-in is `user.login_failed`, a lockout or disable starting is `account.locked` or `account.disabled`, each with the client address; refused requests are rated Warn lines (§1.5) |
 | Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19, #44): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save as it starts and one as it clears, not per guess); each lockout lasts three times the last (5 min up to 24 h) and 50 failures in a row disable sign-in until an unlock; addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
 | `golang.org/x/crypto` advisories | all 30 entries are in `ssh`, `ssh/agent` or `openpgp`; none touches `argon2` | import only `argon2`; birdcage already carries this module at 0.57.0 |
 

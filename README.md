@@ -76,6 +76,33 @@ The HTTP layer that wires these into a `net/http` middleware is
 `go doc github.com/tomlawesome/gauntlet/gate` and
 [docs/design.md](docs/design.md) §1.5.
 
+gate records every sign-in attempt, failed ones included, through
+`Config.Audit`, with the client address `Config.ClientIP` resolves, and
+logs refused requests to `Config.Log` (see design.md §1.5). An admin can
+sign another account out everywhere (`POST
+/api/auth/users/{id}/logout-all`). gauntlet sends no mail itself; to tell
+the account's owner, set `Config.Notify`:
+
+```go
+type mailNotifier struct{ mail *myapp.Mailer; users *myapp.Directory }
+
+func (m mailNotifier) SessionsEnded(ctx context.Context, n gate.SessionsEndedNotice) error {
+	to, ok := m.users.EmailFor(n.Username) // the app maps the account to an address
+	if !ok {
+		return nil // nobody to tell
+	}
+	return m.mail.Send(ctx, to, "You were signed out",
+		fmt.Sprintf("An administrator (%s) signed you out of %d sessions. Reason: %s", n.EndedBy, n.Ended, n.Reason))
+}
+
+g, err := gate.New(gate.Config{ /* ... */ Notify: mailNotifier{mail, users}}, deps)
+```
+
+It is called after the admin's response, in its own goroutine, with a
+context that ends after 10 seconds; an error or panic is logged and
+never changes the admin's answer. `Reason` may be empty: the message
+should still say an administrator signed them out.
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
