@@ -19,9 +19,11 @@ go-webauthn, so an app that never imports it never links the library.
 **Belongs in the apps, not here:** a database-table backend (each app
 supplies its own `persist.Backend`), the public URL a relying party is
 built from, and anything that reaches back into birdcage's or
-mikroview's own types. File storage is the one exception: the encrypted
-file backend (`persist.EncryptedFileBackend`) lives here (#18) as the
-documented default; finding and reading the key file stays with the app.
+mikroview's own types. Encryption at rest is the one exception:
+`persist.Encrypt` seals the document before any app backend stores it,
+and the encrypted file backend (`persist.EncryptedFileBackend`) is that
+wrapper over a file (#18, #50, ADR-0005); finding and reading the key
+file stays with the app.
 
 **Mikroview's auth code is the reference this module is read against**,
 continuously, until mikroview actually moves onto it (birdcage ADR-0005
@@ -37,6 +39,15 @@ branch `dev`. The public GitHub mirror, `github.com/tomlawesome/gauntlet`,
 is created at v0.1.0 so birdcage can `go get` the tag by its module path
 (#17, owner 2026-09-29, replacing 2026-09-27's "mirror at v0.2.0"). GitHub
 is the mirror only: no GitHub issues or pull requests.
+
+## Runner tags
+
+Every job runs on the shared `light` lane except the common-password
+list's two (#52, ADR-0005): `blocklist:sign` on `gauntlet-signing`
+(signing key at `/etc/gauntlet-signing/`) and `blocklist:publish` on
+`gauntlet-publish` (GitHub release token at `/etc/gauntlet-github/`).
+Both are protected, locked to this project, and set up by the owner
+(docs/releasing.md); no other job may use those tags.
 
 ## Closing issues from commits
 

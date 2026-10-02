@@ -46,6 +46,10 @@ var maxLoginLimiterKeys = 4096
 // starts a lockout. Both reset only on a completed sign-in (SignedIn) or
 // a new password -- never on a correct password alone, nor on a lockout
 // running out.
+//
+// A browser the account remembers (Store.KnowsBrowser) keeps a budget of
+// its own when the ordinary one refuses it (ReserveKnownBrowser), so a
+// stranger cannot lock the owner out by guessing wrong (#44).
 type LoginLimiter struct {
 	mu        sync.Mutex
 	attempts  map[string][]time.Time
@@ -149,9 +153,13 @@ const lockoutRetryInterval = 30 * time.Second
 // Account counter buckets. Login and its second-factor step share one
 // budget; re-checking a signed-in caller's own password has its own, so
 // a run of typos there cannot lock the single admin out of signing in.
+//
+// A known browser's allowance during a lockout (ReserveKnownBrowser,
+// #44) is a third, kept apart from the login budget it stands in for.
 const (
-	loginBucket   = "login:"
-	recheckBucket = "password-recheck:"
+	loginBucket        = "login:"
+	recheckBucket      = "password-recheck:"
+	knownBrowserBucket = "known:"
 )
 
 // ErrLimiterConfig is returned by NewLoginLimiter for a threshold or
@@ -594,26 +602,198 @@ func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string
 	}
 }
 
-// SignedIn is ReleaseAccount for an attempt that completed a sign-in:
+// SignedIn is ReleaseAccount, or ReleaseKnownBrowser, for an attempt that completed a sign-in:
 // every factor the account asks for checked out, and a session is being
 // issued (#44). It drops the account's whole count -- the attempts in
-// the window, the lockouts on the record, the run of second-factor
-// failures -- and anything that count decided while this attempt was in
+// the window, a known browser's (ReserveKnownBrowser), the lockouts on
+// the record, the run of second-factor failures -- and anything that count decided while this attempt was in
 // flight: its reservation was admitted, so no lockout or disable was in
 // force when it began.
 //
 // One write when the record carries a lockout or a count of them, none
 // otherwise, so an ordinary sign-in costs no save. Call it in place of
-// ReleaseAccount, not as well as it.
+// ReleaseAccount or ReleaseKnownBrowser, not as well as either.
 func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time) {
 	rec := l.recorder(lockouts)
 	stored, record, changed := l.readRecord(rec, accountID, now)
 
 	l.mu.Lock()
 	delete(l.accounts, loginBucket+accountID)
+	delete(l.accounts, knownBrowserBucket+accountID)
 	delete(l.secondFactor, accountID)
 	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
 	sync := l.settleLocked(accountID, cur, lockoutState{}, p, pending, now)
+	l.mu.Unlock()
+
+	if sync {
+		l.syncLockout(rec, accountID, now)
+	}
+}
+
+// UnlockLogin is Store.UnlockLogin for a process running this limiter:
+// it lifts a disabled sign-in on accountID and clears its lockout and
+// count of lockouts on the record, in one write, and also drops what
+// this limiter holds about the account that the record does not -- its
+// count of attempts in the current window, a known browser's too
+// (ReserveKnownBrowser), and any lockout decision it has yet to save
+// (#44). Without that, the account would stay refused
+// by this process's count until the window passed, or have a disable
+// that failed to save written back over the unlock by the next refused
+// attempt's retry.
+//
+// The run of second-factor failures is kept: an unlock is not a
+// completed sign-in, and the password those failures followed has not
+// changed.
+//
+// For the *Store the write is the same one Store.UnlockLogin makes, and
+// refused the same way: ErrUserNotFound for an account that does not
+// exist, nothing written when there is nothing to clear. With nil or any
+// other AccountLockouts, the lockout's end is cleared there and the rest
+// in this limiter's memory (memoryLockouts).
+//
+// Taken under persistMu, so a save this limiter already had in flight
+// lands before the unlock rather than after it. An attempt that read the
+// record just before the unlock can still decide a lockout over the
+// account's old count and save it just after: that fails closed -- the
+// account is locked again, never opened wider -- and another unlock
+// clears it.
+//
+// Deciding who may unlock whom is the caller's job, as for the store.
+func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) error {
+	rec := l.recorder(lockouts)
+
+	l.persistMu.Lock()
+	defer l.persistMu.Unlock()
+	l.mu.Lock()
+	delete(l.accounts, loginBucket+accountID)
+	delete(l.accounts, knownBrowserBucket+accountID)
+	delete(l.wantLockout, accountID)
+	l.mu.Unlock()
+	return rec.setLockoutRecord(accountID, lockoutState{})
+}
+
+// ReserveKnownBrowser is ReserveAccount for a browser accountID
+// remembers (Store.KnowsBrowser, #44), called only once the ordinary
+// path has refused the attempt -- the account locked out, or the
+// address at its limit -- and only after the browser's token matched
+// the account's record. It is the owner's way past a lockout a stranger
+// caused: the stranger's browser never completed a sign-in there, so it
+// has no token to show.
+//
+// The budget is the limiter's own, threshold attempts per window, per
+// account, kept apart from the login budget it stands in for, and it
+// does not escalate: the attempt that fills it closes it for one window
+// from that attempt, as a first lockout would, whatever the account's
+// count of lockouts. Its key is created only after the token matched,
+// so there is at most one per account.
+//
+// It is no way round the disable. Refused outright while the account's
+// sign-in is disabled, and every failure through it counts toward
+// MaxConsecutiveLoginFailures as an ordinary one does: the attempt that
+// fills the budget adds one to the account's count of lockouts -- in
+// the same write a lockout would make, its end left as it was -- so
+// each budget's worth of failures is counted once, and the attempt that
+// brings the count to MaxConsecutiveLoginFailures disables the account
+// as ReserveAccount's would. That count also lengthens the account's
+// next ordinary lockout, as any lockout's worth of failures does. A
+// stolen token therefore buys its holder threshold guesses per window
+// during a lockout, ending at the disable, and never a session.
+//
+// Guesses made before a password change stop counting, as for
+// ReserveAccount. The attempt hands its count back on success:
+// ReleaseKnownBrowser at the password step, SignedIn when a sign-in
+// completes.
+func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time) bool {
+	rec := l.recorder(lockouts)
+	stored, record, changed := l.readRecord(rec, accountID, now)
+
+	l.mu.Lock()
+	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
+	if cur.disabled() {
+		// Refused, and a disable this limiter has yet to save is tried
+		// again, as ReserveAccount does while refusing.
+		base := stored
+		if pending {
+			base = p.state
+		}
+		sync := l.settleLocked(accountID, base, cur, p, pending, now)
+		l.mu.Unlock()
+		if sync {
+			l.syncLockout(rec, accountID, now)
+		}
+		return false
+	}
+	key := knownBrowserBucket + accountID
+	entries := l.knownEntriesLocked(key, changed, now)
+	if len(entries) >= l.threshold {
+		l.mu.Unlock()
+		return false
+	}
+	entries = append(entries, now)
+	next := cur
+	if len(entries) == l.threshold {
+		// Closed for one window from now: every entry ages out at once,
+		// so the next fill is counted from fresh attempts only and no
+		// failure is counted into two lockouts' worth.
+		for i := range entries {
+			entries[i] = now
+		}
+		next.episodes = cur.episodes + 1
+	}
+	l.accounts[key] = entries
+	if !next.disabled() && consecutiveFailures(cur.episodes, l.threshold, len(entries)) >= MaxConsecutiveLoginFailures {
+		next.disabledAt = now
+	}
+	sync := l.settleLocked(accountID, cur, next, p, pending, now)
+	l.mu.Unlock()
+
+	if sync {
+		l.syncLockout(rec, accountID, now)
+	}
+	return true
+}
+
+// knownEntriesLocked is a known browser's budget for key: its attempts
+// in the window, less any made before a password change (changed, zero
+// for none).
+func (l *LoginLimiter) knownEntriesLocked(key string, changed, now time.Time) []time.Time {
+	cutoff := now.Add(-l.window)
+	if changed.After(cutoff) {
+		cutoff = changed
+	}
+	return dropBefore(l.accounts, key, cutoff)
+}
+
+// ReleaseKnownBrowser is ReleaseAccount for ReserveKnownBrowser: the
+// attempt had the right password, and a second factor is still owed.
+// It hands back the attempt's count. If the budget is full now, its
+// filling was decided after this attempt was admitted and counted this
+// attempt as a failure, which it was not: the lockout's worth it added
+// to the account's count is taken back, and a disable it brought is
+// lifted -- none was in force when the attempt was admitted, or it
+// would have been refused. An ordinary lockout in force is left alone:
+// it was there before this attempt, which only came through because of
+// it.
+//
+// Like ReleaseAccount, it does not reset the account's count: a correct
+// password alone is not a completed sign-in. SignedIn is.
+func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time) {
+	rec := l.recorder(lockouts)
+	stored, record, changed := l.readRecord(rec, accountID, now)
+
+	l.mu.Lock()
+	key := knownBrowserBucket + accountID
+	full := len(l.knownEntriesLocked(key, changed, now)) >= l.threshold
+	l.releaseIn(l.accounts, key, now)
+	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
+	next := cur
+	if full {
+		if next.episodes > 0 {
+			next.episodes--
+		}
+		next.disabledAt = time.Time{}
+	}
+	sync := l.settleLocked(accountID, cur, next, p, pending, now)
 	l.mu.Unlock()
 
 	if sync {
@@ -630,8 +810,11 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 //
 // At secondFactorFailuresForPasswordChange of them someone other than
 // the owner very likely knows the password, so the account is set to
-// MustChangePassword (#44), in one write: the owner, once they next
-// sign in, must replace it before going any further. That write takes
+// MustChangePassword (#44), in one write that also ends every session
+// the account holds (SessionsEndedAt): the owner, once they next sign in
+// with both factors, must replace it before going any further, and no
+// session from before the run reaches the change-password door, which
+// asks for no current password. That write takes
 // lockouts being the *Store (passwordChangeRequirer); with any other,
 // nothing is set. A password changed since the run began starts it
 // again: those failures followed the old one.
@@ -664,7 +847,7 @@ func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID st
 	if !due || !ok {
 		return
 	}
-	err := pc.requirePasswordChange(accountID)
+	err := pc.requirePasswordChange(accountID, now)
 	if err != nil {
 		// Not marked done: the next failure in the run tries again.
 		if log != nil && !errors.Is(err, ErrUserNotFound) {

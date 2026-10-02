@@ -45,6 +45,9 @@
 # internal/spent (the one-time-key set, #20 R2) is new at 100.0%.
 # passkey re-measured once its spent set moved to internal/spent and
 # its credential conversion got a round-trip test: 92.8%.
+# #52: blocklist is new at 95.5%, internal/listsig at 97.8% and
+# cmd/pwlist at 90.7%. What they leave uncovered is mostly a failing
+# disk or JSON encoder, and pwlist's main() itself.
 
 floors:
   persist: 90
@@ -57,3 +60,6 @@ floors:
   passkey: 92
   internal/passkeytest: 91
   internal/spent: 100
+  blocklist: 95
+  internal/listsig: 97
+  cmd/pwlist: 90

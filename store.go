@@ -86,6 +86,16 @@ var (
 	// ErrNoAdmin is returned by TransferAdmin when no account holds the
 	// role -- nothing to transfer.
 	ErrNoAdmin = errors.New("gauntlet: this deployment has no admin account")
+	// ErrPlaintextAtRest is returned by OpenStore for a backend that
+	// stores the accounts document in the clear -- one that does not
+	// implement persist.AtRest, or answers false -- unless
+	// Options.AllowPlaintextAtRest says the application accepts that
+	// (#50). The document holds every account's TOTP secret, which
+	// cannot be hashed (totp.go), so a dump or backup of such a
+	// backend carries them all; wrapping the backend in persist.Encrypt
+	// is the fix, and the default is to refuse rather than warn because
+	// a warning is read once and a backup is copied for years.
+	ErrPlaintextAtRest = errors.New("gauntlet: the accounts backend stores the document in the clear, TOTP secrets included -- wrap it in persist.Encrypt, or set Options.AllowPlaintextAtRest to accept that")
 
 	// errMultipleAdmins is the decode error for an accounts document
 	// holding more than one admin. No write in this package produces
@@ -206,6 +216,24 @@ type Options struct {
 	// store's lock, but before OpenStore returns, so it must not depend
 	// on the returned *Store.
 	OnSetupCode SetupCodeHandler
+	// AllowPlaintextAtRest accepts a backend that stores the accounts
+	// document in the clear (see ErrPlaintextAtRest): the application
+	// takes on that the TOTP secrets and passkey public keys are only as
+	// protected as that backend's own access controls and backups are.
+	// Not a key, not a migration switch: persist.Encrypt and its
+	// MigratePlaintext option are the way to stop needing this. Memory
+	// and the encrypting backends need no permission, and a nil backend
+	// stores nothing.
+	AllowPlaintextAtRest bool
+	// OnUnlockCode receives the one-time unlock code (CheckUnlockCode)
+	// that lifts a disabled sign-in on the admin's account when no other
+	// admin can (#44), with the admin's username, whenever a persisted
+	// store opens to find it so. When nil the code goes to Log instead,
+	// as one Warn line. A CLI that opens the store for one command
+	// passes one that does nothing, as for OnSetupCode: a code its own
+	// process makes is no use to the running server. Called outside the
+	// store's lock, before OpenStore returns.
+	OnUnlockCode UnlockCodeHandler
 }
 
 // Store persists user accounts through a persist.Backend -- an
@@ -265,6 +293,16 @@ type Store struct {
 	// (reloadIfStale). Memory only: never part of the document.
 	setupCodeHash []byte
 	onSetupCode   SetupCodeHandler
+
+	// unlockCodeHash is the SHA-256 of the one-time code that lifts a
+	// disabled sign-in on the admin's account when no other admin can
+	// (unlockcode.go), nil when none is outstanding; unlockCodeFor is
+	// that account's ID. Issued under mu at OpenStore, and retired
+	// wherever a state is installed (retireUnlockCodeLocked) once that
+	// account is no longer disabled. Memory only, like setupCodeHash.
+	unlockCodeHash []byte
+	unlockCodeFor  string
+	onUnlockCode   UnlockCodeHandler
 }
 
 // storeState is the in-memory index over the accounts document: the
@@ -421,6 +459,9 @@ func (s *Store) mutateLocked(op func(*storeState) error) error {
 		// earlier refusal no longer describes it (same as applyLoaded).
 		s.refusedVersion, s.hasRefusedVersion = 0, false
 		s.removalLogged = false
+		// A write that unlocked the admin, by any route, ends the
+		// unlock code with it.
+		s.retireUnlockCodeLocked()
 	}
 	if errors.Is(err, errNoChange) {
 		return nil
@@ -513,11 +554,15 @@ var saveTimeout = 5 * time.Second
 // install, silently reopening registration to whoever loads the page
 // next. See persist.Open.
 func OpenStore(b persist.Backend, opts Options) (*Store, error) {
+	if b != nil && !opts.AllowPlaintextAtRest && !protectedAtRest(b) {
+		return nil, ErrPlaintextAtRest
+	}
 	s := &Store{
-		backend:     b,
-		log:         opts.Log,
-		onSetupCode: opts.OnSetupCode,
-		storeState:  indexUsers(storeFile{}),
+		backend:      b,
+		log:          opts.Log,
+		onSetupCode:  opts.OnSetupCode,
+		onUnlockCode: opts.OnUnlockCode,
+		storeState:   indexUsers(storeFile{}),
 	}
 
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
@@ -542,9 +587,21 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	// rule reads the same way here as on a reload.
 	s.mu.Lock()
 	code := s.issueSetupCodeLocked()
+	admin, unlockCode := s.issueUnlockCodeLocked()
 	s.mu.Unlock()
 	s.announceSetupCode(code)
+	s.announceUnlockCode(admin, unlockCode)
 	return s, nil
+}
+
+// protectedAtRest reports whether b says, through persist.AtRest, that
+// a copy of its storage carries no plaintext. A backend that does not
+// say is taken to store plaintext: the fail-closed reading, since the
+// question is asked before anything is read and the cost of a wrong
+// "yes" is every TOTP secret in a backup.
+func protectedAtRest(b persist.Backend) bool {
+	ar, ok := b.(persist.AtRest)
+	return ok && ar.ProtectedAtRest()
 }
 
 // applyLoaded installs the state decodeAccounts made from a loaded
@@ -559,6 +616,8 @@ func (s *Store) applyLoaded(st *storeState, version int64) {
 	// no longer describes what's out there.
 	s.refusedVersion, s.hasRefusedVersion = 0, false
 	s.removalLogged = false
+	// The admin unlocked by another process ends the unlock code here.
+	s.retireUnlockCodeLocked()
 }
 
 // reloadIfStale re-reads the document if the backend has moved on since

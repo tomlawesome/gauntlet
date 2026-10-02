@@ -6,6 +6,88 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `persist.Encrypt(backend, key, persist.EncryptOptions{Label: "accounts"})`
+  wraps any `persist.Backend` so every document is sealed before the
+  backend stores it and opened after it is read: the AES-256-GCM
+  envelope `persist.EncryptedFileBackend` has used since #18 (HKDF from
+  the application's key of at least 32 bytes, a fresh salt and nonce
+  per save, the label authenticated with the document), stored through
+  the backend as the JSON text `{"sealed": "<base64>"}` so a `text`
+  column or a JSON-validating backend holds it unchanged (#50,
+  [ADR-0005](docs/adr/0005-encryption-at-rest-on-every-backend.md)). A
+  dump or backup of the database then carries no TOTP secret and no
+  passkey public key, and a document altered in the database fails to
+  open rather than being read. `EncryptedFileBackend` is now this
+  wrapper over the plain file and is otherwise unchanged; files it
+  wrote before still open, and still open in mikroview.
+  `EncryptOptions.MigratePlaintext` accepts a document the backend
+  already holds in the clear and seals it in place on the first load,
+  for the one release that introduces the wrapper. The new
+  `persist.AtRest` capability (`ProtectedAtRest() bool`) is how a
+  backend says a copy of its storage carries no plaintext;
+  `persist.Encrypted`, `EncryptedFileBackend` and `Memory` implement it.
+- Ways to unlock a sign-in disabled after 50 failures in a row (#44).
+  `POST /api/auth/users/{id}/unlock` lets an admin lift another
+  account's disable, lockout and count of lockouts; it answers 200
+  whether or not anything was locked. On the admin's own account, from
+  a session they still hold, it takes a body with their password and a
+  current TOTP or recovery code (`UnlockSelfRequest`): 400 without
+  them, 401 for a wrong one, each counted on the account's password
+  re-check budget (429 once spent); the session alone unlocks nothing.
+  It calls the new `LoginLimiter.UnlockLogin`, which also
+  clears the limiter's own count of recent guesses; applications with
+  their own unlock path should call it rather than `Store.UnlockLogin`.
+  When the store opens with the admin disabled and no admin left who
+  could unlock it, it announces a one-time unlock code, like the setup
+  code: through the new `Options.OnUnlockCode` (`UnlockCodeHandler`,
+  `UnlockCodeFunc`), or else as one Warn line on `Options.Log`. A CLI
+  that opens the store should pass a hook that does nothing, as it
+  does for `OnSetupCode`. `POST /api/auth/unlock` takes the admin's
+  username and the code (`Store.CheckUnlockCode`,
+  `ErrUnlockCodeInvalid`), and only lifts the disable: the admin then
+  signs in with their existing password and second factor. The code
+  works once, and stops working if the admin is unlocked any other
+  way. The accounts document is unchanged.
+- `gauntlet/blocklist`, the common-password list (#52,
+  [ADR-0005](docs/adr/0005-common-password-list.md)): the SHA-1 hashes
+  of the 10,000 most prevalent passwords in Have I Been Pwned's Pwned
+  Passwords. `Embedded()` is the copy built into the release and never
+  touches the network; `List.Contains` checks a password against it.
+  An application that wants newer lists between releases runs a
+  `Refresher` (`NewRefresher`, `RefreshConfig`): it checks the public
+  GitHub mirror once a day by default, accepts a list only if its
+  checksum and signature verify and it is newer than the one in use,
+  and keeps it in a directory the application names. Until the first
+  signed list is published, `Embedded()` is empty and blocks nothing,
+  and a release refuses to tag. #43 will use it to refuse common
+  passwords.
+- `cmd/pwlist` and three CI jobs, run by a monthly pipeline schedule,
+  build that list from HIBP, sign it on a dedicated runner, and publish
+  it to the GitLab package registry and the GitHub mirror's releases.
+  `scripts/update-blocklist.sh` copies the newest published list into
+  a release. Setting this up -- a signing key, a GitHub token, two
+  runners and the schedule -- is the owner's, in docs/releasing.md.
+- The known-browser allowance (#44): a browser that completes a sign-in
+  now gets a `gate_known_browser` cookie (`HttpOnly`, `SameSite=Lax`,
+  `Secure` per `SecureCookie`, path `/api/auth`, 45 days), set at every
+  session issue and replaced at each one (the path covers every route
+  that issues a session, so one browser holds one entry however it
+  signed in), and while the account is locked out, or the client's
+  address is at its limit, that browser keeps an allowance of its own
+  -- the limiter's attempts per window -- so a stranger who knows a username can no longer lock its owner out.
+  It is refused once the account is disabled, and every failure through
+  it counts toward the 50. The cookie's value is 32 random bytes; the
+  account keeps only its SHA-256 (new `User.KnownBrowsers`,
+  `KnownBrowser`), at most `MaxKnownBrowsers` (3) per account, the
+  oldest evicted, each for `KnownBrowserLifetime` (45 days) from its
+  latest sign-in there, checked on the server. Sign out everywhere and
+  an admin's reset code forget every browser; a password change, an
+  unlock and the forced change after second-factor failures do not.
+  New API: `Store.RememberBrowser`, `Store.ClearKnownBrowsers`,
+  `Store.KnowsBrowser`, `LoginLimiter.ReserveKnownBrowser` and
+  `ReleaseKnownBrowser`. `Store.List` blanks each hash. An application
+  with its own sign-in path should call `RememberBrowser` where it
+  issues a session; gate does so in `issueSession`.
 - `docs/api/auth.yaml` (OpenAPI 3.1) describes every route `gate.Routes`
   serves -- each request body, response body and status -- as the one
   copy a frontend can build against (ADR-0002, #22). `docs/design.md`
@@ -95,6 +177,33 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Breaking.** `OpenStore` now refuses a backend that stores the
+  accounts document in the clear -- one that does not implement
+  `persist.AtRest`, which is every application database backend
+  written so far -- with the new `ErrPlaintextAtRest`, unless
+  `Options.AllowPlaintextAtRest` is set (#50,
+  [ADR-0005](docs/adr/0005-encryption-at-rest-on-every-backend.md)).
+  The document holds every account's TOTP secret, which cannot be
+  hashed, so the choice is refuse or warn, and a warning is read once
+  while a backup is copied for years. `persist.Memory`, `Encrypt` and
+  `EncryptedFileBackend` need no permission; a nil backend stores
+  nothing. `OpenTokenStore` is unchanged: the tokens document holds
+  only hashes of random values. What each application must do:
+  provision a key file of at least 32 random bytes (`persist.MinKeyBytes`;
+  mikroview's retention key material already qualifies, birdcage has
+  none yet and gains `BIRDCAGE_AUTH_KEY_FILE`), wrap the accounts
+  backend -- and, recommended, the tokens backend -- in
+  `persist.Encrypt` with a fixed `Label` per store, and for the release
+  that first ships the wrapper set `MigratePlaintext: true` where a
+  plaintext document already exists (mikroview's Postgres `auth` row);
+  the first start seals it in place and the option can then be removed.
+  A backend that wraps another (a write-behind queue) must forward
+  `ProtectedAtRest`. Take a copy of the plaintext document before
+  upgrading: an older gauntlet reads a sealed document as an empty
+  store and its first write would overwrite it, while this build
+  refuses a sealed document that reaches a store unwrapped. The
+  envelope does not change the accounts document's own version (#44
+  does, below): it sits below it.
 - A second factor (TOTP or a passkey) is now always required for every
   local-password account; `gate` no longer offers a way to turn the
   forced-enrolment door off (#49). `gate.Config.RequireSecondFactor` is
@@ -147,25 +256,31 @@ All notable changes to this project are documented in this file.
   (`MaxConsecutiveLoginFailures`), password and second-factor steps
   together, disable the account's local sign-in: the right password is
   then refused exactly as during a lockout, with no end, until
-  `Store.UnlockLogin` clears it (the admin route that calls it comes
-  later). Only a completed sign-in or a new password resets the count,
-  not a correct password alone and not a lockout running out; a new
-  password does not lift a disable. Applications that issue a session
+  it is unlocked (see the unlock route and code under Added). Only a
+  completed sign-in or a new password resets the count, not a correct
+  password alone and not a lockout running out. A password the owner
+  sets does not lift a disable; a reset code an admin issues
+  (`IssueResetCode`) does. Applications that issue a session
   themselves after `ReserveAccount` should call the new
   `LoginLimiter.SignedIn` in place of `ReleaseAccount` when the sign-in
   completes; `gate` does. Five failed second-factor steps in a row --
   wrong codes or refused passkeys, which only someone with the password
   can make -- now set `MustChangePassword`, so the owner must change the
-  password at their next sign-in (`LoginLimiter.SecondFactorFailed`).
+  password at their next sign-in (`LoginLimiter.SecondFactorFailed`),
+  and the same save signs the account out everywhere, so only a fresh
+  sign-in with both factors reaches the change-password door. That
+  door's message no longer says an administrator reset the account.
   That run is kept in memory and starts again after a restart. Still
   one save as a lockout starts and one as it clears, never one per
   guess.
-- The accounts document is now version 3: it adds `loginLockoutCount`
-  and `loginDisabledAt` (#44). Version-1 and version-2 documents open
-  unchanged with both empty and are written as version 3 on their next
-  save; no migration is needed. An earlier build cannot open an
-  accounts document once this version has saved it, so keep a copy
-  before upgrading if a rollback is possible.
+- The accounts document is now version 4 (#44): version 3 added
+  `loginLockoutCount` and `loginDisabledAt`, and version 4
+  `knownBrowsers`. Version-1, -2 and -3 documents open unchanged with
+  the fields they lack empty, and are written as version 4 on their
+  next save; no migration is needed. No earlier build -- v0.1.0, or a
+  development build that wrote version 3 -- can open an accounts
+  document once this version has saved it, so keep a copy before
+  upgrading if a rollback is possible.
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

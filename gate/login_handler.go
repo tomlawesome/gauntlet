@@ -30,6 +30,12 @@ type loginReservation struct {
 	// the pass (pendingLoginState.AfterReset): ipKey is skipped, and there
 	// is no pass left to hand back or use up.
 	pendingAfterReset bool
+	// knownBrowser is set when the ordinary path refused the attempt and
+	// it went ahead on the known browser's own allowance
+	// (gauntlet.LoginLimiter.ReserveKnownBrowser, #44): that is the one
+	// reservation it holds -- nothing on ipKey or the account's login
+	// budget -- so it is the one released.
+	knownBrowser bool
 }
 
 // reserveLogin reserves one attempt on both buckets, or neither, and
@@ -40,6 +46,16 @@ type loginReservation struct {
 // gets past the address bucket, one attempt at a time, until its
 // sign-in finishes or a guess fails (AllowAfterReset, #32); its own
 // bucket still applies.
+//
+// When that path refuses an attempt on a real account -- the account
+// locked out, or the address at its limit -- a browser the account
+// remembers gets one more chance, on its own allowance
+// (ReserveKnownBrowser, #44): a stranger who locked the owner out has
+// no such browser. The cookie is checked only then, so an ordinary
+// attempt costs no extra read, and the allowance's bucket exists only
+// for a token that matched. It is refused while the account is
+// disabled, and every failure through it still counts toward the
+// disable.
 func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, pendingAfterReset bool, now time.Time) (loginReservation, bool) {
 	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID, pendingAfterReset: pendingAfterReset}
 	if accountID == "" {
@@ -51,9 +67,6 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 	}
 	if ok {
 		if accountID != "" {
-			// #44 follow-up: the known-browser allowance -- a browser
-			// that has completed a sign-in keeps a small budget of its
-			// own while the account is locked out -- belongs here.
 			ok = g.deps.Limiter.ReserveAccount(g.deps.Users, accountID, now)
 		} else {
 			ok = g.deps.Limiter.Reserve(res.nameKey, now)
@@ -65,14 +78,26 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 			g.deps.Limiter.ReleaseAfterReset(res.ipKey, accountID)
 		}
 	}
+	if !ok && accountID != "" && g.isKnownBrowser(r, accountID, now) &&
+		g.deps.Limiter.ReserveKnownBrowser(g.deps.Users, accountID, now) {
+		// Whatever the ordinary path reserved has been handed back
+		// above, a reset pass included, so this is the only
+		// reservation the attempt holds.
+		ok, res.afterReset, res.knownBrowser = true, false, true
+	}
 	if !ok {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 	}
 	return res, ok
 }
 
-// releaseLogin returns both reservations after a successful attempt.
+// releaseLogin returns both reservations after a successful attempt,
+// or the known browser's one (ReleaseKnownBrowser).
 func (g *Gate) releaseLogin(res loginReservation, now time.Time) {
+	if res.knownBrowser {
+		g.deps.Limiter.ReleaseKnownBrowser(g.deps.Users, res.accountID, now)
+		return
+	}
 	if !res.afterReset && !res.pendingAfterReset {
 		g.deps.Limiter.Release(res.ipKey, now)
 	}
@@ -97,9 +122,10 @@ func (g *Gate) completeLogin(res loginReservation, now time.Time) {
 		g.releaseLogin(res, now)
 		return
 	}
-	if !res.afterReset && !res.pendingAfterReset {
+	if !res.afterReset && !res.pendingAfterReset && !res.knownBrowser {
 		g.deps.Limiter.Release(res.ipKey, now)
 	}
+	// SignedIn drops the known browser's allowance too.
 	g.deps.Limiter.SignedIn(g.deps.Users, res.accountID, now)
 }
 

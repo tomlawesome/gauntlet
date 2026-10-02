@@ -139,6 +139,10 @@ func (b *budgetBackend) Save(ctx context.Context, payload []byte, expect int64) 
 func (b *budgetBackend) Close() error     { return b.inner.Close() }
 func (b *budgetBackend) Describe() string { return "budget test backend" }
 
+// ProtectedAtRest: a test backend over persist.Memory has no storage
+// to copy (persist.AtRest), so OpenStore accepts it as it does Memory.
+func (b *budgetBackend) ProtectedAtRest() bool { return true }
+
 // newOIDCTestServer serves a gate with SSO on against a fake provider,
 // with "setup-admin" already registered as the local admin. It returns
 // the gate's flow-cookie codec, so a test can read the nonce the way the
@@ -232,7 +236,9 @@ func totpCounterNow(now time.Time) uint64 {
 // the minimal way to clear the forced-enrolment door gate/protect.go
 // holds shut for every local-password account (#49), for a fixture
 // whose point is not that door.
-func enrolTOTPFactor(t *testing.T, c *contractChecker, base string, client *http.Client, password string) {
+//
+// It returns the recovery codes the confirmation issued.
+func enrolTOTPFactor(t *testing.T, c *contractChecker, base string, client *http.Client, password string) []string {
 	t.Helper()
 	var enrolled totpEnrolResponse
 	c.do(client, base, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: password}}, 200, &enrolled)
@@ -241,7 +247,9 @@ func enrolTOTPFactor(t *testing.T, c *contractChecker, base string, client *http
 		t.Fatal(err)
 	}
 	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
-	c.do(client, base, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}}, 200, nil)
+	var confirmed totpConfirmResponse
+	c.do(client, base, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}}, 200, &confirmed)
+	return confirmed.RecoveryCodes
 }
 
 func mustCookieJar(t *testing.T) http.CookieJar {
@@ -359,7 +367,8 @@ type totpEnrolResponse struct {
 }
 
 type totpConfirmResponse struct {
-	AlreadyIssued bool `json:"alreadyIssued"`
+	AlreadyIssued bool     `json:"alreadyIssued"`
+	RecoveryCodes []string `json:"recoveryCodes"`
 }
 
 type recoveryCodesRegenerateResponse struct {
@@ -368,6 +377,21 @@ type recoveryCodesRegenerateResponse struct {
 
 type resetPasswordResponse struct {
 	Code string `json:"code"`
+}
+
+type unlockUserResponse struct {
+	WasDisabled  bool `json:"wasDisabled"`
+	WasLockedOut bool `json:"wasLockedOut"`
+}
+
+type unlockSelfRequest struct {
+	Password string `json:"password"`
+	Code     string `json:"code"`
+}
+
+type unlockCodeRequest struct {
+	Username   string `json:"username"`
+	UnlockCode string `json:"unlockCode"`
 }
 
 type tokenResponse struct {

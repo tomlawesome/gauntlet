@@ -18,6 +18,14 @@ func (g *Gate) handleLogout(w http.ResponseWriter, r *http.Request) {
 // mikroview's #677/handleAuthLogoutAll. User-tier: it acts only on the
 // caller's own sessions, resolved from the session cookie, never from a
 // body field naming someone else.
+//
+// It also forgets every browser the account remembers
+// (gauntlet.Store.ClearKnownBrowsers, #44): someone signing out
+// everywhere suspects a device they no longer control, and that device
+// should keep no allowance during a lockout either. The browser making
+// the call is remembered again as its new session is issued. A clear
+// that cannot be saved is logged, and the sign-out goes on: the
+// sessions are what the caller asked to end, and they are already gone.
 func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
 	user, ok := g.sessionUser(r, now)
@@ -27,7 +35,12 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.deps.Sessions.RevokeAllForUser(user.ID)
-	g.audit(user.Username, "account.sessions_ended", user.Username, "sessions ended: all, via sign out everywhere")
+	detail := "sessions ended: all, via sign out everywhere; remembered browsers forgotten"
+	if err := g.deps.Users.ClearKnownBrowsers(user.ID); err != nil {
+		g.logError("forgetting the browsers account " + user.ID + " remembers: " + err.Error())
+		detail = "sessions ended: all, via sign out everywhere; remembered browsers could not be forgotten"
+	}
+	g.audit(user.Username, "account.sessions_ended", user.Username, detail)
 
 	g.issueSession(w, r, user.ID, now)
 	writeJSON(w, http.StatusOK, map[string]any{"signedOutEverywhere": true})

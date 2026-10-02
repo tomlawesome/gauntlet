@@ -25,7 +25,7 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 3 (#28, #44) and
+  version 1 unchanged, gauntlet writes accounts as version 4 (#28, #44) and
   tokens as version 1, and a document newer than the running build is
   refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
@@ -49,8 +49,9 @@ github.com/tomlawesome/gauntlet
 ├── user.go  password.go  session.go  token.go  ratelimit.go  username.go
 ├── totp.go  recoverycodes.go  resetcode.go  passkeys.go   (storage + stdlib logic)
 ├── id.go
-├── persist/                    Backend, Snapshot, ErrConflict, VersionReader,
+├── persist/                    Backend, Snapshot, ErrConflict, VersionReader, AtRest,
 │                               Open, SaveWithRetry (deprecated), LoadDocument, Memory (tests),
+│                               Encrypt, Encrypted, EncryptOptions (#50, ADR-0005),
 │                               EncryptedFileBackend, MinKeyBytes (issue #18)
 ├── oidc/                       Config, Client, Identity, Policy, FlowState, StateCodec,
 │                               AllowIssuer, IsMultiTenantIssuer
@@ -58,6 +59,10 @@ github.com/tomlawesome/gauntlet
 │                               UserFromContext, TokenFromContext
 ├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrNoUsablePasskey
 │                               (G8, ADR-0004; the one importer of go-webauthn)
+├── blocklist/                  List, Parse, Embedded, Refresher, RefreshConfig, NewRefresher,
+│                               DefaultURL (#52, ADR-0005; the common-password list)
+├── cmd/pwlist/                 builds, signs, verifies and publishes that list (CI only)
+├── internal/listsig/           the list's Ed25519 signature format
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
 ├── internal/testutil/          fake OIDC provider (mikroview's fake_provider_test.go)
 └── internal/passkeytest/       fake WebAuthn authenticator (mikroview's webauthnfake_test.go)
@@ -86,7 +91,14 @@ interface in the root, so an application that never imports it -- birdcage
   authenticated-encryption file backend, so it moved into
   `gauntlet/persist` rather than staying duplicated, and gauntlet takes
   key bytes directly rather than a key file path -- reading the key
-  file stays each application's job (§1.7). The one thing that does not
+  file stays each application's job (§1.7). Since #50
+  ([ADR-0005](adr/0005-encryption-at-rest-on-every-backend.md)) that
+  backend is `persist.Encrypt` over the plain file, and the same wrapper
+  goes over any application backend -- mikroview's Postgres blob,
+  birdcage's table -- so the accounts document is ciphertext wherever
+  it is stored, and `OpenStore` refuses a backend that would hold it in
+  the clear unless the application says it accepts that
+  (`Options.AllowPlaintextAtRest`). The one thing that does not
   carry across a package boundary is the sentinel `ErrConflict`, so
   mikroview's `internal/persist` will assign `var ErrConflict =
   gpersist.ErrConflict` when it moves -- one line, no data change.
@@ -177,6 +189,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     CreatedAt, LastLogin, PasswordChangedAt, RoleChangedAt time.Time
     SessionsEndedAt, LoginLockedUntil time.Time // new (#28, #19): gauntlet's own, zero in mikroview's documents
     LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
+    KnownBrowsers []KnownBrowser // new (#44): accounts version 4; none in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
@@ -194,6 +207,7 @@ func (s *Store) Persisted() bool
 func (s *Store) Count() int
 func (s *Store) Register(username, password string, now time.Time) (*User, error)          // first account only, becomes admin; host-side -- gate checks the setup code first
 func (s *Store) CheckSetupCode(code string) error                                           // new (#37, ADR-0003): the one-time code an empty store announced
+func (s *Store) CheckUnlockCode(username, code string) (*User, error)                       // new (#44): the one-time code a store with its lone admin disabled announced
 func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error)
 func (s *Store) DeleteUser(id string) (*User, error)
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error)
@@ -206,7 +220,12 @@ func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (*User, bool, error)
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
-func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout
+func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout (no limiter: a CLI)
+type KnownBrowser struct { Hash string; IssuedAt time.Time } // new (#44): SHA-256 of a browser's token, never the token
+const MaxKnownBrowsers = 3; const KnownBrowserLifetime = 45 * 24 * time.Hour // #44 (owner, 2026-10-02)
+func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (string, error) // #44: new token, old one's entry dropped, oldest evicted past 3
+func (s *Store) ClearKnownBrowsers(accountID string) error                                 // #44: sign out everywhere; IssueResetCode does it in its own write
+func (s *Store) KnowsBrowser(accountID, token string, now time.Time) bool                  // #44: hash on the record, under 45 days old
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
@@ -268,7 +287,10 @@ func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only;
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
 func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time)           // #44: completed sign-in resets the count
-func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword
+func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword, end every session
+func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) error                // #44: Store.UnlockLogin plus this limiter's own count
+func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time) bool // #44: a known browser's own budget once the ordinary path refuses
+func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time)
 const MaxConsecutiveLoginFailures = 50                                                             // #44: disables local sign-in
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
 func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
@@ -362,10 +384,37 @@ exactly the locked response, with no end, until `Store.UnlockLogin`. At
 lockouts. The count resets only on a completed sign-in (`SignedIn`,
 called wherever gate issues a session) or a new password (`SetPassword`,
 `IssueResetCode`); not on a correct password alone, and not as a lockout
-runs out. A new password does not lift a disable. Separately, five
-failed second-factor steps in a row since the last completed sign-in
-mean the password is known to someone else, so `SecondFactorFailed`
-sets `MustChangePassword` (one save); that run is kept in memory only. A lockout whose save fails
+runs out. A new password the owner sets does not lift a disable; a
+reset code does, since issuing one is an admin action (owner,
+2026-10-02). Separately, five failed second-factor steps in a row since
+the last completed sign-in mean the password is known to someone else,
+so `SecondFactorFailed` sets `MustChangePassword` and ends every session
+on the account (`SessionsEndedAt`), in one save: the change-password
+door asks for no current password, so only a fresh sign-in with both
+factors may reach it. That run is kept in memory only.
+
+Unlocking (#44). An admin lifts another account's disable, lockout and
+count with `POST /api/auth/users/{id}/unlock`, through
+`LoginLimiter.UnlockLogin`, which also drops the limiter's own count of
+the window's guesses and any lockout decision it has yet to save;
+`Store.UnlockLogin` alone is for a process with no limiter. An admin
+whose own sign-in is disabled but who still holds a session may unlock
+it on the same route only by entering their password and a current
+second factor (a TOTP or recovery code) again, each checked on the
+account's password re-check budget (`ReserveRecheck`); the session
+alone is not enough (owner, 2026-10-02). When the store opens with the
+admin disabled and no admin left who could unlock it, it makes a
+one-time unlock code and announces it (`Options.OnUnlockCode`, else one
+Warn line on `Options.Log`), with the setup code's shape: 80 bits, only
+its SHA-256 kept, in memory, never in the document, gone with the
+process. It is retired whenever a write or load shows that account no
+longer disabled, so it is single use and dies with any other unlock.
+`POST /api/auth/unlock` takes the username and code (`CheckUnlockCode`),
+rate limited on the client address like registration, with one
+identical refusal for every wrong input. It only lifts the disable: no
+session is issued, and the admin signs in as normal with their existing
+password and second factor -- not a password reset, account reset or
+admin transfer (owner, 2026-10-02). A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A clear whose save fails -- the owner signed in and
 ended a lockout the record still holds -- is retried the same way, but
@@ -390,8 +439,52 @@ names tried from that address stay refused.
 Re-checking a signed-in caller's own password has its own per-account
 budget, memory only.
 
+The known-browser allowance (#44) keeps a stranger from locking the
+owner out. A browser that completes a sign-in on an account is
+remembered on its record (`RememberBrowser`): it gets a 32-byte random
+token, base64url, and the record keeps only the token's SHA-256 and when
+it was issued -- a hash needs no key, unlike gate's per-process
+pending-login codec, so the token survives a deploy, and each browser
+can be forgotten on its own. Each completed sign-in rotates the token,
+dropping the browser's old entry in the same write. An account
+remembers at most three browsers, the oldest evicted, each for 45 days
+from its latest sign-in there, checked on the server from `IssuedAt`
+(owner, 2026-10-02). Once the ordinary path refuses an attempt -- the
+account locked out, or the address at its limit -- and the browser's
+token matches the named account (`KnowsBrowser`), the attempt goes ahead
+on `ReserveKnownBrowser`: the limiter's threshold per window, per
+account, no escalation, refused outright while the account is disabled.
+Its bucket is created only after a match, so there is at most one per
+account. Each failure through it counts toward the 50: the attempt that
+fills the budget closes it for one window and adds one lockout's worth
+to `LoginLockoutCount` (which also lengthens the next ordinary lockout),
+so the fiftieth disables as an ordinary failure would. A success hands
+the count back (`ReleaseKnownBrowser`, `SignedIn`). Sign out everywhere
+(`ClearKnownBrowsers`, the calling browser then remembered again) and an
+admin's reset code forget every browser; a signed-in password change, an
+SSO link, an unlock and the forced change after second-factor failures
+do not -- that is when the owner needs the allowance. Nothing is keyed
+on the client's address. A stolen token gains its holder the allowance
+during a lockout, ending at the disable, and never a session. SSO never
+reaches the limiter, so the token is harmless there; it is issued all
+the same.
+
 Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
+
+**Common passwords** (#43, #52, [ADR-0005](adr/0005-common-password-list.md)).
+`gauntlet/blocklist` holds the SHA-1 hashes of the 10,000 most
+prevalent Pwned Passwords. `blocklist.Embedded()` is the copy compiled
+into the release and makes no network request; it is an empty list
+until the first signed CI run, which a release refuses to tag without.
+An application that wants newer lists between releases runs a
+`blocklist.Refresher`, which fetches the published list from the
+public GitHub mirror's `pwned-top10k-current` release, adopts it only
+if its checksum, Ed25519 signature (keys in `blocklist/keys/`) and
+format check out and it is newer than the list in use, and keeps it in
+a directory the app names. `cmd/pwlist` builds the list from HIBP's
+range API in a monthly scheduled pipeline. #43 wires it into password
+checks.
 
 ### 1.4 `gauntlet/oidc`
 
@@ -469,7 +562,15 @@ on (a browser then refuses the cookie unless it is `Secure`, has no
 `Domain` and is on path `/`; the bare name under plain HTTP, where a
 browser would drop a `__Host-` cookie), `gate.New` warning once when
 `SecureCookie` is off, and a login ending the same account's session the
-browser already held, since the new cookie replaces it (#47); the OIDC flow cookie
+browser already held, since the new cookie replaces it (#47); the
+known-browser cookie `gate_known_browser` set at every session issue
+(`issueSession`, #44), `HttpOnly`, `SameSite=Lax`, `Secure` per
+`SecureCookie`, path `/api/auth` -- every route that issues a session
+is under it, so each issue sees the browser's old token and replaces
+it rather than adding a second entry against the cap of three -- and
+no `__Host-` prefix (which needs path `/`), `Max-Age` 45 days to match
+the server's own check (§1.3), read for the allowance only once the
+limiter has refused an attempt; the OIDC flow cookie
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by
@@ -537,10 +638,10 @@ it. The data for all of this lives on `User`.
 - A SQL backend. Mikroview keeps its own (`internal/persist.PostgresBackend`);
   birdcage writes its own if it ever needs one. `persist.Memory` is for
   tests.
-- Reading the key file itself. `persist.EncryptedFileBackend` (issue #18,
-  see below) takes raw key bytes; finding, mounting and reading that
-  file -- and deciding a store has no key and therefore no persistence
-  -- stays each application's own job.
+- Reading the key file itself. `persist.Encrypt` and
+  `persist.EncryptedFileBackend` (#18, #50) take raw key bytes; finding,
+  mounting and reading that file -- and deciding a store has no key and
+  therefore no persistence -- stays each application's own job.
 - The recovery-key store (`recovery.go`, mikroview's CLI gate) and the
   `-recover-admin-account` tooling. They are mikroview's operational
   surface; birdcage gets a `birdcage user` CLI over the same `Store`
@@ -604,6 +705,17 @@ and `Describe` (`"birdcage db store 'accounts'"`). Uses `db.DB`'s
 `?`-rebinding `Exec/QueryRow`, so one implementation serves SQLite and
 Postgres like every other birdcage store.
 
+The backend `OpenStore` is given is that table wrapped in
+`persist.Encrypt(store.NewAuthBackend(database, "accounts"), key,
+persist.EncryptOptions{Label: "accounts"})` -- the same for `"tokens"`
+-- with `key` the bytes of `BIRDCAGE_AUTH_KEY_FILE` (§2.4), so the
+`payload` column only ever holds `{"sealed": "<base64>"}` (#50,
+[ADR-0005](adr/0005-encryption-at-rest-on-every-backend.md)). The column
+stays `TEXT`: the envelope is JSON text. `OpenStore` refuses the
+unwrapped table (`gauntlet.ErrPlaintextAtRest`). Birdcage has no
+plaintext accounts document to migrate, so it never needs
+`MigratePlaintext`.
+
 Why a document table rather than `users`/`tokens` rows: gauntlet's
 `Store` is an in-memory index that persists whole documents -- that is
 the shape [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) fixed by choosing mikroview's seams, and mikroview's
@@ -626,6 +738,7 @@ BIRDCAGE_SESSION_TTL          default 1h    (gauntlet.MaxSessionIdle; mikroview'
 BIRDCAGE_SESSION_MAX_LIFETIME default 24h   (gauntlet.MaxSessionLifetime; mikroview's old 168h default is refused by gate.New)
 BIRDCAGE_OIDC_ISSUER_URL, _CLIENT_ID, _CLIENT_SECRET_FILE, _SCOPES
 BIRDCAGE_OIDC_ALLOWED_GROUPS, _ALLOWED_EMAILS, _ALLOWED_EMAIL_DOMAINS
+BIRDCAGE_AUTH_KEY_FILE        a file of at least 32 random bytes (persist.MinKeyBytes), mounted like the OIDC secret; the accounts and tokens documents are sealed under it (§2.3, ADR-0005). Required once auth is configured: OpenStore refuses an unsealed table
 BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header); would be passkey.Config.PublicURL if birdcage ever wired passkeys (§1.6: it does not)
 ```
 
@@ -688,7 +801,13 @@ Not done in this work; recorded so the API above is checked against it.
   `internal/persist.EncryptedFileBackend` already moved to
   `gauntlet/persist` (issue #18); mikroview's stores can switch to the
   gauntlet one directly, passing `retention.Key`'s raw material rather
-  than the `*retention.Key` type.
+  than the `*retention.Key` type. Its Postgres mode wraps
+  `PostgresBackend` for the `auth` row in `persist.Encrypt` under the
+  same material, with `Label: "auth"` and `MigratePlaintext: true` for
+  the release that introduces it (the row holds plaintext JSON today;
+  the first open seals it in place), since `OpenStore` now refuses an
+  unsealed backend (#50, ADR-0005). `store_blob.payload` stays `text`:
+  the envelope is JSON text.
 - Constructor renames: `OpenWithBackend(b)` → `OpenStore(b, Options{Log:
   logging.New("auth")})`; `OpenTokenStoreWithBackend(b)` →
   `OpenTokenStore(b, TokenOptions{Kinds: […, TokenKindDroplistPull]})`;
@@ -794,6 +913,19 @@ required, and attestation is `none` (ADR-0004 decision 5).
 `github.com/go-webauthn/webauthn` v0.18.2 is the newest release and has
 no entry in the OSV or Go vulnerability databases (re-checked
 2026-10-02 for G8); `govulncheck` in CI watches it from here on.
+
+### Common-password list (#52, ADR-0005)
+
+| Pitfall | Module does |
+|---|---|
+| A tampered list served to applications | Ed25519 signature over the exact bytes, keys compiled in from `blocklist/keys/`; no key, no list adopted; SHA-256 checked too |
+| A replayed or rolled-back older list | adopted only if built later than the list in use, and never older than the embedded copy |
+| A list dated far ahead to block every later one | refused if built more than 24 hours in the future |
+| A hostile or broken server exhausting memory | 256 B checksum, 1 MiB list and 4 KiB signature caps; per-request timeouts |
+| The stored copy altered on disk | verified again on every start; written 0600 by rename |
+| The signing key leaking | a file on one protected, project-locked runner that talks to nobody, never a CI variable; publishing credentials sit on a different runner |
+| A sample or partial build published | `# sample:` header refused by `Parse`, `sign` and every refresher; a full build must see 500 M hashes with a 10,000th count of at least 1,000 |
+| An outbound call the application did not ask for | `Embedded()` never touches the network; refreshing is opt-in |
 
 ### Fail-closed list
 

@@ -14,10 +14,20 @@ has to meet.
 | Secret scan | `gitleaks` | `lint:secrets` |
 | HTTP contract | `gate/contracttest` (its own Go module) against `docs/api/auth.yaml` | `test:contract` |
 | Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag | `lint:apidiff` |
+| Common-password list age | `scripts/blocklist-age-check.sh` (its own cases: `scripts/blocklist-age-check_test.sh`, run by hand) | `release:version` |
 
 There is no frontend, no shipped image and no live-stack e2e stage here
 (unlike birdcage/mikroview): gauntlet ships a tag, not a running service,
 and every behaviour it has is reachable from a Go test.
+
+The common-password list's code (`blocklist`, `cmd/pwlist`, #52) is
+tested against `httptest` fakes of HIBP's range API, the list's
+download host and GitHub's releases API, with synthetic hashes and
+Ed25519 keys made per test. No test reaches the network, and no real
+HIBP response is recorded in this repository: the owner has not
+approved one as a fixture. What only the real producer can show -- the
+real corpus's size and counts -- is checked by the build's own sanity
+bars on every scheduled run.
 
 ## Compatibility checks
 

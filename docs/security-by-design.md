@@ -53,16 +53,21 @@ fix is made, a test proves the flaw existed first.
 
 ## Trust boundary: the accounts store (issue #18)
 
-The accounts store this module persists (via `persist.EncryptedFileBackend`
-or otherwise) is a **trusted** input, not hostile data: it is refused
+The accounts store this module persists (via `persist.Encrypt`,
+`persist.EncryptedFileBackend` or otherwise) is a **trusted** input, not hostile data: it is refused
 outright on tamper (a wrong key, a flipped byte, a document moved to
 another store's path) rather than sanitised or partially accepted, because
 there is no safe partial reading of a corrupted or forged auth store.
 
 Gauntlet decides how a document is authenticated once opened; the
 *application* decides which `persist.Backend` to use and, for
-`EncryptedFileBackend`, where its key file lives and how it is mounted.
-Gauntlet never reads a key file itself.
+`persist.Encrypt` and `EncryptedFileBackend`, where its key file lives
+and how it is mounted. Gauntlet never reads a key file itself. Since #50
+([ADR-0005](adr/0005-encryption-at-rest-on-every-backend.md)) the accounts
+store refuses to open over a backend that would hold the document in the
+clear, unless the application sets `Options.AllowPlaintextAtRest`; the
+TOTP secrets inside it cannot be hashed, so sealing the document is the
+only way a database dump or backup carries none of them.
 
 The supported way to change accounts outside the UI is the application's
 own CLI (mikroview's `-recover-admin-account` and equivalents), never
@@ -178,12 +183,12 @@ it says so instead of repeating the reasoning.
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
-| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44) |
+| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44); a browser that completed a sign-in keeps a small allowance of its own during a lockout, so a stranger cannot cheaply lock the owner out, and its failures count toward the 50 (`knownbrowser.go`, `LoginLimiter.ReserveKnownBrowser`, #44) |
 | 6.1.2, 6.2.11 context-specific word list | 2 | Gap | #43 (password blocklist). See 800-63B §3.1.1.2 |
 | 6.1.3, 6.3.4 all pathways documented, strength consistent | 2 | Met, with one deviation | Pathways: password then TOTP/passkey/recovery code; reset code then the same second factor (`gate/login_handler.go:129-172`); SSO; bearer token; setup code. All in `docs/api/auth.yaml`. Deviation: an SSO sign-in creates a session with no local second factor (`gate/oidc_handler.go:292`); see 6.8.4 |
 | 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met | `store.go:39` `minPasswordLength = 8`, conforming because a second factor is mandatory for every local-password account (#49); see 800-63B §3.1.1.2 |
 | 6.2.2 users can change their password | 1 | Met | `POST /api/auth/password`, `gate/password_handler.go` |
-| 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code, or (since #44) a sign-in with both factors, just proved the account |
+| 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code, or (since #44) a sign-in with both factors, just proved the account: both causes end every earlier session in the write that sets the flag |
 | 6.2.4 checked against the top 3000 passwords | 1 | Gap | #43 (password blocklist) |
 | 6.2.5 no composition rules | 1 | Met | Length is the only rule (`store.go:962`, `:1532`) |
 | 6.2.6, 6.2.7 masking, paste, password managers | 1 | App | Frontend; gauntlet imposes nothing that blocks them |
@@ -191,7 +196,7 @@ it says so instead of repeating the reasoning.
 | 6.2.9 at least 64 characters permitted | 2 | Met | No maximum; the 64 KiB body limit (`gate/httpjson.go:37`) is the only bound |
 | 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, or five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44) |
 | 6.2.12 breached-password check | 2 | Gap | #43 (password blocklist) |
-| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `stall_test.go` |
+| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `knownbrowser_test.go`, `gate/knownbrowser_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
 | 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
 | 6.3.5 notify suspicious attempts | 3 | Not targeted | No notification channel; see 800-63B §4.6 |
@@ -248,7 +253,7 @@ it says so instead of repeating the reasoning.
 |---|---|---|---|
 | 8.1.1 function-level rules documented | 1 | Met | `docs/design.md` §2.1 (roles) and `docs/api/auth.yaml` (which routes need `admin`); token kinds reach only the handler registered for them (`Gate.Handle`) |
 | 8.1.2 field-level rules documented | 2 | Met | `Store.List` and `blankCredentials` define what leaves the store (`user.go:193`); the API document closes every response body |
-| 8.1.3, 8.1.4, 8.2.4 contextual or adaptive decisions | 3 | N/A | None made; the client address feeds only the login limiter |
+| 8.1.3, 8.1.4, 8.2.4 contextual or adaptive decisions | 3 | N/A | None made on access; the client address feeds only the login limiter, and a known-browser token (#44) only that limiter's allowance during a lockout -- it never grants or widens access |
 | 8.2.1 function-level enforcement | 1 | Met | `RequireRole` (`gate/routes.go:50-59`), unknown role denied everything (`user.go:51`, `gate/protect.go:338`) |
 | 8.2.2 object-level enforcement | 1 | Met | Passkey rename and delete take the caller's own account id; user and token routes are admin only; `logout-all` acts on the cookie's account, never a body field |
 | 8.2.3 field-level enforcement | 2 | Met | Secrets blanked before any copy leaves the store; hashes never serialised to HTTP |
@@ -301,18 +306,19 @@ post-quantum migration) starts from a list rather than a search:
 | Setup code | SHA-256, memory only, constant-time compare | `setupcode.go:73,140` |
 | TOTP | HMAC-SHA1 over a 160-bit secret, 30 s step, 6 digits (RFC 6238; SHA-1 inside HMAC is approved by SP 800-131A) | `totp.go:47-65`, `:206` |
 | Sealed cookies (OIDC flow, pending login, passkey ceremonies) | AES-256-GCM, 32-byte key from `crypto/rand` per process and per codec, 96-bit random nonce per value, strict base64url | `oidc/state.go`, `gate/pendinglogin.go`, `passkey/seal.go` |
-| Encrypted accounts and tokens files | AES-256-GCM; key = HKDF-SHA256(app key ≥ 32 bytes, 16-byte random salt per save); 96-bit random nonce; AAD = the store's logical path; envelope has magic and version bytes | `persist/encrypted_file.go:22,59-78,153-161` |
-| Random values | `crypto/rand`: session and account ids 128 bits, token values 128 bits, TOTP secrets 160 bits, reset and setup codes 80 bits, recovery codes 50 bits, OIDC `state`/`nonce` 256 bits, WebAuthn challenge 256 bits | `id.go`, `totp.go`, `resetcode.go`, `recoverycodes.go`, `oidc/state.go`, go-webauthn |
+| Sealed accounts and tokens documents, on every backend (#50) | AES-256-GCM; key = HKDF-SHA256(app key ≥ 32 bytes, 16-byte random salt per save); 96-bit random nonce; AAD = the store's label (a file's path); envelope has magic and version bytes, carried as `{"sealed": "<base64>"}` through a database backend | `persist/seal.go`, `persist/encrypted.go` |
+| Random values | `crypto/rand`: session and account ids 128 bits, token values 128 bits, TOTP secrets 160 bits, reset, setup and unlock codes 80 bits, recovery codes 50 bits, OIDC `state`/`nonce` 256 bits, WebAuthn challenge 256 bits | `id.go`, `totp.go`, `resetcode.go`, `setupcode.go`, `unlockcode.go`, `recoverycodes.go`, `oidc/state.go`, go-webauthn |
 | Signature verification | ID tokens RS256/ES256/PS256 (go-oidc); WebAuthn assertions, library default COSE algorithms (go-webauthn v0.18.2) | `oidc/oidc.go:183`, `passkey/ceremony.go` |
 
 **Key lifecycle (11.1.1).** Per-process keys are made at start and die
 with the process; a restart ends in-flight ceremonies and pending
-logins, which is accepted. The encrypted-file key is the application's
+logins, which is accepted. The document key is the application's
 (trust boundary section above): gauntlet never reads it, and rotating
 it means loading with the old key and saving with the new, which an
-application can do with two backends. The TOTP secret is the one
-long-lived symmetric key gauntlet stores; it is only as protected as
-the backend (13.3.1 below).
+application can do with two `persist.Encrypt` wrappers over one
+backend. The TOTP secret is the one long-lived symmetric key gauntlet
+stores; it is sealed under that key on every backend, and `OpenStore`
+refuses a backend that would hold it in the clear (13.3.1 below, #50).
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
@@ -384,7 +390,7 @@ store, keep and protect:
 | 2.4.1 anti-automation | 2 | Met | Limiter on login, factor, setup code and re-checks; Argon2id semaphore (`password.go:66`) |
 | 4.1.1 `Content-Type` with charset | 1 | Gap | `application/json` without `charset` and no `nosniff`; #46 (no-store/nosniff headers) |
 | 4.1.3 proxy headers not user-overridable | 2 | App | `gate.Config.ClientIP` is the application's trusted-proxy policy (`docs/design.md` §1.7) |
-| 13.3.1 secrets management | 2 | Deviation | TOTP seeds and passkey public keys are plaintext inside the document; `persist.EncryptedFileBackend` is the documented default, a SQL backend stores them as the database protects them. #50 (TOTP seeds and passkey keys at rest); see 800-63B §3.1.4.2 |
+| 13.3.1 secrets management | 2 | Met | The accounts document -- TOTP seeds and passkey public keys inside it -- is sealed by `persist.Encrypt` before any backend stores it, and `OpenStore` refuses a backend that stores plaintext unless the application sets `AllowPlaintextAtRest` (#50, ADR-0005); the key is the application's secret, never the document's. See 800-63B §3.1.4.2 |
 | 14.2.1 no secrets in URLs | 1 | Met | Bearer token read from the header only (RFC 6750 section above); the OIDC code is consumed once from the callback query, as the protocol requires |
 | 14.3.2 `Cache-Control: no-store` | 2 | Gap | Not set; #46 (no-store/nosniff headers) |
 | 15.1.2 dependency inventory | 2 | Met | `go.sum`, `supply-chain/licence-policy.yml`, `govulncheck` in CI |
@@ -395,9 +401,9 @@ store, keep and protect:
 | 15.4.1–15.4.3 safe concurrency | 3 | Met | Store and session mutexes, copy-then-save (`mutate.go`), `-race` in CI, check-and-spend under one lock for TOTP, recovery codes and ceremonies |
 | 3.3.1 cookie `Secure` | 1 | Met, conditional | `gate.Config.SecureCookie`; the application must set it where TLS terminates, and `gate.New` logs one warning naming the setting when it is left false (#47) |
 | 3.3.2 `SameSite` fits the purpose | 2 | Met | `Lax` on every cookie (`gate/cookie.go` `writeCookie`) |
-| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies are scoped to their routes, which the prefix forbids |
+| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies and the known-browser cookie (`gate_known_browser`, path `/api/auth`, #44) are scoped to their routes, which the prefix forbids |
 | 3.3.4 `HttpOnly` | 2 | Met | Every cookie |
-| 3.3.5 cookie under 4096 bytes | 3 | Met | Session id 32 characters; sealed values a few hundred bytes |
+| 3.3.5 cookie under 4096 bytes | 3 | Met | Session id 32 characters; known-browser token 43; sealed values a few hundred bytes |
 | 3.5.1 CSRF | 1 | Met | `X-Requested-With` on unsafe methods plus `SameSite=Lax` (`gate/protect.go:118-123`, `:313`); bearer requests skip it because no cookie is involved |
 | 3.5.3 state-changing routes use unsafe methods | 1 | Met | Every mutation is POST, PATCH or DELETE (`docs/api/auth.yaml`); the OIDC callback is GET but creates nothing without the sealed flow cookie |
 
@@ -407,10 +413,11 @@ At L2 gauntlet meets every requirement except: password blocklists
 (6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
 decisions (16.2.1, 16.3.1–16.3.3). Each has an issue; the password
 blocklist needs the owner. The lockout shape from the 800-63B review is
-settled (#44). Four deviations are recorded rather than fixed: the TOTP
-acceptance window, the SSO sign-in's reliance on the IdP's policy,
-secrets at rest on backends other than the encrypted file, and ending
-one session without re-authentication (7.5.2, owner 2026-10-02).
+settled (#44). Three deviations are recorded rather than fixed: the TOTP
+acceptance window, the SSO sign-in's reliance on the IdP's policy, and
+ending one session without re-authentication (7.5.2, owner 2026-10-02).
+Secrets at rest were a fourth until #50 sealed the document on every
+backend.
 
 Written by Fable 5.1, 2026-10-02.
 
@@ -459,7 +466,7 @@ already holds the evidence, the row points at it.
 | 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms | `minPasswordLength = 8` (`store.go:39`), conforming unconditionally because a second factor is mandatory for every local-password account and cannot be turned off (#49) |
 | Permit at least 64 characters; accept printing ASCII, space and Unicode; count code points (SHOULD) | Conforms | No maximum, no character rules; length counted in characters (`store.go:962`, `:1532`) |
 | No other composition rules (SHALL NOT) | Conforms | None |
-| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too (`LoginLimiter.SecondFactorFailed`, #44) |
+| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too and sign the account out everywhere (`LoginLimiter.SecondFactorFailed`, #44) |
 | No hints, no knowledge-based questions | Conforms | None exist |
 | Verify the whole password, no truncation | Conforms | `password.go:92`, `:159` |
 | NFC normalisation before hashing (SHOULD) | Deviation | Not applied: ASVS 6.2.8 asks for the bytes exactly as received, and both consumers' operators type on their own devices. A password typed on a device that composes accented characters differently will not match; documented, not fixed |
@@ -468,7 +475,7 @@ already holds the evidence, the row points at it.
 | Rate limiting on the account (SHALL, §3.2.2) | Conforms | Below |
 | Password managers and paste allowed | Conforms | Nothing server-side interferes |
 | Salted and hashed with a password hashing scheme, cost as high as practical, parameters stored with each hash, salt at least 32 bits | Conforms | Argon2id, RFC 9106 §4 second profile, 128-bit salt, parameters in the hash string (`password.go:28-48`, `:94`). ASVS 11.4.2 |
-| Extra keyed hash with a verifier-only secret (SHOULD) | Deviation | No pepper. The encrypted file backend is the at-rest layer instead (trust boundary section above); a pepper would be one more key for the application to mount |
+| Extra keyed hash with a verifier-only secret (SHOULD) | Deviation | No pepper. The sealed document (`persist.Encrypt`, on every backend since #50) is the at-rest layer instead (trust boundary section above); a pepper would be one more key for the application to mount |
 
 ### Look-up secrets: recovery codes (§3.1.2, §4.2.1.1)
 
@@ -495,7 +502,7 @@ stand alone, which these never do.
 |---|---|---|
 | Key at least 112 bits of strength; approved hash | Conforms | 160-bit secret, HMAC-SHA1 (`totp.go:48-51`); SHA-1 inside HMAC is approved by SP 800-131A. Reasoned in the RFC 6238 section above |
 | Time nonce changes at least every two minutes | Conforms | 30 s step |
-| Keys protected by access controls limited to the components that need them (§3.1.4.2) | Deviation | The secret is plaintext in the accounts document; `persist.EncryptedFileBackend` is the documented default, and a SQL backend relies on the database's own controls. #50 (TOTP seeds and passkey keys at rest); ASVS 13.3.1 |
+| Keys protected by access controls limited to the components that need them (§3.1.4.2) | Conforms | The secret is sealed inside the accounts document before any backend stores it (`persist.Encrypt`), so only a process holding the application's key reads it; `OpenStore` refuses a backend that would hold it in the clear unless the application accepts that (#50, ADR-0005). ASVS 13.3.1 |
 | Approved key establishment at binding | Conforms | The secret reaches the authenticator app in the enrolment URI over the application's TLS, once, and is confirmed before activation (`ConfirmTOTP`) |
 | Collected over an authenticated protected channel | Application | TLS is the application's |
 | Accepted only once while valid (replay resistance, §3.2.7) | Conforms | `TOTPLastCounter`, advanced under the same lock as the check (`totp.go:394-434`); the enrolment code cannot also sign in (`totp.go:344`) |
@@ -508,7 +515,7 @@ stand alone, which these never do.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Challenge nonce at least 64 bits, statistically unique | Conforms | 32-byte library challenge, spent once (`passkey/challenges.go`, ADR-0004 decision 5) |
-| Public keys protected against modification | Conforms | Trusted accounts store (trust boundary section); AEAD-tagged on the encrypted backend |
+| Public keys protected against modification | Conforms | Trusted accounts store (trust boundary section); AEAD-tagged on every backend opened through `persist.Encrypt` (#50) |
 | Key and algorithm at least 112 bits; approved verification | Conforms | go-webauthn v0.18.2's default algorithm set (ES256, RS256 and the rest of its COSE list), left as the library ships it; a browser-made passkey is P-256 |
 | Phishing resistance by verifier name binding (§3.2.5.2); at least one phishing-resistant option offered at AAL2 (SHALL) | Conforms where wired | WebAuthn binds the credential to the relying-party id, taken from the application's public URL never the `Host` header (ADR-0004 decision 4). An application that leaves `Deps.Passkeys` nil offers none; that is its own call (birdcage today) |
 | Authentication intent (§3.2.8) | Conforms | User presence always required (`passkey/relyingparty.go:72`); TOTP and recovery codes are typed by hand |
@@ -522,9 +529,9 @@ stand alone, which these never do.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Limit failed attempts on a subscriber account (SHALL) | Conforms | Per-account counter keyed by account id, never evicted; lockout and the count of lockouts written to `User.LoginLockedUntil` and `User.LoginLockoutCount` so a restart does not lift them (`LoginLimiter.ReserveAccount`, `docs/design.md` §1.3). Address counter alongside |
-| No more than 100 consecutive failures per authenticator, then disable it until rebound (SHALL) | Conforms, lower and wider | `MaxConsecutiveLoginFailures` = 50 consecutive failures, password and second-factor steps on one count, disable the account's local sign-in (`User.LoginDisabledAt`) until `Store.UnlockLogin`, rather than one authenticator until rebound (owner, 2026-10-02). Lockouts before that escalate, so the fiftieth arrives after about 102 hours. Only a completed sign-in or a new password resets the count (#44). The admin unlock route and the lone-admin unlock code are still to come under #44 |
+| No more than 100 consecutive failures per authenticator, then disable it until rebound (SHALL) | Conforms, lower and wider | `MaxConsecutiveLoginFailures` = 50 consecutive failures, password and second-factor steps on one count, disable the account's local sign-in (`User.LoginDisabledAt`) until `Store.UnlockLogin`, rather than one authenticator until rebound (owner, 2026-10-02). Lockouts before that escalate, so the fiftieth arrives after about 102 hours. Only a completed sign-in or a new password resets the count (#44). Unlocked by an admin (`POST /api/auth/users/{id}/unlock`; an admin's own only with their password and a current second factor re-entered, not by the session alone), by an admin-issued reset code, or, for the lone admin, by a one-time unlock code written to the server's log at startup that lifts only the disable (`unlockcode.go`, `POST /api/auth/unlock`) |
 | Disregard earlier failures after a success (SHOULD) | Conforms | `LoginLimiter.SignedIn` on a completed sign-in drops the window and the count of lockouts (`gate/login_handler.go`, `completeLogin`); a correct password alone hands back only its own attempt (`ReleaseAccount`), since the second factor is still to come |
-| Increasing delays, bot challenges, risk signals (MAY) | Partly | Increasing delays: each lockout three times the last, 5 min up to 24 h (#44). No bot challenges or risk signals |
+| Increasing delays, bot challenges, risk signals (MAY) | Partly | Increasing delays: each lockout three times the last, 5 min up to 24 h (#44). One risk signal: a browser that has completed a sign-in on the account (a 32-byte token whose SHA-256 is on the record, at most 3 per account, 45 days from its latest sign-in) keeps the limiter's attempts per window during a lockout, refused once the account is disabled and counted toward it (`knownbrowser.go`, #44). Nothing keyed on the client address. No bot challenges |
 | Password and second factor both throttled when both are tried | Conforms | One budget for the password step and the code step (`gate/login_handler.go:226-231`); the signed-in password re-check has its own (`ReserveRecheck`) |
 
 ### Binding, recovery and invalidation (§4)
@@ -561,8 +568,8 @@ stand alone, which these never do.
 Conforms on everything above except: the password blocklist (#43, owner
 decision on the list); refused attempts and binding sources not logged
 (#45). Documented
-deviations: no NFC normalisation, no pepper, TOTP secrets as protected as
-the backend, no out-of-band notifications, the custom-header CSRF defence,
+deviations: no NFC normalisation, no pepper, no out-of-band
+notifications, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),
 and the TOTP acceptance window. Each gap is one issue in the standards-gaps
 list, shared with the ASVS section where both standards ask for it.

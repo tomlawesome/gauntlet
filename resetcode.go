@@ -140,6 +140,19 @@ func FormatResetCode(code string) string {
 // is still expected to drop the live ones it can reach; this is the
 // part that works across a process boundary and a restart.
 //
+// The account's lockout, its count of lockouts and a disabled sign-in
+// (#44) are all cleared in the same write, so the owner can use the code
+// at once. So are the browsers it remembers (KnownBrowsers, #44): a
+// browser the old credentials reached keeps no allowance past the
+// reset. A running LoginLimiter drops its own count of the guesses
+// before it by PasswordChangedAt. The one thing it can still hold is a
+// disable it decided but has not managed to save (only while saves are
+// failing): that survives the code, failing closed, until
+// LoginLimiter.UnlockLogin -- the admin unlock route -- or a restart.
+// The reset route does not call that itself: it would also drop the
+// limiter's count of the guesses before the reset, which is what lets
+// the reset account past its address's limit (AllowAfterReset, #32).
+//
 // Refused with ErrNoLocalPassword for an SSO-only account. Refusing an
 // admin's *own* account is the caller's job, not this method's: the
 // store has no notion of who is asking.
@@ -186,11 +199,23 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		// The reset code is the account's password now, so a lockout
 		// earned by guessing at the old one ends here, as in
 		// SetPassword: otherwise the owner could not use the code until
-		// it ran out. So does the count of lockouts before it (#44). A
-		// disabled sign-in stays disabled, as in SetPassword: the code
-		// is refused like any password until UnlockLogin lifts it.
+		// it ran out. So does the count of lockouts before it (#44).
+		//
+		// Unlike SetPassword, a disabled sign-in is lifted too (owner,
+		// 2026-10-02): issuing the code is itself an admin action, the
+		// one UnlockLogin stands for, and a code the owner could not use
+		// until a second admin action would be no way back at all. A
+		// new password the owner sets for themselves still lifts
+		// nothing.
 		u.LoginLockedUntil = time.Time{}
 		u.LoginLockoutCount = 0
+		u.LoginDisabledAt = time.Time{}
+		// Every remembered browser is forgotten (#44): an admin resets
+		// an account because its credentials may be in the wrong hands,
+		// and a browser remembered before the reset may be too. The
+		// owner's browser is remembered again at the sign-in the code
+		// leads to.
+		u.KnownBrowsers = nil
 		issued = *u
 		return nil
 	})

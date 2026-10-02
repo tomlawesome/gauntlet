@@ -39,7 +39,12 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// After an admin reset there is no current password to supply -- see
 	// mikroview's own handleAuthChangePassword for the full reasoning.
 	// An admin reset (POST /api/auth/users/{id}/reset-password, which
-	// calls IssueResetCode) is what sets MustChangePassword.
+	// calls IssueResetCode) sets MustChangePassword, and so does a run of
+	// failed second-factor steps (gauntlet.LoginLimiter.SecondFactorFailed,
+	// #44). Skipping the check is safe for both: each ends every session
+	// in the same write that sets the flag, so the caller got here
+	// through a sign-in made since -- with the reset code, or with the
+	// password and a second factor.
 	if !user.MustChangePassword {
 		// Throttled and re-checked by recheckPassword.
 		if _, ok := g.recheckPassword(w, user, req.CurrentPassword, "current password is incorrect", now); !ok {
@@ -70,7 +75,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	detail := "sessions ended: all"
 	if user.MustChangePassword {
-		detail += ", after an administrator's reset"
+		detail += ", forced (an administrator's reset or repeated second-factor failures)"
 	}
 	g.audit(user.Username, "account.password_changed", user.Username, detail)
 
@@ -105,4 +110,44 @@ func (g *Gate) recheckPassword(w http.ResponseWriter, user *gauntlet.User, passw
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 	return current, true
+}
+
+// recheckSecondFactor is recheckPassword for a signed-in caller's
+// second factor: code is a current TOTP code or one of the account's
+// recovery codes, checked the way the login factor step checks them
+// (handleLoginFactor) -- VerifyAndRecordTOTP first, so the code cannot
+// be replayed, then BurnRecoveryCode, which spends a recovery code that
+// matches. A passkey has no code to type, so an account holding only
+// passkeys answers with a recovery code.
+//
+// Throttled on the same per-account re-check budget as recheckPassword,
+// reserve-then-release: a wrong code keeps its reservation and counts
+// as a failed re-check, a right one hands it back. A code that could not
+// be recorded is the backend failing, not a wrong guess, and hands it
+// back too, as the login factor step does. Call it only after
+// recheckPassword has passed, so a recovery code is never spent on a
+// request whose password was wrong.
+//
+// Writes the 429, 500 or the 401 carrying wrongMsg itself.
+func (g *Gate) recheckSecondFactor(w http.ResponseWriter, user *gauntlet.User, code, wrongMsg string, now time.Time) bool {
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return false
+	}
+	matched, err := g.deps.Users.VerifyAndRecordTOTP(user.ID, code, now)
+	if err == nil && !matched {
+		matched, err = g.deps.Users.BurnRecoveryCode(user.ID, code, now)
+	}
+	if err != nil {
+		g.deps.Limiter.ReleaseRecheck(user.ID, now)
+		g.logError("re-checking the second factor of " + user.Username + ": " + err.Error())
+		http.Error(w, "unable to check the code", http.StatusInternalServerError)
+		return false
+	}
+	if !matched {
+		writeUnauthorized(w, wrongMsg)
+		return false
+	}
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
+	return true
 }

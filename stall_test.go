@@ -76,6 +76,9 @@ func (b *stallingBackend) Save(ctx context.Context, payload []byte, expect int64
 func (b *stallingBackend) Close() error     { return nil }
 func (b *stallingBackend) Describe() string { return "stalling test backend" }
 
+// ProtectedAtRest: see failingSaveBackend (testhelpers_test.go).
+func (b *stallingBackend) ProtectedAtRest() bool { return true }
+
 func (b *stallingBackend) stats() (maxInFlight, loads, deadlines int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -208,6 +211,9 @@ func (b *stallingSaveBackend) Save(ctx context.Context, payload []byte, expect i
 
 func (b *stallingSaveBackend) Close() error     { return nil }
 func (b *stallingSaveBackend) Describe() string { return "stalling-save test backend" }
+
+// ProtectedAtRest: see failingSaveBackend (testhelpers_test.go).
+func (b *stallingSaveBackend) ProtectedAtRest() bool { return true }
 
 // TestStalledSaveReturnsAndRollsBack: a save runs under the store's
 // write lock, so a backend that hangs mid-save used to hold every

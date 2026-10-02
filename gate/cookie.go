@@ -113,13 +113,14 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 }
 
 // issueSession starts a session for userID and hands the browser its
-// cookie -- the one way gate issues a session, so the three things every
+// cookie -- the one way gate issues a session, so the four things every
 // issue must do happen together at every one of them: end the session
 // this browser already held for the account (revokeReplacedSession,
 // #47), record the client so the account's owner can recognise the
 // session in their own list (gauntlet.SessionStore.CreateFrom, #48),
-// and set the cookie under sessionCookieName with the ceiling's Max-Age
-// (#47).
+// set the cookie under sessionCookieName with the ceiling's Max-Age
+// (#47), and remember the browser, rotating its known-browser token
+// (rememberBrowser, #44).
 //
 // The address is Config.ClientIP's, the same resolution the login
 // limiter is keyed on, so the list shows what the application's own
@@ -130,4 +131,5 @@ func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID strin
 	client := gauntlet.SessionClient{Address: g.cfg.ClientIP(r), UserAgent: r.UserAgent()}
 	sess := g.deps.Sessions.CreateFrom(userID, client, now)
 	g.setSessionCookie(w, sess.ID)
+	g.rememberBrowser(w, r, userID, now)
 }

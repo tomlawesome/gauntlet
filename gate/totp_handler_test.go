@@ -539,6 +539,10 @@ func (b *budgetBackend) Save(ctx context.Context, payload []byte, expect int64) 
 func (b *budgetBackend) Close() error     { return b.inner.Close() }
 func (b *budgetBackend) Describe() string { return "budget test backend" }
 
+// ProtectedAtRest: a test backend over persist.Memory has no storage
+// to copy (persist.AtRest), so OpenStore accepts it as it does Memory.
+func (b *budgetBackend) ProtectedAtRest() bool { return true }
+
 // TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail: the
 // factor is committed by ConfirmTOTP's own save, so a session from
 // before it must end even when the recovery-code save that follows

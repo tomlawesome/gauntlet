@@ -62,6 +62,9 @@ func (b *reloadRaceBackend) Save(ctx context.Context, payload []byte, expect int
 func (b *reloadRaceBackend) Close() error     { return nil }
 func (b *reloadRaceBackend) Describe() string { return "reload-race test backend" }
 
+// ProtectedAtRest: see failingSaveBackend (testhelpers_test.go).
+func (b *reloadRaceBackend) ProtectedAtRest() bool { return true }
+
 // TestReloadIfStaleDoesNotRevertAConcurrentWrite reproduces the sequence
 // found in mikroview while chasing a concurrent-passkey-login race:
 // reloadIfStale reads a backend snapshot without holding the store's
