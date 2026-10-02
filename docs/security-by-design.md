@@ -229,7 +229,7 @@ it says so instead of repeating the reasoning.
 | 7.2.1 verified on the backend | 1 | Met | `SessionStore.Validate` under the server's lock (`session.go:201`) |
 | 7.2.2 dynamic reference tokens | 1 | Met | Opaque id per login (`session.go:108`) |
 | 7.2.3 CSPRNG, 128 bits | 1 | Met | `id.go:14`: 16 bytes from `crypto/rand` |
-| 7.2.4 new token on every authentication, old one ended | 1 | Met, one gap | New session per login and after `logout-all` (`gate/logout_handler.go:32`); the pending-login cookie is never a session. Gap: a login made from a browser that still holds a live session leaves that old session alive until it idles out; part of #47 (session cookie hardening) |
+| 7.2.4 new token on every authentication, old one ended | 1 | Met | New session per login and after `logout-all` (`gate/logout_handler.go:32`); the pending-login cookie is never a session. A login (password, second factor or SSO) from a browser still holding the same account's live session revokes that session before issuing the new one (`gate/cookie.go` `revokeReplacedSession`, #47) |
 | 7.3.1, 7.3.2 inactivity and absolute timeouts | 2 | Met | Both enforced in `Validate` (`session.go:208-217`); `gate.New` refuses a store with no ceiling or above `MaxSessionIdle`/`MaxSessionLifetime` (#51) |
 | 7.4.1 terminated session unusable | 1 | Met | Server-side delete (`Revoke`, `RevokeAllForUser`); `SessionCutoff` catches sessions from another process (`gate/protect.go:163`) |
 | 7.4.2 sessions ended when an account is disabled or deleted | 1 | Met | A deleted user no longer resolves, so every session dies on its next request; `DeleteUser` also revokes the tokens it created |
@@ -392,9 +392,9 @@ store, keep and protect:
 | 15.3.3 mass assignment | 2 | Met | Each handler decodes a named request struct |
 | 15.3.4 client IP from a trusted field | 2 | App | `ClientIP` |
 | 15.4.1–15.4.3 safe concurrency | 3 | Met | Store and session mutexes, copy-then-save (`mutate.go`), `-race` in CI, check-and-spend under one lock for TOTP, recovery codes and ceremonies |
-| 3.3.1 cookie `Secure` | 1 | Met, conditional | `gate.Config.SecureCookie`; the application must set it where TLS terminates. Default false with no warning: #47 (session cookie hardening) |
-| 3.3.2 `SameSite` fits the purpose | 2 | Met | `Lax` on every cookie (`gate/cookie.go:22-31`) |
-| 3.3.3 `__Host-` prefix | 2 | Gap | #47 (session cookie hardening); see 800-63B §5.1.1 |
+| 3.3.1 cookie `Secure` | 1 | Met, conditional | `gate.Config.SecureCookie`; the application must set it where TLS terminates, and `gate.New` logs one warning naming the setting when it is left false (#47) |
+| 3.3.2 `SameSite` fits the purpose | 2 | Met | `Lax` on every cookie (`gate/cookie.go` `writeCookie`) |
+| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies are scoped to their routes, which the prefix forbids |
 | 3.3.4 `HttpOnly` | 2 | Met | Every cookie |
 | 3.3.5 cookie under 4096 bytes | 3 | Met | Session id 32 characters; sealed values a few hundred bytes |
 | 3.5.1 CSRF | 1 | Met | `X-Requested-With` on unsafe methods plus `SameSite=Lax` (`gate/protect.go:118-123`, `:313`); bearer requests skip it because no cookie is involved |
@@ -405,8 +405,7 @@ store, keep and protect:
 At L2 gauntlet meets every requirement except: password blocklists
 (6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
 decisions (16.2.1, 16.3.1–16.3.3), response headers (4.1.1, 14.3.2),
-the session cookie's prefix and lifetime (3.3.3, 7.2.4, 7.3.2), and a
-session list (7.5.2). Each has an issue; the password blocklist and
+and a session list (7.5.2). Each has an issue; the password blocklist and
 the lockout shape (from the 800-63B review) need the owner. Three
 deviations are recorded rather than fixed: the TOTP acceptance window,
 the SSO sign-in's reliance on the IdP's policy, and secrets at rest on
@@ -547,8 +546,8 @@ stand alone, which these never do.
 | Session secret issued at authentication, at least 64 bits from an approved RBG, erased at logout, bound to one authentication event | Conforms | 128-bit id per login (`id.go`, `session.go:108`); `Revoke` on logout, `RevokeAllForUser` on sign-out-everywhere; a new id after every sign-in |
 | Not persistent across restarts (SHOULD) | Conforms | In memory only (`docs/design.md` §1.7); the browser cookie outlives the process but the id it carries does not |
 | Cookies: Secure (SHALL), minimal path, HttpOnly, SameSite Lax or Strict, opaque value | Conforms | `gate/cookie.go:22-31`; the ceremony cookies are scoped to their routes |
-| Cookie `__Host-` prefix (SHOULD); expire at or soon after the session (SHOULD) | Gap | No prefix; `Max-Age` is 30 days against a 7-day ceiling. #47 (session cookie hardening); ASVS 3.3.3 |
-| `Secure` SHALL | Gap, partial | `gate.Config.SecureCookie` defaults to false and `gate.New` says nothing; the same issue, #47 (session cookie hardening) |
+| Cookie `__Host-` prefix (SHOULD); expire at or soon after the session (SHOULD) | Conforms | `__Host-` + `CookieName` while `SecureCookie` is true; `Max-Age` is the session store's lifetime ceiling, so the browser drops the cookie when the session can no longer be valid (`gate/cookie.go`, #47); ASVS 3.3.3 |
+| `Secure` SHALL | Conforms, conditional | `gate.Config.SecureCookie` is the application's to set where TLS terminates; `gate.New` logs one warning when it is left false (#47) |
 | CSRF: POST/PUT content carries a session identifier the RP verifies (SHALL) | Deviation | Gauntlet uses a custom header on every unsafe method plus `SameSite=Lax` (`gate/protect.go:118-123`), the defence OWASP's cheat sheet lists as equivalent; a per-request token would mean a second cookie or body field for both frontends |
 | Timeouts: AAL2 overall SHOULD be at most 24 h, inactivity at most 1 h; both SHALL be enforced and documented (§2.2.3, §5.2) | Conforms | Enforced in `SessionStore.Validate` (`session.go:208-217`) and capped by `gate.New`, which refuses a `Deps.Sessions` store configured above `gauntlet.MaxSessionIdle` (1 h) or `gauntlet.MaxSessionLifetime` (24 h), or with no ceiling at all (`gate/config.go`). Owner decision, 2026-10-02 (gauntlet#51): adopt AAL2's own figures rather than keep mikroview's and birdcage's previous 24 h idle / 7-day ceiling (`docs/design.md` §2.4); both apps must lower their configured values or fail to start. |
 | Activity resets the inactivity timeout; reauthentication resets both | Conforms | Sliding `ExpiresAt` capped at the ceiling; a fresh login is a fresh session |
@@ -561,8 +560,8 @@ stand alone, which these never do.
 Conforms on everything above except: the password blocklist (#43, owner
 decision on the list); the consecutive-failure cap (#44, design call on
 escalate-versus-disable); the password minimum tied to a mandatory second
-factor (#49, design call); cookie prefix, lifetime and `Secure` default
-(#47); refused attempts and binding sources not logged (#45). Documented
+factor (#49, design call); refused attempts and binding sources not
+logged (#45). Documented
 deviations: no NFC normalisation, no pepper, TOTP secrets as protected as
 the backend, no out-of-band notifications, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),

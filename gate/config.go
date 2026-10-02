@@ -22,16 +22,25 @@ type Auditor interface {
 // value mikroview hard-coded (CookieName, CSRFHeaderValue) or a policy
 // choice mikroview made once for itself (RequireSecondFactor) --
 // docs/design.md §1.5. What is NOT here, because it is security
-// behaviour rather than taste, is in the constants in protect.go and
-// session.go: the CSRF header name itself, and the cookie's HttpOnly/
-// SameSite/path/Max-Age.
+// behaviour rather than taste, is fixed in protect.go and cookie.go:
+// the CSRF header name itself, the cookie's HttpOnly/SameSite/path, its
+// __Host- prefix under TLS, and its Max-Age (the session store's
+// lifetime ceiling).
 type Config struct {
 	// CookieName is the session cookie's name -- mikroview uses
-	// "mikroview_session", birdcage its own equivalent.
+	// "mikroview_session", birdcage its own equivalent. While
+	// SecureCookie is true the cookie is written and read as "__Host-"
+	// plus this name (cookie.go's sessionCookieName), so the name must
+	// not already carry a "__Host-" or "__Secure-" prefix: New refuses
+	// one. No frontend reads the cookie (it is HttpOnly), so the prefix
+	// is invisible to both applications' code.
 	CookieName string
-	// SecureCookie sets the session cookie's Secure attribute. The
-	// application decides this from its own listener's TLS state; gate
-	// has no way to know it.
+	// SecureCookie sets the session cookie's Secure attribute, and with
+	// it the __Host- prefix. The application decides this from its own
+	// listener's TLS state; gate has no way to know it, so New logs one
+	// warning when it is left false rather than failing: plain HTTP is
+	// what development runs on, and a warning is what birdcage's startup
+	// is designed to show (docs/design.md §2.4).
 	SecureCookie bool
 	// CSRFHeaderValue is the value Protect requires in the
 	// X-Requested-With header (the header name itself is fixed, see
@@ -148,6 +157,13 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if cfg.CookieName == "" {
 		return nil, fmt.Errorf("gate: Config.CookieName is required")
 	}
+	// gate adds the __Host- prefix itself (cookie.go): a name that
+	// already carries a browser-reserved prefix would be doubled under
+	// TLS and, under plain HTTP, silently dropped by every browser --
+	// a deployment that signs nobody in, with nothing in the log.
+	if hasReservedCookiePrefix(cfg.CookieName) {
+		return nil, fmt.Errorf("gate: Config.CookieName %q must not start with __Host- or __Secure-; gate adds the prefix", cfg.CookieName)
+	}
 	if cfg.CSRFHeaderValue == "" {
 		return nil, fmt.Errorf("gate: Config.CSRFHeaderValue is required")
 	}
@@ -190,12 +206,21 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Gate{
+	g := &Gate{
 		cfg:          cfg,
 		deps:         deps,
 		exempt:       make(map[string]bool),
 		kindHandlers: make(map[gauntlet.TokenKind]http.Handler),
-	}, nil
+	}
+	// Not a refusal: plain HTTP is what development runs on, and the
+	// application, not gate, knows whether TLS terminates in front of
+	// it. One line at startup, naming the setting, is what an operator
+	// reading the log needs to notice a production deployment that
+	// forgot it (ASVS 3.3.1, SP 800-63B-4 §5.1.1 Secure SHALL).
+	if !cfg.SecureCookie {
+		g.logWarn("gate: Config.SecureCookie is false: the session cookie is sent over plain HTTP and has no __Host- prefix; set it to true where TLS terminates")
+	}
+	return g, nil
 }
 
 // now is the current time as Protect and every handler see it.

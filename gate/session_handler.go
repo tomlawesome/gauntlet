@@ -84,7 +84,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		// sessionUser already validated the cookie once; re-reading it
 		// here just for IssuedAt rather than widening sessionUser's own
 		// signature for a field only this handler needs.
-		if cookie, err := r.Cookie(g.cfg.CookieName); err == nil {
+		if cookie, err := r.Cookie(g.sessionCookieName()); err == nil {
 			if sess, ok := g.deps.Sessions.Validate(cookie.Value, now); ok {
 				resp.SignedInSince = sess.IssuedAt.Format(time.RFC3339)
 			}

@@ -37,9 +37,12 @@ info:
     routes: `Protect` sends it to the application's own handler for that
     token kind, or answers `401` "invalid or revoked token".
 
-    **Session cookie.** Its name is the application's `Config.CookieName`;
-    it is `HttpOnly`, `SameSite=Lax`, path `/`. Routes marked "sets the
-    session cookie" issue a fresh one; logout clears it.
+    **Session cookie.** Its name is the application's `Config.CookieName`,
+    prefixed `__Host-` while `Config.SecureCookie` is true; it is
+    `HttpOnly`, `SameSite=Lax`, path `/`, with `Max-Age` equal to the
+    session store's lifetime ceiling. Routes marked "sets the session
+    cookie" issue a fresh one, and a login ends the same account's
+    session the browser already held; logout clears it.
 
     **Errors.** Every error body is `text/plain` holding one human-readable
     line, except two `application/json` bodies for a step that half
@@ -1321,7 +1324,7 @@ components:
       type: apiKey
       in: cookie
       name: session
-      description: The session cookie. Its real name is the application's `Config.CookieName`.
+      description: The session cookie. Its real name is the application's `Config.CookieName`, prefixed `__Host-` while `Config.SecureCookie` is true.
     pendingLoginCookie:
       type: apiKey
       in: cookie

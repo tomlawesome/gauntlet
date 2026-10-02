@@ -87,6 +87,25 @@ All notable changes to this project are documented in this file.
   what `gate.New` checks them against. Mikroview and birdcage both
   pass 24 h idle / 7-day ceiling today and will fail at start-up until
   they change those values to within the new caps.
+- The session cookie is hardened (#47; ASVS 3.3.1, 3.3.3, 7.2.4; NIST SP
+  800-63B-4 §5.1.1). While `gate.Config.SecureCookie` is true the cookie
+  is written and read as `__Host-` plus `CookieName`, which makes a
+  browser refuse it unless it is `Secure`, has no `Domain` and is on
+  path `/`; under plain HTTP the bare name is kept, since a browser
+  drops a `__Host-` cookie that is not `Secure`. Its `Max-Age` is now the
+  session store's lifetime ceiling (24 hours at most, #51) instead of a
+  fixed 30 days, so the browser forgets it when the session can no
+  longer be valid. `gate.New` logs one warning naming `SecureCookie`
+  when it is left false, and refuses a `CookieName` that already starts
+  with `__Host-` or `__Secure-`. A login -- password, second factor or
+  SSO -- from a browser that still holds a live session for the same
+  account now ends that session before issuing the new one; another
+  account's session in the same browser is left alone. Not breaking for
+  mikroview or birdcage: neither reads the session cookie by name
+  outside the code `gate` replaces, and neither uses a prefixed name.
+  What each app should expect: with TLS on, browsers signed in before
+  the upgrade hold the old, unprefixed cookie and are simply asked to
+  sign in again (an in-memory session dies with the restart anyway).
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

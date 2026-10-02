@@ -289,6 +289,10 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An SSO sign-in is a re-authentication like the password paths:
+	// the session this browser held for the account ends, since the
+	// cookie below replaces it (ASVS 7.2.4; see revokeReplacedSession).
+	g.revokeReplacedSession(r, user.ID, now)
 	sess := g.deps.Sessions.Create(user.ID, now)
 	g.setSessionCookie(w, sess.ID)
 	http.Redirect(w, r, "/", http.StatusFound)
