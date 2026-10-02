@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Ways to unlock a sign-in disabled after 50 failures in a row (#44).
+  `POST /api/auth/users/{id}/unlock` lets an admin lift another
+  account's disable, lockout and count of lockouts; it answers 200
+  whether or not anything was locked and refuses the admin's own
+  account. It calls the new `LoginLimiter.UnlockLogin`, which also
+  clears the limiter's own count of recent guesses; applications with
+  their own unlock path should call it rather than `Store.UnlockLogin`.
+  When the store opens with the admin disabled and no admin left who
+  could unlock it, it announces a one-time unlock code, like the setup
+  code: through the new `Options.OnUnlockCode` (`UnlockCodeHandler`,
+  `UnlockCodeFunc`), or else as one Warn line on `Options.Log`. A CLI
+  that opens the store should pass a hook that does nothing, as it
+  does for `OnSetupCode`. `POST /api/auth/unlock` takes the admin's
+  username and the code (`Store.CheckUnlockCode`,
+  `ErrUnlockCodeInvalid`), and only lifts the disable: the admin then
+  signs in with their existing password and second factor. The code
+  works once, and stops working if the admin is unlocked any other
+  way. The accounts document is unchanged.
 - `docs/api/auth.yaml` (OpenAPI 3.1) describes every route `gate.Routes`
   serves -- each request body, response body and status -- as the one
   copy a frontend can build against (ADR-0002, #22). `docs/design.md`
@@ -147,16 +165,20 @@ All notable changes to this project are documented in this file.
   (`MaxConsecutiveLoginFailures`), password and second-factor steps
   together, disable the account's local sign-in: the right password is
   then refused exactly as during a lockout, with no end, until
-  `Store.UnlockLogin` clears it (the admin route that calls it comes
-  later). Only a completed sign-in or a new password resets the count,
-  not a correct password alone and not a lockout running out; a new
-  password does not lift a disable. Applications that issue a session
+  it is unlocked (see the unlock route and code under Added). Only a
+  completed sign-in or a new password resets the count, not a correct
+  password alone and not a lockout running out. A password the owner
+  sets does not lift a disable; a reset code an admin issues
+  (`IssueResetCode`) does. Applications that issue a session
   themselves after `ReserveAccount` should call the new
   `LoginLimiter.SignedIn` in place of `ReleaseAccount` when the sign-in
   completes; `gate` does. Five failed second-factor steps in a row --
   wrong codes or refused passkeys, which only someone with the password
   can make -- now set `MustChangePassword`, so the owner must change the
-  password at their next sign-in (`LoginLimiter.SecondFactorFailed`).
+  password at their next sign-in (`LoginLimiter.SecondFactorFailed`),
+  and the same save signs the account out everywhere, so only a fresh
+  sign-in with both factors reaches the change-password door. That
+  door's message no longer says an administrator reset the account.
   That run is kept in memory and starts again after a restart. Still
   one save as a lockout starts and one as it clears, never one per
   guess.

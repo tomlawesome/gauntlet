@@ -194,6 +194,7 @@ func (s *Store) Persisted() bool
 func (s *Store) Count() int
 func (s *Store) Register(username, password string, now time.Time) (*User, error)          // first account only, becomes admin; host-side -- gate checks the setup code first
 func (s *Store) CheckSetupCode(code string) error                                           // new (#37, ADR-0003): the one-time code an empty store announced
+func (s *Store) CheckUnlockCode(username, code string) (*User, error)                       // new (#44): the one-time code a store with its lone admin disabled announced
 func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error)
 func (s *Store) DeleteUser(id string) (*User, error)
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error)
@@ -206,7 +207,7 @@ func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (*User, bool, error)
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
-func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout
+func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout (no limiter: a CLI)
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
@@ -268,7 +269,8 @@ func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only;
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
 func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time)           // #44: completed sign-in resets the count
-func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword
+func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword, end every session
+func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) error                // #44: Store.UnlockLogin plus this limiter's own count
 const MaxConsecutiveLoginFailures = 50                                                             // #44: disables local sign-in
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
 func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
@@ -362,10 +364,33 @@ exactly the locked response, with no end, until `Store.UnlockLogin`. At
 lockouts. The count resets only on a completed sign-in (`SignedIn`,
 called wherever gate issues a session) or a new password (`SetPassword`,
 `IssueResetCode`); not on a correct password alone, and not as a lockout
-runs out. A new password does not lift a disable. Separately, five
-failed second-factor steps in a row since the last completed sign-in
-mean the password is known to someone else, so `SecondFactorFailed`
-sets `MustChangePassword` (one save); that run is kept in memory only. A lockout whose save fails
+runs out. A new password the owner sets does not lift a disable; a
+reset code does, since issuing one is an admin action (owner,
+2026-10-02). Separately, five failed second-factor steps in a row since
+the last completed sign-in mean the password is known to someone else,
+so `SecondFactorFailed` sets `MustChangePassword` and ends every session
+on the account (`SessionsEndedAt`), in one save: the change-password
+door asks for no current password, so only a fresh sign-in with both
+factors may reach it. That run is kept in memory only.
+
+Unlocking (#44). An admin lifts another account's disable, lockout and
+count with `POST /api/auth/users/{id}/unlock`, through
+`LoginLimiter.UnlockLogin`, which also drops the limiter's own count of
+the window's guesses and any lockout decision it has yet to save;
+`Store.UnlockLogin` alone is for a process with no limiter. The admin's
+own account is refused there (409). When the store opens with the
+admin disabled and no admin left who could unlock it, it makes a
+one-time unlock code and announces it (`Options.OnUnlockCode`, else one
+Warn line on `Options.Log`), with the setup code's shape: 80 bits, only
+its SHA-256 kept, in memory, never in the document, gone with the
+process. It is retired whenever a write or load shows that account no
+longer disabled, so it is single use and dies with any other unlock.
+`POST /api/auth/unlock` takes the username and code (`CheckUnlockCode`),
+rate limited on the client address like registration, with one
+identical refusal for every wrong input. It only lifts the disable: no
+session is issued, and the admin signs in as normal with their existing
+password and second factor -- not a password reset, account reset or
+admin transfer (owner, 2026-10-02). A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A clear whose save fails -- the owner signed in and
 ended a lockout the record still holds -- is retried the same way, but
