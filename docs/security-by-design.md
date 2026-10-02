@@ -351,33 +351,42 @@ store, keep and protect:
   itself once (`setupcode.go:109`), a sessions-ended notifier that
   failed (`gate/notify.go`), and rated Warn lines (`gate/warnrate.go`,
   at most one per kind and address per minute) for a sign-in the login
-  limiter refused, a missing CSRF header, a malformed `Authorization`
-  header, a role refusal on gate's admin routes and the two door 403s,
-  each with `from=` the client address (#45). Lines name the account
+  limiter refused, a re-check it refused, a request body over 64 KiB, a
+  missing CSRF header, a malformed `Authorization` header, a role
+  refusal on gate's admin routes and the two door 403s, each with
+  `from=` the client address (#45). Lines name the account
   (a name that matched none masked by `MaskUnknownUsername`); they never
   carry a password, code, token, cookie or secret.
 - `gate.Auditor.Record(actor, action, target, detail)`: `user.login`,
-  `user.login_failed`, `account.locked`, `account.disabled` (#45; each
-  with `from=` the client address, `gate/signin_record.go`),
+  `user.login_failed` (a failed sign-in, or a wrong password or code at
+  an in-session re-check, `step=recheck`), `account.locked`,
+  `account.disabled` (#45, `gate/signin_record.go`),
   `user.sessions_ended` (an admin's sign-out of another account, #53),
   `user.register`, `account.password_changed`, `account.totp_enabled`,
   `account.totp_disabled`, `user.totp_cleared`, `account.passkey_added`,
   `account.passkey_removed`, `account.passkey_clone_suspected`,
   `user.passkeys_cleared`, `account.link_sso`, `account.sessions_ended`,
   `account.recovery_codes_regenerated`, `user.create`, `user.delete`,
-  `user.password_reset`, `token.create`, `token.revoke`. Timestamps and
-  storage are the application's sink.
+  `user.password_reset`, `token.create`, `token.revoke`, each ending
+  with `from=` the client address (#45). Timestamps and storage are the
+  application's sink.
+- The sign-in history (#53, ADR-0006), a third sealed document the
+  application stores (`gate.Deps.SignIns`): one row per sign-in
+  attempt or fold of alike attempts -- time, account or masked name,
+  outcome, method, address, browser -- the newest 10,000 by default,
+  read by admins through `GET /api/auth/sign-ins`. Never a password,
+  code or a name as typed.
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
 | 16.1.1 inventory | 2 | Met | Above |
-| 16.2.1 who, what, when, where | 2 | Gap, partial | Who and what are in every record; when is the sink's; where (`from=` the client address) is in every sign-in record (`user.login`, `user.login_failed`, `account.locked`, `account.disabled`) and every refused-request Warn line (#45). The other audit records do not carry it yet. #45 (log failed sign-ins) |
+| 16.2.1 who, what, when, where | 2 | Met | Who and what are in every record; when is the sink's; where (`from=` the client address, quoted) is in every audit record a request writes (`gate.audit` takes the request) and every refused-request Warn line (#45); the sign-in history keeps the address and browser of each attempt (#53) |
 | 16.2.2 UTC timestamps | 2 | App | The sink's clock |
 | 16.2.3, 16.2.4 only documented sinks, parseable | 2 | Met | Only the two channels above; `slog` is structured |
 | 16.2.5 no secrets in logs | 2 | Met | Inventory above; raw token shown once in the create response only |
-| 16.3.1 all authentication attempts logged, success and failure | 2 | Gap, partial | Every sign-in attempt is recorded (`gate/signin_record.go`): `user.login` for password, second-factor and SSO sign-ins, `user.login_failed` for each refused password, code, passkey assertion or SSO identity the limiter admitted, a rated Warn line for each it refused; a refused setup or unlock code is logged. Still silent: a wrong password or code at an in-session re-check (`recheckPassword`, `recheckSecondFactor`). #45 (log failed sign-ins) |
+| 16.3.1 all authentication attempts logged, success and failure | 2 | Met | Every sign-in attempt is recorded (`gate/signin_record.go`): `user.login` for password, second-factor and SSO sign-ins, `user.login_failed` for each refused password, code, passkey assertion or SSO identity the limiter admitted, a rated Warn line for each it refused, and a row in the sign-in history when the application keeps one (#53); a wrong password or code at an in-session re-check is `user.login_failed` with `step=recheck`, a refused re-check a rated Warn line; a refused setup or unlock code is logged (#45) |
 | 16.3.2 failed authorization logged | 2 | Met | A rated Warn line with the address for a missing CSRF header, an unrecognised role, either door, and a role refusal on every admin route `Routes` serves (`gate/protect.go` `warnRefused`, `adminOnly`). An application's own `RequireRole` wrapping has no `Gate` to log through and writes nothing (#45) |
-| 16.3.3 attempts to bypass controls logged | 2 | Gap, partial | A lockout starting is `account.locked`, a disable `account.disabled`, every attempt refused during either a rated Warn line, and a malformed `Authorization` header a rated Warn line (#45). Oversize bodies are still silent |
+| 16.3.3 attempts to bypass controls logged | 2 | Met | A lockout starting is `account.locked`, a disable `account.disabled` (on the ordinary path and through a known browser's allowance), every attempt refused during either a rated Warn line, and a malformed `Authorization` header and a request body over 64 KiB each a rated Warn line (#45) |
 | 16.3.4 unexpected errors logged | 2 | Met | `logError` on every backend or sealing failure |
 | 16.4.1 log injection | 2 | Met | Usernames refuse control and format characters (`username.go:74-82`); token names likewise (`token.go`); `slog` quotes |
 | 16.4.2, 16.4.3 log protection and shipping | 2 | App | The sink |
@@ -421,9 +430,7 @@ store, keep and protect:
 
 At L2 gauntlet meets every requirement except: the common-password
 list's data (6.2.4: the check is built, the first signed list is #52's
-owner setup), and the parts of logging #45 has yet to finish: the
-address in the audit records other than sign-ins (16.2.1), in-session
-re-checks (16.3.1) and oversize bodies (16.3.3). Each has an issue. The breached-password check (6.2.12)
+owner setup). The breached-password check (6.2.12)
 is met where the application turns on the live HIBP check. The lockout shape from the 800-63B review is
 settled (#44). Three deviations are recorded rather than fixed: the TOTP
 acceptance window, the SSO sign-in's reliance on the IdP's policy, and
@@ -520,7 +527,7 @@ stand alone, which these never do.
 | Accepted only once while valid (replay resistance, §3.2.7) | Conforms | `TOTPLastCounter`, advanced under the same lock as the check (`totp.go:394-434`); the enrolment code cannot also sign in (`totp.go:344`) |
 | Defined lifetime from clock drift plus entry delay | Conforms, and the ASVS 6.5.5 deviation | One step either side of now, never two (`totp.go:64`, `TestVerifyTOTPRejectsTwoStepsAway`): the drift allowance NIST describes, and the 90 s ASVS counts against |
 | Rate limiting SHALL for outputs under 64 bits (§3.2.2) | Conforms | 6 digits; shares the account budget, so at most 50 consecutive guesses before sign-in is disabled (#44) |
-| Warn on a duplicate OTP (MAY) | Not done | A replay is refused silently; #45 (log failed sign-ins) would at least record it |
+| Warn on a duplicate OTP (MAY) | Not done | A replay is refused without telling the subscriber; it is recorded as `user.login_failed` (`factor_refused`) with the address, and as a row of the sign-in history (#45, #53) |
 
 ### Cryptographic authenticators: passkeys (§3.1.6, §3.1.7, §3.2.5, Appendix B)
 
@@ -550,7 +557,7 @@ stand alone, which these never do.
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Record of every bound authenticator with event times (§4.1) | Conforms, one gap | `TOTPConfirmedAt`, `Passkey.CreatedAt` and `LastUsedAt`, `PasswordChangedAt`. Recovery codes carry no issue time (`GenerateRecoveryCodes` ignores `now`); the audit record `account.recovery_codes_regenerated` holds it. Source address of a binding is not recorded (SHOULD): #45 (log failed sign-ins) adds the address to audit detail |
+| Record of every bound authenticator with event times (§4.1) | Conforms | `TOTPConfirmedAt`, `Passkey.CreatedAt` and `LastUsedAt`, `PasswordChangedAt`. Recovery codes carry no issue time (`GenerateRecoveryCodes` ignores `now`); the audit record `account.recovery_codes_regenerated` holds it. Every binding's audit record carries the source address (`from=`, SHOULD; #45) |
 | Binding an additional authenticator needs authentication at the account's current AAL (§4.1.2.1) | Conforms | TOTP enrol and passkey registration need the session and the password again (`gate/totp_handler.go:67`, `gate/passkey_handler.go:182`); a first factor is enrolled behind the AAL1 session the forced-enrolment door allows, which §4.1.2.1 permits when the account "currently has only AAL1" |
 | Notify the subscriber, independently of the binding transaction (§4.1.2.1, §4.2.3, §4.6) | Deviation | Gauntlet stores no contact addresses and sends nothing; the owner's standing rule forbids its agents from sending mail at all. Every binding, recovery and invalidation is an audit record instead, which the single operator reads. The one hook is an admin ending another account's sessions, which calls the application's `gate.Config.Notify` so it can mail the owner (#53). Documented, not fixed |
 | Encourage two means of authentication (SHOULD) | Conforms | Recovery codes are minted with the first second factor; TOTP and passkeys coexist |
@@ -578,8 +585,8 @@ stand alone, which these never do.
 ### Summary of findings
 
 Conforms on everything above except: the common-password list's data
-(the check is built, #43; the first signed list is #52's owner setup);
-refused attempts and binding sources not logged (#45). Documented
+(the check is built, #43; the first signed list is #52's owner setup).
+Documented
 deviations: no NFC normalisation, no pepper, no out-of-band
 notifications, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),

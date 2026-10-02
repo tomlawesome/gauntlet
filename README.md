@@ -103,6 +103,21 @@ context that ends after 10 seconds; an error or panic is logged and
 never changes the admin's answer. `Reason` may be empty: the message
 should still say an administrator signed them out.
 
+To give admins a sign-in history (`GET /api/auth/sign-ins`), open a
+third document beside the accounts and tokens ones, sealed under its own
+label, and close it at shutdown so its last rows are saved:
+
+```go
+sealed, err := persist.Encrypt(myBackendFor("signins"), key, persist.EncryptOptions{Label: "signins"})
+signIns, err := gauntlet.OpenSignInHistory(sealed, gauntlet.SignInHistoryOptions{Log: logger}) // MaxRows 0: the newest 10,000
+defer signIns.Close()
+g, err := gate.New(cfg, gate.Deps{ /* ... */ SignIns: signIns})
+```
+
+Leave `Deps.SignIns` nil and the route answers 404; the audit records
+are written either way. See
+[docs/adr/0006-sign-in-history.md](docs/adr/0006-sign-in-history.md).
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).

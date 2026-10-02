@@ -855,3 +855,30 @@ func BenchmarkSignInHistorySave(b *testing.B) {
 		}
 	}
 }
+
+// The fold index is capped: past maxSignInFoldKeys, entries older than
+// the span go first, then the oldest, which then no longer folds.
+func TestSignInHistoryFoldIndexIsCapped(t *testing.T) {
+	was := maxSignInFoldKeys
+	maxSignInFoldKeys = 3
+	t.Cleanup(func() { maxSignInFoldKeys = was })
+	h := openTestHistory(t, nil, SignInHistoryOptions{})
+	from := func(i int) SignInEvent { return successFrom("u1", "bob", fmt.Sprintf("192.0.2.%d", i)) }
+
+	h.Record(from(0), signInBase)                                   // ages out of the span
+	h.Record(from(1), signInBase.Add(signInFoldSpan))               // the oldest live entry
+	h.Record(from(2), signInBase.Add(signInFoldSpan+time.Second))   // index full
+	h.Record(from(3), signInBase.Add(signInFoldSpan+2*time.Second)) // drops 0, the expired one
+	h.Record(from(4), signInBase.Add(signInFoldSpan+3*time.Second)) // drops 1, the oldest
+	h.Record(from(1), signInBase.Add(signInFoldSpan+4*time.Second)) // no longer folds
+	h.Record(from(4), signInBase.Add(signInFoldSpan+5*time.Second)) // still folds
+	if total, _ := h.Summary(); total != 6 {
+		t.Errorf("total = %d, want 6: key 1 evicted, key 4 folded", total)
+	}
+	if rows, _ := h.List(SignInQuery{Address: "192.0.2.4"}); len(rows) != 1 || rows[0].Count != 2 {
+		t.Errorf("key 4 rows = %+v, want one with count 2", rows)
+	}
+	if len(h.fold) > maxSignInFoldKeys {
+		t.Errorf("fold index holds %d keys, cap %d", len(h.fold), maxSignInFoldKeys)
+	}
+}

@@ -30,9 +30,9 @@ const (
 	// SignInSSORefused is an identity the provider vouched for that this
 	// deployment's SSO policy refused.
 	SignInSSORefused SignInOutcome = "sso_refused"
-	// SignInUnrecorded stands for attempts a sign-in history did not
-	// keep one by one. Nothing in this build produces it; it is defined
-	// with the rest so the set is complete.
+	// SignInUnrecorded is a SignInHistory row standing for the failed
+	// attempts past a bucket's row budget (signins.go). gate never
+	// reports it as an event.
 	SignInUnrecorded SignInOutcome = "unrecorded"
 )
 

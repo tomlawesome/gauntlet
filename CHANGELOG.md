@@ -25,7 +25,35 @@ All notable changes to this project are documented in this file.
   `LoginLimiter.ReserveAccountDecision` (`AccountDecision`) is
   `ReserveAccount` saying why it refused or what the attempt started;
   `SignInOutcome`, `SignInMethod` and `SignInEvent` name an attempt for
-  the sign-in history to come (#53).
+  the sign-in history (#53).
+- A sign-in history admins can page through (#53,
+  [ADR-0006](docs/adr/0006-sign-in-history.md)).
+  `gauntlet.OpenSignInHistory(backend, gauntlet.SignInHistoryOptions{})`
+  opens a third sealed document, `signins` (wrap its backend in
+  `persist.Encrypt` with the label `"signins"`; a plaintext backend is
+  refused unless `AllowPlaintextAtRest`, and a nil one keeps it in memory).
+  Pass it as the new `gate.Deps.SignIns` and every sign-in attempt
+  becomes a row: time, account or masked name, outcome, method, address
+  and browser. `GET /api/auth/sign-ins` (admin) lists them newest first,
+  filtered by `user`, `address` and `outcome`, paged with `before` and
+  `limit`; it answers 404 while `Deps.SignIns` is nil. The newest 10,000
+  rows are kept by default (`MaxRows`, at most 50,000). Attempts alike
+  within 10 minutes fold into one row with a `count`; failed attempts
+  may start at most 100 rows per 10 minutes, the rest counted in one
+  `unrecorded` row, so a flood of attempts is a bounded number of rows
+  and saves. Saves run in the background, at most every 5 s while a new
+  row is unsaved and every minute while only counts changed, and never
+  hold up a sign-in; call `Close` at shutdown to save the rest. The
+  document starts at version 1.
+- Every audit record a request writes now ends with `from="<address>"`
+  (#45), not only the sign-in records. A wrong password or code at an
+  in-session re-check (password change, authenticator and passkey
+  changes, recovery codes, an admin's own unlock) is `user.login_failed`
+  with `step=recheck`; a re-check the limiter refuses and a request body
+  over 64 KiB each leave a rated Warn line; and a failure through a known
+  browser's allowance that disables sign-in writes `account.disabled`
+  (`LoginLimiter.ReserveKnownBrowserDecision`, which
+  `ReserveKnownBrowser` now wraps).
 - `POST /api/auth/users/{id}/logout-all` lets an admin sign another
   account out everywhere (#53): every gauntlet session it holds ends and
   every browser it remembers is forgotten; its password and factors are
