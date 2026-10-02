@@ -428,7 +428,7 @@ taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by
-`passkey` under two independent keys, each login challenge usable once); the 503 "setup required"
+`passkey` under two independent keys, each login challenge usable once); the pending login is spent by the sign-in that completes it; the 503 "setup required"
 state while `Count()==0` with only healthz, session and register
 reachable (the OIDC pair is not: SSO cannot create the first account,
 #37); identical 401 bodies for unknown and revoked tokens;

@@ -1835,3 +1835,174 @@ func TestPasskeyRegisterFinishJudgesTheBodyBeforeTheCookie(t *testing.T) {
 		t.Errorf("dead cookie + unknown body field: got %d %q cleared=%v, want 400 with the cookie left alone", resp.StatusCode, body, cookieCleared(resp, passkeyRegisterCookieName))
 	}
 }
+
+// pendingCookieOf is the pending-login cookie client holds now -- taken
+// before a completion clears it, as a client keeping a copy would.
+func pendingCookieOf(t *testing.T, client *http.Client, ts *httptest.Server) *http.Cookie {
+	t.Helper()
+	u, err := url.Parse(ts.URL + pendingLoginCookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range client.Jar.Cookies(u) {
+		if c.Name == pendingLoginCookieName {
+			return &http.Cookie{Name: c.Name, Value: c.Value}
+		}
+	}
+	t.Fatal("the client holds no pending-login cookie")
+	return nil
+}
+
+// postRaw posts body with exactly the cookies given, through a client
+// with no jar, and returns the response with its body read.
+func postRaw(t *testing.T, url string, body any, cookies ...*http.Cookie) (*http.Response, string) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, string(raw)
+}
+
+// beginWith starts a passkey sign-in on the given pending-login cookie
+// and returns the options and the ceremony cookie it set, or the
+// refusal's status.
+func beginWith(t *testing.T, ts *httptest.Server, pending *http.Cookie) (*protocol.CredentialAssertion, *http.Cookie, int) {
+	t.Helper()
+	resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor/begin", struct{}{}, pending)
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, resp.StatusCode
+	}
+	var options protocol.CredentialAssertion
+	if err := json.Unmarshal([]byte(raw), &options); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == passkeyAssertCookieName {
+			return &options, &http.Cookie{Name: c.Name, Value: c.Value}, resp.StatusCode
+		}
+	}
+	t.Fatal("login/factor/begin set no ceremony cookie")
+	return nil, nil, 0
+}
+
+func assertionBody(t *testing.T, fake *passkeytest.FakeAuthenticator, options *protocol.CredentialAssertion) loginFactorRequest {
+	t.Helper()
+	body, err := fake.AssertionResponse(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loginFactorRequest{Assertion: json.RawMessage(body)}
+}
+
+// TestPendingLoginIsSpentByTheSignInItCompletes (ruling R2 on #20, from
+// the review's TestReviewPendingCookieReplayMintsUnboundedPasskeyLogins):
+// one correct password yields one session. One pending-login cookie,
+// replayed forty times through begin and an assertion, signs in exactly
+// once; after that, begin and login/factor both refuse it with 401
+// "sign in again" and clear it -- login/factor even for an assertion
+// answering a challenge begun before the completion.
+func TestPendingLoginIsSpentByTheSignInItCompletes(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	g.deps.Limiter = mustNewLoginLimiter(t, 100, time.Minute) // the limiter is not what is being tested
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	fake, _ := registerPasskey(t, bilbo, ts, g, "key")
+	pending := pendingCookieOf(t, startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword), ts)
+
+	// A challenge begun before any completion, kept for later.
+	earlyOptions, earlyCeremony, status := beginWith(t, ts, pending)
+	if status != http.StatusOK {
+		t.Fatalf("the first begin got %d", status)
+	}
+
+	const n = 40
+	signedIn, beginRefused := 0, 0
+	for range n {
+		options, ceremony, status := beginWith(t, ts, pending)
+		if status != http.StatusOK {
+			if status != http.StatusUnauthorized {
+				t.Fatalf("begin on a replayed pending login got %d, want 200 or 401", status)
+			}
+			beginRefused++
+			continue
+		}
+		resp, _ := postRaw(t, ts.URL+"/api/auth/login/factor", assertionBody(t, fake, options), pending, ceremony)
+		if resp.StatusCode == http.StatusOK {
+			signedIn++
+		}
+	}
+	if signedIn != 1 || beginRefused != n-1 {
+		t.Errorf("%d of %d replays of one pending login signed in and %d were refused at begin, want 1 and %d", signedIn, n, beginRefused, n-1)
+	}
+
+	resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor", assertionBody(t, fake, earlyOptions), pending, earlyCeremony)
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "sign in again") || !cookieCleared(resp, pendingLoginCookieName) {
+		t.Errorf("an assertion on the spent pending login got %d %q cleared=%v, want 401 sign in again, cleared", resp.StatusCode, raw, cookieCleared(resp, pendingLoginCookieName))
+	}
+	resp, raw = postRaw(t, ts.URL+"/api/auth/login/factor/begin", struct{}{}, pending)
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "sign in again") || !cookieCleared(resp, pendingLoginCookieName) {
+		t.Errorf("begin on the spent pending login got %d %q cleared=%v, want 401 sign in again, cleared", resp.StatusCode, raw, cookieCleared(resp, pendingLoginCookieName))
+	}
+}
+
+// TestConcurrentCompletionsOfOnePendingLoginHaveOneWinner: two passkey
+// assertions, each answering its own challenge begun on the same pending
+// login, arrive together. Both verify; only the one that claims the
+// pending login first may sign in. Repeated, and run with -race.
+func TestConcurrentCompletionsOfOnePendingLoginHaveOneWinner(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	g.deps.Limiter = mustNewLoginLimiter(t, 1000, time.Minute)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	fake, _ := registerPasskey(t, bilbo, ts, g, "key") // reports 0 every time
+
+	for round := range 20 {
+		pending := pendingCookieOf(t, startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword), ts)
+		type attempt struct {
+			body     loginFactorRequest
+			ceremony *http.Cookie
+		}
+		var attempts [2]attempt
+		for i := range attempts {
+			options, ceremony, status := beginWith(t, ts, pending)
+			if status != http.StatusOK {
+				t.Fatalf("round %d: begin %d got %d", round, i, status)
+			}
+			attempts[i] = attempt{assertionBody(t, fake, options), ceremony}
+		}
+		var wins atomic.Int32
+		var refusedReplay atomic.Int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, a := range attempts {
+			wg.Go(func() {
+				<-start
+				resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor", a.body, pending, a.ceremony)
+				switch {
+				case resp.StatusCode == http.StatusOK:
+					wins.Add(1)
+				case resp.StatusCode == http.StatusUnauthorized && strings.Contains(raw, "sign in again"):
+					refusedReplay.Add(1)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		if wins.Load() != 1 || refusedReplay.Load() != 1 {
+			t.Fatalf("round %d: %d of 2 concurrent completions of one pending login won and %d was refused as a replay, want 1 and 1", round, wins.Load(), refusedReplay.Load())
+		}
+	}
+}

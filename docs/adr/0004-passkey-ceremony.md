@@ -99,7 +99,12 @@ mikroview's fake authenticator copies and this module reuses.
    R4 on #20). A login
    challenge is used once (the spent-challenge set); a registration
    ceremony ends when the cookie is cleared on success, and a replay is
-   refused as a duplicate credential. Either ceremony expires five
+   refused as a duplicate credential. The pending login a password
+   step issues is spent by the sign-in that completes it, so one
+   correct password yields one session (ruling R2). A spent challenge
+   or pending login is remembered until the sealed expiry the
+   acceptance check itself reads, on the same wall clock
+   (`internal/spent`). Either ceremony expires five
    minutes after begin (sealed `Expires`, checked by the library), and
    a value sealed for one ceremony cannot decode as the other. A sign
    counter that fails to advance refuses the login through the

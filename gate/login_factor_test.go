@@ -193,7 +193,7 @@ func TestPendingLoginCookieExpiry(t *testing.T) {
 	// confirmCounter+1, same as the fresh check below, just never spent
 	// -- so a 401 here can only be about the cookie's age.
 	staleCode := gauntlet.GenerateTOTPCode(secret, confirmCounter+1)
-	stale, err := pendingLoginCodec.encode(pendingLoginState{UserID: id, IssuedAt: time.Now().Add(-6 * time.Minute)})
+	stale, err := pendingLoginCodec.encode(pendingLoginState{UserID: id, IssuedAt: time.Now().Add(-6 * time.Minute), ID: newTestPendingID(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestPendingLoginCookieExpiry(t *testing.T) {
 	// Same counter (+1) as staleCode above: with the expiry guard
 	// working, the stale request never actually consumed it, so this one
 	// is still good.
-	fresh, err := pendingLoginCodec.encode(pendingLoginState{UserID: id, IssuedAt: time.Now()})
+	fresh, err := pendingLoginCodec.encode(pendingLoginState{UserID: id, IssuedAt: time.Now(), ID: newTestPendingID(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,5 +474,52 @@ func TestLoginFactorRecoveryCodeSaveFailureIsServerError(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("the same code once saves work again returned %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestPendingLoginIsSpentByATOTPSignIn: the TOTP twin of
+// TestPendingLoginIsSpentByTheSignInItCompletes. A code signs in once;
+// a copy of the same pending-login cookie, kept and sent a minute later
+// with the next window's code -- a code that would be accepted on a
+// fresh pending login -- is refused with "sign in again".
+func TestPendingLoginIsSpentByATOTPSignIn(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	var offset atomic.Int64
+	g.cfg.Now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	secret, _, confirmCounter := totpEnrolAndConfirm(t, bob, ts)
+
+	client := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	kept := pendingCookieOf(t, client, ts)
+	first := submitLoginFactor(t, client, ts, gauntlet.GenerateTOTPCode(secret, confirmCounter+1))
+	_ = first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("the first code got %d, want 200", first.StatusCode)
+	}
+
+	offset.Store(int64(time.Minute)) // the next windows are now current
+	resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor", loginFactorRequest{Code: gauntlet.GenerateTOTPCode(secret, confirmCounter+2)}, kept)
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "sign in again") {
+		t.Errorf("the kept pending login with the next window's code got %d %q, want 401 sign in again", resp.StatusCode, raw)
+	}
+}
+
+// TestAWrongCodeDoesNotSpendThePendingLogin: only a completed sign-in
+// spends the pending login; a wrong code on it leaves it usable.
+func TestAWrongCodeDoesNotSpendThePendingLogin(t *testing.T) {
+	_, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	secret, _, confirmCounter := totpEnrolAndConfirm(t, bob, ts)
+	client := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+
+	wrong := submitLoginFactor(t, client, ts, "000000x")
+	_ = wrong.Body.Close()
+	if wrong.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a wrong code got %d, want 401", wrong.StatusCode)
+	}
+	right := submitLoginFactor(t, client, ts, gauntlet.GenerateTOTPCode(secret, confirmCounter+1))
+	_ = right.Body.Close()
+	if right.StatusCode != http.StatusOK || !sessionAuthenticated(t, client, ts) {
+		t.Errorf("the right code after a wrong one on the same pending login got %d, want 200 and a session", right.StatusCode)
 	}
 }

@@ -1324,7 +1324,7 @@ components:
       type: apiKey
       in: cookie
       name: gate_pending_login
-      description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived.
+      description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived, used by exactly one sign-in -- once a code, recovery code or passkey completes it, it is refused with 401 at login/factor and login/factor/begin.
     passkeyRegisterCookie:
       type: apiKey
       in: cookie

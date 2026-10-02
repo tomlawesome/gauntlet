@@ -39,7 +39,9 @@ All notable changes to this project are documented in this file.
   `assertion` on `POST /api/auth/login/factor`, and the admin
   `DELETE /api/auth/users/{id}/passkeys`. Left nil, every passkey route
   answers 404 and nothing links the WebAuthn library. Each login
-  challenge is usable once; a registration ceremony stays open until it
+  challenge is usable once, and a pending login (the cookie a password
+  step sets when a second factor is needed) is spent by the sign-in
+  that completes it, whichever factor completes it; a registration ceremony stays open until it
   succeeds or expires, so a refused finish can be retried with another
   authenticator, and a credential is never registered twice. The root package
   gains the seam both sides use (`PasskeyCeremony`, `PasskeyAssertion`,
@@ -62,6 +64,15 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- A pending login -- the cookie `POST /api/auth/login` sets when a
+  second factor is needed -- now completes exactly one sign-in (#20,
+  ruling R2). Before, the same cookie could be sent again within its
+  five minutes with another valid code, recovery code or passkey
+  assertion, and each one opened a session. A repeat now gets 401
+  "sign in again" at `login/factor` and `login/factor/begin`; a wrong
+  code still leaves the pending login usable. A pending-login cookie
+  sealed by an earlier version is refused once, and the user signs in
+  again.
 - The first admin is created only with a one-time setup code the server
   announces when it starts with no accounts (#37, ADR-0003; owner,
   2026-10-01). An empty store is not only a fresh install -- a deleted

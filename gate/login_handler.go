@@ -240,16 +240,9 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie, err := r.Cookie(pendingLoginCookieName)
-	if err != nil {
-		writeUnauthorized(w, "sign in again")
-		return
-	}
 	now := g.now()
-	st, err := pendingLoginCodec.decode(cookie.Value, now)
-	if err != nil {
-		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+	st, ok := g.pendingLogin(w, r, now)
+	if !ok {
 		return
 	}
 
@@ -276,9 +269,12 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 			// the challenge this assertion answered; a completed sign-in
 			// hands that back too, so a passkey sign-in costs none of
 			// the budget a wrong guess is limited by. completeLoginFactor
-			// releases this request's own.
-			g.releaseLogin(res, now)
-			g.completeLoginFactor(w, user, res, now)
+			// releases this request's own; begin's goes back only once
+			// the sign-in has actually completed, so a replay refused
+			// there keeps both.
+			if g.completeLoginFactor(w, user, res, st, now) {
+				g.releaseLogin(res, now)
+			}
 		}
 		return
 	}
@@ -299,7 +295,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if matched {
-		g.completeLoginFactor(w, user, res, now)
+		g.completeLoginFactor(w, user, res, st, now)
 		return
 	}
 
@@ -312,7 +308,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
 		return
 	} else if burned {
-		g.completeLoginFactor(w, user, res, now)
+		g.completeLoginFactor(w, user, res, st, now)
 		return
 	}
 
@@ -325,10 +321,25 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	writeUnauthorized(w, "invalid code")
 }
 
-// completeLoginFactor is handleLoginFactor's success path: release the
-// reservations a wrong guess would have kept, drop the now-spent pending
-// cookie, and issue the real session handleLogin withheld.
-func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, res loginReservation, now time.Time) {
+// completeLoginFactor is handleLoginFactor's success path: spend the
+// pending login, release the reservations a wrong guess would have kept,
+// drop the pending cookie, and issue the real session handleLogin
+// withheld. It reports whether it did.
+//
+// The pending login is claimed first, under spentPendingLogins' lock, so
+// of two completions racing on one cookie exactly one wins (ruling R2 on
+// #20). The loser is a replay, not a success: it keeps its reservations
+// and is told to sign in again. The forget time is IssuedAt plus
+// pendingLoginCookieMaxAge -- the same expiry pendingLoginCodec.decode
+// refuses the cookie at, so the claim and the decode share one expiry by
+// construction, on the same wall clock.
+func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, res loginReservation, st pendingLoginState, now time.Time) bool {
+	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
+		g.endAfterReset(res)
+		g.clearPendingLoginCookie(w)
+		writeUnauthorized(w, "sign in again")
+		return false
+	}
 	g.releaseLogin(res, now)
 	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
@@ -336,4 +347,5 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, user *gauntlet.User, r
 	g.setSessionCookie(w, sess.ID)
 	g.audit(user.Username, "user.login", user.Username, "via second factor")
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
+	return true
 }

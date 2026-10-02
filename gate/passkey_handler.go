@@ -444,16 +444,9 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
 	}
-	cookie, err := r.Cookie(pendingLoginCookieName)
-	if err != nil {
-		writeUnauthorized(w, "sign in again")
-		return
-	}
 	now := g.now()
-	st, err := pendingLoginCodec.decode(cookie.Value, now)
-	if err != nil {
-		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+	st, ok := g.pendingLogin(w, r, now)
+	if !ok {
 		return
 	}
 	user, ok := g.deps.Users.Get(st.UserID)
