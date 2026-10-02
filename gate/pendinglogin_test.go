@@ -153,3 +153,44 @@ func TestSpentPendingLoginRefusedAtExactlyItsExpiry(t *testing.T) {
 		t.Errorf("the kept pending login, replayed at exactly its expiry, got %d %q, want 401 sign in again", resp.StatusCode, raw)
 	}
 }
+
+// TestSpentPendingLoginIsNotReopenedAtTheFiveMinuteMark (ruling S2 on
+// #20, from the review's
+// TestRereviewPruneByALaterRequestReopensASpentPendingLogin): request B
+// read its clock at F, decode's last accepting instant for a spent
+// pending login, but reaches the set after request A, which read F+1ns
+// and pruned. The spent ID must still be there for B. No one request's
+// clock steps back; the test only orders two requests' readings the way
+// two goroutines can.
+func TestSpentPendingLoginIsNotReopenedAtTheFiveMinuteMark(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	var mu sync.Mutex
+	clock := time.Now().Round(0)
+	g.cfg.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	setClock := func(c time.Time) { mu.Lock(); clock = c; mu.Unlock() }
+	issuedAt := clock
+	forget := issuedAt.Add(pendingLoginCookieMaxAge)
+
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	_, codes, _ := totpEnrolAndConfirm(t, bob, ts)
+	client := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	kept := pendingCookieOf(t, client, ts)
+	first := submitLoginFactor(t, client, ts, codes[0])
+	_ = first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("the first sign-in got %d", first.StatusCode)
+	}
+
+	// Request A: another pending login touching the set just after F.
+	setClock(forget.Add(-time.Minute))
+	otherCookie := pendingCookieOf(t, startTOTPLogin(t, ts, totpBobUsername, totpBobPassword), ts)
+	setClock(forget.Add(time.Nanosecond))
+	_, _ = postRaw(t, ts.URL+"/api/auth/login/factor", loginFactorRequest{Code: "000000"}, otherCookie)
+
+	// Request B: read its clock at F, before A's prune.
+	setClock(forget)
+	resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor", loginFactorRequest{Code: codes[1]}, kept)
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "sign in again") {
+		t.Errorf("request B on the spent pending login got %d %q, want 401 sign in again", resp.StatusCode, raw)
+	}
+}

@@ -1,8 +1,8 @@
 // Package spent remembers one-time keys -- a passkey login challenge, a
 // pending login's ID -- until the thing they unlock could no longer be
 // accepted anyway, so each can be used once. gauntlet/passkey and gate
-// share this one implementation (rulings R2 on #20, in the second and
-// third addenda to the G8 design note).
+// share this one implementation (rulings R2 and S2 on #20, in the
+// second, third and fourth addenda to the G8 design note).
 //
 // The contract, in plain words:
 //
@@ -12,21 +12,29 @@
 //     its maximum age). Both have been through JSON and carry only a
 //     wall-clock reading, and Claim and Spent strip the monotonic
 //     reading from now as well, so every comparison here is wall clock
-//     against wall clock -- the same clock the acceptance check uses. A
-//     key is forgotten only strictly after its forget time, never at it:
-//     an acceptance check may still pass at that exact instant (gate's
-//     pending-login decode does), so it must still be refused here. A
-//     key is therefore never forgotten while what it guards would still
-//     be accepted, whatever the clock does in between.
+//     against wall clock -- the same clock the acceptance check uses.
+//   - A key is held for a grace period past its forget time: the set,
+//     built with New(grace), forgets it only once forgetAt + grace has
+//     passed. Two requests each judge a ceremony on their own reading of
+//     the clock, and the one that read later must not erase the key the
+//     one that read earlier is about to check -- a request can sit for
+//     seconds between reading the clock and reaching the set, in a slow
+//     store write say. Each caller passes its own lifetime as the grace,
+//     which is longer than any request that could still be accepted and
+//     is the same duration its cookie already carries. A key is
+//     therefore never forgotten while what it guards would still be
+//     accepted, or while a request that read the clock in time could
+//     still be on its way, whatever the clock does in between.
 //   - Forgetting happens late, never early. Keys are queued in claim
 //     order and dropped only from the head, stopping at the first one
-//     whose forget time has not yet passed, so a key behind a longer-lived
+//     whose forget time plus grace has not yet passed, so a key behind a longer-lived
 //     one stays (and stays refused) until that one goes. Each key is
 //     queued once and dropped once, so a claim costs constant time on
 //     average however large the set.
-//   - The set is bounded by the successful uses of one lifetime: a key
-//     outlives its own forget time by at most one lifetime, plus the size
-//     of any backward clock step taken between issue and claim. Every
+//   - The set is bounded by the successful uses of two lifetimes: a key
+//     outlives its own forget time by its grace (one lifetime) plus at
+//     most one more lifetime of queueing behind a longer-lived key, plus
+//     the size of any backward clock step taken between issue and claim. Every
 //     key costs a correct password or a signed assertion, both
 //     rate-limited, so there is no hard cap.
 package spent
@@ -44,25 +52,28 @@ type entry struct {
 // Set is a set of spent keys. The zero value is not ready; use New.
 type Set struct {
 	mu    sync.Mutex
-	seen  map[string]time.Time // key -> its forget time
+	grace time.Duration
+	seen  map[string]time.Time // key -> its forget time plus grace
 	queue []entry              // claim order; queue[head:] is live
 	head  int
 }
 
 // New returns an empty Set.
-func New() *Set {
-	return &Set{seen: make(map[string]time.Time)}
+//
+// grace is how long past its forget time a key is still held: the
+// caller's own ceremony lifetime (see the package comment).
+func New(grace time.Duration) *Set {
+	return &Set{grace: grace, seen: make(map[string]time.Time)}
 }
 
 // Claim reports whether key is being used for the first time and, if so,
-// records it until forgetAt (inclusive). A key already held is refused
-// whatever now says. A forgetAt already past is still recorded, and may
-// be pruned on the next call -- so a second claim then succeeds. That is
-// safe because callers claim only after their acceptance check passed on
-// that same forgetAt: once it is past, the acceptance check refuses
-// before anyone reaches Claim.
+// records it until forgetAt + grace. A key already held is refused
+// whatever now says. A forgetAt + grace already past is still recorded,
+// and may be pruned on the next call -- so a second claim then succeeds.
+// That is safe because callers claim only after their acceptance check
+// passed on that same forgetAt, a whole grace period earlier.
 func (s *Set) Claim(key string, forgetAt, now time.Time) bool {
-	now, forgetAt = now.Round(0), forgetAt.Round(0)
+	now, forgetAt = now.Round(0), forgetAt.Round(0).Add(s.grace)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
@@ -85,8 +96,9 @@ func (s *Set) Spent(key string, now time.Time) bool {
 	return held
 }
 
-// pruneLocked drops keys from the head of the queue while now is
-// strictly after their forget time, stopping at the first that is not.
+// pruneLocked drops keys from the head of the queue while now has
+// reached their forget time plus grace, stopping at the first that has
+// not.
 // Once the dropped prefix is more than half the queue, the live part is
 // copied to a fresh slice so the backing array does not hold onto it. It
 // returns how many entries it looked at: those it dropped, plus the one
@@ -94,7 +106,7 @@ func (s *Set) Spent(key string, now time.Time) bool {
 func (s *Set) pruneLocked(now time.Time) (examined int) {
 	for s.head < len(s.queue) {
 		examined++
-		if !now.After(s.queue[s.head].forgetAt) {
+		if now.Before(s.queue[s.head].forgetAt) {
 			break
 		}
 		delete(s.seen, s.queue[s.head].key)

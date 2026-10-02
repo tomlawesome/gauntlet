@@ -102,9 +102,11 @@ mikroview's fake authenticator copies and this module reuses.
    refused as a duplicate credential. The pending login a password
    step issues is spent by the sign-in that completes it, so one
    correct password yields one session (ruling R2). A spent challenge
-   or pending login is remembered until the sealed expiry the
+   or pending login is checked against the sealed expiry the
    acceptance check itself reads, on the same wall clock
-   (`internal/spent`). Either ceremony expires five
+   (`internal/spent`), and remembered until one lifetime after that
+   expiry, so a request that read the clock before the expiry cannot
+   find the key already forgotten (ruling S2). Either ceremony expires five
    minutes after begin (sealed `Expires`, checked by the library), and
    a value sealed for one ceremony cannot decode as the other. A sign
    counter that fails to advance refuses the login through the

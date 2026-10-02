@@ -70,7 +70,10 @@ All notable changes to this project are documented in this file.
   five minutes with another valid code, recovery code or passkey
   assertion, and each one opened a session. A repeat now gets 401
   "sign in again" at `login/factor` and `login/factor/begin`; a wrong
-  code still leaves the pending login usable. A pending-login cookie
+  code still leaves the pending login usable. A spent pending login
+  (and a spent passkey challenge) is remembered for one lifetime past
+  the moment it stops being accepted, so two requests reading the clock
+  either side of that moment cannot reopen it. A pending-login cookie
   sealed by an earlier version is refused once, and the user signs in
   again.
 - The first admin is created only with a one-time setup code the server

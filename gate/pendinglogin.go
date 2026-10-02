@@ -159,12 +159,15 @@ func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pend
 }
 
 // spentPendingLogins holds the ID of every pending login a sign-in has
-// completed, until the cookie carrying it would be refused anyway: the
-// forget time is the sealed IssuedAt plus pendingLoginCookieMaxAge, the
-// same expiry decode checks, compared on the same wall clock
-// (internal/spent). Shared by every Gate this process runs, like
+// completed, until one lifetime after the cookie carrying it would be
+// refused anyway: the forget time is the sealed IssuedAt plus
+// pendingLoginCookieMaxAge, the same expiry decode checks, compared on
+// the same wall clock, and the grace of one more pendingLoginCookieMaxAge
+// means a request that read the clock before that expiry cannot find the
+// ID already forgotten by one that read it after (ruling S2 on #20,
+// internal/spent). Shared by every Gate this process runs, like
 // pendingLoginCodec, whose cookies it guards.
-var spentPendingLogins = spent.New()
+var spentPendingLogins = spent.New(pendingLoginCookieMaxAge)
 
 // pendingLogin reads, opens and checks the pending-login cookie for
 // login/factor and login/factor/begin. A cookie that is missing, does

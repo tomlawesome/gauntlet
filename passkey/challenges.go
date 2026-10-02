@@ -24,9 +24,11 @@ const ceremonyLifetime = 5 * time.Minute
 //
 // FinishLogin claims with the sealed Expires as the forget time -- the
 // same value open checks the ceremony against, on the same wall clock
-// (internal/spent strips the monotonic reading) -- so the challenge is
-// never forgotten while the ceremony would still be accepted, whatever
-// the host's clock does.
+// (internal/spent strips the monotonic reading) -- and the set holds it
+// for one ceremonyLifetime past that (ruling S2 on #20), so the
+// challenge is never forgotten while the ceremony would still be
+// accepted, or while a request that read the clock before the expiry is
+// still on its way, whatever the host's clock does.
 //
 // Claimed by FinishLogin only, as in mikroview. A login is final inside
 // FinishLogin -- the signature is the proof -- so that is where its
@@ -35,4 +37,4 @@ const ceremonyLifetime = 5 * time.Minute
 // nothing: a claim there would fire before the store said yes, and
 // AddPasskey's duplicate check already refuses a credential registered
 // twice.
-var spentLoginChallenges = spent.New()
+var spentLoginChallenges = spent.New(ceremonyLifetime)
