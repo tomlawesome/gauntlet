@@ -103,8 +103,9 @@ mikroview's fake authenticator copies and this module reuses.
    library's clone warning and, under the store's lock, through
    `RecordPasskeyAssertionIfFresh`; the stored count is never moved by
    a refused assertion. `login/factor/begin` spends the same login
-   limiter reservations as the code step, released only by a completed
-   sign-in.
+   limiter reservations as the code step; they are released by a
+   completed sign-in, by begin's own server-side failure (500), and by
+   a counter that could not be saved -- never by a refused assertion.
 
 6. **Routes and bodies are mikroview's** (`GET /api/auth/passkeys`,
    `POST .../register/begin|finish`, `PATCH|DELETE

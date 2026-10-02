@@ -1610,3 +1610,40 @@ func TestPasskeyAssertionRefusedKeepsCookie(t *testing.T) {
 		t.Error("a refused assertion cleared the live ceremony cookie")
 	}
 }
+
+// TestPasskeyCounterSaveFailureDoesNotSpendBudget: a counter that cannot
+// be saved is the backend failing, not a wrong guess, so it hands back
+// this request's reservation and the one login/factor/begin took for its
+// challenge. Five such failures in a row -- the limiter's threshold --
+// must leave the account free to sign in. Ported from the #20 review.
+func TestPasskeyCounterSaveFailureDoesNotSpendBudget(t *testing.T) {
+	g := passkeyGate(t)
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	g.deps.Users = openTrackedStore(t, backend)
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
+		createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword, Role: "user"}).Body.Close()
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	fake, _ := registerPasskey(t, bilbo, ts, g, "key")
+
+	for i := range 5 { // newTestGate's limiter threshold
+		fake.SignCount = uint32(i + 1) // counting, so the save matters
+		pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+		options := passkeyLoginFactorBegin(t, pending, ts)
+		backend.left = 0
+		resp := submitPasskeyAssertion(t, pending, ts, fake, options)
+		backend.left = -1
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("cycle %d: got %d %q, want 500", i, resp.StatusCode, body)
+		}
+	}
+	client := &http.Client{Jar: mustCookieJar(t)}
+	resp := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("after 5 backend failures and no wrong guess, the password step got %d, want 200", resp.StatusCode)
+	}
+}

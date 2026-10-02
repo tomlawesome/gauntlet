@@ -535,7 +535,11 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 		// false), but as the backend failing, not a wrong guess -- the
 		// same stance as the TOTP branch's VerifyAndRecordTOTP error. A
 		// failed save on a 0 -> 0 login never gets here: the store logs
-		// it and accepts.
+		// it and accepts. Both reservations go back -- this request's and
+		// the one login/factor/begin took for the challenge -- or a
+		// backend outage would cost an attempt per try and end in a 429
+		// for an owner who never guessed wrong.
+		g.releaseLogin(res, now)
 		g.releaseLogin(res, now)
 		g.logError("recording passkey assertion for " + user.Username + ": " + err.Error())
 		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
