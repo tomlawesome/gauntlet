@@ -19,9 +19,17 @@
 # (Apache-2.0). MIT is listed too, as in birdcage's policy: permissive
 # and compatible with this module's own Apache-2.0, though no module in
 # go.mod carries it today.
+#
+# ISC and BSD-2-Clause were added by owner decision on 2026-10-02 (#20).
+# go-webauthn v0.18.2 links github.com/go-webauthn/x/crypto/secp256k1 (ISC)
+# and github.com/go-webauthn/x/revoke (BSD-2-Clause) into the passkey
+# package. Both licences are permissive and compatible with Apache-2.0,
+# and birdcage's policy already allows them.
 allow-licenses:
   - BSD-3-Clause
+  - BSD-2-Clause
   - Apache-2.0
   - MIT
+  - ISC
 
 allow-dependencies-licenses: []

@@ -69,7 +69,10 @@ All notable changes to this project are documented in this file.
   `github.com/go-webauthn/x` and eight more modules (CBOR, TPM, JWT,
   msgp, mapstructure, uuid, float16, fwd). Only `gauntlet/passkey`
   imports it, so an application that never imports that package never
-  compiles it in.
+  compiles it in. Two of its packages carry other permissive licences,
+  `go-webauthn/x/crypto/secp256k1` (ISC) and `go-webauthn/x/revoke`
+  (BSD-2-Clause), so the licence policy now allows both (owner decision
+  2026-10-02).
 
 ### Changed
 
