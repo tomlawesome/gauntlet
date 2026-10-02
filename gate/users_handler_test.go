@@ -4,15 +4,18 @@ package gate
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 func TestAdminCanCreateAdditionalUsers(t *testing.T) {
@@ -332,5 +335,102 @@ func TestCreateUserWithoutStorageSaysWhatToDo(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(rec.Body.String()), gateErrorMessages[gauntlet.ErrNotPersisted]; got != want {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// versionCountingBackend counts calls to Version, the cheap staleness
+// check every gauntlet.Store method makes against its backend
+// (reloadIfStale) before doing anything else. gauntlet #42's regression
+// guard reads this count rather than len(someCounter): on a real
+// backend each Version round trip can itself stall for seconds, so what
+// matters is that handleListUsers makes one of these per *request*
+// (List's own check), not one per *account* on top of it.
+type versionCountingBackend struct {
+	*persist.Memory
+	versionCalls atomic.Int64
+}
+
+func (b *versionCountingBackend) Version(ctx context.Context) (int64, bool, error) {
+	b.versionCalls.Add(1)
+	return b.Memory.Version(ctx)
+}
+
+// TestListUsersDoesNotCheckPasskeysPerAccount is gauntlet #42: before
+// the fix, handleListUsers called Store.PasskeyCount once per account
+// after List(), and each of those calls paid its own staleness check
+// against the backend on top of List()'s own -- on a stalled backend,
+// an N-account list could cost N times reloadTimeout. The fix reads
+// gauntlet.User.PasskeyCount off each List() entry instead, so the
+// backend cost of GET /api/auth/users must stay flat as accounts (and
+// their passkeys) are added, not grow with them.
+//
+// The request's own fixed cost (Protect's session lookup plus List's
+// own staleness check) is measured first, with a single account, then
+// used as the expectation for a second request made after more
+// accounts and passkeys exist -- rather than asserting a specific call
+// count, which would be pinning an implementation detail of Protect
+// this test has no business caring about.
+func TestListUsersDoesNotCheckPasskeysPerAccount(t *testing.T) {
+	backend := &versionCountingBackend{Memory: persist.NewMemory()}
+	users := openTrackedStore(t, backend)
+	g := newTestGateWithUsers(t, users)
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", "password123")
+
+	getUsers := func() []userSummary {
+		t.Helper()
+		resp, err := admin.Get(ts.URL + "/api/auth/users")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /api/auth/users: status = %d, want 200", resp.StatusCode)
+		}
+		var out []userSummary
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	before := backend.versionCalls.Load()
+	getUsers()
+	baseline := backend.versionCalls.Load() - before
+
+	if _, err := users.CreateUser("one", "password456", gauntlet.RoleUser, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	two, err := users.CreateUser("two", "password789", gauntlet.RoleUser, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := users.AddPasskey(two.ID, gauntlet.Passkey{ID: []byte("pk-1"), RPID: "passkeys.example.org", Name: "key one"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := users.AddPasskey(two.ID, gauntlet.Passkey{ID: []byte("pk-2"), RPID: "passkeys.example.org", Name: "key two"}); err != nil {
+		t.Fatal(err)
+	}
+
+	before = backend.versionCalls.Load()
+	out := getUsers()
+	withThreeAccounts := backend.versionCalls.Load() - before
+
+	if withThreeAccounts != baseline {
+		t.Errorf("GET /api/auth/users made %d Version calls against the backend with 3 accounts, want %d (the single-account baseline, unchanged) -- PasskeyCount must not be read per account", withThreeAccounts, baseline)
+	}
+
+	byUsername := make(map[string]userSummary, len(out))
+	for _, u := range out {
+		byUsername[u.Username] = u
+	}
+	if got := byUsername["admin"].PasskeyCount; got != 0 {
+		t.Errorf("admin PasskeyCount = %d, want 0", got)
+	}
+	if got := byUsername["one"].PasskeyCount; got != 0 {
+		t.Errorf("one PasskeyCount = %d, want 0", got)
+	}
+	if got := byUsername["two"].PasskeyCount; got != 2 {
+		t.Errorf("two PasskeyCount = %d, want 2", got)
 	}
 }

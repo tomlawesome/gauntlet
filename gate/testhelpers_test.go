@@ -89,7 +89,15 @@ func openTrackedStore(t *testing.T, backend persist.Backend) *gauntlet.Store {
 
 func newTestGate(t *testing.T) *Gate {
 	t.Helper()
-	users := openTrackedStore(t, persist.NewMemory())
+	return newTestGateWithUsers(t, openTrackedStore(t, persist.NewMemory()))
+}
+
+// newTestGateWithUsers is newTestGate, but over an already-opened
+// (and already openTrackedStore-tracked, for registerAdmin) accounts
+// store -- for a fixture that needs to control the store's backend,
+// such as one counting the calls a handler makes against it.
+func newTestGateWithUsers(t *testing.T, users *gauntlet.Store) *Gate {
+	t.Helper()
 	tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{})
 	if err != nil {
 		t.Fatalf("OpenTokenStore: %v", err)
