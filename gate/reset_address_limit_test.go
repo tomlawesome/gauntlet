@@ -140,6 +140,31 @@ func TestResetPassCoversTheSecondFactorStep(t *testing.T) {
 	}
 }
 
+// A wrong guess at the account from the same address, sent while the
+// owner is reading their code, cannot take the pass away: the password
+// step spends it, and the pending login it issues carries the owner
+// through the code step.
+func TestResetPassCannotBeTakenBetweenLoginSteps(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	secret, _, counter := totpEnrolAndConfirm(t, bob, ts)
+	lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
+
+	const newPW = "reset-by-cli-placeholder"
+	if err := g.deps.Users.SetPassword(totpBobUsername, newPW, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	client := startTOTPLogin(t, ts, totpBobUsername, newPW)
+	if got := loginStatus(t, ts.URL, totpBobUsername, "wrong-password-placeholder"); got != http.StatusTooManyRequests {
+		t.Errorf("a guess between the owner's two steps got %d, want 429", got)
+	}
+	resp := submitLoginFactor(t, client, ts, gauntlet.GenerateTOTPCode(secret, counter+1))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the owner's code step after an interleaved guess got %d, want 200", resp.StatusCode)
+	}
+}
+
 // Only a reset that ends the account's own lockout earns the pass. An
 // account that was never locked out, changing its own password while
 // guesses at other names fill the shared address, stays behind the

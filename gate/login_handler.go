@@ -25,6 +25,10 @@ type loginReservation struct {
 	// (gauntlet.LoginLimiter.AllowAfterReset, #32): nothing is
 	// reserved on ipKey, so nothing is released from it either.
 	afterReset bool
+	// pendingAfterReset is set for a code step whose password step spent
+	// the pass (pendingLoginState.AfterReset): ipKey is skipped, and there
+	// is no pass left to hand back or use up.
+	pendingAfterReset bool
 }
 
 // reserveLogin reserves one attempt on both buckets, or neither, and
@@ -35,12 +39,12 @@ type loginReservation struct {
 // gets past the address bucket, one attempt at a time, until its
 // sign-in finishes or a guess fails (AllowAfterReset, #32); its own
 // bucket still applies.
-func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, now time.Time) (loginReservation, bool) {
-	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID}
+func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, pendingAfterReset bool, now time.Time) (loginReservation, bool) {
+	res := loginReservation{ipKey: "ip:" + g.cfg.ClientIP(r), accountID: accountID, pendingAfterReset: pendingAfterReset}
 	if accountID == "" {
 		res.nameKey = "user:" + strings.ToLower(username)
 	}
-	ok := g.deps.Limiter.Reserve(res.ipKey, now)
+	ok := pendingAfterReset || g.deps.Limiter.Reserve(res.ipKey, now)
 	if !ok && accountID != "" && g.deps.Limiter.AllowAfterReset(res.ipKey, g.deps.Users, accountID, now) {
 		ok, res.afterReset = true, true
 	}
@@ -50,7 +54,7 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 		} else {
 			ok = g.deps.Limiter.Reserve(res.nameKey, now)
 		}
-		if !ok && !res.afterReset {
+		if !ok && !res.afterReset && !pendingAfterReset {
 			g.deps.Limiter.Release(res.ipKey, now)
 		}
 		if !ok && res.afterReset {
@@ -65,7 +69,7 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 
 // releaseLogin returns both reservations after a successful attempt.
 func (g *Gate) releaseLogin(res loginReservation, now time.Time) {
-	if !res.afterReset {
+	if !res.afterReset && !res.pendingAfterReset {
 		g.deps.Limiter.Release(res.ipKey, now)
 	}
 	if res.accountID != "" {
@@ -76,8 +80,9 @@ func (g *Gate) releaseLogin(res loginReservation, now time.Time) {
 }
 
 // endAfterReset uses up the account's pass past the address limit, if
-// this attempt used one: called when a session is issued and on a wrong
-// password or code, never between the password and second-factor steps.
+// this attempt used one: called when a session is issued, when the
+// password step hands over to the code step (the pending login carries
+// it from there), and on a wrong password.
 func (g *Gate) endAfterReset(res loginReservation) {
 	if res.afterReset {
 		g.deps.Limiter.EndAfterReset(res.ipKey, res.accountID)
@@ -114,7 +119,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// pass a plain check before any of them finishes verifying, and a
 	// threshold of N admits as many concurrent attempts as an attacker
 	// cares to send.
-	res, ok := g.reserveLogin(w, r, accountID, req.Username, now)
+	res, ok := g.reserveLogin(w, r, accountID, req.Username, false, now)
 	if !ok {
 		return
 	}
@@ -165,7 +170,11 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if user.HasActiveTOTP() {
 			factors = append(factors, "totp")
 		}
-		if err := g.setPendingLoginCookie(w, user.ID, now); err != nil {
+		// A pass is spent here, not held across the code step: the
+		// pending login carries the owner past the address limit
+		// instead, so a guess sent in between cannot take it.
+		g.endAfterReset(res)
+		if err := g.setPendingLoginCookie(w, user.ID, res.afterReset, now); err != nil {
 			g.logError("sealing pending-login cookie for " + user.Username + ": " + err.Error())
 			http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
 			return
@@ -230,7 +239,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, st.AfterReset, now)
 	if !ok {
 		return
 	}

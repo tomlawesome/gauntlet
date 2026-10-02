@@ -211,8 +211,10 @@ All notable changes to this project are documented in this file.
   five minutes, which read as the reset having failed (#32). Only that
   account gets past the address limit, only when both the address and
   the account itself reached their limits before the reset, one attempt
-  at a time, and only until its sign-in finishes (both steps, for an
-  account with a second factor) or a guess fails. Other accounts tried
+  at a time, and only until its sign-in finishes or a guess fails. For
+  an account with a second factor the right password spends the pass
+  and the code step that follows is let through on the same sign-in, so
+  a guess sent in between cannot take it. Other accounts tried
   from that address are still refused, and so is an account that was
   never locked out and only changed its own password. New
   `LoginLimiter.AllowAfterReset`, `ReleaseAfterReset` and

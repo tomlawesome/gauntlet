@@ -326,9 +326,12 @@ this gives an attacker nothing): only that account, only when the
 address and the account itself both reached their limits before the
 reset -- the reset ended a lockout, so an account that only changed its
 own password gets nothing -- one attempt at a time, and only until its
-sign-in issues a session or a password or code is wrong
-(`AllowAfterReset`, `ReleaseAfterReset`, `EndAfterReset`). Other names
-tried from that address stay refused.
+sign-in issues a session or a password is wrong (`AllowAfterReset`,
+`ReleaseAfterReset`, `EndAfterReset`). For an account with a second
+factor the right password spends the pass, and the pending login
+carries the code step past the address limit, so a guess sent in
+between cannot take it; the account's own limit still applies. Other
+names tried from that address stay refused.
 Re-checking a signed-in caller's own password has its own per-account
 budget, memory only.
 

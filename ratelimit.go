@@ -553,11 +553,13 @@ func resetPassKey(addressKey, accountID string) string {
 //
 // One attempt holds the pass at a time: AllowAfterReset hands it out
 // and refuses everyone else until the attempt hands it back
-// (ReleaseAfterReset) or uses it up (EndAfterReset, called once a
-// session is issued or on a wrong password or code), so a burst of
-// concurrent guesses gets one try, not one each. It lasts across both
-// steps of a sign-in with a second factor. A later reset out of a
-// lockout grants a fresh one; the window ends it anyway.
+// (ReleaseAfterReset) or uses it up (EndAfterReset: a session issued,
+// the right password for an account with a second factor, or a wrong
+// guess), so a burst of concurrent guesses gets one try, not one each.
+// A caller with a second step carries the owner through it itself (gate
+// does so in its pending login), so nobody can take the pass in
+// between. A later reset out of a lockout grants a fresh one; the
+// window ends it anyway.
 //
 // The change is read from lockouts as ReserveAccount reads it, so it
 // takes lockouts being the *Store itself (see lockoutRecorder), and a
@@ -578,8 +580,8 @@ func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockou
 	defer l.mu.Unlock()
 	key := resetPassKey(addressKey, accountID)
 	// Checked before the counts: the account's first attempt under the
-	// pass drops its pre-change guesses (ReserveAccount), so the second
-	// step of a two-factor sign-in no longer sees the lockout it ended.
+	// pass drops its pre-change guesses (ReserveAccount), so an attempt
+	// after a handed-back pass no longer sees the lockout it ended.
 	if p, ok := l.resetPasses[key]; ok && p.changedAt.Equal(changed) {
 		if p.changedAt.Before(now.Add(-l.window)) {
 			delete(l.resetPasses, key) // no attempt in the window predates it
@@ -625,8 +627,8 @@ func countBefore(entries []time.Time, t time.Time) int {
 
 // ReleaseAfterReset hands back the pass AllowAfterReset gave accountID
 // at addressKey, unused: the attempt holding it has finished without a
-// session or a wrong guess -- the password step of a two-factor sign-in,
-// a refusal by the account's own limit, a storage error. A no-op once
+// session or a wrong guess -- a refusal by the account's own limit, a
+// storage error. A no-op once
 // EndAfterReset has used the pass up.
 func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) {
 	l.mu.Lock()
