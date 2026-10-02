@@ -150,8 +150,9 @@ little. L3's extra requirements are mostly deployment and
 infrastructure (hardware security modules, separate log systems,
 memory encryption) that a library cannot provide and a single operator
 would not run. L2 is therefore the target; L3 requirements are listed
-only where gauntlet happens to meet them. Both consumers run with
-`RequireSecondFactor` on, which is what L2's 6.3.3 asks for.
+only where gauntlet happens to meet them. A second factor is mandatory
+for every local-password account (#49), which is what L2's 6.3.3 asks
+for.
 
 **Scope.** A library with HTTP routes but no server, no frontend and no
 deployment. In scope: V6 authentication, V7 sessions, V8
@@ -180,7 +181,7 @@ it says so instead of repeating the reasoning.
 | 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`) |
 | 6.1.2, 6.2.11 context-specific word list | 2 | Gap | #43 (password blocklist). See 800-63B §3.1.1.2 |
 | 6.1.3, 6.3.4 all pathways documented, strength consistent | 2 | Met, with one deviation | Pathways: password then TOTP/passkey/recovery code; reset code then the same second factor (`gate/login_handler.go:129-172`); SSO; bearer token; setup code. All in `docs/api/auth.yaml`. Deviation: an SSO sign-in creates a session with no local second factor (`gate/oidc_handler.go:292`); see 6.8.4 |
-| 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met, conditional | `store.go:39` `minPasswordLength = 8`. 8 is enough only behind a mandatory second factor; see 800-63B §3.1.1.2 and #49 (password minimum) |
+| 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met | `store.go:39` `minPasswordLength = 8`, conforming because a second factor is mandatory for every local-password account (#49); see 800-63B §3.1.1.2 |
 | 6.2.2 users can change their password | 1 | Met | `POST /api/auth/password`, `gate/password_handler.go` |
 | 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code just proved the account |
 | 6.2.4 checked against the top 3000 passwords | 1 | Gap | #43 (password blocklist) |
@@ -192,7 +193,7 @@ it says so instead of repeating the reasoning.
 | 6.2.12 breached-password check | 2 | Gap | #43 (password blocklist) |
 | 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `gate/reset_address_limit_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
-| 6.3.3 MFA or equivalent | 2 | Met | `gate.Config.RequireSecondFactor` closes the door at `gate/protect.go:366`; both consumers set it. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
+| 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
 | 6.3.5 notify suspicious attempts | 3 | Not targeted | No notification channel; see 800-63B §4.6 |
 | 6.3.6 email not an authentication factor | 3 | Met | Gauntlet sends nothing and stores no addresses |
 | 6.3.7 notify after credential changes | 3 | Not targeted | Audit record only (`account.password_changed` etc.); see 800-63B §4.6 |
@@ -430,10 +431,10 @@ self-hosted IdP. The *subscriber* is the operator or one of a handful of
 colleagues; the apps are the service.
 
 **Assurance level.** NIST grades an authentication event AAL1 to AAL3.
-With `gate.Config.RequireSecondFactor` on, as both consumers run, a
-local sign-in is a password plus a single-factor OTP (TOTP), a look-up
-secret (recovery code) or a single-factor cryptographic authenticator
-(passkey): **AAL2** (§2.2.1). With it off, **AAL1**. AAL3 is not claimed:
+A second factor is mandatory for every local-password account (#49), so
+a local sign-in is always a password plus a single-factor OTP (TOTP), a
+look-up secret (recovery code) or a single-factor cryptographic
+authenticator (passkey): **AAL2** (§2.2.1). AAL3 is not claimed:
 it needs a non-exportable hardware key on every sign-in and FIPS 140
 validated modules, and NIST itself rules synced passkeys out of AAL3
 (Appendix B). An SSO sign-in is whatever the IdP's policy makes it;
@@ -456,7 +457,7 @@ already holds the evidence, the row points at it.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Chosen by the subscriber or assigned randomly (§3.1.1.1) | Conforms | User-chosen; the only assigned secret is the reset code, which must be replaced on first use |
-| 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms, conditionally; gap | `minPasswordLength = 8` (`store.go:39`). Allowed only because both consumers mandate a second factor. Nothing stops an application running `RequireSecondFactor = false` with 8-character passwords: #49 (password minimum); design call |
+| 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms | `minPasswordLength = 8` (`store.go:39`), conforming unconditionally because a second factor is mandatory for every local-password account and cannot be turned off (#49) |
 | Permit at least 64 characters; accept printing ASCII, space and Unicode; count code points (SHOULD) | Conforms | No maximum, no character rules; length counted in characters (`store.go:962`, `:1532`) |
 | No other composition rules (SHALL NOT) | Conforms | None |
 | No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`) |
@@ -552,7 +553,7 @@ stand alone, which these never do.
 | CSRF: POST/PUT content carries a session identifier the RP verifies (SHALL) | Deviation | Gauntlet uses a custom header on every unsafe method plus `SameSite=Lax` (`gate/protect.go:118-123`), the defence OWASP's cheat sheet lists as equivalent; a per-request token would mean a second cookie or body field for both frontends |
 | Timeouts: AAL2 overall SHOULD be at most 24 h, inactivity at most 1 h; both SHALL be enforced and documented (§2.2.3, §5.2) | Deviation, documented here (proposed; awaiting the owner's decision) | Both are enforced in `SessionStore.Validate` (`session.go:208-217`). The values are the application's: mikroview and birdcage use 24 h idle and a 7-day ceiling (`docs/design.md` §2.4). Reason for the longer values: a single operator's dashboard left open on a workstation, behind a mandatory second factor, with every session ended at once by any credential change (`SessionCutoff`). Whether to tighten them is awaiting the owner's decision. |
 | Activity resets the inactivity timeout; reauthentication resets both | Conforms | Sliding `ExpiresAt` capped at the ceiling; a fresh login is a fresh session |
-| A session is never stronger than the event that created it | Conforms | One session type; the second-factor door refuses a session whose account has no factor when one is required (`gate/protect.go:366`) |
+| A session is never stronger than the event that created it | Conforms | One session type; the second-factor door refuses a session whose local-password account has no factor (`gate/protect.go:366`, unconditional since #49) |
 | No fallback to an insecure transport | Application | TLS termination |
 | Federation: the RP is authoritative on reauthentication (§5.2) | Conforms | Gauntlet's own timeouts apply to an SSO session; the IdP's session is never consulted after the callback |
 
@@ -560,8 +561,7 @@ stand alone, which these never do.
 
 Conforms on everything above except: the password blocklist (#43, owner
 decision on the list); the consecutive-failure cap (#44, design call on
-escalate-versus-disable); the password minimum tied to a mandatory second
-factor (#49, design call); cookie prefix, lifetime and `Secure` default
+escalate-versus-disable); cookie prefix, lifetime and `Secure` default
 (#47); refused attempts and binding sources not logged (#45). Documented
 deviations: no NFC normalisation, no pepper, TOTP secrets as protected as
 the backend, no out-of-band notifications, the custom-header CSRF defence,

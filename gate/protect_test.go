@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -204,7 +205,10 @@ func TestLoginThenAccessProtectedRoute(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	registerAdmin(t, ts, "admin", "password123").Jar = nil // registration's own session is not what this test checks
+	// registerAdminNoFactor: a confirmed factor would turn the
+	// password-only login below into a pending login, not the full
+	// session this test is about.
+	registerAdminNoFactor(t, ts, "admin", "password123").Jar = nil // registration's own session is not what this test checks
 
 	client := &http.Client{Jar: mustCookieJar(t)}
 	loginResp := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
@@ -212,6 +216,7 @@ func TestLoginThenAccessProtectedRoute(t *testing.T) {
 	if loginResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected login to succeed, got %d", loginResp.StatusCode)
 	}
+	enrolTOTPFactor(t, client, ts, "password123") // /api/protected is not an enrolment route
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {
@@ -327,16 +332,43 @@ func TestLogoutAllRejectsAnonymousCaller(t *testing.T) {
 	}
 }
 
+// sessionClient is an http.Client whose jar carries a session cookie for
+// an already-issued session -- for standing up a second "device" whose
+// session was never actually logged in through the login flow (that
+// flow would need to clear the forced-enrolment door itself, or -- past
+// it -- would be ended by enrolling a factor on a sibling session, see
+// TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail).
+func sessionClient(t *testing.T, ts string, sessionID string) *http.Client {
+	t.Helper()
+	jar := mustCookieJar(t)
+	u, err := url.Parse(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(u, []*http.Cookie{{Name: testCookieName, Value: sessionID, Path: "/"}})
+	return &http.Client{Jar: jar}
+}
+
 func TestLogoutAllEndsEverySessionButTheCallers(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	// registerAdminNoFactor, then enrol a factor on that same session:
+	// doing it through a real login for "deviceA"/"deviceB" below would
+	// either leave them at a pending login (once admin already holds a
+	// factor) or, enrolled afterward on one of them, end the other's
+	// session as a side effect (TOTP confirm's own revoke-other-sessions
+	// rule) -- neither is what this test, about logout-all itself, is
+	// about, so both device sessions are created directly instead.
+	setup := registerAdminNoFactor(t, ts, "admin", "password123")
+	enrolTOTPFactor(t, setup, ts, "password123") // logout-all and /api/protected are not enrolment routes
 
-	deviceA := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, deviceA, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"}).Body.Close()
-
-	deviceB := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, deviceB, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"}).Body.Close()
+	admin, ok := g.deps.Users.ByUsername("admin")
+	if !ok {
+		t.Fatal("admin account missing")
+	}
+	now := time.Now()
+	deviceA := sessionClient(t, ts.URL, g.deps.Sessions.Create(admin.ID, now).ID)
+	deviceB := sessionClient(t, ts.URL, g.deps.Sessions.Create(admin.ID, now).ID)
 
 	callResp := postJSON(t, deviceA, ts.URL+"/api/auth/logout-all", map[string]any{})
 	_ = callResp.Body.Close()
@@ -435,6 +467,12 @@ func TestAnOlderDocumentsLinkStillEndsEarlierSessions(t *testing.T) {
 		OIDCIssuer:        "https://idp.example",
 		OIDCSubject:       "subject-1",
 		HasLocalPassword:  true,
+		// This account still carries a local password (see the field's
+		// doc comment), so it needs an active second factor to clear the
+		// forced-enrolment door -- not what this test is about, hence a
+		// secret no code is ever verified against.
+		TOTPSecret:      "placeholder-secret",
+		TOTPConfirmedAt: linkedAt.Add(-time.Hour),
 	})
 	if u, _ := users.Get("linked-admin"); !u.SessionsEndedAt.IsZero() {
 		t.Fatalf("test setup: the older document should carry no sessionsEndedAt, got %v", u.SessionsEndedAt)
@@ -497,7 +535,12 @@ func TestExpiredSessionIsRefused(t *testing.T) {
 	g := newTestGate(t)
 	g.deps.Sessions = gauntlet.NewSessionStore(time.Millisecond, 0)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	// registerAdminNoFactor: session expiry is caught in Protect before
+	// the second-factor door is ever reached, so this account does not
+	// need one -- and registerAdmin's extra enrol/confirm round trips
+	// would risk outliving the 1ms session this test needs to survive
+	// registration itself.
+	client := registerAdminNoFactor(t, ts, "admin", "password123")
 
 	time.Sleep(5 * time.Millisecond)
 
@@ -511,13 +554,13 @@ func TestExpiredSessionIsRefused(t *testing.T) {
 	}
 }
 
-// TestRequireSecondFactorBlocksAccountWithNone pins Protect's own door,
-// gated by Config.RequireSecondFactor -- docs/design.md §1.5.
+// TestRequireSecondFactorBlocksAccountWithNone pins Protect's own door:
+// a local-password account with no confirmed second factor can reach
+// nothing but the enrolment routes (#49) -- docs/design.md §1.5.
 func TestRequireSecondFactorBlocksAccountWithNone(t *testing.T) {
 	g := newTestGate(t)
-	g.cfg.RequireSecondFactor = true
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdminNoFactor(t, ts, "admin", "password123")
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {
@@ -525,25 +568,36 @@ func TestRequireSecondFactorBlocksAccountWithNone(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("expected 403 for a local account with no second factor once RequireSecondFactor is set, got %d", resp.StatusCode)
+		t.Errorf("expected 403 for a local account with no second factor, got %d", resp.StatusCode)
 	}
 }
 
-// TestRequireSecondFactorOffAllowsAccountWithNone is the control for the
-// test above: with the door off (the default), the same account is let
-// through.
-func TestRequireSecondFactorOffAllowsAccountWithNone(t *testing.T) {
+// TestRequireSecondFactorFalseStillBlocksAccountWithNone pins #49: the
+// deprecated Config.RequireSecondFactor field no longer has an "off"
+// state that lets an unenrolled local-password account through. Before
+// #49 this was the control test for the one above, proving the door
+// opened when the field was left false (its zero value); now the field
+// is ignored and the door holds regardless, so the account can still
+// reach only the enrolment routes.
+func TestRequireSecondFactorFalseStillBlocksAccountWithNone(t *testing.T) {
 	g := newTestGate(t)
+	g.cfg.RequireSecondFactor = false //nolint:staticcheck // pinning that the deprecated field is ignored
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdminNoFactor(t, ts, "admin", "password123")
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected RequireSecondFactor=false to let the account through, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected RequireSecondFactor=false to still block an unenrolled local account, got %d", resp.StatusCode)
+	}
+
+	enrol := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: "password123"})
+	defer func() { _ = enrol.Body.Close() }()
+	if enrol.StatusCode != http.StatusOK {
+		t.Errorf("expected the TOTP enrolment route to stay reachable while stuck at the door, got %d", enrol.StatusCode)
 	}
 }
 

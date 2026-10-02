@@ -174,6 +174,11 @@ func TestResetPassCannotBeTakenBetweenLoginSteps(t *testing.T) {
 func TestOwnPasswordChangeGetsNoAddressPass(t *testing.T) {
 	_, ts, _ := totpFixture(t)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	// A voluntary password change is not an enrolment route, so an
+	// account stuck at the forced-enrolment door cannot reach it either
+	// (#49, docs/design.md §1.6) -- bob needs a factor first to stand in
+	// for an ordinary, already-enrolled account here.
+	totpEnrolAndConfirm(t, bob, ts)
 	lockOutFromFixtureAddress(t, ts.URL, "nobody-placeholder")
 
 	const newPW = "changed-by-bob-placeholder"

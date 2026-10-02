@@ -1403,10 +1403,10 @@ components:
             Present only when the session is stopped at a door:
             `must-change-password` (an administrator reset the account;
             only `POST /api/auth/password` is reachable) or
-            `must-enrol-factor` (`Config.RequireSecondFactor` is on and the
-            account has no second factor; only the TOTP enrol and confirm
-            routes and the passkey register begin and finish routes are
-            reachable).
+            `must-enrol-factor` (the account has no second factor yet --
+            every local-password account must hold one; only the TOTP
+            enrol and confirm routes and the passkey register begin and
+            finish routes are reachable).
           schema:
             type: string
             enum: [must-change-password, must-enrol-factor]
@@ -1667,7 +1667,7 @@ components:
           type: boolean
         mustEnrolSecondFactor:
           type: boolean
-          description: True only when `Config.RequireSecondFactor` is on and the account has no second factor.
+          description: True only when the account has no second factor yet -- every local-password account must hold one.
         hasTOTP:
           type: boolean
           description: A confirmed authenticator app, not a pending enrolment.

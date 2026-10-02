@@ -227,6 +227,23 @@ func totpCounterNow(now time.Time) uint64 {
 	return uint64(now.Unix()) / 30
 }
 
+// enrolTOTPFactor drives TOTP enrol+confirm end to end for client,
+// already signed in with password and holding no second factor yet --
+// the minimal way to clear the forced-enrolment door gate/protect.go
+// holds shut for every local-password account (#49), for a fixture
+// whose point is not that door.
+func enrolTOTPFactor(t *testing.T, c *contractChecker, base string, client *http.Client, password string) {
+	t.Helper()
+	var enrolled totpEnrolResponse
+	c.do(client, base, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: password}}, 200, &enrolled)
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+	c.do(client, base, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}}, 200, nil)
+}
+
 func mustCookieJar(t *testing.T) http.CookieJar {
 	t.Helper()
 	jar, err := cookiejar.New(nil)

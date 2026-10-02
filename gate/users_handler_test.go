@@ -195,6 +195,7 @@ func TestDeletingAUserRevokesTheirSessionAndTokens(t *testing.T) {
 
 	operatorClient := &http.Client{Jar: mustCookieJar(t)}
 	_ = postJSON(t, operatorClient, ts.URL+"/api/auth/login", credentialsRequest{Username: "operator", Password: "password456"}).Body.Close()
+	enrolTOTPFactor(t, operatorClient, ts, "password456") // /api/protected is not an enrolment route, so the "live before the delete" baseline below needs a factor first
 	live, err := operatorClient.Get(ts.URL + "/api/protected")
 	if err != nil {
 		t.Fatal(err)

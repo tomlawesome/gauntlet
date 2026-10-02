@@ -382,7 +382,7 @@ type Config struct {
     CookieName          string        // "mikroview_session" / "birdcage_session"
     SecureCookie        bool
     CSRFHeaderValue     string        // sent as X-Requested-With by the app's own frontend
-    RequireSecondFactor bool          // mikroview: true (#1253). Birdcage: §1.6
+    RequireSecondFactor bool          // deprecated, ignored: see §1.6
     Log                 *slog.Logger
     Audit               Auditor       // nil = no audit
     ClientIP            func(*http.Request) string // limiter key; app owns trusted-proxy policy
@@ -452,7 +452,7 @@ birdcage: the product name in TOTP enrolment URIs and passkey display
 names, the `?ssoError=` redirect target, the 30-day cookie constant's
 name. `Config` gains `ProductName` and `LoginPath` for the first two.
 
-### 1.6 Second factors and passkeys -- recommendation, not a decision
+### 1.6 Second factors and passkeys -- always required, since #49
 
 Mikroview's model (v0.6.1, `CHANGELOG.md` #1249/#1250/#1253) is: every
 local-password account must hold a second factor, TOTP or a passkey;
@@ -478,12 +478,17 @@ it. The data for all of this lives on `User`.
   status (`unset`, `ip`, `insecure`), not a startup refusal: the
   ceremony routes answer 409 and the session body says why; mikroview's
   deployments reached by IP keep starting.
-- **`RequireSecondFactor` for birdcage: recommend on.** Birdcage changes
-  firewall state and holds credentials, so [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md)'s "the case for
-  gating it is stronger than mikroview's" applies to the second factor
-  too. Cost: the TOTP enrol screen is in birdcage's v1 UI slice (§5).
-  If the owner prefers a smaller first cut, off is a one-field change
-  and the door can be closed later without touching data.
+- **The door is always shut: `RequireSecondFactor` is deprecated and
+  ignored (#49).** `gate` no longer offers a way to turn the
+  forced-enrolment door off -- every local-password account, mikroview's
+  and birdcage's alike, must hold a second factor before it can reach
+  anything but the enrolment routes. This closes the gap ASVS 5.0 6.2.1
+  and NIST SP 800-63B-4 §3.1.1.2 flagged against the 8-character minimum
+  (`store.go:39`, docs/security-by-design.md): with the door
+  configurable and off by default, an application that forgot to turn
+  it on got 8-character single-factor passwords. Cost: the TOTP enrol
+  screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
+  way "recommend on" would have allowed.
 
 ### 1.7 Deliberately not in the module
 

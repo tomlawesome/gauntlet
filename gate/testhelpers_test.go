@@ -3,6 +3,7 @@ package gate
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -214,9 +215,27 @@ func mustCookieJar(t *testing.T) http.CookieJar {
 	return jar
 }
 
-// registerAdmin registers the very first account against ts/g and
-// returns a client whose cookie jar carries its session.
+// registerAdmin registers the very first account against ts/g, enrols
+// and confirms it a TOTP factor, and returns a client whose cookie jar
+// carries its session. Every local-password account is stopped at the
+// forced-enrolment door until it holds a second factor (#49), and what
+// nearly every fixture in this package wants from "the admin" is a
+// session that can reach ordinary routes, not one parked at that door
+// -- so this is the default, and it leaves the account ready to act.
+// registerAdminNoFactor is for the handful of tests about the door
+// itself, which need an account that has not cleared it.
 func registerAdmin(t *testing.T, ts *httptest.Server, username, password string) *http.Client {
+	t.Helper()
+	client := registerAdminNoFactor(t, ts, username, password)
+	enrolTOTPFactor(t, client, ts, password)
+	return client
+}
+
+// registerAdminNoFactor is registerAdmin without the automatic TOTP
+// enrolment that clears the forced-enrolment door -- for pinning that
+// door itself (gate/protect.go), or the enrolment routes it still
+// admits.
+func registerAdminNoFactor(t *testing.T, ts *httptest.Server, username, password string) *http.Client {
 	t.Helper()
 	g, ok := testServerGates.Load(ts)
 	if !ok {
@@ -229,4 +248,34 @@ func registerAdmin(t *testing.T, ts *httptest.Server, username, password string)
 		t.Fatalf("registering %q: status = %d, want %d", username, resp.StatusCode, http.StatusCreated)
 	}
 	return client
+}
+
+// enrolTOTPFactor drives TOTP enrol+confirm end to end for client,
+// already signed in with password and holding no second factor yet --
+// the same two-step ceremony totpEnrolAndConfirm (totp_handler_test.go)
+// drives for "bob", used here to clear the forced-enrolment door for an
+// account whose fixture is not about that door.
+func enrolTOTPFactor(t *testing.T, client *http.Client, ts *httptest.Server, password string) {
+	t.Helper()
+	resp := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: password})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("enrolling a TOTP factor: enrol returned %d: %s", resp.StatusCode, body)
+	}
+	var enrolled totpEnrolResponse
+	if err := json.NewDecoder(resp.Body).Decode(&enrolled); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatalf("decoding the enrolled secret: %v", err)
+	}
+	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+	confirmResp := postJSON(t, client, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
+	defer func() { _ = confirmResp.Body.Close() }()
+	if confirmResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(confirmResp.Body)
+		t.Fatalf("confirming a TOTP factor: confirm returned %d: %s", confirmResp.StatusCode, body)
+	}
 }

@@ -26,11 +26,12 @@ type sessionResponse struct {
 	// MustChangePassword mirrors the door Protect enforces in
 	// protect.go.
 	MustChangePassword bool `json:"mustChangePassword"`
-	// MustEnrolSecondFactor is true only when Config.RequireSecondFactor
-	// is set and this account has none yet -- it names the actual door
-	// Protect enforces, not gauntlet.User.HasSecondFactor's raw fact,
-	// so a deployment that leaves RequireSecondFactor off never tells a
-	// client to enrol something nothing is checking for.
+	// MustEnrolSecondFactor is true only when this account has no
+	// second factor yet -- it names the actual door Protect enforces
+	// (always on since #49), not gauntlet.User.HasSecondFactor's raw
+	// fact, so an SSO account with no local password, which the door
+	// never applies to, does not get told to enrol something nothing
+	// is checking for.
 	MustEnrolSecondFactor bool `json:"mustEnrolSecondFactor"`
 	// HasTOTP reports gauntlet.User.HasActiveTOTP: a confirmed
 	// authenticator-app factor, not a pending enrolment.
@@ -72,7 +73,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp.HasLocalPassword = user.LocalPassword()
 		resp.SSOConnected = user.OIDCSubject != ""
 		resp.MustChangePassword = user.MustChangePassword
-		resp.MustEnrolSecondFactor = g.cfg.RequireSecondFactor && user.LocalPassword() && !user.HasSecondFactor()
+		resp.MustEnrolSecondFactor = user.LocalPassword() && !user.HasSecondFactor()
 		resp.HasTOTP = user.HasActiveTOTP()
 		if g.deps.Passkeys != nil {
 			resp.Passkeys = &sessionPasskeysInfo{

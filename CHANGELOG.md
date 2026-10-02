@@ -76,6 +76,19 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- A second factor (TOTP or a passkey) is now always required for every
+  local-password account; `gate` no longer offers a way to turn the
+  forced-enrolment door off (#49). `gate.Config.RequireSecondFactor` is
+  deprecated and ignored -- it stays only so applications that already
+  set it still compile. An application that was relying on the door
+  being off (the field's old default) now sees it on unconditionally:
+  every local-password account, including ones created before this
+  change, is stopped at the door until it enrols a factor, reaching
+  only the enrolment routes until then. This closes the gap behind the
+  8-character password minimum (`store.go:39`): NIST SP 800-63B-4
+  §3.1.1.2 allows 8 characters only behind a mandatory second factor,
+  and the minimum stays 8 rather than rising to 15 because the door can
+  no longer be left off (#49, `docs/security-by-design.md`).
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

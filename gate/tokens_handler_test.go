@@ -228,6 +228,7 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 	g.Handle(gauntlet.TokenKindAPI, kindEchoHandler("/api/readonly"))
 	ts := newTestServer(t, g)
 	admin := loggedInClient(t, ts, "admin", "password123")
+	enrolTOTPFactor(t, admin, ts, "password123") // DELETE /api/tokens/{id} is not an enrolment route
 
 	backend.left = 0
 	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/tokens/"+tok.ID, nil)

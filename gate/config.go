@@ -18,13 +18,13 @@ type Auditor interface {
 	Record(actor, action, target, detail string)
 }
 
-// Config configures a Gate. Everything here is either a per-application
-// value mikroview hard-coded (CookieName, CSRFHeaderValue) or a policy
-// choice mikroview made once for itself (RequireSecondFactor) --
-// docs/design.md §1.5. What is NOT here, because it is security
-// behaviour rather than taste, is in the constants in protect.go and
-// session.go: the CSRF header name itself, and the cookie's HttpOnly/
-// SameSite/path/Max-Age.
+// Config configures a Gate. Everything here is a per-application value
+// mikroview hard-coded (CookieName, CSRFHeaderValue) -- docs/design.md
+// §1.5. What is NOT here, because it is security behaviour rather than
+// taste, is in the constants in protect.go and session.go: the CSRF
+// header name itself, the cookie's HttpOnly/SameSite/path/Max-Age, and
+// -- since #49 -- the second-factor door, which no longer varies by
+// application.
 type Config struct {
 	// CookieName is the session cookie's name -- mikroview uses
 	// "mikroview_session", birdcage its own equivalent.
@@ -40,16 +40,22 @@ type Config struct {
 	// header satisfy the check, since a missing header also reads back
 	// as "".
 	CSRFHeaderValue string
-	// RequireSecondFactor mirrors mikroview's #1253 rule: a session
-	// belonging to a local-password account with no confirmed second
-	// factor can reach nothing once this is true. Off by default. See
-	// docs/design.md §1.6 for why mikroview keeps this on and birdcage
-	// is recommended to.
+	// RequireSecondFactor used to gate the forced-enrolment door: a
+	// session belonging to a local-password account with no confirmed
+	// second factor could reach nothing once this was true. An account
+	// stuck at the door can still reach the enrolment routes
+	// (protect.go's secondFactorEnrolPaths), so the door was never a
+	// lockout for a local account without a factor: it is sent to
+	// enrol one.
 	//
-	// An account stuck at the door can still reach the enrolment
-	// routes (protect.go's secondFactorEnrolPaths), so turning this on
-	// is not a lockout for a local account without a factor: it is sent
-	// to enrol one.
+	// Deprecated: the door is now always shut (#49) and this field is
+	// ignored, whatever value is set -- it stays only so applications
+	// that already set it still compile. See docs/design.md §1.6 for
+	// why: leaving the door optional, off by default, meant an
+	// application that forgot to turn it on got 8-character
+	// single-factor passwords, which NIST SP 800-63B-4 §3.1.1.2 permits
+	// only behind a mandatory second factor; #49 closes that gap by
+	// removing the "off" state rather than raising the minimum.
 	RequireSecondFactor bool
 	// ProductName names the deployment in TOTP enrolment URIs and
 	// passkey display names (docs/design.md §1.5's last paragraph).

@@ -36,6 +36,13 @@ import (
 // created accounts, and any CLI recovery tooling an application builds
 // all funnel through one of those two, so there's exactly one place
 // this needs to live.
+//
+// 8 conforms to NIST SP 800-63B-4 §3.1.1.2, which allows 8 characters
+// only for "a password used as part of multi-factor authentication"
+// and requires 15 when the password is the only factor: gate's
+// second-factor door (gate/protect.go) makes a second factor mandatory
+// for every local-password account (#49), so the password is never the
+// only factor, and 8 conforms unconditionally.
 const minPasswordLength = 8
 
 var (

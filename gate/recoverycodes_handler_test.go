@@ -61,13 +61,24 @@ func TestRecoveryCodesRegenerateWrongPasswordRefusesAndKeepsOldCodes(t *testing.
 	}
 }
 
+// TestRecoveryCodesRegenerateRefusedWithoutASecondFactor: an account
+// with no second factor at all cannot regenerate recovery codes.
+// handleRecoveryCodesRegenerate's own !HasSecondFactor() check (409)
+// used to be what caught this; since #49 the forced-enrolment door in
+// Protect already refuses every non-enrolment route to such an account
+// before the handler runs, so the door's 403 is what this test now
+// observes -- the handler's own check is unreachable through the normal
+// session-cookie path but is left in place as defence in depth.
 func TestRecoveryCodesRegenerateRefusedWithoutASecondFactor(t *testing.T) {
 	_, ts, _ := totpFixture(t)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 
 	resp := postJSON(t, bob, ts.URL+"/api/auth/recovery-codes", recoveryCodesRegenerateRequest{Password: totpBobPassword})
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("regenerating with no second factor got %d, want 409", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("regenerating with no second factor got %d, want 403", resp.StatusCode)
+	}
+	if got := resp.Header.Get(authGateHeader); got != authGateMustEnrolFactor {
+		t.Errorf("%s header = %q, want %q", authGateHeader, got, authGateMustEnrolFactor)
 	}
 }
