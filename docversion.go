@@ -18,9 +18,13 @@ import (
 // yet, so there is no migration code.
 //
 // Accounts version 2 (#28) added User.SessionsEndedAt; a version-1
-// document reads it as zero, which is what it meant.
+// document reads it as zero, which is what it meant. Version 3 (#44)
+// added User.LoginLockoutCount and User.LoginDisabledAt; an older
+// document reads them as zero -- no lockouts counted since the last
+// sign-in, sign-in not disabled -- which is what it meant, since no
+// build that wrote it counted either.
 const (
-	accountsDocumentVersion = 2
+	accountsDocumentVersion = 3
 	tokensDocumentVersion   = 1
 )
 

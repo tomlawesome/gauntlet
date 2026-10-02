@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// accountsFixture is a version-2 accounts document, written out by hand
+// accountsFixture is a version-3 accounts document, written out by hand
 // and frozen: it is the stored format as birdcage and mikroview hold it
 // on disk, not what this build's structs happen to produce. A renamed
 // or dropped JSON tag changes what loading it and saving it back
@@ -21,10 +22,12 @@ import (
 // one was before #29, could never do. Change it only alongside a new
 // document version (see docversion.go).
 //
-// Mikroview users.json-shaped, plus gauntlet's own sessionsEndedAt and
-// loginLockedUntil, never real user data: an admin with every field
-// populated, including every second-factor kind (TOTP, two
-// recovery codes, a passkey, an outstanding reset code, a lockout --
+// Mikroview users.json-shaped, plus gauntlet's own sessionsEndedAt,
+// loginLockedUntil, loginLockoutCount and loginDisabledAt, never real
+// user data: an admin with every field populated, including every
+// second-factor kind (TOTP, two recovery codes, a passkey, an
+// outstanding reset code, a lockout, a count of lockouts, a disabled
+// sign-in --
 // data shape only; a real account would not carry all of these live at
 // once), a plain local user, an SSO-linked account with no local
 // password, and a roleless legacy account (loads as-is; see
@@ -32,7 +35,7 @@ import (
 // not hashes of anything: nothing here authenticates. Users are in the
 // username order a save writes them in.
 const accountsFixture = `{
-  "version": 2,
+  "version": 3,
   "users": [
     {
       "id": "admin-id-0001",
@@ -49,6 +52,8 @@ const accountsFixture = `{
       "resetCodeExpiresAt": "2026-01-03T03:04:05Z",
       "mustChangePassword": true,
       "loginLockedUntil": "2026-01-02T03:19:05Z",
+      "loginLockoutCount": 2,
+      "loginDisabledAt": "2026-01-02T03:20:05Z",
       "totpSecret": "JBSWY3DPEHPK3PXP",
       "totpConfirmedAt": "2026-01-02T03:04:05Z",
       "totpLastCounter": 99,
@@ -163,27 +168,68 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	}
 }
 
-// TestAVersion1AccountsDocumentOpensAndSavesAsVersion2: version 2
-// (#28) only added sessionsEndedAt, which a version-1 document --
-// gauntlet v0.2.0's, or mikroview's -- does not carry and which reads
-// correctly as zero, so no migration code exists. The every-field
-// fixture without that field, at version 1, opens with SessionsEndedAt
-// zero and the session cutoff at passwordChangedAt, and its next save
-// writes exactly the fixture without that field, now at version 2.
-func TestAVersion1AccountsDocumentOpensAndSavesAsVersion2(t *testing.T) {
-	const sessionsLine = "      \"sessionsEndedAt\": \"2026-01-02T03:06:05Z\",\n"
-	if !strings.Contains(accountsFixture, sessionsLine) || !strings.Contains(accountsFixture, `"version": 2,`) {
-		t.Fatal("the every-field fixture no longer has the shape this test edits")
-	}
-	want := strings.Replace(accountsFixture, sessionsLine, "", 1)
-	v1 := strings.Replace(want, `"version": 2,`, `"version": 1,`, 1)
+// lockoutLines are the fields accounts version 3 (#44) added, as the
+// every-field fixture spells them.
+const lockoutLines = "      \"loginLockoutCount\": 2,\n" +
+	"      \"loginDisabledAt\": \"2026-01-02T03:20:05Z\",\n"
 
+// fixtureAtVersion is the every-field fixture without the given lines
+// and with its version set to version: an older document, as the build
+// that wrote it would have.
+func fixtureAtVersion(t *testing.T, version int, without ...string) string {
+	t.Helper()
+	doc := accountsFixture
+	for _, line := range without {
+		if !strings.Contains(doc, line) {
+			t.Fatalf("the every-field fixture no longer has the line this test removes: %q", line)
+		}
+		doc = strings.Replace(doc, line, "", 1)
+	}
+	const current = `"version": 3,`
+	if !strings.Contains(doc, current) {
+		t.Fatal("the every-field fixture is no longer at version 3")
+	}
+	return strings.Replace(doc, current, `"version": `+strconv.Itoa(version)+`,`, 1)
+}
+
+// openSaveAndCompare opens doc, saves it with no change, and fails
+// unless what is saved is exactly want.
+func openSaveAndCompare(t *testing.T, doc, want string) *Store {
+	t.Helper()
 	m := persist.NewMemory()
-	primeMemory(t, m, v1)
+	primeMemory(t, m, doc)
 	s, err := OpenStore(m, Options{})
 	if err != nil {
-		t.Fatalf("OpenStore refused a version-1 document: %v", err)
+		t.Fatalf("OpenStore refused an older document: %v", err)
 	}
+	if err := s.mutate(func(*storeState) error { return nil }); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snap.Payload) != want {
+		t.Errorf("a saved older document differs from the fixture at version 3 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
+			want, snap.Payload)
+	}
+	return s
+}
+
+// TestAVersion1AccountsDocumentOpensAndSavesAsVersion3: version 2
+// (#28) only added sessionsEndedAt, and version 3 (#44) only
+// loginLockoutCount and loginDisabledAt, none of which a version-1
+// document -- gauntlet v0.2.0's, or mikroview's -- carries, and all of
+// which read correctly as zero, so no migration code exists. The
+// every-field fixture without them, at version 1, opens with them zero
+// and the session cutoff at passwordChangedAt, and its next save writes
+// exactly the fixture without them, now at version 3.
+func TestAVersion1AccountsDocumentOpensAndSavesAsVersion3(t *testing.T) {
+	const sessionsLine = "      \"sessionsEndedAt\": \"2026-01-02T03:06:05Z\",\n"
+	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines)
+	want := fixtureAtVersion(t, 3, sessionsLine, lockoutLines)
+
+	s := openSaveAndCompare(t, v1, want)
 	admin, ok := s.Get("admin-id-0001")
 	if !ok {
 		t.Fatal("the admin did not load")
@@ -194,17 +240,34 @@ func TestAVersion1AccountsDocumentOpensAndSavesAsVersion2(t *testing.T) {
 	if !admin.SessionCutoff().Equal(admin.PasswordChangedAt) {
 		t.Errorf("SessionCutoff() = %v, want passwordChangedAt %v", admin.SessionCutoff(), admin.PasswordChangedAt)
 	}
+	if admin.LoginLockoutCount != 0 || !admin.LoginDisabledAt.IsZero() {
+		t.Errorf("lockout count %d, disabled at %v from a document without them, want zero",
+			admin.LoginLockoutCount, admin.LoginDisabledAt)
+	}
+}
 
-	if err := s.mutate(func(*storeState) error { return nil }); err != nil {
-		t.Fatalf("mutate: %v", err)
+// TestAVersion2AccountsDocumentOpensAndSavesAsVersion3: version 3 (#44)
+// added loginLockoutCount and loginDisabledAt, which a version-2
+// document does not carry and which read correctly as zero -- no
+// lockouts counted, sign-in not disabled: no build that wrote version 2
+// counted either. The every-field fixture without them, at version 2,
+// opens with both zero, its lockout still in force, and saves back as
+// exactly the fixture without them at version 3.
+func TestAVersion2AccountsDocumentOpensAndSavesAsVersion3(t *testing.T) {
+	v2 := fixtureAtVersion(t, 2, lockoutLines)
+	want := fixtureAtVersion(t, 3, lockoutLines)
+
+	s := openSaveAndCompare(t, v2, want)
+	admin, ok := s.Get("admin-id-0001")
+	if !ok {
+		t.Fatal("the admin did not load")
 	}
-	snap, err := m.Load(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if admin.LoginLockoutCount != 0 || !admin.LoginDisabledAt.IsZero() {
+		t.Errorf("lockout count %d, disabled at %v from a version-2 document, want zero",
+			admin.LoginLockoutCount, admin.LoginDisabledAt)
 	}
-	if string(snap.Payload) != want {
-		t.Errorf("a saved version-1 document differs from the fixture at version 2 without sessionsEndedAt:\n--- want ---\n%s\n--- saved ---\n%s",
-			want, snap.Payload)
+	if admin.LoginLockedUntil.IsZero() {
+		t.Error("the version-2 document's lockout did not load")
 	}
 }
 

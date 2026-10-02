@@ -73,9 +73,99 @@ All notable changes to this project are documented in this file.
   `go-webauthn/x/crypto/secp256k1` (ISC) and `go-webauthn/x/revoke`
   (BSD-2-Clause), so the licence policy now allows both (owner decision
   2026-10-02).
+- Signed-in users can see and end their own sessions (#48; ASVS 7.5.2).
+  `GET /api/auth/sessions` lists every live session on the caller's
+  account, newest first: when it signed in, when it was last used, the
+  address and browser it signed in from, and which one is this browser.
+  It shows at most 100 rows and a `total` of all of them. Each row is
+  named by a one-way `ref`, never the session ID, which is the cookie.
+  `DELETE /api/auth/sessions/{ref}` ends one; ending this browser's own
+  session clears its cookie. It asks for no password, for any account:
+  signing out is a safe direction (owner decision 2026-10-02, recorded
+  as a deviation from ASVS 7.5.2). It ends the gauntlet session only,
+  not the sign-on provider's. Any ref that is not one of the caller's
+  live sessions answers 404. There is no admin view of other people's
+  sessions. The list lives in memory like the sessions themselves, so a
+  restart empties it. In the core package, `Session` gains `Client` and
+  `LastUsedAt` and a `Ref()` method, and `SessionStore` gains
+  `CreateFrom`, `ListForUser` and `RevokeRef`; a browser's agent and
+  address are kept cleaned and capped at `MaxSessionUserAgent` (256)
+  and `MaxSessionAddress` (64) bytes. All additions; nothing existing
+  changes.
 
 ### Changed
 
+- A second factor (TOTP or a passkey) is now always required for every
+  local-password account; `gate` no longer offers a way to turn the
+  forced-enrolment door off (#49). `gate.Config.RequireSecondFactor` is
+  deprecated and ignored -- it stays only so applications that already
+  set it still compile. An application that was relying on the door
+  being off (the field's old default) now sees it on unconditionally:
+  every local-password account, including ones created before this
+  change, is stopped at the door until it enrols a factor, reaching
+  only the enrolment routes until then. This closes the gap behind the
+  8-character password minimum (`store.go:39`): NIST SP 800-63B-4
+  §3.1.1.2 allows 8 characters only behind a mandatory second factor,
+  and the minimum stays 8 rather than rising to 15 because the door can
+  no longer be left off (#49, `docs/security-by-design.md`).
+- **Breaking.** `gate.New` now refuses a `Deps.Sessions` store whose
+  idle timeout exceeds the new `MaxSessionIdle` (1 hour), whose
+  lifetime ceiling exceeds the new `MaxSessionLifetime` (24 hours), or
+  which has no ceiling at all -- NIST SP 800-63B-4's AAL2 session
+  limits (§2.2.3, §5.2), adopted by the owner on 2026-10-02 over the
+  consumers' previous, longer values (#51). `SessionStore` itself is
+  unchanged and still accepts any values; the new
+  `(*SessionStore).Limits` method and the two exported constants are
+  what `gate.New` checks them against. Mikroview and birdcage both
+  pass 24 h idle / 7-day ceiling today and will fail at start-up until
+  they change those values to within the new caps.
+- The session cookie is hardened (#47; ASVS 3.3.1, 3.3.3, 7.2.4; NIST SP
+  800-63B-4 §5.1.1). While `gate.Config.SecureCookie` is true the cookie
+  is written and read as `__Host-` plus `CookieName`, which makes a
+  browser refuse it unless it is `Secure`, has no `Domain` and is on
+  path `/`; under plain HTTP the bare name is kept, since a browser
+  drops a `__Host-` cookie that is not `Secure`. Its `Max-Age` is now the
+  session store's lifetime ceiling (24 hours at most, #51) instead of a
+  fixed 30 days, so the browser forgets it when the session can no
+  longer be valid. `gate.New` logs one warning naming `SecureCookie`
+  when it is left false, and refuses a `CookieName` that already starts
+  with `__Host-` or `__Secure-`. A login -- password, second factor or
+  SSO -- from a browser that still holds a live session for the same
+  account now ends that session before issuing the new one; another
+  account's session in the same browser is left alone. Not breaking for
+  mikroview or birdcage: neither reads the session cookie by name
+  outside the code `gate` replaces, and neither uses a prefixed name.
+  What each app should expect: with TLS on, browsers signed in before
+  the upgrade hold the old, unprefixed cookie and are simply asked to
+  sign in again (an in-memory session dies with the restart anyway).
+- Login lockouts now escalate, and too many failures in a row disable
+  an account's sign-in (#44). Each lockout lasts three times the one
+  before, from the attempt that starts it: 5, 15, 45, 135, 405 and 1215
+  minutes at 5 attempts per 5 minutes, then 24 hours each. The first
+  lockout now runs a full window from its last attempt, not until the
+  oldest attempt in the window ages out. 50 failures in a row
+  (`MaxConsecutiveLoginFailures`), password and second-factor steps
+  together, disable the account's local sign-in: the right password is
+  then refused exactly as during a lockout, with no end, until
+  `Store.UnlockLogin` clears it (the admin route that calls it comes
+  later). Only a completed sign-in or a new password resets the count,
+  not a correct password alone and not a lockout running out; a new
+  password does not lift a disable. Applications that issue a session
+  themselves after `ReserveAccount` should call the new
+  `LoginLimiter.SignedIn` in place of `ReleaseAccount` when the sign-in
+  completes; `gate` does. Five failed second-factor steps in a row --
+  wrong codes or refused passkeys, which only someone with the password
+  can make -- now set `MustChangePassword`, so the owner must change the
+  password at their next sign-in (`LoginLimiter.SecondFactorFailed`).
+  That run is kept in memory and starts again after a restart. Still
+  one save as a lockout starts and one as it clears, never one per
+  guess.
+- The accounts document is now version 3: it adds `loginLockoutCount`
+  and `loginDisabledAt` (#44). Version-1 and version-2 documents open
+  unchanged with both empty and are written as version 3 on their next
+  save; no migration is needed. An earlier build cannot open an
+  accounts document once this version has saved it, so keep a copy
+  before upgrading if a rollback is possible.
 - A pending login -- the cookie `POST /api/auth/login` sets when a
   second factor is needed -- now completes exactly one sign-in (#20,
   ruling R2). Before, the same cookie could be sent again within its

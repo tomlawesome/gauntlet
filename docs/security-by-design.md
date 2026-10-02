@@ -150,8 +150,9 @@ little. L3's extra requirements are mostly deployment and
 infrastructure (hardware security modules, separate log systems,
 memory encryption) that a library cannot provide and a single operator
 would not run. L2 is therefore the target; L3 requirements are listed
-only where gauntlet happens to meet them. Both consumers run with
-`RequireSecondFactor` on, which is what L2's 6.3.3 asks for.
+only where gauntlet happens to meet them. A second factor is mandatory
+for every local-password account (#49), which is what L2's 6.3.3 asks
+for.
 
 **Scope.** A library with HTTP routes but no server, no frontend and no
 deployment. In scope: V6 authentication, V7 sessions, V8
@@ -177,22 +178,22 @@ it says so instead of repeating the reasoning.
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
-| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`) |
+| 6.1.1 brute-force controls documented | 1 | Met | `docs/design.md` §1.3 (limiter) and §4 Tokens table; lockout survives restart (`ratelimit.go`, `User.LoginLockedUntil`); each lockout three times the last, 5 min up to 24 h, and 50 consecutive failures disable sign-in (`User.LoginLockoutCount`, `User.LoginDisabledAt`, #44) |
 | 6.1.2, 6.2.11 context-specific word list | 2 | Gap | #43 (password blocklist). See 800-63B §3.1.1.2 |
 | 6.1.3, 6.3.4 all pathways documented, strength consistent | 2 | Met, with one deviation | Pathways: password then TOTP/passkey/recovery code; reset code then the same second factor (`gate/login_handler.go:129-172`); SSO; bearer token; setup code. All in `docs/api/auth.yaml`. Deviation: an SSO sign-in creates a session with no local second factor (`gate/oidc_handler.go:292`); see 6.8.4 |
-| 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met, conditional | `store.go:39` `minPasswordLength = 8`. 8 is enough only behind a mandatory second factor; see 800-63B §3.1.1.2 and #49 (password minimum) |
+| 6.2.1 passwords at least 8 characters (15 recommended) | 1 | Met | `store.go:39` `minPasswordLength = 8`, conforming because a second factor is mandatory for every local-password account (#49); see 800-63B §3.1.1.2 |
 | 6.2.2 users can change their password | 1 | Met | `POST /api/auth/password`, `gate/password_handler.go` |
-| 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code just proved the account |
+| 6.2.3 change requires current and new password | 1 | Met | `gate/password_handler.go:45` (`recheckPassword`, rate limited by `ReserveRecheck`, :98). Skipped only under `MustChangePassword`, where the reset code, or (since #44) a sign-in with both factors, just proved the account |
 | 6.2.4 checked against the top 3000 passwords | 1 | Gap | #43 (password blocklist) |
 | 6.2.5 no composition rules | 1 | Met | Length is the only rule (`store.go:962`, `:1532`) |
 | 6.2.6, 6.2.7 masking, paste, password managers | 1 | App | Frontend; gauntlet imposes nothing that blocks them |
 | 6.2.8 verified exactly as received | 1 | Met | `password.go:92`, `:159`: raw bytes to Argon2id, no trimming or case change. See 800-63B §3.1.1.2 on NFC |
 | 6.2.9 at least 64 characters permitted | 2 | Met | No maximum; the 64 KiB body limit (`gate/httpjson.go:37`) is the only bound |
-| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only by an admin reset |
+| 6.2.10 no periodic rotation | 2 | Met | No expiry exists; `MustChangePassword` is set only on evidence of compromise: an admin reset, or five failed second-factor steps in a row (`LoginLimiter.SecondFactorFailed`, #44) |
 | 6.2.12 breached-password check | 2 | Gap | #43 (password blocklist) |
-| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `gate/reset_address_limit_test.go`, `stall_test.go` |
+| 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
-| 6.3.3 MFA or equivalent | 2 | Met | `gate.Config.RequireSecondFactor` closes the door at `gate/protect.go:366`; both consumers set it. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
+| 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
 | 6.3.5 notify suspicious attempts | 3 | Not targeted | No notification channel; see 800-63B §4.6 |
 | 6.3.6 email not an authentication factor | 3 | Met | Gauntlet sends nothing and stores no addresses |
 | 6.3.7 notify after credential changes | 3 | Not targeted | Audit record only (`account.password_changed` etc.); see 800-63B §4.6 |
@@ -223,21 +224,21 @@ it says so instead of repeating the reasoning.
 
 | Req | Level | Status | Evidence |
 |---|---|---|---|
-| 7.1.1 timeouts documented with justification against NIST | 2 | Met by 800-63B §5.2 below | Idle and absolute lifetimes are `NewSessionStore(ttl, maxLifetime)` arguments; the consumers' 24 h idle / 7 day ceiling and why it differs from NIST's AAL2 figures are recorded there |
-| 7.1.2 concurrent sessions documented | 2 | Met, here | Unlimited sessions per account; each is independent; `logout-all` ends them together; a credential change ends them all through `SessionCutoff` |
+| 7.1.1 timeouts documented with justification against NIST | 2 | Met by 800-63B §5.2 below | Idle and absolute lifetimes are `NewSessionStore(ttl, maxLifetime)` arguments; `gate.New` caps them at `gauntlet.MaxSessionIdle`/`MaxSessionLifetime`, AAL2's own figures, recorded there |
+| 7.1.2 concurrent sessions documented | 2 | Met, here | Unlimited sessions per account; each is independent; `logout-all` ends them together; a credential change ends them all through `SessionCutoff`. The owner sees them in `GET /api/auth/sessions`, which shows at most 100 rows and a `total` of all of them (#48) |
 | 7.1.3, 7.6.1 federated sessions documented | 2 | Met, here | An SSO session is gauntlet's own, with gauntlet's timeouts; IdP logout does not reach it and gauntlet never calls the IdP again until the next login. No back-channel logout |
 | 7.2.1 verified on the backend | 1 | Met | `SessionStore.Validate` under the server's lock (`session.go:201`) |
 | 7.2.2 dynamic reference tokens | 1 | Met | Opaque id per login (`session.go:108`) |
 | 7.2.3 CSPRNG, 128 bits | 1 | Met | `id.go:14`: 16 bytes from `crypto/rand` |
-| 7.2.4 new token on every authentication, old one ended | 1 | Met, one gap | New session per login and after `logout-all` (`gate/logout_handler.go:32`); the pending-login cookie is never a session. Gap: a login made from a browser that still holds a live session leaves that old session alive until it idles out; part of #47 (session cookie hardening) |
-| 7.3.1, 7.3.2 inactivity and absolute timeouts | 2 | Met, one gap | Both enforced in `Validate` (`session.go:208-217`). Gap: `maxLifetime` 0 means no ceiling and `gate.New` accepts it; the same issue, #47 (session cookie hardening) |
+| 7.2.4 new token on every authentication, old one ended | 1 | Met | New session per login and after `logout-all` (`gate/logout_handler.go:32`); the pending-login cookie is never a session. A login (password, second factor or SSO) from a browser still holding the same account's live session revokes that session before issuing the new one (`gate/cookie.go` `revokeReplacedSession`, #47) |
+| 7.3.1, 7.3.2 inactivity and absolute timeouts | 2 | Met | Both enforced in `Validate` (`session.go:208-217`); `gate.New` refuses a store with no ceiling or above `MaxSessionIdle`/`MaxSessionLifetime` (#51) |
 | 7.4.1 terminated session unusable | 1 | Met | Server-side delete (`Revoke`, `RevokeAllForUser`); `SessionCutoff` catches sessions from another process (`gate/protect.go:163`) |
 | 7.4.2 sessions ended when an account is disabled or deleted | 1 | Met | A deleted user no longer resolves, so every session dies on its next request; `DeleteUser` also revokes the tokens it created |
 | 7.4.3 option to end other sessions after a factor change | 2 | Met | A password change and a reset end every session (`SessionsEndedAt`, `store.go:1556`, `resetcode.go:185`); TOTP and passkey changes do not, and `POST /api/auth/logout-all` is the option |
 | 7.4.4 logout visible on every page | 2 | App | Frontend |
 | 7.4.5 admins can end a user's sessions | 2 | Met, bluntly | An admin reset code ends them (and the password); deleting the account ends them. No softer admin route |
 | 7.5.1 full re-authentication before changing authentication settings | 2 | Met | `recheckPassword` guards password change, TOTP enrol and delete, passkey register and delete, recovery-code regeneration (`gate/password_handler.go:45,67`, `gate/totp_handler.go:253`, `gate/passkey_handler.go:182,431`, `gate/recoverycodes_handler.go:44`) |
-| 7.5.2 users can view and end their sessions | 2 | Gap, deferred | End-all exists; there is no list. Sessions carry no device or address, so a list would be a count. #48 (session list); accepted for v0.x |
+| 7.5.2 users can view and end their sessions | 2 | Met, with a deviation | `GET /api/auth/sessions` lists the caller's own live sessions with the address and browser each signed in from; `DELETE /api/auth/sessions/{ref}` ends one, `logout-all` ends all (`gate/sessions_handler.go`, #48). Deviation: ending a session asks for no re-authentication, for any account, SSO-only included. Owner decision, 2026-10-02: signing out is a safe direction -- a stolen session can already end every session through `logout-all` without a password, and an SSO-only account has none to give. Ends gauntlet's session only, not the IdP's |
 | 7.5.3 step-up before highly sensitive operations | 3 | Not targeted | Admin routes (create user, create token, reset) rely on the session alone |
 | 7.6.2 session needs the user's action | 2 | Met | The OIDC flow starts from the user's redirect and a sealed flow cookie; the callback cannot create a session without it (`gate/oidc_handler.go:229-249`) |
 
@@ -392,9 +393,9 @@ store, keep and protect:
 | 15.3.3 mass assignment | 2 | Met | Each handler decodes a named request struct |
 | 15.3.4 client IP from a trusted field | 2 | App | `ClientIP` |
 | 15.4.1–15.4.3 safe concurrency | 3 | Met | Store and session mutexes, copy-then-save (`mutate.go`), `-race` in CI, check-and-spend under one lock for TOTP, recovery codes and ceremonies |
-| 3.3.1 cookie `Secure` | 1 | Met, conditional | `gate.Config.SecureCookie`; the application must set it where TLS terminates. Default false with no warning: #47 (session cookie hardening) |
-| 3.3.2 `SameSite` fits the purpose | 2 | Met | `Lax` on every cookie (`gate/cookie.go:22-31`) |
-| 3.3.3 `__Host-` prefix | 2 | Gap | #47 (session cookie hardening); see 800-63B §5.1.1 |
+| 3.3.1 cookie `Secure` | 1 | Met, conditional | `gate.Config.SecureCookie`; the application must set it where TLS terminates, and `gate.New` logs one warning naming the setting when it is left false (#47) |
+| 3.3.2 `SameSite` fits the purpose | 2 | Met | `Lax` on every cookie (`gate/cookie.go` `writeCookie`) |
+| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies are scoped to their routes, which the prefix forbids |
 | 3.3.4 `HttpOnly` | 2 | Met | Every cookie |
 | 3.3.5 cookie under 4096 bytes | 3 | Met | Session id 32 characters; sealed values a few hundred bytes |
 | 3.5.1 CSRF | 1 | Met | `X-Requested-With` on unsafe methods plus `SameSite=Lax` (`gate/protect.go:118-123`, `:313`); bearer requests skip it because no cookie is involved |
@@ -404,13 +405,12 @@ store, keep and protect:
 
 At L2 gauntlet meets every requirement except: password blocklists
 (6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
-decisions (16.2.1, 16.3.1–16.3.3), response headers (4.1.1, 14.3.2),
-the session cookie's prefix and lifetime (3.3.3, 7.2.4, 7.3.2), and a
-session list (7.5.2). Each has an issue; the password blocklist and
-the lockout shape (from the 800-63B review) need the owner. Three
-deviations are recorded rather than fixed: the TOTP acceptance window,
-the SSO sign-in's reliance on the IdP's policy, and secrets at rest on
-backends other than the encrypted file.
+decisions (16.2.1, 16.3.1–16.3.3). Each has an issue; the password
+blocklist needs the owner. The lockout shape from the 800-63B review is
+settled (#44). Four deviations are recorded rather than fixed: the TOTP
+acceptance window, the SSO sign-in's reliance on the IdP's policy,
+secrets at rest on backends other than the encrypted file, and ending
+one session without re-authentication (7.5.2, owner 2026-10-02).
 
 Written by Fable 5.1, 2026-10-02.
 
@@ -430,10 +430,10 @@ self-hosted IdP. The *subscriber* is the operator or one of a handful of
 colleagues; the apps are the service.
 
 **Assurance level.** NIST grades an authentication event AAL1 to AAL3.
-With `gate.Config.RequireSecondFactor` on, as both consumers run, a
-local sign-in is a password plus a single-factor OTP (TOTP), a look-up
-secret (recovery code) or a single-factor cryptographic authenticator
-(passkey): **AAL2** (§2.2.1). With it off, **AAL1**. AAL3 is not claimed:
+A second factor is mandatory for every local-password account (#49), so
+a local sign-in is always a password plus a single-factor OTP (TOTP), a
+look-up secret (recovery code) or a single-factor cryptographic
+authenticator (passkey): **AAL2** (§2.2.1). AAL3 is not claimed:
 it needs a non-exportable hardware key on every sign-in and FIPS 140
 validated modules, and NIST itself rules synced passkeys out of AAL3
 (Appendix B). An SSO sign-in is whatever the IdP's policy makes it;
@@ -456,16 +456,16 @@ already holds the evidence, the row points at it.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Chosen by the subscriber or assigned randomly (§3.1.1.1) | Conforms | User-chosen; the only assigned secret is the reset code, which must be replaced on first use |
-| 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms, conditionally; gap | `minPasswordLength = 8` (`store.go:39`). Allowed only because both consumers mandate a second factor. Nothing stops an application running `RequireSecondFactor = false` with 8-character passwords: #49 (password minimum); design call |
+| 15 characters minimum as a single factor; 8 minimum when only part of MFA (§3.1.1.2) | Conforms | `minPasswordLength = 8` (`store.go:39`), conforming unconditionally because a second factor is mandatory for every local-password account and cannot be turned off (#49) |
 | Permit at least 64 characters; accept printing ASCII, space and Unicode; count code points (SHOULD) | Conforms | No maximum, no character rules; length counted in characters (`store.go:962`, `:1532`) |
 | No other composition rules (SHALL NOT) | Conforms | None |
-| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`) |
+| No periodic change; force a change on compromise | Conforms | No expiry; an admin reset sets `MustChangePassword` and kills the old password at once (`resetcode.go:180-183`); five failed second-factor steps in a row, which only someone with the password can make, set it too (`LoginLimiter.SecondFactorFailed`, #44) |
 | No hints, no knowledge-based questions | Conforms | None exist |
 | Verify the whole password, no truncation | Conforms | `password.go:92`, `:159` |
 | NFC normalisation before hashing (SHOULD) | Deviation | Not applied: ASVS 6.2.8 asks for the bytes exactly as received, and both consumers' operators type on their own devices. A password typed on a device that composes accented characters differently will not match; documented, not fixed |
 | Blocklist of common, expected and compromised passwords, whole-password match, reason given on refusal (SHALL) | Gap | None. #43 (password blocklist); owner decision on the list |
 | Guidance on choosing a strong password (SHALL) | Application | Frontend copy; gauntlet returns a plain "too short" |
-| Rate limiting on the account (SHALL, §3.2.2) | Conforms, with the #44 (consecutive-failure cap) gap | Below |
+| Rate limiting on the account (SHALL, §3.2.2) | Conforms | Below |
 | Password managers and paste allowed | Conforms | Nothing server-side interferes |
 | Salted and hashed with a password hashing scheme, cost as high as practical, parameters stored with each hash, salt at least 32 bits | Conforms | Argon2id, RFC 9106 §4 second profile, 128-bit salt, parameters in the hash string (`password.go:28-48`, `:94`). ASVS 11.4.2 |
 | Extra keyed hash with a verifier-only secret (SHOULD) | Deviation | No pepper. The encrypted file backend is the at-rest layer instead (trust boundary section above); a pepper would be one more key for the application to mount |
@@ -500,7 +500,7 @@ stand alone, which these never do.
 | Collected over an authenticated protected channel | Application | TLS is the application's |
 | Accepted only once while valid (replay resistance, §3.2.7) | Conforms | `TOTPLastCounter`, advanced under the same lock as the check (`totp.go:394-434`); the enrolment code cannot also sign in (`totp.go:344`) |
 | Defined lifetime from clock drift plus entry delay | Conforms, and the ASVS 6.5.5 deviation | One step either side of now, never two (`totp.go:64`, `TestVerifyTOTPRejectsTwoStepsAway`): the drift allowance NIST describes, and the 90 s ASVS counts against |
-| Rate limiting SHALL for outputs under 64 bits (§3.2.2) | Conforms, with the #44 (consecutive-failure cap) gap | 6 digits; shares the account budget |
+| Rate limiting SHALL for outputs under 64 bits (§3.2.2) | Conforms | 6 digits; shares the account budget, so at most 50 consecutive guesses before sign-in is disabled (#44) |
 | Warn on a duplicate OTP (MAY) | Not done | A replay is refused silently; #45 (log failed sign-ins) would at least record it |
 
 ### Cryptographic authenticators: passkeys (§3.1.6, §3.1.7, §3.2.5, Appendix B)
@@ -521,10 +521,10 @@ stand alone, which these never do.
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Limit failed attempts on a subscriber account (SHALL) | Conforms | Per-account counter keyed by account id, never evicted; lockout written to `User.LoginLockedUntil` so a restart does not lift it (`ratelimit.go:399-402`, `docs/design.md` §1.3). Address counter alongside |
-| No more than 100 consecutive failures per authenticator, then disable it until rebound (SHALL) | Gap, design call | A lockout lasts one window and then the count starts again; nothing accumulates across windows and no authenticator is ever disabled. At the consumers' 5 per 5 minutes that is 1,440 guesses a day against a six-digit code, forever. #44 (consecutive-failure cap); owner question: escalate or disable |
-| Disregard earlier failures after a success (SHOULD) | Conforms | `Release`/`ReleaseAccount` on success (`gate/login_handler.go:152`, `:276`) |
-| Increasing delays, bot challenges, risk signals (MAY) | Not done | #44 (consecutive-failure cap) is the first of these |
+| Limit failed attempts on a subscriber account (SHALL) | Conforms | Per-account counter keyed by account id, never evicted; lockout and the count of lockouts written to `User.LoginLockedUntil` and `User.LoginLockoutCount` so a restart does not lift them (`LoginLimiter.ReserveAccount`, `docs/design.md` §1.3). Address counter alongside |
+| No more than 100 consecutive failures per authenticator, then disable it until rebound (SHALL) | Conforms, lower and wider | `MaxConsecutiveLoginFailures` = 50 consecutive failures, password and second-factor steps on one count, disable the account's local sign-in (`User.LoginDisabledAt`) until `Store.UnlockLogin`, rather than one authenticator until rebound (owner, 2026-10-02). Lockouts before that escalate, so the fiftieth arrives after about 102 hours. Only a completed sign-in or a new password resets the count (#44). The admin unlock route and the lone-admin unlock code are still to come under #44 |
+| Disregard earlier failures after a success (SHOULD) | Conforms | `LoginLimiter.SignedIn` on a completed sign-in drops the window and the count of lockouts (`gate/login_handler.go`, `completeLogin`); a correct password alone hands back only its own attempt (`ReleaseAccount`), since the second factor is still to come |
+| Increasing delays, bot challenges, risk signals (MAY) | Partly | Increasing delays: each lockout three times the last, 5 min up to 24 h (#44). No bot challenges or risk signals |
 | Password and second factor both throttled when both are tried | Conforms | One budget for the password step and the code step (`gate/login_handler.go:226-231`); the signed-in password re-check has its own (`ReserveRecheck`) |
 
 ### Binding, recovery and invalidation (§4)
@@ -547,22 +547,20 @@ stand alone, which these never do.
 | Session secret issued at authentication, at least 64 bits from an approved RBG, erased at logout, bound to one authentication event | Conforms | 128-bit id per login (`id.go`, `session.go:108`); `Revoke` on logout, `RevokeAllForUser` on sign-out-everywhere; a new id after every sign-in |
 | Not persistent across restarts (SHOULD) | Conforms | In memory only (`docs/design.md` §1.7); the browser cookie outlives the process but the id it carries does not |
 | Cookies: Secure (SHALL), minimal path, HttpOnly, SameSite Lax or Strict, opaque value | Conforms | `gate/cookie.go:22-31`; the ceremony cookies are scoped to their routes |
-| Cookie `__Host-` prefix (SHOULD); expire at or soon after the session (SHOULD) | Gap | No prefix; `Max-Age` is 30 days against a 7-day ceiling. #47 (session cookie hardening); ASVS 3.3.3 |
-| `Secure` SHALL | Gap, partial | `gate.Config.SecureCookie` defaults to false and `gate.New` says nothing; the same issue, #47 (session cookie hardening) |
+| Cookie `__Host-` prefix (SHOULD); expire at or soon after the session (SHOULD) | Conforms | `__Host-` + `CookieName` while `SecureCookie` is true; `Max-Age` is the session store's lifetime ceiling, so the browser drops the cookie when the session can no longer be valid (`gate/cookie.go`, #47); ASVS 3.3.3 |
+| `Secure` SHALL | Conforms, conditional | `gate.Config.SecureCookie` is the application's to set where TLS terminates; `gate.New` logs one warning when it is left false (#47) |
 | CSRF: POST/PUT content carries a session identifier the RP verifies (SHALL) | Deviation | Gauntlet uses a custom header on every unsafe method plus `SameSite=Lax` (`gate/protect.go:118-123`), the defence OWASP's cheat sheet lists as equivalent; a per-request token would mean a second cookie or body field for both frontends |
-| Timeouts: AAL2 overall SHOULD be at most 24 h, inactivity at most 1 h; both SHALL be enforced and documented (§2.2.3, §5.2) | Deviation, documented here (proposed; awaiting the owner's decision) | Both are enforced in `SessionStore.Validate` (`session.go:208-217`). The values are the application's: mikroview and birdcage use 24 h idle and a 7-day ceiling (`docs/design.md` §2.4). Reason for the longer values: a single operator's dashboard left open on a workstation, behind a mandatory second factor, with every session ended at once by any credential change (`SessionCutoff`). Whether to tighten them is awaiting the owner's decision. |
+| Timeouts: AAL2 overall SHOULD be at most 24 h, inactivity at most 1 h; both SHALL be enforced and documented (§2.2.3, §5.2) | Conforms | Enforced in `SessionStore.Validate` (`session.go:208-217`) and capped by `gate.New`, which refuses a `Deps.Sessions` store configured above `gauntlet.MaxSessionIdle` (1 h) or `gauntlet.MaxSessionLifetime` (24 h), or with no ceiling at all (`gate/config.go`). Owner decision, 2026-10-02 (gauntlet#51): adopt AAL2's own figures rather than keep mikroview's and birdcage's previous 24 h idle / 7-day ceiling (`docs/design.md` §2.4); both apps must lower their configured values or fail to start. |
 | Activity resets the inactivity timeout; reauthentication resets both | Conforms | Sliding `ExpiresAt` capped at the ceiling; a fresh login is a fresh session |
-| A session is never stronger than the event that created it | Conforms | One session type; the second-factor door refuses a session whose account has no factor when one is required (`gate/protect.go:366`) |
+| A session is never stronger than the event that created it | Conforms | One session type; the second-factor door refuses a session whose local-password account has no factor (`gate/protect.go:366`, unconditional since #49) |
 | No fallback to an insecure transport | Application | TLS termination |
 | Federation: the RP is authoritative on reauthentication (§5.2) | Conforms | Gauntlet's own timeouts apply to an SSO session; the IdP's session is never consulted after the callback |
 
 ### Summary of findings
 
 Conforms on everything above except: the password blocklist (#43, owner
-decision on the list); the consecutive-failure cap (#44, design call on
-escalate-versus-disable); the password minimum tied to a mandatory second
-factor (#49, design call); cookie prefix, lifetime and `Secure` default
-(#47); refused attempts and binding sources not logged (#45). Documented
+decision on the list); refused attempts and binding sources not logged
+(#45). Documented
 deviations: no NFC normalisation, no pepper, TOTP secrets as protected as
 the backend, no out-of-band notifications, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),

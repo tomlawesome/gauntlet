@@ -97,7 +97,12 @@ func TestEncodedPathDoesNotBypassSessionGate(t *testing.T) {
 func TestEncodedPathDoesNotEscapeMustChangePasswordDoor(t *testing.T) {
 	g := newTestGate(t)
 	ts := newEscapedPathTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	// registerAdminNoFactor, not registerAdmin: a confirmed factor would
+	// turn the reset-code sign-in below into a pending login awaiting a
+	// TOTP code instead of a full session, which is not what this test
+	// is about -- it pins the MustChangePassword door, reached first in
+	// Protect regardless of the second-factor door's own state.
+	registerAdminNoFactor(t, ts, "admin", "password123")
 
 	u, ok := g.deps.Users.ByUsername("admin")
 	if !ok {

@@ -25,7 +25,7 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 2 (#28) and
+  version 1 unchanged, gauntlet writes accounts as version 3 (#28, #44) and
   tokens as version 1, and a document newer than the running build is
   refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
@@ -176,6 +176,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     ID, Username, PasswordHash string; Role Role
     CreatedAt, LastLogin, PasswordChangedAt, RoleChangedAt time.Time
     SessionsEndedAt, LoginLockedUntil time.Time // new (#28, #19): gauntlet's own, zero in mikroview's documents
+    LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
@@ -205,6 +206,7 @@ func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (*User, bool, error)
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
+func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
@@ -230,10 +232,16 @@ func (p KDFParams) Valid() bool      // zero fields refused, never derived cheap
 func NewKDFSalt() ([]byte, error)
 func DeriveKey(passphrase string, salt []byte, p KDFParams) []byte  // kept: mikroview's retention key uses it
 
-type Session struct { ID, UserID string; IssuedAt, ExpiresAt time.Time }
+type Session struct { ID, UserID string; IssuedAt, ExpiresAt, LastUsedAt time.Time; Client SessionClient }
+type SessionClient struct { Address, UserAgent string }             // new (#48): recorded at sign-in, memory only
+const ( MaxSessionUserAgent = 256; MaxSessionAddress = 64 )          // bytes kept, after control/format chars are dropped
+func (s Session) Ref() string                                       // new (#48): first 32 hex of SHA-256(ID); shown instead of the ID
 func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore  // new: one constructor; mikroview's two collapse
-func (s *SessionStore) Create(userID string, now time.Time) Session
-func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime
+func (s *SessionStore) Create(userID string, now time.Time) Session // CreateFrom with an empty client
+func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.Time) Session // new (#48)
+func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime; moves LastUsedAt
+func (s *SessionStore) ListForUser(userID string, now time.Time) []Session // new (#48): live only, newest first; evicts expired
+func (s *SessionStore) RevokeRef(userID, ref string) (Session, bool)       // new (#48): searches userID's sessions only
 func (s *SessionStore) Revoke(id string)
 func (s *SessionStore) RevokeAllForUser(userID string)
 
@@ -259,6 +267,9 @@ func (l *LoginLimiter) RecordFailure(key string, now time.Time)
 func (l *LoginLimiter) Allow(key string, now time.Time) bool       // read only; prefer Reserve before a slow check
 func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string, now time.Time) bool // #19
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time)
+func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time)           // #44: completed sign-in resets the count
+func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) // #44: 5 in a row set MustChangePassword
+const MaxConsecutiveLoginFailures = 50                                                             // #44: disables local sign-in
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
 func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
@@ -334,14 +345,34 @@ count, entries leave only by expiring), and only addresses and unknown
 names share the capped map, which drops every expired key before
 evicting a live one and logs, once per window, when it has to. A login
 lockout is written to the account (`User.LoginLockedUntil`) so it
-survives a restart, but only as it begins and as it clears: one save per
-lockout episode, not one per wrong guess. A lockout whose save fails
+survives a restart, but only as it begins and as it clears: one save as
+a lockout starts and one as the first attempt after it clears it, never
+one per wrong guess.
+
+Lockouts escalate (#44, owner 2026-10-02). Each lasts three times the
+one before, from the attempt that starts it: 5, 15, 45, 135, 405 and
+1215 minutes at 5 attempts per 5 minutes, then 24 hours each (never
+less than one window). Their count, `User.LoginLockoutCount`, is
+written in the same save that starts one. `MaxConsecutiveLoginFailures`
+(50) failures in a row -- each lockout's attempts plus those in the
+window, password and second-factor steps alike -- disable the account's
+local sign-in (`User.LoginDisabledAt`), in that same save: refused with
+exactly the locked response, with no end, until `Store.UnlockLogin`. At
+5 per lockout the fiftieth failure comes after about 102 hours of
+lockouts. The count resets only on a completed sign-in (`SignedIn`,
+called wherever gate issues a session) or a new password (`SetPassword`,
+`IssueResetCode`); not on a correct password alone, and not as a lockout
+runs out. A new password does not lift a disable. Separately, five
+failed second-factor steps in a row since the last completed sign-in
+mean the password is known to someone else, so `SecondFactorFailed`
+sets `MustChangePassword` (one save); that run is kept in memory only. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A clear whose save fails -- the owner signed in and
 ended a lockout the record still holds -- is retried the same way, but
 that retry lives only in memory: a restart before it succeeds reloads
-the record's lockout, and the owner waits it out (at most one window)
-or resets the password (#28). A new password or reset code ends the lockout, and
+the record's lockout, and the owner waits it out or resets the
+password (#28). An escalated lockout or a disable whose save fails is
+enforced from memory and retried the same way. A new password or reset code ends the lockout, and
 guesses from before it stop counting (#24); linking the admin to SSO,
 which ends its sessions but keeps its password, does not. The reset
 account also gets past the per-address limit (#32; owner, 2026-10-01:
@@ -382,7 +413,7 @@ type Config struct {
     CookieName          string        // "mikroview_session" / "birdcage_session"
     SecureCookie        bool
     CSRFHeaderValue     string        // sent as X-Requested-With by the app's own frontend
-    RequireSecondFactor bool          // mikroview: true (#1253). Birdcage: §1.6
+    RequireSecondFactor bool          // deprecated, ignored: see §1.6
     Log                 *slog.Logger
     Audit               Auditor       // nil = no audit
     ClientIP            func(*http.Request) string // limiter key; app owns trusted-proxy policy
@@ -431,7 +462,14 @@ has the seam, the cookies and the policy.
 
 What stays fixed inside `gate` because it is security behaviour, not
 taste: `X-Requested-With` as the CSRF header name; cookie `HttpOnly`,
-`SameSite=Lax`, path `/`, browser `Max-Age` 30 days; the OIDC flow cookie
+`SameSite=Lax`, path `/`, browser `Max-Age` equal to the session store's
+lifetime ceiling (so the browser forgets the cookie when the session can
+no longer be valid), the name prefixed `__Host-` while `SecureCookie` is
+on (a browser then refuses the cookie unless it is `Secure`, has no
+`Domain` and is on path `/`; the bare name under plain HTTP, where a
+browser would drop a `__Host-` cookie), `gate.New` warning once when
+`SecureCookie` is off, and a login ending the same account's session the
+browser already held, since the new cookie replaces it (#47); the OIDC flow cookie
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by
@@ -449,10 +487,11 @@ moves onto the module (owner, 2026-09-27, on #7).
 
 Hard-coded strings that are mikroview's today and must not leak into
 birdcage: the product name in TOTP enrolment URIs and passkey display
-names, the `?ssoError=` redirect target, the 30-day cookie constant's
-name. `Config` gains `ProductName` and `LoginPath` for the first two.
+names, the `?ssoError=` redirect target. `Config` gains `ProductName`
+and `LoginPath` for them. Mikroview's 30-day cookie constant is gone:
+the cookie's lifetime is the session ceiling (#47).
 
-### 1.6 Second factors and passkeys -- recommendation, not a decision
+### 1.6 Second factors and passkeys -- always required, since #49
 
 Mikroview's model (v0.6.1, `CHANGELOG.md` #1249/#1250/#1253) is: every
 local-password account must hold a second factor, TOTP or a passkey;
@@ -478,12 +517,17 @@ it. The data for all of this lives on `User`.
   status (`unset`, `ip`, `insecure`), not a startup refusal: the
   ceremony routes answer 409 and the session body says why; mikroview's
   deployments reached by IP keep starting.
-- **`RequireSecondFactor` for birdcage: recommend on.** Birdcage changes
-  firewall state and holds credentials, so [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md)'s "the case for
-  gating it is stronger than mikroview's" applies to the second factor
-  too. Cost: the TOTP enrol screen is in birdcage's v1 UI slice (§5).
-  If the owner prefers a smaller first cut, off is a one-field change
-  and the door can be closed later without touching data.
+- **The door is always shut: `RequireSecondFactor` is deprecated and
+  ignored (#49).** `gate` no longer offers a way to turn the
+  forced-enrolment door off -- every local-password account, mikroview's
+  and birdcage's alike, must hold a second factor before it can reach
+  anything but the enrolment routes. This closes the gap ASVS 5.0 6.2.1
+  and NIST SP 800-63B-4 §3.1.1.2 flagged against the 8-character minimum
+  (`store.go:39`, docs/security-by-design.md): with the door
+  configurable and off by default, an application that forgot to turn
+  it on got 8-character single-factor passwords. Cost: the TOTP enrol
+  screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
+  way "recommend on" would have allowed.
 
 ### 1.7 Deliberately not in the module
 
@@ -578,12 +622,19 @@ a second ingest credential would be a second door.
 
 ```
 BIRDCAGE_AUTH_SECURE_COOKIE   default: true when the dashboard listener has TLS, else false with a startup warning
-BIRDCAGE_SESSION_TTL          default 24h   (mikroview default)
-BIRDCAGE_SESSION_MAX_LIFETIME default 168h  (mikroview default)
+BIRDCAGE_SESSION_TTL          default 1h    (gauntlet.MaxSessionIdle; mikroview's old 24h default is refused by gate.New)
+BIRDCAGE_SESSION_MAX_LIFETIME default 24h   (gauntlet.MaxSessionLifetime; mikroview's old 168h default is refused by gate.New)
 BIRDCAGE_OIDC_ISSUER_URL, _CLIENT_ID, _CLIENT_SECRET_FILE, _SCOPES
 BIRDCAGE_OIDC_ALLOWED_GROUPS, _ALLOWED_EMAILS, _ALLOWED_EMAIL_DOMAINS
 BIRDCAGE_PUBLIC_URL           redirect URL base (never the Host header); would be passkey.Config.PublicURL if birdcage ever wired passkeys (§1.6: it does not)
 ```
+
+`gate.New` fails closed on a `Deps.Sessions` built with an idle timeout
+above `gauntlet.MaxSessionIdle` or a lifetime ceiling above
+`gauntlet.MaxSessionLifetime`, or with no ceiling at all -- NIST SP
+800-63B-4 AAL2's own limits, adopted by the owner 2026-10-02
+(gauntlet#51, `docs/security-by-design.md`'s Sessions table). An app
+passing more than that is refused at start-up, not just logged.
 
 Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
 listening, as mikroview's `main.go:1723` does -- `oidc.New` refuses it
@@ -699,8 +750,9 @@ once, which is the price of sharing and the reason fixes land once.
 | Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt` |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
-| Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener |
+| Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
 | Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept |
+| Sessions their owner cannot see | none: logout-all only | new (#48): `GET /api/auth/sessions` lists the caller's own live sessions (address and agent from sign-in, capped at 100 rows with a `total`) by a one-way `ref`, never the ID; `DELETE /api/auth/sessions/{ref}` ends one, with no password (owner, 2026-10-02: signing out is a safe direction), and 404 for any ref not the caller's. Own sessions only: no admin view of anyone else's |
 
 ### OIDC
 
@@ -725,7 +777,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
-| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save per lockout, not per guess); addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
+| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19, #44): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save as it starts and one as it clears, not per guess); each lockout lasts three times the last (5 min up to 24 h) and 50 failures in a row disable sign-in until an unlock; addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
 | `golang.org/x/crypto` advisories | all 30 entries are in `ssh`, `ssh/agent` or `openpgp`; none touches `argon2` | import only `argon2`; birdcage already carries this module at 0.57.0 |
 
 ### Second factors (data in v1; ceremonies per §1.6)

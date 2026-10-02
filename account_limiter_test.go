@@ -500,7 +500,7 @@ func TestPasswordChangeDropsAnUnsavedLockout(t *testing.T) {
 	p, pending := l.wantLockout[id]
 	l.mu.Unlock()
 	if pending {
-		t.Errorf("the limiter still holds the old password's unsaved lockout (until %v) for a later retry to save", p.until)
+		t.Errorf("the limiter still holds the old password's unsaved lockout (until %v) for a later retry to save", p.state.until)
 	}
 }
 
@@ -627,8 +627,8 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	l := mustNewLoginLimiter(t, 3, time.Hour)
-	// Spread out, so the later two are still in the window when the
-	// lockout (one window after the first) ends.
+	// Spread out: the lockout runs one window from the third (#44), so
+	// it ends at 1h20m.
 	for i := range 3 {
 		l.ReserveAccount(s, id, now.Add(time.Duration(i)*10*time.Minute))
 	}
@@ -650,15 +650,22 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 		t.Error("linking the admin cleared the lockout on its record")
 	}
 
-	// Once the recorded lockout has ended, the guesses made before the
-	// link still count: one more fills the window again, and the next is
-	// refused, rather than the link buying three fresh guesses.
-	ended := now.Add(time.Hour + time.Second)
-	if !l.ReserveAccount(s, id, ended) {
-		t.Fatal("expected an attempt once the recorded lockout had ended")
+	// A lockout outlasts the window (#44), so once it has ended the
+	// guesses that caused it have aged out with it. What the link must
+	// not reset is the count of lockouts: the next full window starts
+	// the second lockout, three times as long, rather than a first one
+	// again.
+	ended := now.Add(20*time.Minute + time.Hour + time.Second)
+	for i := range 3 {
+		if !l.ReserveAccount(s, id, ended) {
+			t.Fatalf("attempt %d refused after the recorded lockout had ended", i+1)
+		}
 	}
-	if l.ReserveAccount(s, id, ended.Add(time.Second)) {
-		t.Error("linking the admin stopped its earlier wrong guesses counting once the lockout ended")
+	if u, _ := s.Get(id); u.LoginLockoutCount != 2 {
+		t.Errorf("linking the admin reset its count of lockouts: the next one is number %d, want 2", u.LoginLockoutCount)
+	}
+	if got, want := s.LoginLockedUntil(id), ended.Add(3*time.Hour); !got.Equal(want) {
+		t.Errorf("the second lockout ends at %v, want three windows on, %v", got, want)
 	}
 }
 

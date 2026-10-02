@@ -349,7 +349,10 @@ func TestOIDCLoginRedirectsToProviderAndSetsFlowCookie(t *testing.T) {
 func TestOIDCRoutesAreNotFoundWithoutOIDC(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	// registerAdminNoFactor: the test signs in again below with only a
+	// password, which needs a full session, not the pending login a
+	// confirmed factor would leave it with -- not what this test is about.
+	registerAdminNoFactor(t, ts, "admin", "password123")
 
 	for _, tc := range []struct {
 		method, path string
@@ -373,6 +376,7 @@ func TestOIDCRoutesAreNotFoundWithoutOIDC(t *testing.T) {
 
 	admin := &http.Client{Jar: mustCookieJar(t)}
 	_ = postJSON(t, admin, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"}).Body.Close()
+	enrolTOTPFactor(t, admin, ts, "password123") // POST /api/auth/oidc/link is not an enrolment route
 	linkResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
 	defer func() { _ = linkResp.Body.Close() }()
 	if linkResp.StatusCode != http.StatusNotFound {
@@ -622,6 +626,7 @@ func TestOIDCLinkNonAdminLosesLocalPassword(t *testing.T) {
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users",
 		createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
 	operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
+	enrolTOTPFactor(t, operator, ts, "operator-password-placeholder") // POST /api/auth/oidc/link is not an enrolment route
 
 	oidcCompleteLinkFlow(t, g, ts, operator, fp)
 

@@ -5,7 +5,7 @@ import "net/http"
 // handleLogout ends the caller's own session, if any -- calling it with
 // no session is a harmless no-op, not worth a 401 for (see exemptPaths).
 func (g *Gate) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(g.cfg.CookieName); err == nil {
+	if cookie, err := r.Cookie(g.sessionCookieName()); err == nil {
 		g.deps.Sessions.Revoke(cookie.Value)
 	}
 	g.clearSessionCookie(w)
@@ -29,7 +29,6 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	g.deps.Sessions.RevokeAllForUser(user.ID)
 	g.audit(user.Username, "account.sessions_ended", user.Username, "sessions ended: all, via sign out everywhere")
 
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, user.ID, now)
 	writeJSON(w, http.StatusOK, map[string]any{"signedOutEverywhere": true})
 }

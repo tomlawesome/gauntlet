@@ -34,8 +34,12 @@ type userSummary struct {
 	// account is needed.
 	HasTOTP bool `json:"hasTOTP"`
 	// PasskeyCount is how many passkeys this account holds, from
-	// Store.PasskeyCount -- List blanks Passkeys on every copy it
-	// returns, so len(u.Passkeys) there always reads zero. Present
+	// gauntlet.User.PasskeyCount -- List blanks Passkeys on every copy
+	// it returns, so len(u.Passkeys) there always reads zero, but
+	// PasskeyCount still answers truly on that same copy (gauntlet #42:
+	// a separate Store.PasskeyCount call per account, each paying its
+	// own staleness reload against the backend, made this list as slow
+	// as the backend's worst stall times the account count). Present
 	// whether or not the application wires passkeys: an account carried
 	// over from mikroview's documents may hold some either way.
 	PasskeyCount int `json:"passkeyCount"`
@@ -100,7 +104,7 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			HasLocalPassword: u.LocalPassword(),
 			SSO:              u.OIDCIssuer != "",
 			HasTOTP:          u.HasActiveTOTP(),
-			PasskeyCount:     g.deps.Users.PasskeyCount(u.ID),
+			PasskeyCount:     u.PasskeyCount(),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

@@ -18,20 +18,28 @@ type Auditor interface {
 	Record(actor, action, target, detail string)
 }
 
-// Config configures a Gate. Everything here is either a per-application
-// value mikroview hard-coded (CookieName, CSRFHeaderValue) or a policy
-// choice mikroview made once for itself (RequireSecondFactor) --
-// docs/design.md §1.5. What is NOT here, because it is security
-// behaviour rather than taste, is in the constants in protect.go and
-// session.go: the CSRF header name itself, and the cookie's HttpOnly/
-// SameSite/path/Max-Age.
+// Config configures a Gate. Everything here is a per-application value
+// mikroview hard-coded (CookieName, CSRFHeaderValue) -- docs/design.md
+// §1.5. What is NOT here, because it is security behaviour rather than
+// taste, is fixed in protect.go and cookie.go: the CSRF header name
+// itself, the cookie's HttpOnly/SameSite/path, its __Host- prefix under
+// TLS, its Max-Age (the session store's lifetime ceiling), and -- since
+// #49 -- the second-factor door, which no longer varies by application.
 type Config struct {
 	// CookieName is the session cookie's name -- mikroview uses
-	// "mikroview_session", birdcage its own equivalent.
+	// "mikroview_session", birdcage its own equivalent. While
+	// SecureCookie is true the cookie is written and read as "__Host-"
+	// plus this name (cookie.go's sessionCookieName), so the name must
+	// not already carry a "__Host-" or "__Secure-" prefix: New refuses
+	// one. No frontend reads the cookie (it is HttpOnly), so the prefix
+	// is invisible to both applications' code.
 	CookieName string
-	// SecureCookie sets the session cookie's Secure attribute. The
-	// application decides this from its own listener's TLS state; gate
-	// has no way to know it.
+	// SecureCookie sets the session cookie's Secure attribute, and with
+	// it the __Host- prefix. The application decides this from its own
+	// listener's TLS state; gate has no way to know it, so New logs one
+	// warning when it is left false rather than failing: plain HTTP is
+	// what development runs on, and a warning is what birdcage's startup
+	// is designed to show (docs/design.md §2.4).
 	SecureCookie bool
 	// CSRFHeaderValue is the value Protect requires in the
 	// X-Requested-With header (the header name itself is fixed, see
@@ -40,16 +48,22 @@ type Config struct {
 	// header satisfy the check, since a missing header also reads back
 	// as "".
 	CSRFHeaderValue string
-	// RequireSecondFactor mirrors mikroview's #1253 rule: a session
-	// belonging to a local-password account with no confirmed second
-	// factor can reach nothing once this is true. Off by default. See
-	// docs/design.md §1.6 for why mikroview keeps this on and birdcage
-	// is recommended to.
+	// RequireSecondFactor used to gate the forced-enrolment door: a
+	// session belonging to a local-password account with no confirmed
+	// second factor could reach nothing once this was true. An account
+	// stuck at the door can still reach the enrolment routes
+	// (protect.go's secondFactorEnrolPaths), so the door was never a
+	// lockout for a local account without a factor: it is sent to
+	// enrol one.
 	//
-	// An account stuck at the door can still reach the enrolment
-	// routes (protect.go's secondFactorEnrolPaths), so turning this on
-	// is not a lockout for a local account without a factor: it is sent
-	// to enrol one.
+	// Deprecated: the door is now always shut (#49) and this field is
+	// ignored, whatever value is set -- it stays only so applications
+	// that already set it still compile. See docs/design.md §1.6 for
+	// why: leaving the door optional, off by default, meant an
+	// application that forgot to turn it on got 8-character
+	// single-factor passwords, which NIST SP 800-63B-4 §3.1.1.2 permits
+	// only behind a mandatory second factor; #49 closes that gap by
+	// removing the "off" state rather than raising the minimum.
 	RequireSecondFactor bool
 	// ProductName names the deployment in TOTP enrolment URIs and
 	// passkey display names (docs/design.md §1.5's last paragraph).
@@ -132,6 +146,14 @@ type Gate struct {
 // to report and exit on, not a crash inside a library.
 var errMissingDep = errors.New("gate: missing required dependency")
 
+// errSessionLimits is New's fail-closed refusal for a Deps.Sessions
+// store configured outside gauntlet.MaxSessionIdle/MaxSessionLifetime
+// (the NIST SP 800-63B-4 AAL2 caps the owner adopted on 2026-10-02,
+// gauntlet#51) -- a Gate that started despite a longer-lived session
+// store would silently keep a session alive past the limit the rest of
+// the module is now built to.
+var errSessionLimits = errors.New("gate: Deps.Sessions session limits exceed AAL2 caps")
+
 // New builds a Gate from cfg and deps, failing closed on anything it
 // cannot safely default: a Gate that started despite a missing store or
 // CSRF value would either panic on the first request or -- worse, for
@@ -139,6 +161,13 @@ var errMissingDep = errors.New("gate: missing required dependency")
 func New(cfg Config, deps Deps) (*Gate, error) {
 	if cfg.CookieName == "" {
 		return nil, fmt.Errorf("gate: Config.CookieName is required")
+	}
+	// gate adds the __Host- prefix itself (cookie.go): a name that
+	// already carries a browser-reserved prefix would be doubled under
+	// TLS and, under plain HTTP, silently dropped by every browser --
+	// a deployment that signs nobody in, with nothing in the log.
+	if hasReservedCookiePrefix(cfg.CookieName) {
+		return nil, fmt.Errorf("gate: Config.CookieName %q must not start with __Host- or __Secure-; gate adds the prefix", cfg.CookieName)
 	}
 	if cfg.CSRFHeaderValue == "" {
 		return nil, fmt.Errorf("gate: Config.CSRFHeaderValue is required")
@@ -155,6 +184,19 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if deps.Sessions == nil {
 		return nil, fmt.Errorf("%w: Deps.Sessions", errMissingDep)
 	}
+	idle, ceiling := deps.Sessions.Limits()
+	if idle <= 0 {
+		return nil, fmt.Errorf("%w: idle %s must be positive", errSessionLimits, idle)
+	}
+	if idle > gauntlet.MaxSessionIdle {
+		return nil, fmt.Errorf("%w: idle %s exceeds MaxSessionIdle %s", errSessionLimits, idle, gauntlet.MaxSessionIdle)
+	}
+	if ceiling <= 0 {
+		return nil, fmt.Errorf("%w: no lifetime ceiling configured (MaxSessionLifetime is %s)", errSessionLimits, gauntlet.MaxSessionLifetime)
+	}
+	if ceiling > gauntlet.MaxSessionLifetime {
+		return nil, fmt.Errorf("%w: ceiling %s exceeds MaxSessionLifetime %s", errSessionLimits, ceiling, gauntlet.MaxSessionLifetime)
+	}
 	if deps.Tokens == nil {
 		return nil, fmt.Errorf("%w: Deps.Tokens", errMissingDep)
 	}
@@ -169,12 +211,21 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Gate{
+	g := &Gate{
 		cfg:          cfg,
 		deps:         deps,
 		exempt:       make(map[string]bool),
 		kindHandlers: make(map[gauntlet.TokenKind]http.Handler),
-	}, nil
+	}
+	// Not a refusal: plain HTTP is what development runs on, and the
+	// application, not gate, knows whether TLS terminates in front of
+	// it. One line at startup, naming the setting, is what an operator
+	// reading the log needs to notice a production deployment that
+	// forgot it (ASVS 3.3.1, SP 800-63B-4 §5.1.1 Secure SHALL).
+	if !cfg.SecureCookie {
+		g.logWarn("gate: Config.SecureCookie is false: the session cookie is sent over plain HTTP and has no __Host- prefix; set it to true where TLS terminates")
+	}
+	return g, nil
 }
 
 // now is the current time as Protect and every handler see it.

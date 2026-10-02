@@ -1233,6 +1233,15 @@ func TestPasskeyRoutesAnswer404WhenPasskeysAreOff(t *testing.T) {
 		createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword, Role: "user"}).Body.Close()
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
 	id := passkeyBilboID(t, g)
+	// Most of the routes below are not enrolment routes, so bilbo needs a
+	// second factor to reach them at all -- a stored passkey credential,
+	// not TOTP, so it stands in for exactly the carried-over-data case
+	// this test is about (see the doc comment above) rather than adding
+	// a TOTP factor that would taint the login's offered-factors check
+	// further down.
+	if _, err := g.deps.Users.AddPasskey(id, gauntlet.Passkey{ID: []byte("pre-existing-credential"), RPID: "passkeys.example.org", Name: "pre-existing"}); err != nil {
+		t.Fatal(err)
+	}
 	credID := base64.RawURLEncoding.EncodeToString([]byte("carried-over-credential"))
 
 	for _, tc := range []struct {
@@ -1783,8 +1792,13 @@ func TestPasskeyNotOfferedToAnAccountWithNoLocalPassword(t *testing.T) {
 	}
 	now := time.Now()
 	g.deps.Users = openStoreWithUsers(t, gauntlet.User{
+		// TOTPSecret/TOTPConfirmedAt give admin-1 an active second factor
+		// (gauntlet.User.HasActiveTOTP) so it clears the forced-enrolment
+		// door for the DELETE below -- no code is ever verified against
+		// this secret, so its value does not matter.
 		ID: "admin-1", Username: "admin", PasswordHash: hash, Role: gauntlet.RoleAdmin,
 		CreatedAt: now, HasLocalPassword: true,
+		TOTPSecret: "placeholder-secret", TOTPConfirmedAt: now,
 	}, gauntlet.User{
 		ID: "sso-1", Username: "sam", Role: gauntlet.RoleUser, CreatedAt: now,
 		OIDCIssuer: "https://idp.example.org", OIDCSubject: "sam-subject",

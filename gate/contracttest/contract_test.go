@@ -184,6 +184,7 @@ func (tr contractTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if err := openapi3filter.ValidateResponse(req.Context(), out); err != nil {
 		t.Errorf("%s -> %d %q: response does not match %s: %v", what, resp.StatusCode, respBody, contractDocPath, err)
 	}
+	checkJSONResponseHeaders(t, what, resp)
 
 	op := route.Method + " " + route.Path
 	tr.c.mu.Lock()
@@ -193,6 +194,31 @@ func (tr contractTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	tr.c.seen[op][resp.StatusCode] = true
 	tr.c.mu.Unlock()
 	return resp, nil
+}
+
+// checkJSONResponseHeaders is gauntlet #46's guard: every JSON response
+// gate writes must carry Content-Type: application/json; charset=utf-8,
+// Cache-Control: no-store and X-Content-Type-Options: nosniff (see
+// gate/httpjson.go's writeJSON). It only looks at responses already
+// carrying an application/json Content-Type -- this document's own
+// "Errors" section (above) says every error body is text/plain except
+// the two writeJSON uses for a half-succeeded request, and text/plain
+// responses are not this issue's concern.
+func checkJSONResponseHeaders(t *testing.T, what string, resp *http.Response) {
+	t.Helper()
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		return
+	}
+	if ct != "application/json; charset=utf-8" {
+		t.Errorf("%s -> %d: Content-Type = %q, want \"application/json; charset=utf-8\"", what, resp.StatusCode, ct)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("%s -> %d: Cache-Control = %q, want \"no-store\"", what, resp.StatusCode, got)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("%s -> %d: X-Content-Type-Options = %q, want \"nosniff\"", what, resp.StatusCode, got)
+	}
 }
 
 // requireEveryOperationDriven fails for any documented operation the
@@ -327,6 +353,7 @@ func contractNoStorage(t *testing.T, c *contractChecker) {
 
 	admin := c.client()
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", stored.setupCode}}, 201, nil)
+	enrolTOTPFactor(t, c, ts.URL, admin, "contract-admin-password") // POST /api/auth/users is not an enrolment route
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "operator", Password: "contract-operator-password"}}, 503, nil)
 }
 
@@ -361,6 +388,12 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 
 	c.do(anon, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", "wrong-password"}}, 401, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+	// Every route from here on is not an enrolment route, so admin needs
+	// a second factor to clear the forced-enrolment door (#49) before it
+	// can reach any of them -- done now, not before the re-login above,
+	// which needs a full session rather than the pending login a
+	// confirmed factor would leave it with.
+	enrolTOTPFactor(t, c, u, admin, adminPass)
 
 	// Accounts.
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "bob", Password: bobPass}}, 201, nil)
@@ -445,7 +478,12 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(bob, u, call{method: "POST", path: "/api/auth/recovery-codes", body: recoveryCodesRegenerateRequest{Password: bobPass}}, 401, nil)
 	bob = c.client()
 	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", bobPass}}, 200, nil)
-	c.do(bob, u, call{method: "POST", path: "/api/auth/recovery-codes", body: recoveryCodesRegenerateRequest{Password: bobPass}}, 409, nil)
+	// bob now holds no second factor at all. regenerateRecoveryCodes's
+	// own refusal for that (409, still documented above) is unreachable
+	// through the ordinary session-cookie path since #49: the
+	// forced-enrolment door in Protect already refuses every
+	// non-enrolment route to such an account before the handler runs.
+	c.do(bob, u, call{method: "POST", path: "/api/auth/recovery-codes", body: recoveryCodesRegenerateRequest{Password: bobPass}}, 403, nil)
 
 	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + bobID + "/totp"}, 200, nil)
 	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID + "/totp"}, 409, nil)
@@ -464,8 +502,45 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	}
 	c.do(bob, u, call{method: "POST", path: "/api/auth/password", body: changePasswordRequest{NewPassword: "short"}}, 400, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/password", body: changePasswordRequest{NewPassword: bobPass + "-2"}}, 200, nil)
+	// Admin cleared bob's factor above (line 487) and this SetPassword
+	// just cleared MustChangePassword, so bob is otherwise back at the
+	// forced-enrolment door -- a voluntary change is not an enrolment
+	// route either, so bob needs a factor again before the wrong-
+	// current-password check below can reach the handler at all.
+	enrolTOTPFactor(t, c, u, bob, bobPass+"-2")
 	c.do(bob, u, call{method: "POST", path: "/api/auth/password", body: changePasswordRequest{CurrentPassword: "wrong", NewPassword: bobPass}}, 401, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all"}, 200, nil)
+
+	// The caller's own sessions (#48). Sign out everywhere left bob one
+	// session, listed with the address and agent the closed row schema
+	// allows; ending it signs this client out, which the logout below
+	// then finds already done.
+	var sessions struct {
+		Sessions []struct {
+			Ref       string `json:"ref"`
+			Current   bool   `json:"current"`
+			UserAgent string `json:"userAgent"`
+			Address   string `json:"address"`
+		} `json:"sessions"`
+		Total int `json:"total"`
+	}
+	c.do(bob, u, call{method: "GET", path: "/api/auth/sessions"}, 200, &sessions)
+	if sessions.Total != 1 || len(sessions.Sessions) != 1 || !sessions.Sessions[0].Current || sessions.Sessions[0].UserAgent == "" || sessions.Sessions[0].Address == "" {
+		t.Fatalf("bob's sessions after sign out everywhere = %+v", sessions)
+	}
+	c.do(anon, u, call{method: "GET", path: "/api/auth/sessions"}, 401, nil)
+	c.do(bob, u, call{method: "DELETE", path: "/api/auth/sessions/" + strings.Repeat("0", 32)}, 404, nil)
+	c.do(bob, u, call{method: "DELETE", path: "/api/auth/sessions/" + sessions.Sessions[0].Ref, noCSRF: true}, 403, nil)
+	var ended struct {
+		Ended     bool `json:"ended"`
+		SignedOut bool `json:"signedOut"`
+	}
+	c.do(bob, u, call{method: "DELETE", path: "/api/auth/sessions/" + sessions.Sessions[0].Ref}, 200, &ended)
+	if !ended.Ended || !ended.SignedOut {
+		t.Fatalf("ending bob's only session = %+v, want ended and signed out", ended)
+	}
+	c.do(bob, u, call{method: "GET", path: "/api/auth/sessions"}, 401, nil)
+
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout"}, 200, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/logout", noCSRF: true}, 403, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/logout-all"}, 401, nil)
@@ -532,6 +607,7 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	c.do(first, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{"anything"}}, 409, nil)
 	admin := c.client()
 	c.do(admin, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"setup-admin", "setup-admin-password"}}, 200, nil)
+	enrolTOTPFactor(t, c, u, admin, "setup-admin-password") // POST /api/auth/users is not an enrolment route
 
 	c.do(c.client(), u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 401, nil)
 	c.do(first, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 403, nil)
@@ -540,6 +616,7 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	// carol links her local account to a second identity.
 	carol := c.client()
 	c.do(carol, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"carol", "contract-carol-password"}}, 200, nil)
+	enrolTOTPFactor(t, c, u, carol, "contract-carol-password") // POST /api/auth/oidc/link is not an enrolment route
 	contractSSOSignIn(t, c, codec, fp, carol, u, "/api/auth/oidc/link", "/?ssoLinked=1")
 	c.do(carol, u, call{method: "POST", path: "/api/auth/oidc/link"}, 409, nil)
 
@@ -610,6 +687,7 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 	ts := newTestServer(t, f.g)
 	admin := c.client()
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{Username: "admin", Password: "password123"}}, 200, nil)
+	enrolTOTPFactor(t, c, ts.URL, admin, "password123") // DELETE /api/tokens/{id} is not an enrolment route
 
 	backend.left = 0
 	c.do(admin, ts.URL, call{method: "DELETE", path: "/api/tokens/" + tok.ID}, http.StatusInternalServerError, nil)
@@ -637,6 +715,7 @@ func TestContractTokenRegisteredKinds(t *testing.T) {
 	u := ts.URL
 	admin := c.client()
 	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{Username: "admin", Password: "contract-admin-password", SetupCode: f.setupCode}}, 201, nil)
+	enrolTOTPFactor(t, c, u, admin, "contract-admin-password") // POST /api/tokens is not an enrolment route
 
 	var created tokenResponse
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom)}}, 201, &created)
@@ -665,6 +744,7 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 	ts := newTestServer(t, f.g)
 	admin := c.client()
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "password123", f.setupCode}}, 201, nil)
+	enrolTOTPFactor(t, c, ts.URL, admin, "password123") // POST /api/auth/users is not an enrolment route
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: bobName, Password: bobPass, Role: "user"}}, 201, nil)
 
 	bob := c.client()
@@ -713,6 +793,7 @@ func passkeyGateServer(t *testing.T, c *contractChecker, publicURL string, wired
 	ts := newTestServer(t, f.g)
 	admin := c.client()
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", code}}, 201, nil)
+	enrolTOTPFactor(t, c, ts.URL, admin, "contract-admin-password") // POST /api/auth/users is not an enrolment route
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "bob", Password: "contract-bob-password"}}, 201, nil)
 	return f, ts, admin
 }
@@ -731,7 +812,14 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", bobPass}}, 200, nil)
 
 	var rows []passkeyRow
-	c.do(bob, u, call{method: "GET", path: "/api/auth/passkeys"}, 200, &rows)
+	// GET /api/auth/passkeys is deliberately not one of the
+	// forced-enrolment door's exempt routes (secondFactorEnrolPaths'
+	// own doc comment in gate/protect.go: "there is nothing yet
+	// enrolled for them to act on while this gate holds") -- bob holds
+	// no second factor yet, so this is the door, not an empty list. The
+	// populated list is checked with bob2 further down, once bob has
+	// registered his first passkey.
+	c.do(bob, u, call{method: "GET", path: "/api/auth/passkeys"}, 403, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/passkeys"}, 401, nil)
 	var state sessionResponse
 	c.do(bob, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)

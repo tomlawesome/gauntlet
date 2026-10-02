@@ -113,14 +113,13 @@ func primeMustChangePasswordAdmin(t *testing.T) *gauntlet.Store {
 // TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor pins the fix
 // ported from mikroview's own gitlab/dev 683704c4: a session stuck at
 // MustChangePassword must still be able to reach changePasswordPath even
-// when RequireSecondFactor is set and the account has no factor yet --
-// without the !user.MustChangePassword guard in Protect, that request
-// would be refused by the second-factor door too, with no path left to
-// escape it.
+// though the second-factor door is shut and the account has no factor
+// yet -- without the !user.MustChangePassword guard in Protect, that
+// request would be refused by the second-factor door too, with no path
+// left to escape it.
 func TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor(t *testing.T) {
 	g := newTestGate(t)
 	g.deps.Users = primeMustChangePasswordAdmin(t)
-	g.cfg.RequireSecondFactor = true
 	ts := newTestServer(t, g)
 
 	client := &http.Client{Jar: mustCookieJar(t)}
@@ -133,7 +132,7 @@ func TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor(t *testing.T) {
 	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "a-new-password"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected the change-password route to stay reachable for a MustChangePassword session even with RequireSecondFactor set, got %d", resp.StatusCode)
+		t.Errorf("expected the change-password route to stay reachable for a MustChangePassword session even with the second-factor door shut, got %d", resp.StatusCode)
 	}
 }
 
@@ -142,9 +141,8 @@ func TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor(t *testing.T) {
 // 403 apart from an ordinary refusal.
 func TestForcedAuthGateHeaderNamesTheDoor(t *testing.T) {
 	g := newTestGate(t)
-	g.cfg.RequireSecondFactor = true
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdminNoFactor(t, ts, "admin", "password123")
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {

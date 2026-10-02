@@ -32,6 +32,7 @@ const (
 	oidcCallbackPath = "/api/auth/oidc/callback"
 	totpEnrolPath    = "/api/auth/totp/enrol"
 	totpConfirmPath  = "/api/auth/totp/confirm"
+	sessionsPath     = "/api/auth/sessions"
 
 	passkeysPath              = "/api/auth/passkeys"
 	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"
@@ -89,8 +90,9 @@ var bootstrapExemptPaths = map[string]bool{
 }
 
 // secondFactorEnrolPaths are the routes a session may still reach while
-// stuck at the forced-enrolment door (Config.RequireSecondFactor) --
-// enrolling a TOTP factor or registering a passkey, and nothing else, as
+// stuck at the forced-enrolment door (always shut for a local-password
+// account with no second factor, since #49) -- enrolling a TOTP factor
+// or registering a passkey, and nothing else, as
 // mikroview's requireAuth has it. Named once here, the same reasoning
 // changePasswordPath is, so Protect's gate and this list cannot drift
 // apart silently. With Deps.Passkeys nil the passkey pair answers 404,
@@ -148,7 +150,7 @@ func bearerToken(r *http.Request) (string, bool) {
 // fails that check is proactively revoked here rather than left to
 // expire naturally, since it is already known to be invalid.
 func (g *Gate) sessionUser(r *http.Request, now time.Time) (*gauntlet.User, bool) {
-	cookie, err := r.Cookie(g.cfg.CookieName)
+	cookie, err := r.Cookie(g.sessionCookieName())
 	if err != nil {
 		return nil, false
 	}
@@ -258,9 +260,8 @@ func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 //     treated as "no token" and passed on to the session-cookie check),
 //     as is one that is not a well-formed Bearer credential at all.
 //     Otherwise: the CSRF header on unsafe methods, exempt paths, the
-//     session cookie, the MustChangePassword door, then -- when
-//     Config.RequireSecondFactor is set -- the second-factor door, then
-//     next.
+//     session cookie, the MustChangePassword door, then the
+//     second-factor door (always on, since #49), then next.
 func (g *Gate) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := g.now()
@@ -343,9 +344,11 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			writeForcedAuthGate(w, authGateMustChangePassword, "an administrator reset this account -- set a new password before going any further")
 			return
 		}
-		// The forced-enrolment door (mikroview's #1253), gated by
-		// Config.RequireSecondFactor rather than always on -- see that
-		// field's doc comment.
+		// The forced-enrolment door (mikroview's #1253), always shut for
+		// every local-password account since #49 -- a second factor is
+		// mandatory, not an application's choice, so this no longer reads
+		// Config.RequireSecondFactor (deprecated; see that field's doc
+		// comment).
 		//
 		// The !user.MustChangePassword guard is what stops this door and
 		// the one above deadlocking each other: MustChangePassword's own
@@ -359,11 +362,10 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// for exactly this, gitlab/dev 683704c4).
 		//
 		// secondFactorEnrolPaths (TOTP enrol/confirm, passkey register
-		// begin/finish) stays reachable
-		// while this door holds -- without it, an account with
-		// RequireSecondFactor set and no factor yet would have no route
-		// left to enrol one on.
-		if !user.MustChangePassword && g.cfg.RequireSecondFactor && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
+		// begin/finish) stays reachable while this door holds -- without
+		// it, a newly created local account with no factor yet would have
+		// no route left to enrol one on.
+		if !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
 			writeForcedAuthGate(w, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")
 			return
 		}

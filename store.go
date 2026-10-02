@@ -36,6 +36,13 @@ import (
 // created accounts, and any CLI recovery tooling an application builds
 // all funnel through one of those two, so there's exactly one place
 // this needs to live.
+//
+// 8 conforms to NIST SP 800-63B-4 §3.1.1.2, which allows 8 characters
+// only for "a password used as part of multi-factor authentication"
+// and requires 15 when the password is the only factor: gate's
+// second-factor door (gate/protect.go) makes a second factor mandatory
+// for every local-password account (#49), so the password is never the
+// only factor, and 8 conforms unconditionally.
 const minPasswordLength = 8
 
 var (
@@ -1567,11 +1574,14 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		u.ResetCodeHash = ""
 		u.ResetCodeExpiresAt = time.Time{}
 		u.MustChangePassword = false
-		// And it ends any login lockout: the guesses that caused it were
-		// at the old password, and whoever set the new one should be
-		// able to use it at once. The limiter drops its own count of
-		// those guesses by PasswordChangedAt (see lockoutRecorder).
+		// And it ends any login lockout and the count of lockouts before
+		// it (#44): the guesses that caused them were at the old
+		// password, and whoever set the new one should be able to use it
+		// at once. The limiter drops its own count of those guesses by
+		// PasswordChangedAt (see lockoutRecorder). A disabled sign-in
+		// (LoginDisabledAt) stays disabled: only UnlockLogin lifts it.
 		u.LoginLockedUntil = time.Time{}
+		u.LoginLockoutCount = 0
 		return nil
 	})
 }

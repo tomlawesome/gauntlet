@@ -331,8 +331,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// them later, since begin now excludes this passkey.
 	if wasFirstFactor {
 		g.deps.Sessions.RevokeAllForUser(current.ID)
-		sess := g.deps.Sessions.Create(current.ID, now)
-		g.setSessionCookie(w, sess.ID)
+		g.issueSession(w, r, current.ID, now)
 	}
 	g.clearPasskeyRegisterCookie(w)
 	detail := "name=" + stored.Name
@@ -529,7 +528,9 @@ const passkeyStartAgain = "start passkey sign-in again"
 // RecordPasskeyAssertionIfFresh decides and records under the store's
 // lock, so two copies of one assertion cannot both win.
 //
-// Every refusal answers 401 and keeps the reservations. A dead ceremony
+// Every refusal answers 401, keeps the reservations and counts toward
+// the account's run of second-factor failures (secondFactorFailed): the
+// caller holds a pending login, so had the right password. A dead ceremony
 // (the cookie missing, or gauntlet.ErrPasskeyCeremonyInvalid: expired,
 // tampered with, already used) answers "start passkey sign-in again" and
 // clears the cookie, since it can never succeed; anything else answers
@@ -538,6 +539,7 @@ const passkeyStartAgain = "start passkey sign-in again"
 func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, user *gauntlet.User, assertion json.RawMessage, res loginReservation, now time.Time) bool {
 	refuse := func(msg string) bool {
 		g.endAfterReset(res)
+		g.secondFactorFailed(user, now)
 		writeUnauthorized(w, msg)
 		return false
 	}

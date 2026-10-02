@@ -10,11 +10,13 @@
 // its names kept (docs/adr/0001-shared-auth-module.md decision 3;
 // docs/design.md §1.3), plus what gauntlet added: User.clone for the
 // copy-then-save writes (Store.mutate) and the unexported
-// totpSecretBlanked and passkeysBlanked marks that let a blanked copy
-// still answer HasActiveTOTP and HasSecondFactor. The stored fields are
-// mikroview's, byte for byte, plus two of gauntlet's own that
-// mikroview's documents lack and read as zero: loginLockedUntil (#19)
-// and sessionsEndedAt (#28). User carries every field mikroview's own
+// totpSecretBlanked mark and blankedPasskeyCount count that let a
+// blanked copy still answer HasActiveTOTP, HasSecondFactor and
+// PasskeyCount. The stored fields are
+// mikroview's, byte for byte, plus gauntlet's own that mikroview's
+// documents lack and read as zero: loginLockedUntil (#19),
+// sessionsEndedAt (#28), and loginLockoutCount and loginDisabledAt
+// (#44). User carries every field mikroview's own
 // User carries -- including TOTP, recovery codes, reset codes and
 // passkeys -- because Store persists the whole document on every save
 // (docs/design.md Summary): a field this package didn't know about would
@@ -127,8 +129,10 @@ type User struct {
 	// issued. Checked against, never the only check -- see
 	// User.resetCodeLive.
 	ResetCodeExpiresAt time.Time `json:"resetCodeExpiresAt,omitzero"`
-	// MustChangePassword is set by an admin reset, and cleared only where
-	// that reset ends: SetPassword (a real password is chosen), or
+	// MustChangePassword is set by an admin reset, and by a LoginLimiter
+	// once a run of second-factor failures shows someone else knows the
+	// password (SecondFactorFailed, #44). It is cleared only where a new
+	// password ends it: SetPassword (a real password is chosen), or
 	// LinkOIDCIdentity voiding it for a non-admin going SSO-only, where
 	// there is no local password left to force a change on. Recorded on
 	// the account rather than on the session: the flag has to survive the
@@ -143,6 +147,23 @@ type User struct {
 	// in the same write; LinkOIDCIdentity, which ends sessions but leaves
 	// the admin's password working, does not.
 	LoginLockedUntil time.Time `json:"loginLockedUntil,omitzero"`
+	// LoginLockoutCount is how many login lockouts this account has had
+	// since its last completed sign-in (#44): each lasts three times as
+	// long as the one before (ReserveAccount). Written in the same write
+	// that starts a lockout, never per attempt. A completed sign-in
+	// (LoginLimiter.SignedIn), a new password (SetPassword,
+	// IssueResetCode) and UnlockLogin set it back to zero; a lockout
+	// running out does not. Gauntlet's own field: older documents lack
+	// it and read it as zero.
+	LoginLockoutCount int `json:"loginLockoutCount,omitempty"`
+	// LoginDisabledAt is when this account's local sign-in was disabled
+	// after MaxConsecutiveLoginFailures failures in a row (#44), zero
+	// while it is not. A disabled account is refused at the password step
+	// exactly as a locked one is, for good: it does not time out, no
+	// sign-in can complete while it is in force, and a new password does
+	// not lift it. Only UnlockLogin does. It disables the local password sign-in, not
+	// the account's sessions, its SSO identity or its second factors.
+	LoginDisabledAt time.Time `json:"loginDisabledAt,omitzero"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
@@ -178,10 +199,14 @@ type User struct {
 	// before the blanking. Unexported, so it never reaches JSON; it says
 	// that a secret exists, never what it is.
 	totpSecretBlanked bool
-	// passkeysBlanked is the same for Passkeys: set only on a blanked
-	// copy whose passkeys were removed, so HasSecondFactor on that copy
-	// still sees a passkey-only account as having a second factor.
-	passkeysBlanked bool
+	// blankedPasskeyCount is the same for Passkeys, but a count rather
+	// than a flag: how many passkeys blankCredentials has stripped from
+	// this copy, accumulated across repeated blanking so it is never
+	// lost. It is what PasskeyCount and HasSecondFactor read once
+	// Passkeys itself has been blanked to nil. Unexported, so it never
+	// reaches JSON: it says how many credentials existed, never what
+	// they were.
+	blankedPasskeyCount int
 }
 
 // blankCredentials clears every credential and credential verifier on
@@ -208,11 +233,11 @@ func (u *User) blankCredentials() {
 	// Passkeys carries each credential's PublicKey -- not a secret the
 	// way a private key would be, but still credential material nothing
 	// outside the Store has business serializing. Blanked wholesale
-	// rather than per-field: a caller that needs a count must call a
-	// dedicated accessor instead of reading len(this copy's Passkeys),
-	// which always reads zero. HasSecondFactor still answers truly on
-	// the copy (see passkeysBlanked).
-	u.passkeysBlanked = u.passkeysBlanked || len(u.Passkeys) > 0
+	// rather than per-field: a caller that needs a count reads
+	// PasskeyCount instead of len(this copy's Passkeys), which always
+	// reads zero once blanked. HasSecondFactor and PasskeyCount both
+	// still answer truly on the copy (see blankedPasskeyCount).
+	u.blankedPasskeyCount += len(u.Passkeys)
 	u.Passkeys = nil
 }
 
@@ -269,5 +294,16 @@ func (u *User) HasActiveTOTP() bool {
 // only affects whether a passkey can complete a *login*, not whether the
 // account is considered to have a second factor at all.
 func (u *User) HasSecondFactor() bool {
-	return u.HasActiveTOTP() || len(u.Passkeys) > 0 || u.passkeysBlanked
+	return u.HasActiveTOTP() || u.PasskeyCount() > 0
+}
+
+// PasskeyCount reports how many passkeys u holds. It answers truly on a
+// Store.List() copy, whose Passkeys field List blanks the same way it
+// blanks TOTPSecret (see blankCredentials): len(u.Passkeys) on such a
+// copy always reads zero, but this adds back blankedPasskeyCount, so a
+// caller already holding a List entry -- an admin-facing accounts list,
+// say -- gets the real count without a separate Store.PasskeyCount call
+// per account.
+func (u *User) PasskeyCount() int {
+	return len(u.Passkeys) + u.blankedPasskeyCount
 }

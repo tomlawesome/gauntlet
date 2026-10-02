@@ -37,9 +37,12 @@ info:
     routes: `Protect` sends it to the application's own handler for that
     token kind, or answers `401` "invalid or revoked token".
 
-    **Session cookie.** Its name is the application's `Config.CookieName`;
-    it is `HttpOnly`, `SameSite=Lax`, path `/`. Routes marked "sets the
-    session cookie" issue a fresh one; logout clears it.
+    **Session cookie.** Its name is the application's `Config.CookieName`,
+    prefixed `__Host-` while `Config.SecureCookie` is true; it is
+    `HttpOnly`, `SameSite=Lax`, path `/`, with `Max-Age` equal to the
+    session store's lifetime ceiling. Routes marked "sets the session
+    cookie" issue a fresh one, and a login ends the same account's
+    session the browser already held; logout clears it.
 
     **Errors.** Every error body is `text/plain` holding one human-readable
     line, except two `application/json` bodies for a step that half
@@ -349,6 +352,60 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/sessions:
+    get:
+      operationId: listSessions
+      summary: List the caller's own sessions
+      description: |
+        Every live session on the caller's account, newest sign-in first,
+        at most 100 rows; `total` counts them all, so a cut list says so.
+        Sessions live in the server's memory: a restart empties the list
+        and everyone signs in again. A row never carries the session ID
+        (it is the cookie); `ref` names the session instead. Needs a
+        session, unlike `GET /api/auth/session`. There is no route to
+        list another account's sessions.
+      responses:
+        "200":
+          description: The caller's sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/sessions/{ref}:
+    delete:
+      operationId: endSession
+      summary: End one of the caller's own sessions
+      description: |
+        No password, like sign out everywhere: ending a session is a safe
+        direction. Ending the session the request was made with clears the
+        cookie and sets `signedOut`. Ends the gauntlet session only, never
+        the single sign-on provider's. Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/SessionRef"
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Ended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionEnded"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/SessionNotFound"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1321,7 +1378,7 @@ components:
       type: apiKey
       in: cookie
       name: session
-      description: The session cookie. Its real name is the application's `Config.CookieName`.
+      description: The session cookie. Its real name is the application's `Config.CookieName`, prefixed `__Host-` while `Config.SecureCookie` is true.
     pendingLoginCookie:
       type: apiKey
       in: cookie
@@ -1367,6 +1424,14 @@ components:
       schema:
         type: string
 
+    SessionRef:
+      name: ref
+      in: path
+      required: true
+      description: A session's `ref` from `GET /api/auth/sessions`.
+      schema:
+        type: string
+
   responses:
     BadRequest:
       description: The body is not one JSON object of the documented fields (unknown fields and trailing data are refused), or a field's value is refused.
@@ -1403,10 +1468,10 @@ components:
             Present only when the session is stopped at a door:
             `must-change-password` (an administrator reset the account;
             only `POST /api/auth/password` is reachable) or
-            `must-enrol-factor` (`Config.RequireSecondFactor` is on and the
-            account has no second factor; only the TOTP enrol and confirm
-            routes and the passkey register begin and finish routes are
-            reachable).
+            `must-enrol-factor` (the account has no second factor yet --
+            every local-password account must hold one; only the TOTP
+            enrol and confirm routes and the passkey register begin and
+            finish routes are reachable).
           schema:
             type: string
             enum: [must-change-password, must-enrol-factor]
@@ -1458,6 +1523,12 @@ components:
             $ref: "#/components/schemas/TextError"
     PasskeyNotFound:
       description: The application has no passkeys, or no passkey on the caller's account has this id.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    SessionNotFound:
+      description: No live session on the caller's account has this ref. The same for a malformed ref and for another account's session, and nothing ends.
       content:
         text/plain:
           schema:
@@ -1538,6 +1609,57 @@ components:
       additionalProperties: true
       required: [publicKey]
       description: The W3C `CredentialRequestOptions` JSON (an object holding `publicKey`) the WebAuthn library produced, for `navigator.credentials.get()`. An open object -- see "Compatibility" above.
+    SessionRow:
+      type: object
+      additionalProperties: false
+      required: [ref, current, signedInAt, lastUsedAt]
+      properties:
+        ref:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+          description: A one-way reference to the session (not its ID, which is the cookie); what `DELETE /api/auth/sessions/{ref}` takes.
+        current:
+          type: boolean
+          description: True for the session this request was made with.
+        signedInAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          description: The last request the session made; its sign-in until then.
+        address:
+          type: string
+          maxLength: 64
+          description: The client address the application resolved at sign-in. Absent when none was recorded.
+        userAgent:
+          type: string
+          maxLength: 256
+          description: The browser's `User-Agent` at sign-in, with control and formatting characters removed. Absent when none was sent.
+    SessionList:
+      type: object
+      additionalProperties: false
+      required: [sessions, total]
+      properties:
+        sessions:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SessionRow"
+        total:
+          type: integer
+          minimum: 1
+          description: How many live sessions the account holds; more than the rows only when the list was cut at 100.
+    SessionEnded:
+      type: object
+      additionalProperties: false
+      required: [ended, signedOut]
+      properties:
+        ended:
+          const: true
+        signedOut:
+          type: boolean
+          description: True when the session ended was this one; the cookie has been cleared.
     PasskeyRow:
       type: object
       additionalProperties: false
@@ -1667,7 +1789,7 @@ components:
           type: boolean
         mustEnrolSecondFactor:
           type: boolean
-          description: True only when `Config.RequireSecondFactor` is on and the account has no second factor.
+          description: True only when the account has no second factor yet -- every local-password account must hold one.
         hasTOTP:
           type: boolean
           description: A confirmed authenticator app, not a pending enrolment.

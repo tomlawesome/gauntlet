@@ -547,11 +547,15 @@ func (s *Store) ClearAllSecondFactors(userID string) error {
 	})
 }
 
-// PasskeyCount reports how many passkeys userID's account holds. It
-// exists because List() blanks Passkeys entirely on every copy it
-// returns (see List's doc comment in store.go), so len(copy.Passkeys)
-// on a List() result always reads zero -- this is the guard against
-// that mistake for an admin-facing users list's passkey count. An
+// PasskeyCount reports how many passkeys userID's account holds, read
+// live from the Store. A caller that already holds a User -- a
+// Store.List() entry, say -- should call User.PasskeyCount instead: List
+// blanks Passkeys entirely on every copy it returns (see List's doc
+// comment in store.go), so len(copy.Passkeys) on a List() result always
+// reads zero, but User.PasskeyCount still answers truly on that copy,
+// with no further Store call. This method remains for a caller that
+// only has an ID, not a User -- a bearer-token endpoint, or a caller
+// confirming the account's current state right after a write. An
 // unknown user answers 0 rather than erroring, the same yes/no-gate
 // stance User.HasActiveTOTP takes.
 func (s *Store) PasskeyCount(userID string) int {

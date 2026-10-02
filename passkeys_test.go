@@ -707,6 +707,70 @@ func TestListBlanksPasskeysAndPasskeyCountReadsTheLiveData(t *testing.T) {
 	}
 }
 
+// TestUserPasskeyCountReadsTrueOnAListCopy is gauntlet #42's guard: an
+// admin-facing accounts list reads User.PasskeyCount off each List()
+// entry instead of calling Store.PasskeyCount per account, so
+// User.PasskeyCount itself must answer truly on a blanked copy -- for
+// zero, one and two passkeys -- and HasSecondFactor must keep doing so
+// too, the same trap TestListBlanksPasskeysAndPasskeyCountReadsTheLiveData
+// covers for the Store method.
+func TestUserPasskeyCountReadsTrueOnAListCopy(t *testing.T) {
+	s := openTestStore(t)
+
+	none, err := s.Register("admin", "password123", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := s.CreateUser("one", "password456", RoleUser, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(one.ID, testPasskey(1, "")); err != nil {
+		t.Fatal(err)
+	}
+	two, err := s.CreateUser("two", "password789", RoleUser, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(two.ID, testPasskey(2, "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(two.ID, testPasskey(3, "")); err != nil {
+		t.Fatal(err)
+	}
+
+	byID := make(map[string]User)
+	for _, u := range s.List() {
+		byID[u.ID] = u
+	}
+
+	cases := []struct {
+		name string
+		id   string
+		want int
+	}{
+		{"no passkeys", none.ID, 0},
+		{"one passkey", one.ID, 1},
+		{"two passkeys", two.ID, 2},
+	}
+	for _, c := range cases {
+		cp, ok := byID[c.id]
+		if !ok {
+			t.Fatalf("%s: List() did not return this account", c.name)
+		}
+		if cp.Passkeys != nil {
+			t.Errorf("%s: List()'s copy carries Passkeys (%v), want it blanked to nil", c.name, cp.Passkeys)
+		}
+		if got := cp.PasskeyCount(); got != c.want {
+			t.Errorf("%s: PasskeyCount() on the List() copy = %d, want %d", c.name, got, c.want)
+		}
+		wantSecondFactor := c.want > 0
+		if got := cp.HasSecondFactor(); got != wantSecondFactor {
+			t.Errorf("%s: HasSecondFactor() on the List() copy = %v, want %v", c.name, got, wantSecondFactor)
+		}
+	}
+}
+
 // TestPasskeyWritesLeaveStateWhenPersistFails holds every write in this
 // file to the restore-on-persist-failure contract: a change that cannot
 // be durably saved must not be reported as done, and must not leave

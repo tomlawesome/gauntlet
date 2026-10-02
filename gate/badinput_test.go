@@ -108,6 +108,7 @@ func TestTOTPConfirmRejectsInvalidJSON(t *testing.T) {
 func TestTOTPDeleteRejectsInvalidJSON(t *testing.T) {
 	_, ts, _ := totpFixture(t)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	totpEnrolAndConfirm(t, bob, ts) // DELETE /api/auth/totp is not an enrolment route, so bob needs a factor to reach the handler at all
 	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/totp", strings.NewReader("not json"))
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +128,7 @@ func TestTOTPDeleteRejectsInvalidJSON(t *testing.T) {
 func TestRecoveryCodesRegenerateRejectsInvalidJSON(t *testing.T) {
 	_, ts, _ := totpFixture(t)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	totpEnrolAndConfirm(t, bob, ts) // not an enrolment route, so bob needs a factor to reach the handler at all
 	resp := postRawBody(t, bob, ts.URL+"/api/auth/recovery-codes", "not json")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {

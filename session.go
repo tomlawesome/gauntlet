@@ -12,9 +12,69 @@
 package gauntlet
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
+
+// MaxSessionIdle is the longest a session may go unused before gate.New
+// refuses to start: NIST SP 800-63B-4 AAL2 caps inactivity at one hour
+// (§2.2.3, §5.2). The owner adopted this over the consumers' previous
+// 24-hour idle value on 2026-10-02 (gauntlet#51) -- see
+// docs/security-by-design.md's Sessions table.
+//
+// This is a cap gate.New enforces on Deps.Sessions, not a limit
+// SessionStore itself imposes -- a caller using SessionStore directly
+// (the CLI tooling, this package's own tests) is unaffected.
+const MaxSessionIdle = time.Hour
+
+// MaxSessionLifetime is the longest a session may live from IssuedAt,
+// however often it is used, before gate.New refuses to start: NIST SP
+// 800-63B-4 AAL2 caps the overall session at 24 hours (§2.2.3, §5.2).
+// The owner adopted this over the consumers' previous 7-day ceiling on
+// 2026-10-02 (gauntlet#51).
+//
+// As with MaxSessionIdle, this is a cap gate.New enforces, not one
+// SessionStore itself imposes.
+const MaxSessionLifetime = 24 * time.Hour
+
+// MaxSessionUserAgent and MaxSessionAddress bound what CreateFrom keeps
+// of a SessionClient, in bytes, after it has dropped the characters
+// cleanClientText refuses. The User-Agent header is the client's to
+// choose and has no length limit of its own short of the server's
+// header cap, and every session holds its copy in memory until the
+// session ends -- at most MaxSessionLifetime when gate is in front --
+// so the cap is what bounds that memory, not the header. 256 bytes holds
+// every real browser's agent string whole; 64 holds an IPv6 address with
+// a zone (gauntlet#48).
+const (
+	MaxSessionUserAgent = 256
+	MaxSessionAddress   = 64
+)
+
+// SessionClient is what a session records about the browser that signed
+// in, so its owner can tell one session from another in a list of their
+// own sessions (ASVS 7.5.2, gauntlet#48). It is captured once, when the
+// session is created, and never updated: a session is one sign-in, and
+// the address it signed in from is the fact the list shows. It lives in
+// memory with the session and is never written to the accounts
+// document.
+//
+// Both fields are as the client presented them, not verified: Address
+// is whatever the application's own client-address policy resolved
+// (gate.Config.ClientIP, which may read a proxy header), and UserAgent
+// is the header the browser chose to send. They help a person recognise
+// their own devices; they prove nothing about who holds a session.
+type SessionClient struct {
+	Address   string
+	UserAgent string
+}
 
 // Session is deliberately an opaque random ID (see newID), not a JWT --
 // easy to revoke (delete it server-side) and needs no signing-key
@@ -31,6 +91,27 @@ type Session struct {
 	// ExpiresAt alone can't express.
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+	// LastUsedAt is the last time Validate accepted this session (IssuedAt
+	// until then) -- what a session list shows so a person can spot a
+	// session they are not using.
+	LastUsedAt time.Time
+	// Client is the browser this session signed in from, as CreateFrom
+	// recorded it; empty when created through Create.
+	Client SessionClient
+}
+
+// Ref is a one-way reference to this session: the first 32 hex
+// characters (128 bits) of SHA-256 over its ID. A session list shows
+// this and never the ID, because the ID is the session cookie itself --
+// a page that rendered it would hand a copy of every one of the
+// person's sessions to anything that can read the page. The ref names a
+// session well enough to end it (SessionStore.RevokeRef, which only
+// ever acts within one account), and cannot be turned back into a
+// cookie. Derived on each call rather than stored, so it costs no
+// memory and cannot drift from the ID.
+func (s Session) Ref() string {
+	sum := sha256.Sum256([]byte(s.ID))
+	return hex.EncodeToString(sum[:16])
 }
 
 // SessionStore holds active sessions, mutex-protected like every other
@@ -101,11 +182,38 @@ func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore {
 	return &SessionStore{sessions: make(map[string]Session), byUser: make(map[string]map[string]struct{}), ttl: ttl, maxLifetime: maxLifetime}
 }
 
-// Create starts a new session for userID.
+// Limits returns the store's configured idle timeout and lifetime
+// ceiling (0 meaning no ceiling, as NewSessionStore and maxLifetime's
+// doc comment describe) -- what gate.New reads to refuse a
+// Deps.Sessions store configured outside MaxSessionIdle/
+// MaxSessionLifetime, without exposing the fields themselves.
+func (s *SessionStore) Limits() (idle, ceiling time.Duration) {
+	return s.ttl, s.maxLifetime
+}
+
+// Create starts a new session for userID, recording no client -- the
+// CLI tooling and tests that have no request to read one from. It is
+// CreateFrom with an empty SessionClient.
 func (s *SessionStore) Create(userID string, now time.Time) Session {
+	return s.CreateFrom(userID, SessionClient{}, now)
+}
+
+// CreateFrom starts a new session for userID, recording client so the
+// account's owner can recognise it later (ListForUser). Each field is
+// cleaned and cut before it is kept: control and Unicode formatting
+// characters and invalid UTF-8 are dropped, then UserAgent is cut to
+// MaxSessionUserAgent bytes and Address to MaxSessionAddress, never
+// mid-character. Both come from the client, so neither may carry a
+// terminal escape, a bidirectional override or a megabyte of padding
+// into a page or a log that later shows them.
+func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.Time) Session {
+	client = SessionClient{
+		Address:   cleanClientText(client.Address, MaxSessionAddress),
+		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess := Session{ID: newID(), UserID: userID, IssuedAt: now, ExpiresAt: now.Add(s.ttl)}
+	sess := Session{ID: newID(), UserID: userID, IssuedAt: now, ExpiresAt: now.Add(s.ttl), LastUsedAt: now, Client: client}
 	s.sessions[sess.ID] = sess
 	if s.byUser[userID] == nil {
 		s.byUser[userID] = make(map[string]struct{})
@@ -114,6 +222,30 @@ func (s *SessionStore) Create(userID string, now time.Time) Session {
 	s.order.push(sess.ID)
 	s.sweepLocked(now)
 	return sess
+}
+
+// cleanClientText is CreateFrom's rule for one SessionClient field: the
+// characters printableWithin (token.go) refuses in a token name are
+// dropped rather than refused -- a session is never refused for what a
+// browser sent -- and what is left is cut to at most maxBytes on a
+// character boundary.
+func cleanClientText(s string, maxBytes int) string {
+	var b strings.Builder
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		s = s[size:]
+		if r == utf8.RuneError && size == 1 {
+			continue // invalid UTF-8
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		if b.Len()+size > maxBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // sweepLocked checks the next sweepBatch entries of order: an ID no
@@ -218,6 +350,7 @@ func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) {
 	} else {
 		sess.ExpiresAt = now.Add(s.ttl)
 	}
+	sess.LastUsedAt = now
 	s.sessions[id] = sess
 	return sess, true
 }
@@ -255,6 +388,60 @@ func (s *SessionStore) removeLocked(sess Session) {
 	if len(ids) == 0 {
 		delete(s.byUser, sess.UserID)
 	}
+}
+
+// ListForUser returns userID's live sessions, newest IssuedAt first --
+// what a person sees when they list their own sessions (ASVS 7.5.2,
+// gauntlet#48). A session Validate would refuse at now is evicted here
+// rather than listed, the same as Validate evicts one it finds expired,
+// so the list never shows a session that could not be used.
+//
+// It walks only userID's own entries (byUser), never the whole store,
+// for the reason RevokeAllForUser does. It knows nothing of the account
+// itself: a session issued before User.SessionCutoff is still returned,
+// and dropping it is the caller's job, as it is for Validate.
+func (s *SessionStore) ListForUser(userID string, now time.Time) []Session {
+	s.mu.Lock()
+	var out []Session
+	for id := range s.byUser[userID] {
+		sess := s.sessions[id]
+		if s.expired(sess, now) {
+			s.removeLocked(sess)
+			continue
+		}
+		out = append(out, sess)
+	}
+	s.mu.Unlock()
+	// Sorted outside the lock: the order is for the reader, and no other
+	// request needs to wait on it.
+	slices.SortFunc(out, func(a, b Session) int {
+		if c := b.IssuedAt.Compare(a.IssuedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out
+}
+
+// RevokeRef ends the one session of userID's whose Ref is ref, and
+// returns it. It reports false, ending nothing, when no session of
+// userID's has that ref -- including when another account's session
+// does: the search never leaves userID's own entries, so a ref can only
+// ever end a session belonging to the account that asked. Whether the
+// session was still live does not matter; ending an expired one only
+// evicts it early. The comparison is constant-time per entry, so how
+// long a refusal takes says nothing about how near a guess came.
+func (s *SessionStore) RevokeRef(userID, ref string) (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.byUser[userID] {
+		sess := s.sessions[id]
+		if subtle.ConstantTimeCompare([]byte(sess.Ref()), []byte(ref)) == 1 {
+			s.removeLocked(sess)
+			return sess, true
+		}
+	}
+	return Session{}, false
 }
 
 // RevokeAllForUser ends every session belonging to userID -- used when
