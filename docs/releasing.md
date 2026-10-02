@@ -41,7 +41,10 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
      pipeline; open the pipeline for the newest commit on `dev` instead
    - the common-password list in `blocklist/embedded/` is still the
      placeholder, or was built more than 90 days ago -- run
-     `scripts/update-blocklist.sh` as in step 2 and merge again
+     `scripts/update-blocklist.sh` as in step 2 and merge again.
+     v0.2.0 alone may ship the placeholder, with no built-in list,
+     because the first signed list did not exist yet (owner,
+     2026-10-02); every later version is refused again
 
    Once release:version succeeds, **release:gitlab** runs by itself --
    there's no second button to press. It creates the tag `v<VERSION>`
@@ -83,7 +86,7 @@ step 2 above copies the published list into each release.
 Until the setup below is done there is no real list:
 `blocklist/embedded/` holds a placeholder, `Embedded()` blocks nothing,
 every fetched list is refused for want of a trusted key, and
-release:version refuses to tag.
+release:version refuses to tag (v0.2.0 excepted, step 3 above).
 
 ### Setup the owner does once
 

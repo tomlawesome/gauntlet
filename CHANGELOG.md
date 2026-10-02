@@ -177,6 +177,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- release:version lets v0.2.0, and only v0.2.0, ship with the
+  common-password list still the placeholder, so `Embedded()` blocks
+  nothing in that release; the first signed list does not exist yet.
+  Every later version is refused again until a real list is in place
+  (refs #52, owner 2026-10-02).
+
 - **Breaking.** `OpenStore` now refuses a backend that stores the
   accounts document in the clear -- one that does not implement
   `persist.AtRest`, which is every application database backend

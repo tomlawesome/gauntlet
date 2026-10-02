@@ -3,7 +3,8 @@ PLACEHOLDER -- there is no real common-password list here yet.
 This file stands in for top10k.txt and top10k.txt.sig, the signed list
 that ships inside gauntlet (#52, ADR-0005). While it is here,
 blocklist.Embedded() returns an empty list that blocks nothing, and a
-release refuses to tag (scripts/blocklist-age-check.sh).
+release refuses to tag (scripts/blocklist-age-check.sh); v0.2.0 alone
+was allowed to ship it.
 
 The first real list arrives with the first signed run of the
 `blocklist` pipeline schedule. Then run scripts/update-blocklist.sh,
