@@ -6,10 +6,14 @@
 // protocol itself lives in the separate gauntlet/oidc package, which
 // this package doesn't import.
 //
-// Everything in this file is mikroview's internal/auth/store.go, with
+// The types here start from mikroview's internal/auth/store.go, with
 // its names kept (docs/adr/0001-shared-auth-module.md decision 3;
-// docs/design.md §1.3). User carries every field mikroview's own User
-// carries -- including TOTP, recovery codes, reset codes and passkeys --
+// docs/design.md §1.3), plus what gauntlet added: User.clone for the
+// copy-then-save writes (Store.mutate) and the unexported
+// totpSecretBlanked and passkeysBlanked marks that let a blanked copy
+// still answer HasActiveTOTP and HasSecondFactor. The stored fields are
+// mikroview's, byte for byte. User carries every field mikroview's own
+// User carries -- including TOTP, recovery codes, reset codes and passkeys --
 // because Store persists the whole document on every save (docs/design.md
 // Summary): a field this package didn't know about would be silently
 // dropped on the first write. The methods that generate, verify or

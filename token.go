@@ -309,7 +309,7 @@ func (s *TokenStore) indexTokens(list []*Token) *tokenState {
 		lastUsedSaved: make(map[string]time.Time, len(list)),
 	}
 	for _, t := range list {
-		if t == nil { // see Store.applyLoaded's identical guard for why this is needed
+		if t == nil { // see indexUsers' identical guard for why this is needed
 			continue
 		}
 		st.byID[t.ID] = t

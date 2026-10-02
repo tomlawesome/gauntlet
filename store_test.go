@@ -243,7 +243,7 @@ func TestSetPasswordChangesCredentials(t *testing.T) {
 // a restart before the next good write would silently restore a
 // credential the operator was told was already dead.
 func TestSetPasswordLeavesTheOldPasswordWorkingWhenPersistFails(t *testing.T) {
-	// Register below persists too (createLocked persists as well), so
+	// Register below persists too (createAccount persists as well), so
 	// the fixture needs a backend that saves once before failing, not
 	// one that fails outright.
 	s, err := OpenStore(&saveBudgetBackend{left: 1}, Options{})
@@ -645,7 +645,7 @@ func TestAStoreLeftByTheRemovedNoAuthModeRequiresSetup(t *testing.T) {
 
 // TestConcurrentRegisterCreatesExactlyOneAdmin is the regression test
 // for the first-run registration race. Before the equivalent fix in
-// mikroview, Register checked Count() outside the lock and createLocked
+// mikroview, Register checked Count() outside the lock and createAccount
 // only re-checked for a username collision under it -- so N concurrent
 // registrations with distinct usernames all succeeded, every one of
 // them landing RoleAdmin. Measured 8/8 succeeding, reproducibly, there.

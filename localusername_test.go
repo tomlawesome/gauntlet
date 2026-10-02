@@ -45,7 +45,7 @@ func TestLocalCreationRefusesAnEmailShapedUsername(t *testing.T) {
 	}
 
 	// The admin creating somebody else goes through the same funnel
-	// (createLocked), so the rule cannot be walked around from the
+	// (createAccount), so the rule cannot be walked around from the
 	// people list.
 	if _, err := s.CreateUser("bob@example.com", "password456", RoleUser, time.Now()); err != ErrUsernameIsEmail {
 		t.Errorf("CreateUser(email) = %v, want ErrUsernameIsEmail", err)

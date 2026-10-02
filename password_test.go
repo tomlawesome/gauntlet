@@ -1,4 +1,7 @@
-// Ported from mikroview's internal/auth/password_test.go, unchanged.
+// Partly ported from mikroview's internal/auth/password_test.go: the
+// round-trip, unique-salt and malformed-hash tests are mikroview's.
+// TestHashPasswordUsesTheProductionCost and
+// TestVerifyPasswordRejectsOutOfRangeStoredHash (#12) were written here.
 
 package gauntlet
 

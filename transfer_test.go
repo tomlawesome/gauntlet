@@ -110,7 +110,7 @@ func TestTransferRejections(t *testing.T) {
 // restart before the next good write would leave the deployment with
 // the wrong admin -- or, briefly, two.
 func TestTransferAdminLeavesRolesUnchangedWhenPersistFails(t *testing.T) {
-	// Register and CreateUser below each persist too (createLocked
+	// Register and CreateUser below each persist too (createAccount
 	// persists as well), so the fixture needs a backend that saves
 	// twice before failing, not one that fails outright.
 	s, err := OpenStore(&saveBudgetBackend{left: 2}, Options{})

@@ -182,13 +182,9 @@ func TestLinkOIDCIdentityClearsAPendingEnrolmentToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser bob: %v", err)
 	}
-	// A pending (unconfirmed) secret, set directly -- the real entry
-	// point (SetPendingTOTPSecret) is a later slice.
-	if err := s.mutate(func(st *storeState) error {
-		st.byID[bob.ID].TOTPSecret = testTOTPSecret
-		return nil
-	}); err != nil {
-		t.Fatalf("persisting pending secret fixture: %v", err)
+	// A pending (unconfirmed) secret, through the real entry point.
+	if err := s.SetPendingTOTPSecret(bob.ID, testTOTPSecret); err != nil {
+		t.Fatalf("SetPendingTOTPSecret: %v", err)
 	}
 
 	if err := s.LinkOIDCIdentity(bob.ID, "https://idp.example", "sub-1", now); err != nil {

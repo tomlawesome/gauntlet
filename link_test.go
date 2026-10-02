@@ -226,7 +226,7 @@ func TestALinkedNonAdminIsNotLocallyRecoverable(t *testing.T) {
 // (which linking replaced with an unmatchable hash) has already stopped
 // working for the operator.
 func TestLinkOIDCIdentityLeavesThePasswordWorkingWhenPersistFails(t *testing.T) {
-	// Register and CreateUser below each persist too (createLocked
+	// Register and CreateUser below each persist too (createAccount
 	// persists as well), so the fixture needs a backend that saves
 	// twice before failing, not one that fails outright. bob must be a
 	// non-admin: linking keeps the admin's password unconditionally

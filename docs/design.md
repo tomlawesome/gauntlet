@@ -317,7 +317,11 @@ lockout is written to the account (`User.LoginLockedUntil`) so it
 survives a restart, but only as it begins and as it clears: one save per
 lockout episode, not one per wrong guess. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
-30 seconds (#24). A new password or reset code ends the lockout, and
+30 seconds (#24). A clear whose save fails -- the owner signed in and
+ended a lockout the record still holds -- is retried the same way, but
+that retry lives only in memory: a restart before it succeeds reloads
+the record's lockout, and the owner waits it out (at most one window)
+or resets the password (#28). A new password or reset code ends the lockout, and
 guesses from before it stop counting (#24); linking the admin to SSO,
 which ends its sessions but keeps its password, does not. The reset
 account also gets past the per-address limit (#32; owner, 2026-10-01:

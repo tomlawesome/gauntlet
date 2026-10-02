@@ -483,6 +483,13 @@ func (l *LoginLimiter) releaseIn(m map[string][]time.Time, key string, now time.
 // other failed clear is dropped: the record then holds a lockout that
 // has ended, and the next attempt clears it again (ReserveAccount's
 // wasPersisted case).
+//
+// That pending clear lives only in this process's memory. A restart
+// before a retry saves it loses it, and the new process enforces the
+// lockout still on the record until it ends (at most one window) or a
+// password change clears it (#28). Nothing durable says the owner
+// signed in: recording that would itself be a save, and saves are what
+// failed.
 func (l *LoginLimiter) syncLockout(lockouts AccountLockouts, accountID string, now time.Time) {
 	l.persistMu.Lock()
 	defer l.persistMu.Unlock()

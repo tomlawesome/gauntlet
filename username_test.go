@@ -62,7 +62,7 @@ func TestValidateUsernameAcceptsRealNames(t *testing.T) {
 	}
 }
 
-// Every locally-created account funnels through createLocked, so both
+// Every locally-created account funnels through createAccount, so both
 // entry points inherit the check.
 func TestRegisterAndCreateUserRejectAHostileUsername(t *testing.T) {
 	s := openTestStore(t)
