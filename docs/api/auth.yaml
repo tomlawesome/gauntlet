@@ -1240,18 +1240,33 @@ paths:
   /api/auth/users/{id}/unlock:
     post:
       operationId: unlockUser
-      summary: Lift another account's disabled sign-in or lockout (admin)
+      summary: Lift an account's disabled sign-in or lockout (admin)
       description: |
         Lifts a disabled sign-in (fifty failed sign-ins in a row, #44),
         ends any login lockout and clears the count of lockouts, so the
         account signs in as one that never failed, with the password and
         second factor it already has. Nothing else changes. Answers `200`
-        whether or not anything was lifted. Refused for the caller's own
-        account: an admin whose own sign-in is disabled uses the unlock
-        code in the server's log (`POST /api/auth/unlock`). Takes no body.
+        whether or not anything was lifted.
+
+        Another account's unlock takes no body. The caller's own takes
+        `UnlockSelfRequest`: an admin whose sign-in is disabled but who
+        still holds a session must enter their password and a current
+        second factor (an authenticator-app code or a recovery code)
+        again; the session alone is not enough. Either missing is `400`;
+        either wrong is `401` and counts against the account's
+        password re-check budget (`429` once it is spent), and nothing
+        is unlocked. An admin with no session left uses the unlock code
+        in the server's log (`POST /api/auth/unlock`).
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: false
+        description: Only for the caller's own account.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnlockSelfRequest"
       responses:
         "200":
           description: Unlocked, or there was nothing to lift.
@@ -1278,12 +1293,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NoSuchUser"
-        "409":
-          description: The account is the caller's own.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1700,6 +1711,17 @@ components:
         unlockCode:
           type: string
           description: The one-time code from the server's log, with or without dashes, in either case.
+    UnlockSelfRequest:
+      type: object
+      additionalProperties: false
+      required: [password, code]
+      properties:
+        password:
+          type: string
+          description: The caller's current password.
+        code:
+          type: string
+          description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here).
     PasswordRequest:
       type: object
       additionalProperties: false

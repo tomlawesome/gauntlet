@@ -385,8 +385,12 @@ Unlocking (#44). An admin lifts another account's disable, lockout and
 count with `POST /api/auth/users/{id}/unlock`, through
 `LoginLimiter.UnlockLogin`, which also drops the limiter's own count of
 the window's guesses and any lockout decision it has yet to save;
-`Store.UnlockLogin` alone is for a process with no limiter. The admin's
-own account is refused there (409). When the store opens with the
+`Store.UnlockLogin` alone is for a process with no limiter. An admin
+whose own sign-in is disabled but who still holds a session may unlock
+it on the same route only by entering their password and a current
+second factor (a TOTP or recovery code) again, each checked on the
+account's password re-check budget (`ReserveRecheck`); the session
+alone is not enough (owner, 2026-10-02). When the store opens with the
 admin disabled and no admin left who could unlock it, it makes a
 one-time unlock code and announces it (`Options.OnUnlockCode`, else one
 Warn line on `Options.Log`), with the setup code's shape: 80 bits, only

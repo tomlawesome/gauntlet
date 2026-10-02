@@ -109,7 +109,8 @@ func unlockUser(t *testing.T, client *http.Client, ts *httptest.Server, id strin
 
 // The admin unlocks a disabled account: 200, and its owner signs in with
 // the password they already had. Again with nothing to lift is still
-// 200. An unknown account is 404, the admin's own 409.
+// 200. An unknown account is 404; the admin's own, with no password and
+// code (unlock_self_test.go), 400.
 func TestAdminUnlocksADisabledAccount(t *testing.T) {
 	g, ts, admin := totpFixture(t)
 	id := totpBobID(t, g)
@@ -133,8 +134,8 @@ func TestAdminUnlocksADisabledAccount(t *testing.T) {
 		t.Errorf("unlocking an unknown account = %d, want 404", status)
 	}
 	adminUser, _ := g.deps.Users.ByUsername("admin")
-	if status, _ = unlockUser(t, admin, ts, adminUser.ID); status != http.StatusConflict {
-		t.Errorf("the admin unlocking their own account = %d, want 409", status)
+	if status, _ = unlockUser(t, admin, ts, adminUser.ID); status != http.StatusBadRequest {
+		t.Errorf("the admin unlocking their own account with no password or code = %d, want 400", status)
 	}
 }
 

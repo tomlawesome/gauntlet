@@ -111,3 +111,43 @@ func (g *Gate) recheckPassword(w http.ResponseWriter, user *gauntlet.User, passw
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 	return current, true
 }
+
+// recheckSecondFactor is recheckPassword for a signed-in caller's
+// second factor: code is a current TOTP code or one of the account's
+// recovery codes, checked the way the login factor step checks them
+// (handleLoginFactor) -- VerifyAndRecordTOTP first, so the code cannot
+// be replayed, then BurnRecoveryCode, which spends a recovery code that
+// matches. A passkey has no code to type, so an account holding only
+// passkeys answers with a recovery code.
+//
+// Throttled on the same per-account re-check budget as recheckPassword,
+// reserve-then-release: a wrong code keeps its reservation and counts
+// as a failed re-check, a right one hands it back. A code that could not
+// be recorded is the backend failing, not a wrong guess, and hands it
+// back too, as the login factor step does. Call it only after
+// recheckPassword has passed, so a recovery code is never spent on a
+// request whose password was wrong.
+//
+// Writes the 429, 500 or the 401 carrying wrongMsg itself.
+func (g *Gate) recheckSecondFactor(w http.ResponseWriter, user *gauntlet.User, code, wrongMsg string, now time.Time) bool {
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return false
+	}
+	matched, err := g.deps.Users.VerifyAndRecordTOTP(user.ID, code, now)
+	if err == nil && !matched {
+		matched, err = g.deps.Users.BurnRecoveryCode(user.ID, code, now)
+	}
+	if err != nil {
+		g.deps.Limiter.ReleaseRecheck(user.ID, now)
+		g.logError("re-checking the second factor of " + user.Username + ": " + err.Error())
+		http.Error(w, "unable to check the code", http.StatusInternalServerError)
+		return false
+	}
+	if !matched {
+		writeUnauthorized(w, wrongMsg)
+		return false
+	}
+	g.deps.Limiter.ReleaseRecheck(user.ID, now)
+	return true
+}

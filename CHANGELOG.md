@@ -29,8 +29,12 @@ All notable changes to this project are documented in this file.
 - Ways to unlock a sign-in disabled after 50 failures in a row (#44).
   `POST /api/auth/users/{id}/unlock` lets an admin lift another
   account's disable, lockout and count of lockouts; it answers 200
-  whether or not anything was locked and refuses the admin's own
-  account. It calls the new `LoginLimiter.UnlockLogin`, which also
+  whether or not anything was locked. On the admin's own account, from
+  a session they still hold, it takes a body with their password and a
+  current TOTP or recovery code (`UnlockSelfRequest`): 400 without
+  them, 401 for a wrong one, each counted on the account's password
+  re-check budget (429 once spent); the session alone unlocks nothing.
+  It calls the new `LoginLimiter.UnlockLogin`, which also
   clears the limiter's own count of recent guesses; applications with
   their own unlock path should call it rather than `Store.UnlockLogin`.
   When the store opens with the admin disabled and no admin left who
