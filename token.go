@@ -16,6 +16,7 @@
 package gauntlet
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -182,6 +183,20 @@ type TokenStore struct {
 	// the same name for why it is not guarded by mu.
 	reloadMu       sync.Mutex
 	reloadInFlight chan struct{}
+
+	// refusedVersion is the last document version reloadIfStale refused
+	// to apply (see checkDocumentVersion), so it is logged once rather
+	// than on every request -- Store's fields of the same name, guarded
+	// by mu the same way.
+	refusedVersion    int64
+	hasRefusedVersion bool
+
+	// removalLogged is set once a write has met ErrDocumentRemoved and
+	// logged it, so a removed document is reported once per removal
+	// rather than on every write (#39). Cleared whenever this store
+	// installs a document again -- a save or a reload -- so a restore
+	// followed by a second removal is logged afresh. Guarded by mu.
+	removalLogged bool
 }
 
 // tokenState is the in-memory index over the tokens document. It is
@@ -243,9 +258,43 @@ func (st *tokenState) tokens() []*Token {
 	return list
 }
 
+// tokenFile is the on-disk shape since #29: an object carrying the
+// format version (tokensDocumentVersion) and the token list. v0.1.0
+// wrote the bare list; parseTokens reads it as version 1, and the next
+// save writes it in this shape.
+type tokenFile struct {
+	Version int      `json:"version"`
+	Tokens  []*Token `json:"tokens"`
+}
+
 // encodeTokens is the state as the document is saved.
 func encodeTokens(st *tokenState) ([]byte, error) {
-	return json.MarshalIndent(st.tokens(), "", "  ")
+	return json.MarshalIndent(tokenFile{Version: tokensDocumentVersion, Tokens: st.tokens()}, "", "  ")
+}
+
+// parseTokens parses a stored tokens document in either shape: v0.1.0's
+// bare list, or a tokenFile, refusing one newer than this build reads
+// (see checkDocumentVersion) before parsing the rest of it.
+func parseTokens(data []byte) ([]*Token, error) {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		var list []*Token
+		if err := json.Unmarshal(data, &list); err != nil {
+			return nil, err
+		}
+		return list, nil
+	}
+	version, err := documentVersion(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkDocumentVersion("API tokens", version, tokensDocumentVersion); err != nil {
+		return nil, err
+	}
+	var file tokenFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, err
+	}
+	return file.Tokens, nil
 }
 
 // indexTokens builds the state for a document's token list, leaving a
@@ -278,8 +327,8 @@ func (s *TokenStore) indexTokens(list []*Token) *tokenState {
 
 // decodeTokens is the document as it is opened.
 func (s *TokenStore) decodeTokens(data []byte) (*tokenState, error) {
-	var list []*Token
-	if err := json.Unmarshal(data, &list); err != nil {
+	list, err := parseTokens(data)
+	if err != nil {
 		return nil, err
 	}
 	return s.indexTokens(list), nil
@@ -316,11 +365,30 @@ func (s *TokenStore) mutateLocked(op func(*tokenState) error) error {
 		next.recordSaved()
 		s.tokenState = *next
 		s.version = version
+		s.refusedVersion, s.hasRefusedVersion = 0, false
+		s.removalLogged = false
 	}
 	if errors.Is(err, errNoChange) {
 		return nil
 	}
+	if errors.Is(err, ErrDocumentRemoved) {
+		s.logRemovalLocked()
+	}
 	return err
+}
+
+// logRemovalLocked tells the operator, once per removal, that the
+// document this store loaded is gone and why every write now fails.
+// The store never recreates it (see ErrDocumentRemoved); reads carry on
+// from memory.
+func (s *TokenStore) logRemovalLocked() {
+	if s.removalLogged {
+		return
+	}
+	s.removalLogged = true
+	if s.log != nil {
+		s.log.Error(fmt.Sprintf("API tokens store (%s) has been removed since this process loaded it; writes are refused until it is restored or the process restarts", s.backend.Describe()))
+	}
 }
 
 // mutateBestEffortLocked is mutateLocked for a write not worth failing
@@ -335,7 +403,9 @@ func (s *TokenStore) mutateBestEffortLocked(op func(*tokenState) error) {
 	if opErr := op(&s.tokenState); opErr != nil {
 		return
 	}
-	if s.log != nil {
+	// A removed document has already been reported, once, by
+	// logRemovalLocked; a line per login on top of it is noise.
+	if s.log != nil && !errors.Is(err, ErrDocumentRemoved) {
 		s.log.Error(fmt.Sprintf("%v -- this change exists only in memory and will be lost on restart", err))
 	}
 }
@@ -407,11 +477,11 @@ func (s *TokenStore) Persisted() bool {
 // The same three bounds apply: a deadline (reloadTimeout), one check
 // in flight at a time with later callers joining it, and the cheap
 // Version question first where the backend can answer it. Every
-// failure is silent and keeps what is in memory. The one thing Store's
-// version has that this one does not is the refused-document
-// bookkeeping: there is no admin rule for tokens, so a document that
-// decodes is applied, and one that does not is kept out silently, as
-// Store does for an unparseable one.
+// failure is silent and keeps what is in memory. There is no admin rule
+// for tokens, so the one document refused rather than skipped is a
+// newer one (see checkDocumentVersion): it is logged once, as Store
+// logs a refused document, and one that does not parse is kept out
+// silently, as Store does for an unparseable one.
 func (s *TokenStore) reloadIfStale() {
 	if s.backend == nil {
 		return
@@ -443,8 +513,9 @@ func (s *TokenStore) reloadIfStale() {
 		}
 		s.mu.RLock()
 		stale := version != s.version
+		refused := s.hasRefusedVersion && version == s.refusedVersion
 		s.mu.RUnlock()
-		if !stale {
+		if !stale || refused {
 			return
 		}
 	}
@@ -460,7 +531,22 @@ func (s *TokenStore) reloadIfStale() {
 	if err != nil || !snap.Exists || snap.Version == beforeLoad {
 		return
 	}
+	s.mu.RLock()
+	alreadyRefused := s.hasRefusedVersion && snap.Version == s.refusedVersion
+	s.mu.RUnlock()
+	if alreadyRefused {
+		return
+	}
 	st, err := s.decodeTokens(snap.Payload)
+	if errors.Is(err, errNewerDocument) {
+		s.mu.Lock()
+		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
+		s.mu.Unlock()
+		if s.log != nil {
+			s.log.Error(fmt.Sprintf("API tokens store (%s) was changed by another process and is not being applied: %v", s.backend.Describe(), err))
+		}
+		return
+	}
 	if err != nil {
 		return
 	}
@@ -472,6 +558,8 @@ func (s *TokenStore) reloadIfStale() {
 	}
 	s.tokenState = *st
 	s.version = snap.Version
+	s.refusedVersion, s.hasRefusedVersion = 0, false
+	s.removalLogged = false
 }
 
 // hashTokenValue is the one place a raw token value is ever hashed --

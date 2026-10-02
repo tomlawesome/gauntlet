@@ -703,11 +703,13 @@ func TestTokenOrderIsDeterministicOnEqualCreatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var saved []Token
+	var saved struct {
+		Tokens []Token `json:"tokens"`
+	}
 	if err := json.Unmarshal(snap.Payload, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if got := ids(saved); got != want {
+	if got := ids(saved.Tokens); got != want {
 		t.Errorf("persisted order differs from List:\nList  %s\nsaved %s", want, got)
 	}
 }

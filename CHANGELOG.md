@@ -24,6 +24,40 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The first admin is created only with a one-time setup code the server
+  announces when it starts with no accounts (#37, ADR-0003; owner,
+  2026-10-01). An empty store is not only a fresh install -- a deleted
+  accounts file, a wrong path or a bad restore all start a server with
+  none -- and until now the first visitor took admin. The store makes an
+  80-bit code, keeps only its hash in memory, and hands it to the new
+  `Options.OnSetupCode` or, when that is nil, writes it as one `Warn`
+  line on `Options.Log`; `POST /api/auth/register` now needs it as
+  `setupCode` (`401` when wrong, counted against the address by the
+  login limiter, `429` at the limit) and checks it before hashing the
+  password. It is used up once any account exists and dies with the
+  process: a lost code means restart and read the log. SSO can no
+  longer create the first account: the two `/api/auth/oidc/*` routes
+  answer `503` "setup required" like everything else until the first
+  admin exists, and `FindOrCreateOIDCUser` refuses on an empty store
+  with the new `ErrSetupRequired`. The first admin is local and links
+  SSO afterwards. New: `Store.CheckSetupCode`, `ErrSetupCodeInvalid`,
+  `SetupCodeHandler` and its `SetupCodeFunc` adapter;
+  `Store.Register` is unchanged and is the host-side primitive gate
+  calls after the check. A frontend's first-run screen collects the
+  code and hides the SSO button while `setupRequired` is true.
+- Both stored documents now carry a top-level `version`, and the tokens
+  document is an object, `{"version": 1, "tokens": [...]}`, instead of
+  a bare list (#29, ADR-0002 decision 1). Documents written by v0.1.0
+  open unchanged, as version 1, and are written in the new shape on
+  their next save; v0.1.0 cannot open a tokens document once this
+  version has saved it, so keep a copy before upgrading if a rollback
+  is possible. A document with a version newer than the running build
+  reads is refused at startup with an error naming both versions, is
+  not applied (and is logged once) when it appears under a running
+  server, and is never saved over by a write -- so a rolled-back build
+  cannot load it and silently drop what only the newer build knows,
+  such as TOTP secrets or passkeys. There is no migration code yet; it
+  is added with the first format change that needs one.
 - A write from the CLI and one from the running server at the same
   moment no longer lose one of them (issue #21). Before, the second
   save to land wrote its whole accounts or tokens document on top of
@@ -63,7 +97,11 @@ All notable changes to this project are documented in this file.
   instead of recreating the file from that one write, which for an
   accounts file could mean a file with no admin that the next start
   refuses. The single-admin rule is checked on every save as well as
-  every load, so no write can produce such a file.
+  every load, so no write can produce such a file. The first such
+  failure after each removal logs one error naming the store and file
+  and saying writes are refused until the file is restored or the
+  process restarts; reads carry on from memory (#39). To recover,
+  put the file back, or restart to start afresh.
 - `VerifyAndRecordTOTP` and `RecordPasskeyAssertionIfFresh` report a
   code or assertion as accepted only when the counter that stops it
   being used again was saved. Before, a matching TOTP code was
@@ -71,7 +109,17 @@ All notable changes to this project are documented in this file.
   left the same code good for a second login; now it is refused with
   the error, the stance reset codes and recovery codes already take.
   A caller that granted the login on `ok` despite an error no longer
-  sees that combination.
+  sees that combination. The one exception is a passkey that has
+  never counted and presents 0 (most platform passkeys): that save
+  protects nothing, since the app's single-use challenge is what stops
+  a replay, so it is best-effort like `LastLogin` -- if it fails, the
+  login is accepted, the last-used time is kept in memory and the
+  failure is logged (#36). The app must claim that challenge before
+  calling.
+- `RecordPasskeyAssertionIfFresh` refuses a passkey whose stored count
+  is above zero and that now presents 0, as the WebAuthn spec treats
+  it: a possible cloned authenticator (#36). Before, any count of 0 was
+  accepted.
 - Persistence errors from store writes no longer carry the
   `saving accounts:` / `saving API tokens:` prefix; they name the store
   and backend themselves, and `errors.Is` against the package's errors
@@ -156,6 +204,21 @@ All notable changes to this project are documented in this file.
 - `docs/api/auth.yaml` now says a token's kind is whatever the
   application registered (`api` and `ingest` by default), not only
   `api` or `ingest` (#26).
+- An account locked out by wrong passwords and then reset -- from the
+  command line (`SetPassword`) or with a reset code -- can sign in from
+  the address the wrong guesses came from straight away. Before, the
+  lockout ended but the per-address limit still answered 429 for up to
+  five minutes, which read as the reset having failed (#32). Only that
+  account gets past the address limit, only when both the address and
+  the account itself reached their limits before the reset, one attempt
+  at a time, and only until its sign-in finishes or a guess fails. For
+  an account with a second factor the right password spends the pass
+  and the code step that follows is let through on the same sign-in, so
+  a guess sent in between cannot take it. Other accounts tried
+  from that address are still refused, and so is an account that was
+  never locked out and only changed its own password. New
+  `LoginLimiter.AllowAfterReset`, `ReleaseAfterReset` and
+  `EndAfterReset` carry this.
 
 ## [0.1.0] - 2026-09-30
 

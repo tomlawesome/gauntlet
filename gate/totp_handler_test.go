@@ -547,10 +547,7 @@ func (b *budgetBackend) Describe() string { return "budget test backend" }
 func TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail(t *testing.T) {
 	g := newTestGate(t)
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
-	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	users := openTrackedStore(t, backend)
 	g.deps.Users = users
 	ts := newTestServer(t, g)
 	admin := registerAdmin(t, ts, "admin", "password123")
@@ -595,10 +592,7 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 	c := newContractChecker(t)
 	g := newTestGate(t)
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
-	users, err := gauntlet.OpenStore(backend, gauntlet.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	users := openTrackedStore(t, backend)
 	g.deps.Users = users
 	ts := newTestServer(t, g)
 	admin := registerAdmin(t, ts, "admin", "password123")

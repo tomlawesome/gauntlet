@@ -17,9 +17,9 @@ info:
     the responses below include the ones `Protect` itself writes before a
     handler runs:
 
-    - `503` "setup required" on every route except `GET /api/auth/session`,
-      `POST /api/auth/register` and the two `GET /api/auth/oidc/*` routes
-      while no account exists yet.
+    - `503` "setup required" on every route except `GET /api/auth/session`
+      and `POST /api/auth/register` while no account exists yet. The SSO
+      routes are not exempt: the first account is never an SSO one.
     - `403` "missing required header" on every `POST` and `DELETE` without
       the `X-Requested-With` header carrying the application's configured
       value.
@@ -84,8 +84,13 @@ paths:
       summary: Create the first account
       description: |
         Creates the first (and only self-service) account, always as admin,
-        and sets the session cookie. Refused once any account exists.
-        Reachable while no account exists; still needs the CSRF header.
+        and sets the session cookie. Needs the one-time setup code the
+        server wrote to its log when it started with no accounts (#37):
+        a wrong or missing code is `401`, counted against the client
+        address by the login limiter (`429` at the limit), and nothing is
+        created. The code is typed with or without its dashes, in either
+        case. Refused once any account exists. Reachable while no account
+        exists; still needs the CSRF header.
       security:
         - {}
       parameters:
@@ -95,7 +100,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/Credentials"
+              $ref: "#/components/schemas/SetupCredentials"
       responses:
         "201":
           description: Account created and signed in; sets the session cookie.
@@ -105,6 +110,18 @@ paths:
                 $ref: "#/components/schemas/Account"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          description: The setup code is wrong or missing; the current one is in the server's log.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
         "403":
           $ref: "#/components/responses/CSRFRefused"
         "409":
@@ -113,6 +130,8 @@ paths:
             text/plain:
               schema:
                 $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -128,7 +147,10 @@ paths:
       summary: Sign in with username and password
       description: |
         Rate-limited per client address and per account; only a success
-        releases the attempt. On an account with no second factor this
+        releases the attempt. An account whose password was reset after
+        its address reached the limit gets past that address limit (not
+        its own) until its next sign-in finishes or a guess fails (#32).
+        On an account with no second factor this
         signs in and sets the session cookie. On an account holding one it
         does not: it sets a short-lived pending-login cookie and names the
         factors to ask for next, and `POST /api/auth/login/factor` finishes
@@ -1062,7 +1084,7 @@ components:
           schema:
             $ref: "#/components/schemas/TextError"
     SetupRequired:
-      description: No account exists yet; only the session, register and SSO routes are reachable.
+      description: No account exists yet; only the session and register routes are reachable.
       content:
         text/plain:
           schema:
@@ -1097,6 +1119,18 @@ components:
           type: string
         password:
           type: string
+    SetupCredentials:
+      type: object
+      additionalProperties: false
+      required: [username, password, setupCode]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        setupCode:
+          type: string
+          description: The one-time code from the server's log, with or without dashes, in either case.
     PasswordRequest:
       type: object
       additionalProperties: false
@@ -1146,7 +1180,7 @@ components:
       properties:
         setupRequired:
           type: boolean
-          description: No account exists yet; show first-run registration.
+          description: No account exists yet; show first-run registration, which asks for the setup code from the server's log, and hide the SSO button (SSO cannot create the first account).
         ssoAvailable:
           type: boolean
         authenticated:

@@ -301,19 +301,31 @@ func (s *Store) DeletePasskey(userID string, credID []byte) (Passkey, error) {
 // both won a session.
 //
 // SignCount is forward-only, the same stance VerifyAndRecordTOTP
-// (totp.go) takes for its counter: a value at or below what's already
-// stored is a no-op on the count, not an error, since many platform
-// authenticators always report 0 and that must never be treated as a
-// regression. LastUsedAt is set to now unconditionally, even on a
-// 0-to-0 call, so the passkey list can show "last used" for an
+// (totp.go) takes for its counter. LastUsedAt is set to now on every
+// accepted login, so the passkey list can show "last used" for an
 // authenticator that never advances its counter at all.
 //
-// accepted is false when signCount is not fresh: nonzero and at or
-// below what's already stored -- the sign-count regression that flags
-// a possible cloned authenticator (docs/design.md §4, "Second
-// factors"). Zero is exempt: an authenticator that always reports 0
-// must not be locked out after its first login, so its logins carry no
-// counter-based replay protection here.
+// accepted is false when signCount is not fresh: at or below what's
+// already stored, and not the 0-to-0 case below. That includes a
+// passkey that has counted and now reports 0, which the WebAuthn spec
+// treats like any other regression: a possible cloned authenticator
+// (docs/design.md §4, "Second factors"). Nothing is saved for a
+// refused assertion.
+//
+// Zero is exempt only while the passkey has never counted: an
+// authenticator that always reports 0 (most platform passkeys) has a
+// stored count of 0 and presents 0 every time, and must not be locked
+// out after its first login. Such a login carries no counter-based
+// replay protection here, so the caller must have claimed its
+// single-use WebAuthn challenge before calling this: for these
+// passkeys that claim is the whole replay defence.
+//
+// A login is accepted only once its record is saved -- the saved count
+// is what refuses a replay of 0 -> 5 or 5 -> 6 -- except in that 0-to-0
+// case, where the save protects nothing. There it is best-effort, like
+// LastLogin in Authenticate: a save that fails is logged through
+// Options.Log, LastUsedAt is kept in memory, and the login is accepted
+// with a nil error. accepted is never true alongside an error.
 //
 // The caller is expected to have already verified the assertion's
 // signature (an application's own WebAuthn wiring, G8) before calling
@@ -326,9 +338,11 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 
 	// Freshness is decided inside the op, against the count in the
 	// document being saved: a replay after another process recorded the
-	// same assertion must see the advanced count and refuse it.
-	err = s.mutate(func(st *storeState) error {
-		accepted = false
+	// same assertion must see the advanced count and refuse it. So is
+	// whether the save matters (bestEffort), for the same reason.
+	var bestEffort bool
+	op := func(st *storeState) error {
+		accepted, bestEffort = false, false
 		u, ok := st.byID[userID]
 		if !ok {
 			return ErrUserNotFound
@@ -338,17 +352,32 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 			return ErrPasskeyNotFound
 		}
 		stored := u.Passkeys[idx].SignCount
-		if signCount != 0 && signCount <= stored {
+		bothZero := stored == 0 && signCount == 0
+		if signCount <= stored && !bothZero {
 			return errNoChange
 		}
-		// In place: the account the op is handed is mutate's deep copy.
-		if signCount > stored {
-			u.Passkeys[idx].SignCount = signCount
-		}
+		// In place: the account the op is handed is mutate's deep copy,
+		// or the live state on the best-effort path below.
+		u.Passkeys[idx].SignCount = signCount
 		u.Passkeys[idx].LastUsedAt = now
-		accepted = true
+		accepted, bestEffort = true, bothZero
 		return nil
-	})
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err = s.mutateLocked(op)
+	if err != nil && bestEffort {
+		// The last run decided 0-to-0 and only the save failed. Decide
+		// again against the live state, as mutateBestEffortLocked does,
+		// and keep the change there if it is still 0-to-0.
+		if opErr := op(&s.storeState); opErr == nil && bestEffort {
+			if s.log != nil && !errors.Is(err, ErrDocumentRemoved) { // reported once already
+				s.log.Error(fmt.Sprintf("%v -- this passkey's last-used time exists only in memory and will be lost on restart", err))
+			}
+			return true, nil
+		}
+	}
 	if err != nil {
 		// Same as VerifyAndRecordTOTP: accepted may be true from a run
 		// the loop threw away, so it counts only when mutate saved.

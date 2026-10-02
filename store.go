@@ -111,9 +111,31 @@ type oidcKey struct {
 	subject string
 }
 
-// storeFile is the on-disk shape: an object wrapping the user list.
+// storeFile is the on-disk shape: an object wrapping the user list,
+// with the format version (accountsDocumentVersion) alongside it since
+// #29. A v0.1.0 document has no version; it reads as 0, loads as
+// version 1, and is written with the version on its next save.
 type storeFile struct {
-	Users []*User `json:"users"`
+	Version int     `json:"version"`
+	Users   []*User `json:"users"`
+}
+
+// parseAccounts parses a stored accounts document, refusing one newer
+// than this build reads (see checkDocumentVersion) before parsing the
+// rest of it.
+func parseAccounts(data []byte) (storeFile, error) {
+	version, err := documentVersion(data)
+	if err != nil {
+		return storeFile{}, err
+	}
+	if err := checkDocumentVersion("accounts", version, accountsDocumentVersion); err != nil {
+		return storeFile{}, err
+	}
+	var file storeFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return storeFile{}, err
+	}
+	return file, nil
 }
 
 // checkAdmins refuses a document with more than one admin, and refuses
@@ -161,6 +183,18 @@ type Options struct {
 	// that this store refuses to apply -- see reloadIfStale. nil
 	// discards both.
 	Log *slog.Logger
+	// OnSetupCode receives the one-time setup code that creates the
+	// first admin (CheckSetupCode), in its display form, whenever a
+	// persisted store finds itself with no accounts: once at OpenStore,
+	// and again if a reload applies a document with none. When nil the
+	// code goes to Log instead, as one Warn line. Set it to print the
+	// code the application's own way -- as a link to the first-run
+	// screen, say -- or to one that does nothing in a CLI that opens the
+	// store for one command and should not announce a code of its own
+	// (SetupCodeFunc adapts a plain function). Called outside the
+	// store's lock, but before OpenStore returns, so it must not depend
+	// on the returned *Store.
+	OnSetupCode SetupCodeHandler
 }
 
 // Store persists user accounts through a persist.Backend -- an
@@ -196,7 +230,7 @@ type Store struct {
 	reloadInFlight chan struct{}
 
 	// refusedVersion is the last document version reloadIfStale refused
-	// to apply (see checkAdmins), so a refused document is logged once
+	// to apply (see checkAdmins and checkDocumentVersion), so a refused document is logged once
 	// rather than on every request until someone fixes it, and so
 	// registrationOpenGuard can keep registration closed while it holds.
 	// Only reloadIfStale writes it, and only one of those runs at a time,
@@ -204,6 +238,22 @@ type Store struct {
 	// through mu like byID/byName/version above.
 	refusedVersion    int64
 	hasRefusedVersion bool
+
+	// removalLogged is set once a write has met ErrDocumentRemoved and
+	// logged it, so a removed document is reported once per removal
+	// rather than on every write (#39). Cleared whenever this store
+	// installs a document again -- a save or a reload -- so a restore
+	// followed by a second removal is logged afresh. Guarded by mu.
+	removalLogged bool
+
+	// setupCodeHash is the SHA-256 of the one-time code that creates the
+	// first admin (setupcode.go), nil when none is outstanding. Issued
+	// under mu when the store is found empty -- at open, or on a reload
+	// that applies an emptied document -- and retired the moment an
+	// account exists, in this process (createLocked) or another
+	// (reloadIfStale). Memory only: never part of the document.
+	setupCodeHash []byte
+	onSetupCode   SetupCodeHandler
 }
 
 // storeState is the in-memory index over the accounts document: the
@@ -291,14 +341,14 @@ func (st *storeState) recordSaved() {
 
 // encodeAccounts is the state as the document is saved.
 func encodeAccounts(st *storeState) ([]byte, error) {
-	return json.MarshalIndent(storeFile{Users: st.users()}, "", "  ")
+	return json.MarshalIndent(storeFile{Version: accountsDocumentVersion, Users: st.users()}, "", "  ")
 }
 
 // decodeAccounts is the document as it is opened: parsed and checked
-// (checkAdmins) before it becomes a state.
+// (parseAccounts, checkAdmins) before it becomes a state.
 func decodeAccounts(data []byte) (*storeState, error) {
-	var file storeFile
-	if err := json.Unmarshal(data, &file); err != nil {
+	file, err := parseAccounts(data)
+	if err != nil {
 		return nil, err
 	}
 	if err := file.checkAdmins(); err != nil {
@@ -358,11 +408,29 @@ func (s *Store) mutateLocked(op func(*storeState) error) error {
 		// The document out there is now one this process holds: an
 		// earlier refusal no longer describes it (same as applyLoaded).
 		s.refusedVersion, s.hasRefusedVersion = 0, false
+		s.removalLogged = false
 	}
 	if errors.Is(err, errNoChange) {
 		return nil
 	}
+	if errors.Is(err, ErrDocumentRemoved) {
+		s.logRemovalLocked()
+	}
 	return err
+}
+
+// logRemovalLocked tells the operator, once per removal, that the
+// document this store loaded is gone and why every write now fails.
+// The store never recreates it (see ErrDocumentRemoved); reads carry on
+// from memory.
+func (s *Store) logRemovalLocked() {
+	if s.removalLogged {
+		return
+	}
+	s.removalLogged = true
+	if s.log != nil {
+		s.log.Error(fmt.Sprintf("accounts store (%s) has been removed since this process loaded it; writes are refused until it is restored or the process restarts", s.backend.Describe()))
+	}
 }
 
 // mutateBestEffortLocked is mutateLocked for a write not worth failing
@@ -385,7 +453,9 @@ func (s *Store) mutateBestEffortLocked(op func(*storeState) error) {
 	if opErr := op(&s.storeState); opErr != nil {
 		return
 	}
-	if s.log != nil {
+	// A removed document has already been reported, once, by
+	// logRemovalLocked; a line per login on top of it is noise.
+	if s.log != nil && !errors.Is(err, ErrDocumentRemoved) {
 		s.log.Error(fmt.Sprintf("%v -- this change exists only in memory and will be lost on restart", err))
 	}
 }
@@ -432,14 +502,15 @@ var saveTimeout = 5 * time.Second
 // next. See persist.Open.
 func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	s := &Store{
-		backend:    b,
-		log:        opts.Log,
-		storeState: indexUsers(storeFile{}),
+		backend:     b,
+		log:         opts.Log,
+		onSetupCode: opts.OnSetupCode,
+		storeState:  indexUsers(storeFile{}),
 	}
 
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
-		var file storeFile
-		if err := json.Unmarshal(data, &file); err != nil {
+		file, err := parseAccounts(data)
+		if err != nil {
 			return err
 		}
 		if err := file.checkAdmins(); err != nil {
@@ -458,6 +529,12 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	if existed {
 		s.version = version
 	}
+	// No lock contention is possible yet; taken anyway so the issuing
+	// rule reads the same way here as on a reload.
+	s.mu.Lock()
+	code := s.issueSetupCodeLocked()
+	s.mu.Unlock()
+	s.announceSetupCode(code)
 	return s, nil
 }
 
@@ -471,6 +548,7 @@ func (s *Store) applyLoaded(file storeFile, version int64) {
 	// on disk: this document was just accepted, so any earlier refusal
 	// no longer describes what's out there.
 	s.refusedVersion, s.hasRefusedVersion = 0, false
+	s.removalLogged = false
 }
 
 // reloadIfStale re-reads the document if the backend has moved on since
@@ -558,18 +636,23 @@ func (s *Store) reloadIfStale() {
 		return
 	}
 
-	var file storeFile
-	if err := json.Unmarshal(snap.Payload, &file); err != nil {
+	// A document that does not parse is skipped silently, as a read
+	// failure is. One that parses but is refused -- newer than this
+	// build reads, or breaking the admin rule -- is different.
+	file, err := parseAccounts(snap.Payload)
+	if err == nil {
+		err = file.checkAdmins()
+	} else if !errors.Is(err, errNewerDocument) {
 		return
 	}
-	// Unlike a transient read failure, this is a document someone wrote:
-	// keep serving what is in memory, and say why once. Every write
-	// fails while it stands -- mutate meets the same refusal when its
-	// save conflicts and reloads, rather than writing over it -- and a
-	// store that opened on an empty backend also keeps registration
+	// Unlike a transient read failure, a refused document is one someone
+	// wrote: keep serving what is in memory, and say why once. Every
+	// write fails while it stands -- mutate meets the same refusal when
+	// its save conflicts and reloads, rather than writing over it -- and
+	// a store that opened on an empty backend also keeps registration
 	// closed (registrationOpenGuard) instead of treating Count() == 0 as
 	// a fresh install.
-	if err := file.checkAdmins(); err != nil {
+	if err != nil {
 		s.mu.Lock()
 		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
 		s.mu.Unlock()
@@ -580,11 +663,17 @@ func (s *Store) reloadIfStale() {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.version != beforeLoad {
+		s.mu.Unlock()
 		return
 	}
 	s.applyLoaded(file, snap.Version)
+	// The document just applied decides whether a setup code should be
+	// outstanding: accounts retire it, none issues one (announced after
+	// the lock is released, so Options.OnSetupCode never runs under it).
+	code := s.issueSetupCodeLocked()
+	s.mu.Unlock()
+	s.announceSetupCode(code)
 }
 
 // Persisted reports whether a backend is configured.
@@ -605,6 +694,13 @@ func (s *Store) Count() int {
 // parameter because there's no meaningful choice: the first person to
 // register is the super-admin by definition. Fails with
 // ErrRegistrationClosed once any account exists.
+//
+// This is the host-side primitive. A caller acting for someone who
+// reached the server over the network -- gate's register handler --
+// first checks the one-time setup code with CheckSetupCode (issue #37,
+// ADR-0003), so taking admin needs the server's log, not just its
+// address. Register itself does not take the code: the CLI and tests
+// that hold a *Store already have host access.
 //
 // The "is registration still open" test is passed down as a guard and
 // evaluated inside createLocked's critical section rather than checked
@@ -906,6 +1002,14 @@ func (s *Store) createLocked(username, password string, role Role, now time.Time
 	if err != nil {
 		return nil, err
 	}
+	// An account now exists, so the setup code has done its job (or was
+	// bypassed by CreateUser on the host). Retired here, in this
+	// process, as reloadIfStale retires it for a write from another:
+	// a lingering hash would otherwise come back to life if a later
+	// reload applied an emptied document and found one already "issued".
+	s.mu.Lock()
+	s.setupCodeHash = nil
+	s.mu.Unlock()
 	return &created, nil
 }
 
@@ -944,12 +1048,12 @@ func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool) {
 // derived from (issuer, subject) so a retried provisioning attempt lands
 // on the same account rather than racing itself.
 //
-// The very first user -- local or OIDC, whichever happens first --
-// becomes RoleAdmin, the same rule Register already applies; every later
-// account (from either path) is RoleUser, decided under this method's
-// own write lock rather than a separate Count() pre-check, so this
-// doesn't add a second copy of the narrow TOCTOU window Register's own
-// pre-lock Count() check already has.
+// Never the first account: while the store is empty this refuses with
+// ErrSetupRequired and provisions nothing, because the first admin is a
+// local account created with the setup code (issue #37, ADR-0003), not
+// an identity an outside provider vouches for. Every account this
+// method creates is RoleUser. Both facts are decided inside the write
+// against the document being saved, not by a separate Count() check.
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (user *User, created bool, err error) {
 	if !s.Persisted() {
 		return nil, false, ErrNotPersisted
@@ -966,7 +1070,15 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	// operation.
 	s.mu.RLock()
 	_, known := s.byID[s.oidcIndex[key]]
+	empty := len(s.byID) == 0
 	s.mu.RUnlock()
+	// The first account is never an SSO one (ErrSetupRequired,
+	// setupcode.go). Refused here, before the hash, as the cheap path;
+	// the op below refuses again against the document being saved,
+	// which is the correctness boundary.
+	if empty {
+		return nil, false, ErrSetupRequired
+	}
 	var unmatchable string
 	if !known {
 		if unmatchable, err = unmatchablePasswordHash(); err != nil {
@@ -1032,15 +1144,16 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 			}
 		}
 
-		role := RoleUser
+		// Never the first account, and so never the admin: the first
+		// admin is created locally with the setup code (issue #37).
 		if len(st.byID) == 0 {
-			role = RoleAdmin
+			return ErrSetupRequired
 		}
 		u := &User{
 			ID:           id,
 			Username:     st.uniqueUsername(usernameHint, issuer, subject),
 			PasswordHash: unmatchable,
-			Role:         role,
+			Role:         RoleUser,
 			CreatedAt:    now,
 			LastLogin:    now,
 			OIDCIssuer:   issuer,

@@ -22,7 +22,17 @@ const oidcTestClientID = "test-client"
 // newOIDCTestGate builds a Gate wired to a fresh fake provider -- policy
 // is passed straight through as Deps.OIDCPolicy so each test can control
 // what gets permitted.
+// newOIDCTestGate is newEmptyOIDCTestGate plus the first admin,
+// "setup-admin", registered with the setup code: SSO never creates the
+// first account (issue #37), so every SSO test starts after it.
 func newOIDCTestGate(t *testing.T, policy oidc.Policy) (*Gate, *httptest.Server, *testutil.FakeProvider) {
+	t.Helper()
+	g, ts, fp := newEmptyOIDCTestGate(t, policy)
+	registerAdmin(t, ts, "setup-admin", "setup-admin-password")
+	return g, ts, fp
+}
+
+func newEmptyOIDCTestGate(t *testing.T, policy oidc.Policy) (*Gate, *httptest.Server, *testutil.FakeProvider) {
 	t.Helper()
 	fp := testutil.NewFakeProvider(t)
 	client, err := oidc.New(context.Background(), oidc.Config{
@@ -92,12 +102,12 @@ func TestOIDCCallbackFakeProviderHappyPath(t *testing.T) {
 	if sessionCookie == nil {
 		t.Fatal("expected a session cookie to be set on a successful callback")
 	}
-	if g.deps.Users.Count() != 1 {
-		t.Fatalf("expected exactly one just-in-time provisioned account, got %d", g.deps.Users.Count())
+	if g.deps.Users.Count() != 2 {
+		t.Fatalf("expected the admin plus exactly one just-in-time provisioned account, got %d", g.deps.Users.Count())
 	}
-	u, ok := g.deps.Users.Get(g.deps.Users.List()[0].ID)
-	if !ok || u.Role != "admin" {
-		t.Errorf("expected the first OIDC user to become admin, got role %v", u.Role)
+	u, ok := g.deps.Users.ByOIDCIdentity(fp.Issuer(), fp.DefaultClaims(oidcTestClientID, fs.Nonce).Subject)
+	if !ok || u.Role != "user" {
+		t.Errorf("expected an SSO-provisioned account to be an ordinary user (the admin is local, #37), got %v %v", u, ok)
 	}
 }
 
@@ -121,7 +131,7 @@ func TestOIDCCallbackStateMismatchRefused(t *testing.T) {
 	if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=state_mismatch" {
 		t.Errorf("redirect location = %q, want the state_mismatch ssoError", loc)
 	}
-	if g.deps.Users.Count() != 0 {
+	if g.deps.Users.Count() != 1 {
 		t.Error("a state-mismatched callback must not provision an account")
 	}
 }
@@ -144,7 +154,7 @@ func TestOIDCCallbackNonceMismatchRefused(t *testing.T) {
 	if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=state_mismatch" {
 		t.Errorf("redirect location = %q, want the state_mismatch ssoError (nonce reuses that code)", loc)
 	}
-	if g.deps.Users.Count() != 0 {
+	if g.deps.Users.Count() != 1 {
 		t.Error("a nonce-mismatched callback must not provision an account")
 	}
 }
@@ -167,7 +177,7 @@ func TestOIDCCallbackPolicyRefusal(t *testing.T) {
 	if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=not_permitted" {
 		t.Errorf("redirect location = %q, want the not_permitted ssoError", loc)
 	}
-	if g.deps.Users.Count() != 0 {
+	if g.deps.Users.Count() != 1 {
 		t.Error("an identity the policy refuses must not be provisioned an account")
 	}
 }
@@ -255,8 +265,8 @@ func TestOIDCCallbackPolicyRefusalOnReturningUser(t *testing.T) {
 	if resp1.StatusCode != http.StatusFound || resp1.Header.Get("Location") != "/" {
 		t.Fatalf("first login: status=%d location=%q, want 302 to /", resp1.StatusCode, resp1.Header.Get("Location"))
 	}
-	if g.deps.Users.Count() != 1 {
-		t.Fatalf("expected exactly one provisioned account after the first login, got %d", g.deps.Users.Count())
+	if g.deps.Users.Count() != 2 {
+		t.Fatalf("expected the admin plus one provisioned account after the first login, got %d", g.deps.Users.Count())
 	}
 
 	// The policy tightens after that first, successful login -- standing
@@ -283,7 +293,7 @@ func TestOIDCCallbackPolicyRefusalOnReturningUser(t *testing.T) {
 			t.Error("a policy-refused login for a returning user must not set a session cookie")
 		}
 	}
-	if g.deps.Users.Count() != 1 {
+	if g.deps.Users.Count() != 2 {
 		t.Error("a policy refusal on a returning user must not provision another account")
 	}
 }
@@ -370,7 +380,7 @@ func TestOIDCRoutesAreNotFoundWithoutOIDC(t *testing.T) {
 }
 
 func TestOIDCLinkStartRefusesAlreadySSOOnlyAccount(t *testing.T) {
-	g, ts, _ := newOIDCTestGate(t, oidc.Policy{})
+	g, ts, _ := newEmptyOIDCTestGate(t, oidc.Policy{})
 	registerAdmin(t, ts, "admin", "password123")
 	// A second account, SSO-provisioned from the start.
 	u, _, err := g.deps.Users.FindOrCreateOIDCUser("https://idp.example", "subject-1", "frodo", time.Now())
@@ -395,7 +405,7 @@ func TestOIDCLinkStartRefusesAlreadySSOOnlyAccount(t *testing.T) {
 }
 
 func TestOIDCLinkStartRefusesAlreadyConnectedAccount(t *testing.T) {
-	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
 	admin := registerAdmin(t, ts, "admin", "password123")
 
 	// Link once, successfully.
@@ -464,7 +474,7 @@ func oidcCompleteLinkFlow(t *testing.T, g *Gate, ts *httptest.Server, client *ht
 // completeOIDCLink's ErrOIDCIdentityTaken branch: the identity that
 // comes back is already linked to a *different* account.
 func TestOIDCLinkCallbackRefusesIdentityAlreadyLinkedElsewhere(t *testing.T) {
-	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
 	admin := registerAdmin(t, ts, "admin", "password123")
 
 	// A different account already holds this (issuer, subject).
@@ -513,7 +523,7 @@ func TestOIDCLinkCallbackRefusesIdentityAlreadyLinkedElsewhere(t *testing.T) {
 // "the browser is signed in as someone else by the time the provider
 // comes back" branch.
 func TestOIDCLinkCallbackSessionChangedRefused(t *testing.T) {
-	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
 	admin := registerAdmin(t, ts, "admin", "password123")
 
 	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
@@ -557,7 +567,7 @@ func TestOIDCLinkCallbackSessionChangedRefused(t *testing.T) {
 // non-admin audit-detail branch: a plain user loses its local password
 // on linking, unlike the admin.
 func TestOIDCLinkNonAdminLosesLocalPassword(t *testing.T) {
-	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
 	adminClient := registerAdmin(t, ts, "admin", "password123")
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users",
 		createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
@@ -649,7 +659,7 @@ func TestOIDCCallbackBadSignatureRefused(t *testing.T) {
 // completes it against the fake provider, and ends up with both
 // credentials working.
 func TestOIDCLinkHappyPath(t *testing.T) {
-	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
 	admin := registerAdmin(t, ts, "admin", "password123")
 
 	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})

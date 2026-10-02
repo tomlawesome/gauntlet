@@ -22,7 +22,10 @@
 package gauntlet
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -496,17 +499,100 @@ func TestRecordPasskeyAssertionIfFreshAcceptsAndAdvances(t *testing.T) {
 		t.Errorf("LastUsedAt moved on a refused assertion: %v, want unchanged at %v", got.Passkeys[0].LastUsedAt, now)
 	}
 
-	// Zero is exempt from the regression check -- an authenticator that
-	// always reports 0 must still be able to log in.
-	if accepted, err := s.RecordPasskeyAssertionIfFresh(u.ID, []byte{1}, 0, later); err != nil || !accepted {
-		t.Fatalf("signCount 0: accepted=%v err=%v, want true, nil", accepted, err)
+	// A passkey that has counted and now reports 0 is refused too: the
+	// WebAuthn spec treats a counter going back to 0 as a possible
+	// cloned authenticator (#36).
+	if accepted, err := s.RecordPasskeyAssertionIfFresh(u.ID, []byte{1}, 0, later); err != nil || accepted {
+		t.Errorf("signCount 0 after 5: accepted=%v err=%v, want false, nil", accepted, err)
 	}
 	got, _ = s.Get(u.ID)
-	if got.Passkeys[0].SignCount != 5 {
-		t.Errorf("a count-0 assertion changed SignCount to %d, want it left at 5", got.Passkeys[0].SignCount)
+	if got.Passkeys[0].SignCount != 5 || !got.Passkeys[0].LastUsedAt.Equal(now) {
+		t.Errorf("a refused count-0 assertion changed the passkey: %+v", got.Passkeys[0])
 	}
-	if !got.Passkeys[0].LastUsedAt.Equal(later) {
-		t.Errorf("LastUsedAt after a count-0 assertion = %v, want %v", got.Passkeys[0].LastUsedAt, later)
+}
+
+// TestRecordPasskeyAssertionIfFreshAcceptsAPasskeyThatNeverCounts: an
+// authenticator that always reports 0 (most platform passkeys) logs in
+// every time, and each login moves LastUsedAt.
+func TestRecordPasskeyAssertionIfFreshAcceptsAPasskeyThatNeverCounts(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password123", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(u.ID, testPasskey(1, "")); err != nil {
+		t.Fatal(err)
+	}
+	for i, at := range []time.Time{now, now.Add(time.Hour)} {
+		if accepted, err := s.RecordPasskeyAssertionIfFresh(u.ID, []byte{1}, 0, at); err != nil || !accepted {
+			t.Fatalf("count-0 login %d: accepted=%v err=%v, want true, nil", i+1, accepted, err)
+		}
+		got, _ := s.Get(u.ID)
+		if got.Passkeys[0].SignCount != 0 || !got.Passkeys[0].LastUsedAt.Equal(at) {
+			t.Errorf("after count-0 login %d: %+v, want SignCount 0 and LastUsedAt %v", i+1, got.Passkeys[0], at)
+		}
+	}
+}
+
+// TestRecordPasskeyAssertionIfFreshWhileStorageFails (#36): with every
+// save failing, a passkey that has never counted and presents 0 is let
+// in, its LastUsedAt kept in memory and the failed save logged -- that
+// save protects nothing, as LastLogin's does not for a password login.
+// A count that has to be saved to refuse the next replay (0 -> 5,
+// 5 -> 6) is still refused with the error.
+func TestRecordPasskeyAssertionIfFreshWhileStorageFails(t *testing.T) {
+	var logs bytes.Buffer
+	budget := &saveBudgetBackend{left: 1}
+	s, err := OpenStore(budget, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password123", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget.left = 2
+	if _, err := s.AddPasskey(u.ID, testPasskey(1, "never counts")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(u.ID, testPasskey(2, "counts")); err != nil {
+		t.Fatal(err)
+	}
+	budget.left = 1
+	if accepted, err := s.RecordPasskeyAssertionIfFresh(u.ID, []byte{2}, 5, now); err != nil || !accepted {
+		t.Fatalf("fixture: count 5 on the counting passkey: accepted=%v err=%v", accepted, err)
+	}
+	budget.left = 0
+	later := now.Add(time.Hour)
+
+	// 0 -> 0: accepted, kept in memory, logged.
+	accepted, err := s.RecordPasskeyAssertionIfFresh(u.ID, []byte{1}, 0, later)
+	if err != nil || !accepted {
+		t.Fatalf("0 -> 0 while saves fail: accepted=%v err=%v, want true, nil", accepted, err)
+	}
+	if got, _ := s.Get(u.ID); !got.Passkeys[0].LastUsedAt.Equal(later) {
+		t.Errorf("0 -> 0 while saves fail: LastUsedAt = %v in memory, want %v", got.Passkeys[0].LastUsedAt, later)
+	}
+	if !strings.Contains(logs.String(), "only in memory") {
+		t.Errorf("0 -> 0 whose save failed was not logged; log = %q", logs.String())
+	}
+
+	// 0 -> 5 and 5 -> 6: refused with the error, nothing changed.
+	cases := []struct {
+		cred  byte
+		count uint32
+		want  uint32
+	}{{1, 5, 0}, {2, 6, 5}}
+	for _, c := range cases {
+		accepted, err := s.RecordPasskeyAssertionIfFresh(u.ID, []byte{c.cred}, c.count, later)
+		if err == nil || accepted {
+			t.Errorf("%d -> %d while saves fail: accepted=%v err=%v, want false and an error", c.want, c.count, accepted, err)
+		}
+		if got, _ := s.Get(u.ID); got.Passkeys[c.cred-1].SignCount != c.want {
+			t.Errorf("%d -> %d while saves fail: SignCount = %d in memory, want %d", c.want, c.count, got.Passkeys[c.cred-1].SignCount, c.want)
+		}
 	}
 }
 

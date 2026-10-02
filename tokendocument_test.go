@@ -4,25 +4,59 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// TestMikroviewTokensJSONFixtureRoundTripsByteIdentical is gauntlet
-// issue #4's done-when: a mikroview-shaped tokens document containing an
-// "api" row, an "ingest" row and a "droplist-pull" row (mikroview's own
-// third kind, #1224) loads, saves and reloads byte-identical, and only
-// registered kinds authenticate.
+// tokensFixture is a version-1 tokens document, written out by hand and
+// frozen, for the same reason as accountsFixture (roundtrip_test.go): a
+// renamed or dropped JSON tag on Token must fail the round trip below.
+// Change it only alongside a new document version.
 //
-// The fixture is built from gauntlet's own Token type -- field-for-
-// field, JSON tag-for-tag, from mikroview's internal/auth/token.go
-// (docs/design.md §1.3) -- and every raw value below is invented for
-// this test, never a real credential. hashTokenValue is this package's
-// own SHA-256 helper (token.go), the same one Create and Authenticate
-// use, so the fixture's HashedValue fields are exactly what a real
-// TokenStore would have written for these (fake) raw values.
+// Mikroview tokens.json-shaped: an "api" row, an "ingest" row with
+// every field populated, and a "droplist-pull" row (mikroview's own
+// third kind, #1224). Every raw value behind a hashedValue is invented
+// for this test (the raw* constants below), never a real credential;
+// each hashedValue is hashTokenValue of its raw value, exactly what a
+// real TokenStore would have written for it.
+const tokensFixture = `{
+  "version": 1,
+  "tokens": [
+    {
+      "id": "token-id-0001",
+      "name": "birdcage",
+      "kind": "api",
+      "hashedValue": "4974e92fc97ec37e76aa819a8798344bec8f7f9761ae79e320466ddce1be67c2",
+      "createdAt": "2026-01-02T03:04:05Z"
+    },
+    {
+      "id": "token-id-0002",
+      "name": "router-1",
+      "kind": "ingest",
+      "device": "router-1",
+      "hashedValue": "78bfe5d78db6eb1fc4664928a6648a1a2d181ed90872f71b501d6865640afa20",
+      "createdAt": "2026-01-02T03:05:05Z",
+      "lastUsedAt": "2026-01-02T05:04:05Z",
+      "createdBy": "user-admin",
+      "createdByUsername": "admin"
+    },
+    {
+      "id": "token-id-0003",
+      "name": "droplist-pull",
+      "kind": "droplist-pull",
+      "hashedValue": "a61a27d3cc5217aa8c66d5b48d520ce4591320abab88927151299610166d9e94",
+      "createdAt": "2026-01-02T03:06:05Z"
+    }
+  ]
+}`
+
+// TestMikroviewTokensJSONFixtureRoundTripsByteIdentical is gauntlet
+// issue #4's done-when, held to a frozen fixture since #29: the tokens
+// document above loads, saves and reloads byte-identical, and only
+// registered kinds authenticate.
 func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
@@ -32,47 +66,13 @@ func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 		rawDroplist = "fixture-droplist-pull-raw-token-does-not-exist"
 	)
 	const droplistPull TokenKind = "droplist-pull"
+	const tokenCount = 3
 
-	// Already in the CreatedAt-ascending order mutate writes,
-	// so a correct load-then-save is a no-op on the bytes.
-	fixture := []*Token{
-		{
-			ID:          "token-id-0001",
-			Name:        "birdcage",
-			Kind:        TokenKindAPI,
-			HashedValue: hashTokenValue(rawAPI),
-			CreatedAt:   now,
-		},
-		{
-			ID:          "token-id-0002",
-			Name:        "router-1",
-			Kind:        TokenKindIngest,
-			Device:      "router-1",
-			HashedValue: hashTokenValue(rawIngest),
-			CreatedAt:   now.Add(time.Minute),
-			LastUsedAt:  now.Add(2 * time.Hour),
-			CreatedBy:   "user-admin",
-		},
-		{
-			// mikroview's third kind: not one of gauntlet's default
-			// Kinds, and already present in a real tokens document by
-			// the time mikroview would move onto this module (#1224) --
-			// this row is what proves the move drops nothing.
-			ID:          "token-id-0003",
-			Name:        "droplist-pull",
-			Kind:        droplistPull,
-			HashedValue: hashTokenValue(rawDroplist),
-			CreatedAt:   now.Add(2 * time.Minute),
-		},
-	}
-
-	original, err := json.MarshalIndent(fixture, "", "  ")
-	if err != nil {
-		t.Fatalf("marshalling fixture: %v", err)
-	}
+	assertFixtureCoversEveryField(t, tokensFixture, reflect.TypeFor[Token]())
+	original := []byte(tokensFixture)
 
 	m := persist.NewMemory()
-	primeMemory(t, m, string(original))
+	primeMemory(t, m, tokensFixture)
 
 	// Load with the default Kinds (api, ingest): the droplist-pull row
 	// must be kept -- listed, not silently dropped -- but must never
@@ -81,8 +81,8 @@ func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTokenStore (load, default kinds): %v", err)
 	}
-	if got := len(s1.List()); got != len(fixture) {
-		t.Fatalf("List() = %d tokens, want %d -- an unregistered kind must not be dropped", got, len(fixture))
+	if got := len(s1.List()); got != tokenCount {
+		t.Fatalf("List() = %d tokens, want %d -- an unregistered kind must not be dropped", got, tokenCount)
 	}
 
 	// Save before any Authenticate call: Authenticate records
@@ -123,8 +123,8 @@ func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTokenStore (reload, default kinds): %v", err)
 	}
-	if got := len(s2.List()); got != len(fixture) {
-		t.Fatalf("reloaded List() = %d tokens, want %d", got, len(fixture))
+	if got := len(s2.List()); got != tokenCount {
+		t.Fatalf("reloaded List() = %d tokens, want %d", got, tokenCount)
 	}
 	if _, ok := s2.Authenticate(rawDroplist, droplistPull, now); ok {
 		t.Error("the droplist-pull row authenticated after a reload with the default Kinds")
