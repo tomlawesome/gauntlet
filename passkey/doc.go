@@ -20,8 +20,8 @@
 // login limiter, sessions, recovery codes and audit.
 //
 // Ported from mikroview's internal/api/webauthn.go (NewRelyingParty,
-// webauthnSessionCodec, spentChallenges) and the ceremony half of
-// internal/api/passkey.go (webauthnUser, passkeyToCredential,
+// webauthnSessionCodec; its spentChallenges became gauntlet's shared
+// internal/spent) and the ceremony half of internal/api/passkey.go (webauthnUser, passkeyToCredential,
 // credentialToPasskey), read at mikroview gitlab/dev 8a78d662; the
 // tests come with them (docs/testing.md).
 package passkey

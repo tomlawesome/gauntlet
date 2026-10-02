@@ -238,7 +238,7 @@ func (rp *RelyingParty) FinishLogin(u *gauntlet.User, sealed string, assertion j
 	if out.CloneWarning {
 		return out, nil
 	}
-	if !spent.claim(sd.Challenge, sd.Expires, time.Now()) {
+	if !spentLoginChallenges.Claim(sd.Challenge, sd.Expires, time.Now()) {
 		return gauntlet.PasskeyAssertion{}, fmt.Errorf("passkey: challenge already used: %w", gauntlet.ErrPasskeyCeremonyInvalid)
 	}
 	return out, nil

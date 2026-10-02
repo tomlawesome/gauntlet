@@ -5,10 +5,8 @@ package passkey
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -124,64 +122,5 @@ func TestSessionCodecRejectsAnAuthenticNonSessionPayload(t *testing.T) {
 	sealed := codec.aead.Seal(nonce, nonce, []byte("not json"), nil)
 	if _, err := codec.decode(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 		t.Fatalf("decode(non-JSON payload) error = %v, want ErrPasskeyCeremonyInvalid", err)
-	}
-}
-
-// TestSpentChallengesClaimOnce: a challenge is accepted once, refused
-// until its sealed expiry, and forgotten once the ceremony has expired.
-func TestSpentChallengesClaimOnce(t *testing.T) {
-	var c spentChallenges
-	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	expires := now.Add(ceremonyLifetime)
-	if !c.claim("a", expires, now) {
-		t.Fatal("the first claim of a fresh challenge was refused")
-	}
-	if c.claim("a", expires, now.Add(time.Second)) {
-		t.Fatal("a second claim of the same challenge was accepted")
-	}
-	if c.claim("a", expires, expires.Add(-time.Second)) {
-		t.Fatal("the challenge was forgotten before its ceremony expired")
-	}
-	if !c.claim("b", expires.Add(time.Minute), expires) {
-		t.Fatal("a fresh challenge was refused")
-	}
-	if _, kept := c.seen["a"]; kept {
-		t.Error("a challenge whose ceremony has expired was not dropped")
-	}
-}
-
-// TestSpentChallengeLivesOnTheSealedWallClockExpiry: the entry's expiry
-// is the sealed ceremony's own Expires, with no monotonic reading, so it
-// is dropped on the same wall clock open checks the ceremony against.
-//
-// No test here can show the failure this guards against end to end:
-// that needs a monotonic reading that disagrees with the wall clock (a
-// wall clock stepped back), and Go hands out monotonic readings only
-// from time.Now, with no way to construct or shift one apart from the
-// wall reading. So this pins the mechanism instead: the code it replaced
-// stored now.Add(ceremonyLifetime), which carries time.Now's monotonic
-// reading, and fails both checks below.
-func TestSpentChallengeLivesOnTheSealedWallClockExpiry(t *testing.T) {
-	var c spentChallenges
-	now := time.Now() // carries a monotonic reading, as FinishLogin's does
-	// The sealed Expires, as it comes back out of the JSON round trip:
-	// wall clock only.
-	var sealedExpires time.Time
-	raw, err := json.Marshal(now.Add(ceremonyLifetime - time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(raw, &sealedExpires); err != nil {
-		t.Fatal(err)
-	}
-	if !c.claim("a", sealedExpires, now) {
-		t.Fatal("the first claim was refused")
-	}
-	until := c.seen["a"]
-	if !until.Equal(sealedExpires) {
-		t.Errorf("the entry expires at %v, want the sealed Expires %v", until, sealedExpires)
-	}
-	if strings.Contains(until.String(), "m=") {
-		t.Errorf("the entry's expiry %v carries a monotonic reading; it must be wall clock only", until)
 	}
 }

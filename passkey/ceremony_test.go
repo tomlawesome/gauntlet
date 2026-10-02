@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -398,5 +400,60 @@ func TestSealedLoginStateIsSmallWhateverTheAccountHolds(t *testing.T) {
 	}
 	if _, err := rp.FinishLogin(other, sealed, body); err != nil {
 		t.Errorf("the same passkey on its own account: %v", err)
+	}
+}
+
+// TestSpentLoginChallengeIsHeldUntilTheSealedExpiry takes over from
+// 6806f33's TestSpentChallengeLivesOnTheSealedWallClockExpiry and
+// TestSpentChallengesClaimOnce, which tested the set this package used to
+// keep (now internal/spent, whose own tests pin the wall-clock and
+// claim-once rules). This one goes through FinishLogin: the challenge it
+// spends must stay spent right up to the sealed Expires that open checks
+// -- so a replay a nanosecond before is refused as a used challenge, not
+// as an expired ceremony -- and not a moment less. Run in a synctest
+// bubble so the five minutes pass instantly.
+func TestSpentLoginChallengeIsHeldUntilTheSealedExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rp := mustReady(t)
+		u := testUser()
+		fake := passkeytest.New(rp.RPID(), rp.Origin())
+		registerOn(t, rp, u, fake)
+
+		sealed, assertion := assertWith(t, rp, u, fake)
+		sd, err := assertCodec.decode(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rp.FinishLogin(u, sealed, assertion); err != nil {
+			t.Fatalf("FinishLogin: %v", err)
+		}
+		if _, err := rp.FinishLogin(u, sealed, assertion); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) || !strings.Contains(err.Error(), "challenge already used") {
+			t.Fatalf("an immediate replay: error = %v, want a used challenge", err)
+		}
+
+		time.Sleep(time.Until(sd.Expires) - time.Nanosecond)
+		_, err = rp.FinishLogin(u, sealed, assertion)
+		if !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) || !strings.Contains(err.Error(), "challenge already used") {
+			t.Fatalf("a replay a nanosecond before the sealed expiry: error = %v, want a used challenge", err)
+		}
+	})
+}
+
+// TestPasskeyCredentialConversionRoundTrip: a stored passkey survives the
+// trip to the library's credential and back field for field --
+// transports and all four flags included, which the fake authenticator
+// never reports and so no ceremony test exercises.
+func TestPasskeyCredentialConversionRoundTrip(t *testing.T) {
+	want := gauntlet.Passkey{
+		ID:         []byte("credential-id"),
+		PublicKey:  []byte("cose-public-key"),
+		SignCount:  42,
+		Transports: []string{"usb", "nfc"},
+		Flags:      gauntlet.PasskeyFlags{UserPresent: true, UserVerified: true, BackupEligible: true, BackupState: true},
+		RPID:       "passkeys.example.org",
+	}
+	got := credentialToPasskey(passkeyToCredential(want), want.RPID)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip changed the passkey:\n got:  %+v\n want: %+v", got, want)
 	}
 }

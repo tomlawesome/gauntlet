@@ -43,6 +43,8 @@
 # 91.6%. What neither reaches is a failing crypto/rand or JSON encoder.
 # gate re-measured with the passkey routes and their tests: 92.0%.
 # internal/spent (the one-time-key set, #20 R2) is new at 100.0%.
+# passkey re-measured once its spent set moved to internal/spent and
+# its credential conversion got a round-trip test: 92.8%.
 
 floors:
   persist: 90
@@ -52,6 +54,6 @@ floors:
   internal/evict: 100
   gate: 92
   internal/hashcost: 75
-  passkey: 90
+  passkey: 92
   internal/passkeytest: 91
   internal/spent: 100
