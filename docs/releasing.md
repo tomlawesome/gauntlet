@@ -11,8 +11,9 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
 2. Once the audit is closed, open an ordinary merge request to `dev`
    that bumps `VERSION` to the next version -- a plain three-part
    version like `0.2.0`, three numbers separated by dots, no leading
-   zeros -- and moves the CHANGELOG's `[Unreleased]` entries under
-   `[<version>] - <date>`.
+   zeros -- sets `info.version` in `docs/api/auth.yaml` to the same
+   value (the contract tests fail if the two differ), and moves the
+   CHANGELOG's `[Unreleased]` entries under `[<version>] - <date>`.
 
 3. Once that merge request lands on `dev`, click **CI/CD > Pipelines**
    and open the pipeline for the merge commit -- it's the top row.

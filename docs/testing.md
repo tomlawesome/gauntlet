@@ -42,6 +42,8 @@ itself, which ADR-0002 allows only in a new major version.
   describes, in both directions. `TestContractRequestBodiesMatchHandlers`
   does the same for the fields each handler reads from a request body
   (also read from the source code) and the document's request bodies.
+  `TestContractDocumentVersionMatchesVERSION` fails if the document's
+  `info.version` differs from `VERSION`.
   These tests are a separate Go module, `gate/contracttest`, so
   `kin-openapi` stays out of the library's `go.mod` (#30). Run them
   with `cd gate/contracttest && go test ./...`. They use `gate` only
