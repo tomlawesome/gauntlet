@@ -29,11 +29,14 @@ import (
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers"
 	legacyrouter "github.com/getkin/kin-openapi/routers/legacy"
+	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/gate"
+	"github.com/tomlawesome/gauntlet/internal/passkeytest"
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/passkey"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -296,6 +299,7 @@ func TestContractEveryRoute(t *testing.T) {
 	contractLocalAccounts(t, c)
 	contractSSO(t, c)
 	contractNoStorage(t, c)
+	contractPasskeys(t, c)
 	c.requireEveryOperationDriven()
 }
 
@@ -686,4 +690,186 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 	if !body.TOTPActive || body.Error == "" {
 		t.Errorf("the 500 body = %+v, want totpActive true and an error message", body)
 	}
+}
+
+// passkeyGateServer serves a gate whose Deps.Passkeys is a relying party
+// for publicURL ("" for one that is not ready), with "admin" registered
+// and signed in on the returned client and "bob" created.
+func passkeyGateServer(t *testing.T, c *contractChecker, publicURL string, wired bool) (*fixture, *httptest.Server, *http.Client) {
+	t.Helper()
+	users, code := openStore(t, persist.NewMemory())
+	deps := gate.Deps{Users: users}
+	if wired {
+		rp, err := passkey.New(passkey.Config{PublicURL: publicURL, DisplayName: testProductName})
+		if err != nil {
+			t.Fatal(err)
+		}
+		deps.Passkeys = rp
+	}
+	f := &fixture{g: newGate(t, deps), users: users, setupCode: code}
+	ts := newTestServer(t, f.g)
+	admin := c.client()
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", code}}, 201, nil)
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "bob", Password: "contract-bob-password"}}, 201, nil)
+	return f, ts, admin
+}
+
+// contractPasskeys drives the passkey routes (G8, ADR-0004) with the
+// shared fake authenticator: every documented success and the refusals
+// a test can reach, on a wired gate, one whose relying party is not
+// ready, and one with no passkeys at all.
+func contractPasskeys(t *testing.T, c *contractChecker) {
+	const bobPass = "contract-bob-password"
+	const publicURL = "https://passkeys.example.org"
+	f, ts, admin := passkeyGateServer(t, c, publicURL, true)
+	u := ts.URL
+	anon := c.client()
+	bob := c.client()
+	c.do(bob, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", bobPass}}, 200, nil)
+
+	var rows []passkeyRow
+	c.do(bob, u, call{method: "GET", path: "/api/auth/passkeys"}, 200, &rows)
+	c.do(anon, u, call{method: "GET", path: "/api/auth/passkeys"}, 401, nil)
+	var state sessionResponse
+	c.do(bob, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if state.Passkeys == nil || state.Passkeys.Status != "ready" || state.Passkeys.Origin != publicURL {
+		t.Fatalf("session passkeys = %+v, want ready at %s", state.Passkeys, publicURL)
+	}
+
+	register := func(client *http.Client, fake *passkeytest.FakeAuthenticator, name string, want int, out any) {
+		t.Helper()
+		var creation protocol.CredentialCreation
+		c.do(client, u, call{method: "POST", path: "/api/auth/passkeys/register/begin"}, 200, &creation)
+		body, err := fake.RegisterResponse(&creation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.do(client, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(body), name}}, want, out)
+	}
+
+	// Refused registrations, then the first factor (codes minted), a
+	// second (alreadyIssued) and a duplicate.
+	wrongOrigin := passkeytest.New("passkeys.example.org", "https://not-the-relying-party.example")
+	register(bob, wrongOrigin, "wrong origin", 400, nil)
+	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: "{", bad: true}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), "no begin"}}, 401, nil)
+	key := passkeytest.New("passkeys.example.org", publicURL)
+	var first passkeyRegisterFinishResponse
+	register(bob, key, "first", 200, &first)
+	if len(first.RecoveryCodes) != 10 {
+		t.Fatalf("first passkey = %+v, want ten recovery codes", first)
+	}
+	spare := passkeytest.New("passkeys.example.org", publicURL)
+	var second passkeyRegisterFinishResponse
+	register(bob, spare, "spare", 200, &second)
+	if !second.AlreadyIssued || second.RecoveryCodes != nil {
+		t.Fatalf("second passkey = %+v, want alreadyIssued and no codes", second)
+	}
+	register(bob, key, "again", 409, nil)
+
+	// Rename.
+	var renamed passkeyRow
+	c.do(bob, u, call{method: "PATCH", path: "/api/auth/passkeys/" + first.Passkey.ID, body: passkeyRenameRequest{"YubiKey"}}, 200, &renamed)
+	c.do(bob, u, call{method: "PATCH", path: "/api/auth/passkeys/bm8tc3VjaC1rZXk", body: passkeyRenameRequest{"x"}}, 404, nil)
+	c.do(bob, u, call{method: "PATCH", path: "/api/auth/passkeys/not!base64", body: passkeyRenameRequest{"x"}}, 400, nil)
+	c.do(bob, u, call{method: "PATCH", path: "/api/auth/passkeys/" + first.Passkey.ID, body: passkeyRenameRequest{"x"}, noCSRF: true}, 403, nil)
+
+	// Sign in with a passkey.
+	bob2 := c.client()
+	var challenge struct {
+		SecondFactor  []string `json:"secondFactor"`
+		PasskeyOrigin string   `json:"passkeyOrigin"`
+	}
+	c.do(bob2, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"bob", bobPass}}, 200, &challenge)
+	if !slices.Equal(challenge.SecondFactor, []string{"passkey"}) || challenge.PasskeyOrigin != publicURL {
+		t.Fatalf("second-factor challenge = %+v", challenge)
+	}
+	c.do(anon, u, call{method: "POST", path: "/api/auth/login/factor/begin"}, 401, nil)
+	assert := func(client *http.Client, fake *passkeytest.FakeAuthenticator, want int) {
+		t.Helper()
+		var options protocol.CredentialAssertion
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/factor/begin"}, 200, &options)
+		body, err := fake.AssertionResponse(&options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Assertion: json.RawMessage(body)}}, want, nil)
+	}
+	wrongRPID := *key
+	wrongRPID.RPID = "not-the-relying-party.example"
+	assert(bob2, &wrongRPID, 401)
+	assert(bob2, key, 200)
+	c.do(bob2, u, call{method: "GET", path: "/api/auth/passkeys"}, 200, &rows)
+	if i := slices.IndexFunc(rows, func(r passkeyRow) bool { return r.ID == first.Passkey.ID }); i < 0 || rows[i].Name != "YubiKey" || rows[i].LastUsedAt.IsZero() {
+		t.Fatalf("listed passkeys = %+v, want %s renamed and with lastUsedAt", rows, first.Passkey.ID)
+	}
+
+	// An account whose only passkey is stale: no passkey offered, and
+	// begin refuses.
+	var users []userSummary
+	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, &users)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: bobPass}}, 201, nil)
+	carol, ok := f.users.ByUsername("carol")
+	if !ok {
+		t.Fatal("carol was not created")
+	}
+	if _, err := f.users.AddPasskey(carol.ID, gauntlet.Passkey{ID: []byte("old-credential"), RPID: "old.example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	carolClient := c.client()
+	c.do(carolClient, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"carol", bobPass}}, 200, &challenge)
+	if len(challenge.SecondFactor) != 0 {
+		t.Fatalf("a stale-only account was offered %v", challenge.SecondFactor)
+	}
+	c.do(carolClient, u, call{method: "POST", path: "/api/auth/login/factor/begin"}, 409, nil)
+
+	// Removing passkeys: the owner's own, then an admin's clear.
+	var removed map[string]any
+	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/passkeys/" + second.Passkey.ID, body: passwordRequest{"wrong"}}, 401, nil)
+	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/passkeys/" + second.Passkey.ID, body: passwordRequest{bobPass}}, 200, &removed)
+	if removed["signedOut"] != false {
+		t.Fatalf("removing one of two passkeys = %v, want signedOut false", removed)
+	}
+	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/passkeys/" + second.Passkey.ID, body: passwordRequest{bobPass}}, 404, nil)
+	adminRow := slices.IndexFunc(users, func(s userSummary) bool { return s.Username == "admin" })
+	bobRow := slices.IndexFunc(users, func(s userSummary) bool { return s.Username == "bob" })
+	if adminRow < 0 || bobRow < 0 || users[bobRow].PasskeyCount != 2 {
+		t.Fatalf("users list = %+v, want bob with passkeyCount 2", users)
+	}
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[adminRow].ID + "/passkeys"}, 409, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id/passkeys"}, 404, nil)
+	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/users/" + users[bobRow].ID + "/passkeys"}, 403, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[bobRow].ID + "/passkeys"}, 200, nil)
+
+	// A relying party that is not ready.
+	_, unready, unreadyAdmin := passkeyGateServer(t, c, "", true)
+	state = sessionResponse{}
+	c.do(unreadyAdmin, unready.URL, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if state.Passkeys == nil || state.Passkeys.Status != "unset" || state.Passkeys.Origin != "" {
+		t.Fatalf("session passkeys with no public URL = %+v, want unset", state.Passkeys)
+	}
+	c.do(unreadyAdmin, unready.URL, call{method: "GET", path: "/api/auth/passkeys"}, 200, &rows)
+	c.do(unreadyAdmin, unready.URL, call{method: "POST", path: "/api/auth/passkeys/register/begin"}, 409, nil)
+	c.do(unreadyAdmin, unready.URL, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), ""}}, 409, nil)
+
+	// No passkeys at all.
+	off, offTS, offAdmin := passkeyGateServer(t, c, "", false)
+	o := offTS.URL
+	bobOff, ok := off.users.ByUsername("bob")
+	if !ok {
+		t.Fatal("bob was not created")
+	}
+	state = sessionResponse{}
+	c.do(offAdmin, o, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if state.Passkeys != nil {
+		t.Fatalf("session with passkeys off carries %+v", state.Passkeys)
+	}
+	c.do(offAdmin, o, call{method: "GET", path: "/api/auth/passkeys"}, 404, nil)
+	c.do(offAdmin, o, call{method: "POST", path: "/api/auth/passkeys/register/begin"}, 404, nil)
+	c.do(offAdmin, o, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), ""}}, 404, nil)
+	c.do(offAdmin, o, call{method: "PATCH", path: "/api/auth/passkeys/eA", body: passkeyRenameRequest{"x"}}, 404, nil)
+	c.do(offAdmin, o, call{method: "DELETE", path: "/api/auth/passkeys/eA", body: passwordRequest{"contract-admin-password"}}, 404, nil)
+	c.do(offAdmin, o, call{method: "DELETE", path: "/api/auth/users/" + bobOff.ID + "/passkeys"}, 404, nil)
+	c.do(anon, o, call{method: "POST", path: "/api/auth/login/factor/begin"}, 404, nil)
+	c.do(anon, o, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Assertion: json.RawMessage(`{"id":"eA"}`)}}, 404, nil)
 }
