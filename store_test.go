@@ -7,12 +7,10 @@
 // moved to testhelpers_test.go since other files share them.
 //
 // mikroview's TOTP-method tests (SetPendingTOTPSecret, ConfirmTOTP,
-// ClearTOTP, RecordTOTPCounter and friends) are not ported: those
-// methods are a later slice (G4). TestUnconfirmedTOTPSecretIsNotAnActiveFactor
-// is kept in reduced form, testing only User.HasActiveTOTP -- the
-// predicate itself is in scope for G2 (docs/design.md §1.3) -- with the
-// Store.HasActiveTOTP(userID) assertions dropped, since that store-level
-// wrapper is not part of G2's API.
+// ClearTOTP and friends) live in totp_test.go instead.
+// TestUnconfirmedTOTPSecretIsNotAnActiveFactor stays here, with the
+// Store.HasActiveTOTP(userID) assertions dropped, since this package has
+// no such wrapper (see totp.go's package comment).
 
 package gauntlet
 
@@ -978,10 +976,10 @@ func TestRoleAtLeastStacksTheThreeTiers(t *testing.T) {
 }
 
 // setTOTPForTest sets userID's TOTPSecret/TOTPConfirmedAt/TOTPLastCounter
-// directly and persists them -- the real way in (SetPendingTOTPSecret,
-// ConfirmTOTP) is a later slice (G4); this exists to reach the fixture
-// states TestUnconfirmedTOTPSecretIsNotAnActiveFactor needs to test the
-// User.HasActiveTOTP predicate, which is in scope now.
+// directly and persists them, for fixture states the real methods
+// (SetPendingTOTPSecret, ConfirmTOTP) cannot reach in one step: a given
+// counter on a confirmed or pending secret, or a secret replaced in
+// place. A test about enrolment itself uses the real methods.
 func setTOTPForTest(t *testing.T, s *Store, userID, secret string, confirmedAt time.Time, counter uint64) {
 	t.Helper()
 	err := s.mutate(func(st *storeState) error {
@@ -1015,7 +1013,9 @@ func TestUnconfirmedTOTPSecretIsNotAnActiveFactor(t *testing.T) {
 	}
 
 	// A secret with no confirmation -- mid-setup, or an abandoned one.
-	setTOTPForTest(t, s, u.ID, "JBSWY3DPEHPK3PXP", time.Time{}, 0)
+	if err := s.SetPendingTOTPSecret(u.ID, "JBSWY3DPEHPK3PXP"); err != nil {
+		t.Fatal(err)
+	}
 	got, ok := s.Get(u.ID)
 	if !ok {
 		t.Fatal("expected the user to still exist")
@@ -1026,7 +1026,9 @@ func TestUnconfirmedTOTPSecretIsNotAnActiveFactor(t *testing.T) {
 
 	// Confirming it is what activates it.
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	setTOTPForTest(t, s, u.ID, "JBSWY3DPEHPK3PXP", now, 5)
+	if err := s.ConfirmTOTP(u.ID, now, 5); err != nil {
+		t.Fatal(err)
+	}
 	got2, ok := s.Get(u.ID)
 	if !ok {
 		t.Fatal("expected the user to still exist")

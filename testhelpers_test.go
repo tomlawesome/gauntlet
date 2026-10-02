@@ -83,30 +83,24 @@ func (b *saveBudgetBackend) Save(ctx context.Context, payload []byte, expect int
 func (b *saveBudgetBackend) Close() error     { return nil }
 func (b *saveBudgetBackend) Describe() string { return "save-budget test backend" }
 
-// setSecondFactorForTest sets userID's TOTP, recovery-code and passkey
-// fields directly and persists them. This package doesn't yet implement
-// the methods that generate these (SetPendingTOTPSecret,
-// GenerateRecoveryCodes, AddPasskey -- a later slice), but
-// LinkOIDCIdentity's clearing behaviour is in scope now and needs a
-// fixture that already holds every kind of second factor, the same way
-// mikroview's own enrolEverySecondFactor does through its real
-// enrolment methods.
+// setSecondFactorForTest enrols userID in every kind of second factor
+// through the real enrolment methods, as mikroview's own
+// enrolEverySecondFactor does: a confirmed authenticator app whose
+// replay guard is at 42, a set of recovery codes and one passkey. It
+// makes four saves.
 func setSecondFactorForTest(t *testing.T, s *Store, userID string, now time.Time) {
 	t.Helper()
-	err := s.mutate(func(st *storeState) error {
-		u, ok := st.byID[userID]
-		if !ok {
-			return ErrUserNotFound
-		}
-		u.TOTPSecret = testTOTPSecret
-		u.TOTPConfirmedAt = now
-		u.TOTPLastCounter = 42
-		u.RecoveryCodes = []RecoveryCode{{Hash: "fake-recovery-hash-1"}, {Hash: "fake-recovery-hash-2"}}
-		u.Passkeys = []Passkey{{ID: []byte("test-credential-1"), PublicKey: []byte("test-public-key-1"), Name: "YubiKey", CreatedAt: now}}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("setSecondFactorForTest: persisting fixture for %q: %v", userID, err)
+	if err := s.SetPendingTOTPSecret(userID, testTOTPSecret); err != nil {
+		t.Fatalf("setSecondFactorForTest: SetPendingTOTPSecret for %q: %v", userID, err)
+	}
+	if err := s.ConfirmTOTP(userID, now, 42); err != nil {
+		t.Fatalf("setSecondFactorForTest: ConfirmTOTP for %q: %v", userID, err)
+	}
+	if _, err := s.GenerateRecoveryCodes(userID, now); err != nil {
+		t.Fatalf("setSecondFactorForTest: GenerateRecoveryCodes for %q: %v", userID, err)
+	}
+	if _, err := s.AddPasskey(userID, testPasskey(1, "YubiKey")); err != nil {
+		t.Fatalf("setSecondFactorForTest: AddPasskey for %q: %v", userID, err)
 	}
 }
 
@@ -114,10 +108,6 @@ func setSecondFactorForTest(t *testing.T, s *Store, userID string, now time.Time
 // constant of the same name -- the shape here only has to look like the
 // base32 a caller would actually store.
 const testTOTPSecret = "JBSWY3DPEHPK3PXP"
-
-// setTOTPForTest already exists in store_test.go (added alongside G2's
-// TestUnconfirmedTOTPSecretIsNotAnActiveFactor, ahead of this slice) --
-// reused here rather than redeclared.
 
 // testPasskey builds a fixture Passkey with a distinct credential ID --
 // id is folded into ID and PublicKey so every fixture in a test is
