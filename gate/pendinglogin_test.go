@@ -124,3 +124,32 @@ func TestSpentPendingLoginOutlivesABackwardClockStep(t *testing.T) {
 		t.Errorf("the kept pending login, replayed just before its wall-clock expiry, got %d %q, want 401 sign in again", resp.StatusCode, raw)
 	}
 }
+
+// TestSpentPendingLoginRefusedAtExactlyItsExpiry: decode still accepts a
+// pending-login cookie at exactly IssuedAt plus its maximum age (it
+// refuses only an older one), so the spent ID must still be held at that
+// instant. A replay then is refused.
+func TestSpentPendingLoginRefusedAtExactlyItsExpiry(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	var mu sync.Mutex
+	clock := time.Now().Round(0)
+	g.cfg.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	setClock := func(c time.Time) { mu.Lock(); clock = c; mu.Unlock() }
+	issuedAt := clock
+
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	_, codes, _ := totpEnrolAndConfirm(t, bob, ts)
+	client := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	kept := pendingCookieOf(t, client, ts)
+	first := submitLoginFactor(t, client, ts, codes[0])
+	_ = first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("the sign-in got %d, want 200", first.StatusCode)
+	}
+
+	setClock(issuedAt.Add(pendingLoginCookieMaxAge)) // decode's last accepting instant
+	resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor", loginFactorRequest{Code: codes[1]}, kept)
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "sign in again") {
+		t.Errorf("the kept pending login, replayed at exactly its expiry, got %d %q, want 401 sign in again", resp.StatusCode, raw)
+	}
+}
