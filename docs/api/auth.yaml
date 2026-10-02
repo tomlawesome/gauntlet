@@ -724,7 +724,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PasskeyRegisterFinishResponse"
         "400":
-          description: The body is not one JSON object of the documented fields, or the credential was refused (wrong origin, bad signature, malformed). The ceremony cookie is kept, so a corrected credential can finish it.
+          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or the credential was refused (wrong origin, bad signature, malformed). The ceremony cookie is kept, so a corrected credential can finish it.
           content:
             text/plain:
               schema:

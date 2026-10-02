@@ -1819,3 +1819,19 @@ func TestPasskeyNotOfferedToAnAccountWithNoLocalPassword(t *testing.T) {
 		t.Errorf("admin clear on the SSO account got %d and left %d passkeys, want 200 and none", clear.StatusCode, g.deps.Users.PasskeyCount("sso-1"))
 	}
 }
+
+// TestPasskeyRegisterFinishJudgesTheBodyBeforeTheCookie pins the order
+// ruling R5 on #20 accepts and auth.yaml documents: a malformed body is
+// refused with 400 before the ceremony cookie is examined, so a dead
+// cookie sent with it is not cleared by that request. (The review's
+// TestReviewDeadRegisterCookieWithBadBody observed this order.)
+func TestPasskeyRegisterFinishJudgesTheBodyBeforeTheCookie(t *testing.T) {
+	_, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	resp, body := postWithCookie(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish",
+		map[string]any{"credential": map[string]any{}, "name": "x", "extra": 1},
+		&http.Cookie{Name: passkeyRegisterCookieName, Value: "garbage"})
+	if resp.StatusCode != http.StatusBadRequest || cookieCleared(resp, passkeyRegisterCookieName) {
+		t.Errorf("dead cookie + unknown body field: got %d %q cleared=%v, want 400 with the cookie left alone", resp.StatusCode, body, cookieCleared(resp, passkeyRegisterCookieName))
+	}
+}

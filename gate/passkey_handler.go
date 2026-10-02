@@ -231,6 +231,12 @@ type passkeyRegisterFinishResponse struct {
 // keeps the cookie, so a corrected response -- or another authenticator,
 // after a 409 duplicate -- can finish inside the same five minutes, as
 // in mikroview. The cookie is otherwise cleared only on success.
+//
+// A malformed body is refused (400) before the ceremony cookie is
+// examined, since only the ceremony can judge the cookie and it needs
+// the body to do so; a dead cookie sent with a malformed body is left
+// for the next request to clear (ruling R5 on #20, accepted: no
+// frontend sends such a body).
 func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
