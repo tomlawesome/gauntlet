@@ -239,9 +239,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// The session this browser already held for the account ends here:
 	// the cookie below replaces it, and nothing else would (ASVS 7.2.4;
 	// see revokeReplacedSession).
-	g.revokeReplacedSession(r, user.ID, now)
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, user.ID, now)
 	g.audit(user.Username, "user.login", user.Username, "")
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 }
@@ -387,9 +385,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// As in handleLogin: the session this browser held for the account
 	// is replaced by the cookie below, so it ends here (ASVS 7.2.4). Only
 	// here, not at the password step, which issues no session.
-	g.revokeReplacedSession(r, user.ID, now)
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, user.ID, now)
 	g.audit(user.Username, "user.login", user.Username, "via second factor")
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 	return true

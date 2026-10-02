@@ -32,6 +32,7 @@ const (
 	oidcCallbackPath = "/api/auth/oidc/callback"
 	totpEnrolPath    = "/api/auth/totp/enrol"
 	totpConfirmPath  = "/api/auth/totp/confirm"
+	sessionsPath     = "/api/auth/sessions"
 
 	passkeysPath              = "/api/auth/passkeys"
 	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"

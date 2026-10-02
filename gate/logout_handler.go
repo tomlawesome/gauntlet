@@ -29,7 +29,6 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	g.deps.Sessions.RevokeAllForUser(user.ID)
 	g.audit(user.Username, "account.sessions_ended", user.Username, "sessions ended: all, via sign out everywhere")
 
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, user.ID, now)
 	writeJSON(w, http.StatusOK, map[string]any{"signedOutEverywhere": true})
 }

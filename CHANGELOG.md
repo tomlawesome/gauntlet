@@ -73,6 +73,25 @@ All notable changes to this project are documented in this file.
   `go-webauthn/x/crypto/secp256k1` (ISC) and `go-webauthn/x/revoke`
   (BSD-2-Clause), so the licence policy now allows both (owner decision
   2026-10-02).
+- Signed-in users can see and end their own sessions (#48; ASVS 7.5.2).
+  `GET /api/auth/sessions` lists every live session on the caller's
+  account, newest first: when it signed in, when it was last used, the
+  address and browser it signed in from, and which one is this browser.
+  It shows at most 100 rows and a `total` of all of them. Each row is
+  named by a one-way `ref`, never the session ID, which is the cookie.
+  `DELETE /api/auth/sessions/{ref}` ends one; ending this browser's own
+  session clears its cookie. It asks for no password, for any account:
+  signing out is a safe direction (owner decision 2026-10-02, recorded
+  as a deviation from ASVS 7.5.2). It ends the gauntlet session only,
+  not the sign-on provider's. Any ref that is not one of the caller's
+  live sessions answers 404. There is no admin view of other people's
+  sessions. The list lives in memory like the sessions themselves, so a
+  restart empties it. In the core package, `Session` gains `Client` and
+  `LastUsedAt` and a `Ref()` method, and `SessionStore` gains
+  `CreateFrom`, `ListForUser` and `RevokeRef`; a browser's agent and
+  address are kept cleaned and capped at `MaxSessionUserAgent` (256)
+  and `MaxSessionAddress` (64) bytes. All additions; nothing existing
+  changes.
 
 ### Changed
 

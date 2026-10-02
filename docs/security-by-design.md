@@ -225,7 +225,7 @@ it says so instead of repeating the reasoning.
 | Req | Level | Status | Evidence |
 |---|---|---|---|
 | 7.1.1 timeouts documented with justification against NIST | 2 | Met by 800-63B §5.2 below | Idle and absolute lifetimes are `NewSessionStore(ttl, maxLifetime)` arguments; `gate.New` caps them at `gauntlet.MaxSessionIdle`/`MaxSessionLifetime`, AAL2's own figures, recorded there |
-| 7.1.2 concurrent sessions documented | 2 | Met, here | Unlimited sessions per account; each is independent; `logout-all` ends them together; a credential change ends them all through `SessionCutoff` |
+| 7.1.2 concurrent sessions documented | 2 | Met, here | Unlimited sessions per account; each is independent; `logout-all` ends them together; a credential change ends them all through `SessionCutoff`. The owner sees them in `GET /api/auth/sessions`, which shows at most 100 rows and a `total` of all of them (#48) |
 | 7.1.3, 7.6.1 federated sessions documented | 2 | Met, here | An SSO session is gauntlet's own, with gauntlet's timeouts; IdP logout does not reach it and gauntlet never calls the IdP again until the next login. No back-channel logout |
 | 7.2.1 verified on the backend | 1 | Met | `SessionStore.Validate` under the server's lock (`session.go:201`) |
 | 7.2.2 dynamic reference tokens | 1 | Met | Opaque id per login (`session.go:108`) |
@@ -238,7 +238,7 @@ it says so instead of repeating the reasoning.
 | 7.4.4 logout visible on every page | 2 | App | Frontend |
 | 7.4.5 admins can end a user's sessions | 2 | Met, bluntly | An admin reset code ends them (and the password); deleting the account ends them. No softer admin route |
 | 7.5.1 full re-authentication before changing authentication settings | 2 | Met | `recheckPassword` guards password change, TOTP enrol and delete, passkey register and delete, recovery-code regeneration (`gate/password_handler.go:45,67`, `gate/totp_handler.go:253`, `gate/passkey_handler.go:182,431`, `gate/recoverycodes_handler.go:44`) |
-| 7.5.2 users can view and end their sessions | 2 | Gap, deferred | End-all exists; there is no list. Sessions carry no device or address, so a list would be a count. #48 (session list); accepted for v0.x |
+| 7.5.2 users can view and end their sessions | 2 | Met, with a deviation | `GET /api/auth/sessions` lists the caller's own live sessions with the address and browser each signed in from; `DELETE /api/auth/sessions/{ref}` ends one, `logout-all` ends all (`gate/sessions_handler.go`, #48). Deviation: ending a session asks for no re-authentication, for any account, SSO-only included. Owner decision, 2026-10-02: signing out is a safe direction -- a stolen session can already end every session through `logout-all` without a password, and an SSO-only account has none to give. Ends gauntlet's session only, not the IdP's |
 | 7.5.3 step-up before highly sensitive operations | 3 | Not targeted | Admin routes (create user, create token, reset) rely on the session alone |
 | 7.6.2 session needs the user's action | 2 | Met | The OIDC flow starts from the user's redirect and a sealed flow cookie; the callback cannot create a session without it (`gate/oidc_handler.go:229-249`) |
 
@@ -405,11 +405,12 @@ store, keep and protect:
 
 At L2 gauntlet meets every requirement except: password blocklists
 (6.1.2, 6.2.4, 6.2.11, 6.2.12), logging of refused attempts and
-decisions (16.2.1, 16.3.1–16.3.3), and a session list (7.5.2). Each has an issue; the password blocklist needs
-the owner. The lockout shape from the 800-63B review is settled (#44). Three
-deviations are recorded rather than fixed: the TOTP acceptance window,
-the SSO sign-in's reliance on the IdP's policy, and secrets at rest on
-backends other than the encrypted file.
+decisions (16.2.1, 16.3.1–16.3.3). Each has an issue; the password
+blocklist needs the owner. The lockout shape from the 800-63B review is
+settled (#44). Four deviations are recorded rather than fixed: the TOTP
+acceptance window, the SSO sign-in's reliance on the IdP's policy,
+secrets at rest on backends other than the encrypted file, and ending
+one session without re-authentication (7.5.2, owner 2026-10-02).
 
 Written by Fable 5.1, 2026-10-02.
 

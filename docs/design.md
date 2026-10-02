@@ -232,10 +232,16 @@ func (p KDFParams) Valid() bool      // zero fields refused, never derived cheap
 func NewKDFSalt() ([]byte, error)
 func DeriveKey(passphrase string, salt []byte, p KDFParams) []byte  // kept: mikroview's retention key uses it
 
-type Session struct { ID, UserID string; IssuedAt, ExpiresAt time.Time }
+type Session struct { ID, UserID string; IssuedAt, ExpiresAt, LastUsedAt time.Time; Client SessionClient }
+type SessionClient struct { Address, UserAgent string }             // new (#48): recorded at sign-in, memory only
+const ( MaxSessionUserAgent = 256; MaxSessionAddress = 64 )          // bytes kept, after control/format chars are dropped
+func (s Session) Ref() string                                       // new (#48): first 32 hex of SHA-256(ID); shown instead of the ID
 func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore  // new: one constructor; mikroview's two collapse
-func (s *SessionStore) Create(userID string, now time.Time) Session
-func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime
+func (s *SessionStore) Create(userID string, now time.Time) Session // CreateFrom with an empty client
+func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.Time) Session // new (#48)
+func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime; moves LastUsedAt
+func (s *SessionStore) ListForUser(userID string, now time.Time) []Session // new (#48): live only, newest first; evicts expired
+func (s *SessionStore) RevokeRef(userID, ref string) (Session, bool)       // new (#48): searches userID's sessions only
 func (s *SessionStore) Revoke(id string)
 func (s *SessionStore) RevokeAllForUser(userID string)
 
@@ -746,6 +752,7 @@ once, which is the price of sharing and the reason fixes land once.
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
 | Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept |
+| Sessions their owner cannot see | none: logout-all only | new (#48): `GET /api/auth/sessions` lists the caller's own live sessions (address and agent from sign-in, capped at 100 rows with a `total`) by a one-way `ref`, never the ID; `DELETE /api/auth/sessions/{ref}` ends one, with no password (owner, 2026-10-02: signing out is a safe direction), and 404 for any ref not the caller's. Own sessions only: no admin view of anyone else's |
 
 ### OIDC
 

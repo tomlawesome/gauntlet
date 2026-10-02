@@ -176,8 +176,7 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 	// document while this one runs would drop it (#28). A fresh session
 	// is issued so the person stays signed in on this browser.
 	g.deps.Sessions.RevokeAllForUser(caller.ID)
-	sess := g.deps.Sessions.Create(caller.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, caller.ID, now)
 	http.Redirect(w, r, "/?ssoLinked=1", http.StatusFound)
 }
 
@@ -292,8 +291,6 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// An SSO sign-in is a re-authentication like the password paths:
 	// the session this browser held for the account ends, since the
 	// cookie below replaces it (ASVS 7.2.4; see revokeReplacedSession).
-	g.revokeReplacedSession(r, user.ID, now)
-	sess := g.deps.Sessions.Create(user.ID, now)
-	g.setSessionCookie(w, sess.ID)
+	g.issueSession(w, r, user.ID, now)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
