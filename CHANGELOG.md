@@ -108,7 +108,7 @@ All notable changes to this project are documented in this file.
   works once, and stops working if the admin is unlocked any other
   way. The accounts document is unchanged.
 - `gauntlet/blocklist`, the common-password list (#52,
-  [ADR-0005](docs/adr/0005-common-password-list.md)): the SHA-1 hashes
+  [ADR-0007](docs/adr/0007-common-password-list.md)): the SHA-1 hashes
   of the 10,000 most prevalent passwords in Have I Been Pwned's Pwned
   Passwords. `Embedded()` is the copy built into the release and never
   touches the network; `List.Contains` checks a password against it.
@@ -313,7 +313,7 @@ All notable changes to this project are documented in this file.
   every local-password account, including ones created before this
   change, is stopped at the door until it enrols a factor, reaching
   only the enrolment routes until then. This closes the gap behind the
-  8-character password minimum (`store.go:39`): NIST SP 800-63B-4
+  8-character password minimum (`store.go:46`): NIST SP 800-63B-4
   §3.1.1.2 allows 8 characters only behind a mandatory second factor,
   and the minimum stays 8 rather than rising to 15 because the door can
   no longer be left off (#49, `docs/security-by-design.md`).

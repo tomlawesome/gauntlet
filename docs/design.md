@@ -60,10 +60,14 @@ github.com/tomlawesome/gauntlet
 ├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrNoUsablePasskey
 │                               (G8, ADR-0004; the one importer of go-webauthn)
 ├── blocklist/                  List, Parse, Embedded, Refresher, RefreshConfig, NewRefresher,
-│                               DefaultURL (#52, ADR-0005; the common-password list)
+│                               DefaultURL (#52, ADR-0007; the common-password list)
 ├── cmd/pwlist/                 builds, signs, verifies and publishes that list (CI only)
 ├── internal/listsig/           the list's Ed25519 signature format
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
+├── internal/hashcost/          Use, Cheap -- cheap Argon2id hashes for this
+│                               module's own tests
+├── internal/spent/             Set, New, Claim, Spent -- one-time-key tracking
+│                               shared by gate and passkey
 ├── internal/testutil/          fake OIDC provider (mikroview's fake_provider_test.go)
 └── internal/passkeytest/       fake WebAuthn authenticator (mikroview's webauthnfake_test.go)
 ```
@@ -500,7 +504,7 @@ the same.
 Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
 
-**Common passwords** (#43, #52, [ADR-0005](adr/0005-common-password-list.md)).
+**Common passwords** (#43, #52, [ADR-0007](adr/0007-common-password-list.md)).
 `gauntlet/blocklist` holds the SHA-1 hashes of the 10,000 most
 prevalent Pwned Passwords. `blocklist.Embedded()` is the copy compiled
 into the release and makes no network request; it is an empty list
@@ -731,7 +735,7 @@ it. The data for all of this lives on `User`.
   and birdcage's alike, must hold a second factor before it can reach
   anything but the enrolment routes. This closes the gap ASVS 5.0 6.2.1
   and NIST SP 800-63B-4 §3.1.1.2 flagged against the 8-character minimum
-  (`store.go:39`, docs/security-by-design.md): with the door
+  (`store.go:46`, docs/security-by-design.md): with the door
   configurable and off by default, an application that forgot to turn
   it on got 8-character single-factor passwords. Cost: the TOTP enrol
   screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
@@ -1042,7 +1046,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | Addresses and browsers readable in a backup | sealed under its own `persist.Encrypt` label, `signins`; a plaintext backend is refused unless allowed |
 | Two writers, or a removed document | a conflicting save reloads and re-appends its unsaved rows renumbered; a removed document keeps memory and is logged once until a save succeeds |
 
-### Common-password list (#52, ADR-0005)
+### Common-password list (#52, ADR-0007)
 
 | Pitfall | Module does |
 |---|---|

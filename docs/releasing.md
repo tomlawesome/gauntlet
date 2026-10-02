@@ -77,7 +77,7 @@ Apps then take it with `go get github.com/tomlawesome/gauntlet@v<VERSION>`.
 
 `blocklist.Embedded()` and `blocklist.Refresher` serve the SHA-1
 hashes of the 10,000 most prevalent passwords in Have I Been Pwned's
-Pwned Passwords (#52, [ADR-0005](adr/0005-common-password-list.md)).
+Pwned Passwords (#52, [ADR-0007](adr/0007-common-password-list.md)).
 The monthly `blocklist` pipeline schedule rebuilds the list from HIBP,
 signs it, and publishes it to this project's package registry and then
 to releases on the public GitHub mirror, where applications fetch it;

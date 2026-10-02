@@ -1,5 +1,5 @@
 // Package listsig is the signature format for the common-password list
-// (#52, ADR-0005): Ed25519 keys in PEM files, and a detached signature
+// (#52, ADR-0007): Ed25519 keys in PEM files, and a detached signature
 // file holding one line per signing key.
 //
 // It is internal so the format is shared by the two places that need it
