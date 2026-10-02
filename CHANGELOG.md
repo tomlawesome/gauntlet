@@ -10,17 +10,22 @@ All notable changes to this project are documented in this file.
   serves -- each request body, response body and status -- as the one
   copy a frontend can build against (ADR-0002, #22). `docs/design.md`
   §1.5 now points at it instead of listing the routes by hand.
-- Compatibility is checked in CI, not by review (#22). A contract test
-  drives every gate route and fails on a request, response or status the
-  document does not describe, or on a route that exists on one side
-  only. The `lint:apidiff` job (`scripts/apidiff.sh`) fails a merge
-  request that removes, renames or changes an exported Go identifier
-  since the last release tag, unless `VERSION` bumps the major version;
-  additions pass. Neither tool enters the library's own dependencies.
-- `TokenStore.Create` refuses a token name over 64 bytes
-  (`MaxTokenNameLen`) or carrying control or formatting characters, with
-  the new `ErrTokenNameInvalid`, the same rule the device id already
-  had (#24). An empty name is still allowed.
+- CI now checks for breaking changes (#22). A test calls every `gate`
+  route and fails if a request, response or status code is not
+  described in `docs/api/auth.yaml`, or if a route exists in only one
+  of the two. A second job, `lint:apidiff`, fails if an exported Go
+  identifier has been removed, renamed or changed since the last
+  release tag, unless `VERSION` moves to a new major number (0.x to
+  1.0) -- a minor bump such as 0.1 to 0.2 does not count. Additions
+  pass. Neither tool enters the library's own dependencies. A field
+  renamed in both the handler and `auth.yaml` still has to be caught in
+  review.
+- `TokenStore.Create` now refuses a token name longer than 64 bytes
+  (`MaxTokenNameLen`), or one that contains control characters or
+  invisible formatting characters (such as zero-width spaces),
+  returning the new `ErrTokenNameInvalid` (#24). Code that passes
+  user-typed names should handle this error. An empty name is still
+  allowed. Device ids already followed this rule.
 
 ### Changed
 
@@ -58,38 +63,41 @@ All notable changes to this project are documented in this file.
   cannot load it and silently drop what only the newer build knows,
   such as TOTP secrets or passkeys. There is no migration code yet; it
   is added with the first format change that needs one.
-- A write from the CLI and one from the running server at the same
-  moment no longer lose one of them (issue #21). Before, the second
-  save to land wrote its whole accounts or tokens document on top of
-  the first, and the first change was gone with only a log line to say
-  so. Now the second write loads what the first saved, makes its own
-  change again on top of that, and saves the result, so both changes
-  survive. `TokenStore` gets the same protection; it had none. It also
-  now re-reads its document before every read, write and
+- If the CLI and the running server save at the same moment, both
+  changes are now kept (#21). Before, the second save to land wrote its
+  whole accounts or tokens document on top of the first, and the first
+  change was gone with only a log line to say so. Now the second write
+  loads what the first saved, makes its own change again on top of
+  that, and saves the result, so both changes survive. This covers both
+  the accounts store and the token store, which had no such protection
+  before.
+- A token revoked with the CLI now stops working on the running server
+  at once. Before, it kept working until the server restarted.
+  `TokenStore` now re-reads its document before every read, write and
   `Authenticate` when another process has changed it, as `Store`
-  always has: a token revoked through the CLI stops working on the
-  running server at once, where before it worked until a restart.
-- A login or token use whose last-seen timestamp was being saved as
-  another process deleted that account or revoked that token is
-  refused: the store takes the document the other process wrote
-  instead of keeping the account or token in memory as valid.
-- After five conflicting writes in a row -- a script writing in a loop,
-  not an ordinary CLI command -- a write gives up with the new
-  `ErrSaveConflict` and changes nothing; the caller can try again. The
-  whole write, retries and reloads included, is held to one five-second
-  limit (the limit one save had before), since it runs while every
-  login and signed-in request on that store waits. The shipped file
-  backends cannot be interrupted mid-call, so on a hung mount the
-  limit only stops another retry from starting, not a call already
-  in progress.
-  Checks such as "registration is still open", "one admin only",
-  "username free" and "recovery codes already issued" are made again
-  against the document another process saved, so a retried write never
-  breaks them. A write that finds nothing to change -- a revoke of a
-  token already gone, say -- now re-checks that decision against the
-  saved document too, so it cannot miss a token another process just
-  issued; such a call can now return an error if that re-check fails,
-  where before it always returned nil.
+  already did.
+- If an account is deleted, or a token revoked, by another process
+  while a login or token use is in progress, that login or token use is
+  now refused. Before, it could succeed using the old copy held in
+  memory.
+- A save conflicts when another process saved the same file after this
+  one loaded it. After five conflicts in a row for the same write -- a
+  script writing in a loop, not an ordinary CLI command -- the write
+  gives up with the new `ErrSaveConflict` and changes nothing; the
+  caller can try again. The whole write, retries and reloads included,
+  is held to one five-second limit (the limit one save had before),
+  since it runs while every login and signed-in request on that store
+  waits. The shipped file backends cannot be interrupted mid-call, so
+  on a hung mount the limit only stops another retry from starting, not
+  a call already in progress.
+- When a save is retried, its rules are checked again against the newer
+  file: registration still open, only one admin, username not taken,
+  recovery codes not already issued. A retry can never break them. A
+  write that finds nothing to change -- revoking a token already gone,
+  say -- now re-checks that decision against the saved document too, so
+  it cannot miss a token another process just issued; such a call can
+  now return an error if that re-check fails, where before it always
+  returned nil.
 - A write that meets an accounts document this store refuses to load
   (two admins, say) now fails instead of saving over it. One that finds
   the document removed from under it -- a file deleted or moved aside
@@ -102,14 +110,14 @@ All notable changes to this project are documented in this file.
   and saying writes are refused until the file is restored or the
   process restarts; reads carry on from memory (#39). To recover,
   put the file back, or restart to start afresh.
-- `VerifyAndRecordTOTP` and `RecordPasskeyAssertionIfFresh` report a
-  code or assertion as accepted only when the counter that stops it
-  being used again was saved. Before, a matching TOTP code was
-  accepted even when that save failed (mikroview's stance), which
-  left the same code good for a second login; now it is refused with
-  the error, the stance reset codes and recovery codes already take.
-  A caller that granted the login on `ok` despite an error no longer
-  sees that combination. The one exception is a passkey that has
+- `VerifyAndRecordTOTP` and `RecordPasskeyAssertionIfFresh` now accept a
+  code or passkey only if they could save the record that stops it
+  being used twice. Before, a correct TOTP code was accepted even when
+  that save failed, so the same code could log in a second time. Now
+  the call returns `ok == false` and the error, as reset codes and
+  recovery codes already did. Callers that allowed a login when `ok`
+  was true but an error was also returned should remove that path: that
+  combination no longer occurs. The one exception is a passkey that has
   never counted and presents 0 (most platform passkeys): that save
   protects nothing, since the app's single-use challenge is what stops
   a replay, so it is best-effort like `LastLogin` -- if it fails, the
@@ -149,14 +157,14 @@ All notable changes to this project are documented in this file.
     `GenerateRecoveryCodesIfAbsent` skips the hashing entirely when the
     account already has codes. `BurnRecoveryCode` no longer changes a
     copy another caller is reading.
-  - Clearing out expired sessions no longer pauses every login and
-    session check while a large session store is walked in one go; each
-    login now checks a fixed few sessions instead. Signing out
-    everywhere, and other per-user session revokes, no longer walk
-    every session either: the store now keeps each user's session IDs
-    alongside the sessions and revokes from that list.
-  - Each CI job keeps its own cache, so the lint jobs running side by
-    side no longer overwrite each other's and every job starts warm.
+  - Removing expired sessions no longer pauses every login and session
+    check while the whole session store is scanned in one go; each
+    login now removes up to 4 expired sessions instead. On a quiet
+    server, expired sessions may therefore stay in memory longer, but
+    they still never authenticate. Signing out everywhere, and other
+    per-user session revokes, no longer walk every session either: the
+    store now keeps each user's session IDs alongside the sessions and
+    revokes from that list.
   - A login lockout that could not be saved is saved again by a later
     refused attempt on that account (at most every 30 seconds), so a
     backend that recovers inside the lockout ends up holding it and a
@@ -173,8 +181,8 @@ All notable changes to this project are documented in this file.
     limiter stops counting guesses made before the change. Linking the
     admin to SSO, whose password keeps working, leaves its lockout in
     place.
-  - Internal tidying in `gate` with no change on the wire, plus test and
-    documentation fixes.
+  - Internal tidying in `gate`, plus test and documentation fixes. HTTP
+    requests and responses are unchanged.
 - A failed password change, and a failed SSO login or link, are now
   logged, as the API document already said (#26).
 

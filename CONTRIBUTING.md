@@ -9,10 +9,10 @@ contributors.
 
 ## Branching
 
-Branch from and target `dev` for issue work. `dev` is the default branch;
-there is no `preview`/`main` promotion pipeline here -- a tagged release
-is the promotion, not a protected branch, and it is cut from a button on
-the `dev` pipeline (docs/releasing.md).
+Branch from `dev` and send merge requests to `dev`, the default branch.
+There are no `preview` or `main` branches. A release is a version tag,
+created by a button in the `dev` pipeline; see
+[docs/releasing.md](docs/releasing.md).
 
 ## Before starting work
 
