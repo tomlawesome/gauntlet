@@ -493,6 +493,47 @@ func TestPasswordChangeDropsAnUnsavedLockout(t *testing.T) {
 	if got := s.LoginLockedUntil(id); !got.IsZero() {
 		t.Fatalf("a lockout from before the password change was saved after it, until %v", got)
 	}
+	// Checked on the limiter itself: nothing a caller can do next would
+	// reach a retry of the old lockout before a new count replaced it,
+	// so the record alone cannot show whether it was dropped.
+	l.mu.Lock()
+	p, pending := l.wantLockout[id]
+	l.mu.Unlock()
+	if pending {
+		t.Errorf("the limiter still holds the old password's unsaved lockout (until %v) for a later retry to save", p.until)
+	}
+}
+
+// #28: a lockout whose save failed, then the admin linked to SSO while
+// the retry was still spaced out. The link ends the account's sessions
+// but leaves its password working, so it must not read as a password
+// change: the next attempt is still refused, and its retry saves the
+// lockout the backend has recovered enough to take.
+func TestLinkingTheAdminKeepsAnUnsavedLockout(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	window := time.Hour
+	l := mustNewLoginLimiter(t, 3, window)
+
+	b.fail.Store(true)
+	for range 3 {
+		l.ReserveAccount(s, id, now)
+	}
+	if got := s.LoginLockedUntil(id); !got.IsZero() {
+		t.Fatalf("test setup: the lockout's first save was meant to fail, but the record holds %v", got)
+	}
+	b.fail.Store(false)
+	if err := s.LinkOIDCIdentity(id, "https://idp.example", "subject-1", now.Add(10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	if l.ReserveAccount(s, id, now.Add(lockoutRetryInterval+time.Second)) {
+		t.Fatal("linking the admin to SSO ended a lockout whose save had failed")
+	}
+	if got, want := s.LoginLockedUntil(id), now.Add(window); !got.Equal(want) {
+		t.Errorf("record locked until %v after the retry, want %v", got, want)
+	}
 }
 
 // A lockout whose save lands just after a password change -- decided
@@ -575,10 +616,10 @@ func TestFuturePasswordChangeDoesNotTurnTheLimitOff(t *testing.T) {
 	})
 }
 
-// Linking the admin to an SSO identity bumps PasswordChangedAt, to end
-// the sessions issued before it, but the admin keeps its password: the
-// guesses that locked it out were at a password that still works. The
-// lockout stays, in this limiter and in a fresh one reading the record.
+// Linking the admin to an SSO identity ends the sessions issued before
+// it, but the admin keeps its password: the guesses that locked it out
+// were at a password that still works. The lockout stays, in this
+// limiter and in a fresh one reading the record.
 func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	if u, _ := s.ByUsername("alice"); u.Role != RoleAdmin {

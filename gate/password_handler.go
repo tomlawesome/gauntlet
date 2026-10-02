@@ -63,7 +63,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Every session issued before now is dead by PasswordChangedAt, but
+	// Every session issued before now is dead by SessionCutoff, but
 	// that is only enforced on the next request each one makes -- dropped
 	// here so they are gone immediately.
 	g.deps.Sessions.RevokeAllForUser(user.ID)

@@ -122,6 +122,14 @@ All notable changes to this project are documented in this file.
   cannot load it and silently drop what only the newer build knows,
   such as TOTP secrets or passkeys. There is no migration code yet; it
   is added with the first format change that needs one.
+- The accounts document is now version 2: it adds `sessionsEndedAt`
+  (#28), and any change to what a stored document carries now raises
+  its version (ADR-0002 decision 1). Version-1 documents, from v0.2.0
+  or mikroview, open unchanged with the new field empty and are written
+  as version 2 on their next save; no migration is needed. v0.2.0
+  cannot open an accounts document once this version has saved it, so
+  keep a copy before upgrading if a rollback is possible. The tokens
+  document stays version 1.
 - If the CLI and the running server save at the same moment, both
   changes are now kept (#21). Before, the second save to land wrote its
   whole accounts or tokens document on top of the first, and the first
@@ -286,6 +294,36 @@ All notable changes to this project are documented in this file.
   never locked out and only changed its own password. New
   `LoginLimiter.AllowAfterReset`, `ReleaseAfterReset` and
   `EndAfterReset` carry this.
+- The token-name and device-id errors say the limit is 64 bytes (fewer
+  characters for non-Latin letters), not 64 characters, so a name
+  refused for length no longer seems to meet the limit it names (#28).
+- `Store.AddPasskey` copies the passkey it is given and the one it
+  returns, so a caller reusing either buffer cannot change the stored
+  credential (#28).
+- A returning SSO sign-in saves `LastLogin` at most hourly, as a
+  password login does, instead of rewriting the accounts document on
+  every sign-in; `GET /api/auth/users` no longer re-reads each account
+  to learn whether it has an authenticator app (#28). Its passkey
+  count still takes one store read per account.
+- The release job's `release-cli` image is pinned by tag and digest
+  instead of `:latest` (#28).
+- A request whose `Authorization` header is not a well-formed
+  `Bearer <token>` -- another scheme such as `Basic`, a bare `Bearer`,
+  a tab for the space -- is refused with 401 and
+  `WWW-Authenticate: Bearer realm="gate"`, as an unknown token is.
+  Before, the header was ignored and the request went through on its
+  session cookie. A request with no `Authorization` header is
+  unchanged (#41).
+- Linking the admin to SSO no longer ends a login lockout whose save
+  had failed (#28). The link used to record itself in
+  `PasswordChangedAt`, which the login limiter reads as a password
+  change. A new stored field, `User.SessionsEndedAt`, now records when
+  an account's sessions were ended -- by a new password, a reset code or
+  an SSO link -- and `PasswordChangedAt` moves only when the password
+  does. `User.SessionCutoff()` returns the later of the two, and the
+  gate refuses a session issued before it. Documents written before this
+  field existed, by gauntlet or mikroview, record a link in
+  `passwordChangedAt` only, and those sessions stay ended.
 
 ## [0.1.0] - 2026-09-30
 

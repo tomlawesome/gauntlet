@@ -23,11 +23,11 @@
 //     same not-yet-advanced counter and both win a session -- doing both
 //     under one lock closes it. There is no reason for a new caller to
 //     have the unsafe two-call option available at all.
-//   - There is no Store.HasActiveTOTP(userID) convenience wrapper.
-//     Store.Get already returns an unblanked *User (unlike List), so a
-//     caller checking activity calls Get then the User method directly;
-//     mikroview's version predates that shape and is now redundant with
-//     it.
+//   - There is no Store.HasActiveTOTP(userID) convenience wrapper. A
+//     caller calls the User method on what Get or List returns: List
+//     blanks TOTPSecret, but HasActiveTOTP still answers truly on the
+//     blanked copy (see User.totpSecretBlanked), so listing accounts
+//     with their authenticator-app status needs no Get per account.
 package gauntlet
 
 import (

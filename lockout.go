@@ -47,13 +47,15 @@ func (s *Store) SetLoginLockedUntil(accountID string, until time.Time) error {
 // AccountLockouts: the lockout together with the account's
 // PasswordChangedAt, in one read. Guesses made before a password change
 // were at the old password, so the limiter stops counting them
-// (ReserveAccount). Not every bump is a password change: linking the
-// admin to SSO bumps it to end old sessions and keeps the password, so
-// the limiter takes a bump as one only while the record carries no
-// lockout -- SetPassword and IssueResetCode clear it in the same write,
-// LinkOIDCIdentity does not. Unexported, so only *Store has it: a
-// limiter given any other AccountLockouts keeps counting those guesses
-// until they age out of the window, as before.
+// (ReserveAccount). In this build only SetPassword and IssueResetCode
+// move it, and they clear the lockout in the same write;
+// LinkOIDCIdentity ends sessions through SessionsEndedAt and leaves both
+// alone (#28). A document an older gauntlet or mikroview wrote may
+// record an SSO link in PasswordChangedAt, so the limiter still takes a
+// bump as a password change only while the record carries no lockout.
+// Unexported, so only *Store has it: a limiter given any other
+// AccountLockouts keeps counting those guesses until they age out of
+// the window, as before.
 type lockoutRecorder interface {
 	lockoutRecord(accountID string) (lockedUntil, passwordChangedAt time.Time)
 }

@@ -1,6 +1,6 @@
 // Ported from mikroview's internal/api/auth_test.go: the requireAuth
 // cases that fall inside G6 stage 1 (docs/design.md §1.5) -- bootstrap
-// gating, CSRF, session gating and the PasswordChangedAt revoke check.
+// gating, CSRF, session gating and the session-cutoff revoke check.
 // Second-factor login, TOTP and OIDC cases are stage 2 and are not
 // ported here.
 package gate
@@ -367,7 +367,7 @@ func TestLogoutAllEndsEverySessionButTheCallers(t *testing.T) {
 // reset from a separate process (a CLI recovery tool in the real
 // application) -- it has no handle on the running server's
 // SessionStore, so this has to work purely off the persisted
-// User.PasswordChangedAt field (see Gate.sessionUser).
+// User.SessionCutoff (see Gate.sessionUser).
 func TestPasswordResetInvalidatesExistingSessions(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
@@ -394,6 +394,82 @@ func TestPasswordResetInvalidatesExistingSessions(t *testing.T) {
 	if post.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected the pre-reset session to be invalidated, got %d", post.StatusCode)
 	}
+}
+
+// TestLinkingSSOInvalidatesExistingSessions: linking an account to SSO
+// ends its earlier sessions through SessionsEndedAt, not
+// PasswordChangedAt (#28), so the gate's check has to read both.
+func TestLinkingSSOInvalidatesExistingSessions(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password123")
+	if got := protectedStatusWithCookie(t, client, ts.URL, nil); got != http.StatusOK {
+		t.Fatalf("expected the session to work before the link, got %d", got)
+	}
+	admin, _ := g.deps.Users.ByUsername("admin")
+	if err := g.deps.Users.LinkOIDCIdentity(admin.ID, "https://idp.example", "subject-1", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := protectedStatusWithCookie(t, client, ts.URL, nil); got != http.StatusUnauthorized {
+		t.Errorf("expected the pre-link session to be invalidated, got %d", got)
+	}
+}
+
+// TestAnOlderDocumentsLinkStillEndsEarlierSessions: an accounts
+// document written before SessionsEndedAt existed (gauntlet v0.2.0,
+// mikroview) records an SSO link in passwordChangedAt alone. A session
+// issued before that time stays dead; one issued after it works.
+func TestAnOlderDocumentsLinkStillEndsEarlierSessions(t *testing.T) {
+	linkedAt := time.Now().Add(-time.Minute)
+	hash, err := gauntlet.HashPassword("password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := openStoreWithUsers(t, gauntlet.User{
+		ID:                "linked-admin",
+		Username:          "admin",
+		PasswordHash:      hash,
+		Role:              gauntlet.RoleAdmin,
+		CreatedAt:         linkedAt.Add(-time.Hour),
+		PasswordChangedAt: linkedAt,
+		OIDCIssuer:        "https://idp.example",
+		OIDCSubject:       "subject-1",
+		HasLocalPassword:  true,
+	})
+	if u, _ := users.Get("linked-admin"); !u.SessionsEndedAt.IsZero() {
+		t.Fatalf("test setup: the older document should carry no sessionsEndedAt, got %v", u.SessionsEndedAt)
+	}
+	g := newTestGate(t)
+	g.deps.Users = users
+	ts := newTestServer(t, g)
+
+	before := g.deps.Sessions.Create("linked-admin", linkedAt.Add(-time.Second))
+	if got := protectedStatusWithCookie(t, http.DefaultClient, ts.URL, &http.Cookie{Name: testCookieName, Value: before.ID}); got != http.StatusUnauthorized {
+		t.Errorf("a session issued before the older document's link got %d, want 401", got)
+	}
+	after := g.deps.Sessions.Create("linked-admin", linkedAt.Add(time.Second))
+	if got := protectedStatusWithCookie(t, http.DefaultClient, ts.URL, &http.Cookie{Name: testCookieName, Value: after.ID}); got != http.StatusOK {
+		t.Errorf("a session issued after the older document's link got %d, want 200", got)
+	}
+}
+
+// protectedStatusWithCookie is the status GET /api/protected answers
+// client with, sending cookie too when it is not nil.
+func protectedStatusWithCookie(t *testing.T, client *http.Client, base string, cookie *http.Cookie) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+"/api/protected", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
 }
 
 func TestMutatingRequestWithoutCSRFHeaderIsRejectedOnceAuthActive(t *testing.T) {

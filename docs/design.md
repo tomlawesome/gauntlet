@@ -25,7 +25,8 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, and a document newer than the running build is
+  version 1 unchanged, gauntlet writes accounts as version 2 (#28) and
+  tokens as version 1, and a document newer than the running build is
   refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
   `User` must carry *every* field mikroview stores today -- including
@@ -174,12 +175,14 @@ func (r Role) AtLeast(min Role) bool // admin ⊇ user ⊇ viewer; unknown role 
 type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     ID, Username, PasswordHash string; Role Role
     CreatedAt, LastLogin, PasswordChangedAt, RoleChangedAt time.Time
+    SessionsEndedAt, LoginLockedUntil time.Time // new (#28, #19): gauntlet's own, zero in mikroview's documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
     RecoveryCodes []RecoveryCode; Passkeys []Passkey
 }
 func (u *User) LocalPassword() bool
+func (u *User) SessionCutoff() time.Time // new (#28): later of SessionsEndedAt and PasswordChangedAt
 func (u *User) HasActiveTOTP() bool
 func (u *User) HasSecondFactor() bool
 
@@ -334,7 +337,11 @@ lockout is written to the account (`User.LoginLockedUntil`) so it
 survives a restart, but only as it begins and as it clears: one save per
 lockout episode, not one per wrong guess. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
-30 seconds (#24). A new password or reset code ends the lockout, and
+30 seconds (#24). A clear whose save fails -- the owner signed in and
+ended a lockout the record still holds -- is retried the same way, but
+that retry lives only in memory: a restart before it succeeds reloads
+the record's lockout, and the owner waits it out (at most one window)
+or resets the password (#28). A new password or reset code ends the lockout, and
 guesses from before it stop counting (#24); linking the admin to SSO,
 which ends its sessions but keeps its password, does not. The reset
 account also gets past the per-address limit (#32; owner, 2026-10-01:
@@ -398,7 +405,7 @@ func New(cfg Config, deps Deps) (*Gate, error)
 // Protect is mikroview's requireAuth. Bearer tokens are tried first, in the
 // order kinds were registered with Handle; a match is dispatched to that
 // kind's handler and never to next. Otherwise: CSRF header on unsafe
-// methods, exempt paths, session cookie, PasswordChangedAt check,
+// methods, exempt paths, session cookie, SessionCutoff check,
 // MustChangePassword door, second-factor door, then next.
 func (g *Gate) Protect(next http.Handler) http.Handler
 func (g *Gate) Handle(kind gauntlet.TokenKind, h http.Handler) // e.g. TokenKindAPI -> the app's read-only mux
@@ -619,10 +626,11 @@ Not done in this work; recorded so the API above is checked against it.
   `users.json`/`tokens.json` files) are what gauntlet still reads as
   version 1, so a copy of real data loads without migration -- the
   acceptance test [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) assigns
-  to #1202. Gauntlet's first save adds `"version": 1` to both and
-  wraps the tokens list as `{"version": 1, "tokens": [...]}` (#29);
-  mikroview's own code cannot read that tokens document, so rolling
-  back past the move needs the copy taken before it.
+  to #1202. Gauntlet's first save adds `"version": 2` to the accounts
+  document (#28) and wraps the tokens list as
+  `{"version": 1, "tokens": [...]}` (#29); mikroview's own code cannot
+  read that tokens document, so rolling back past the move needs the
+  copy taken before it.
 - `persist.Backend`: mikroview's file, Postgres and write-behind
   backends satisfy gauntlet's interface as they stand. One line:
   `ErrConflict = gpersist.ErrConflict`. Its own
@@ -635,6 +643,12 @@ Not done in this work; recorded so the API above is checked against it.
   `OpenTokenStore(b, TokenOptions{Kinds: […, TokenKindDroplistPull]})`;
   `NewSessionStoreWithMaxLifetime(ttl, max)` → `NewSessionStore(ttl,
   max)`. Call sites: `main.go:839, 970, 1930-1937` and the CLI tools.
+- Session check: mikroview's one `IssuedAt.Before(PasswordChangedAt)`
+  check (`internal/api/auth.go:202`, its `sessionUser`) becomes
+  `IssuedAt.Before(user.SessionCutoff())` (#28). Its documents record an
+  SSO link in `passwordChangedAt` and carry no `sessionsEndedAt`;
+  `SessionCutoff` reads both, so a session issued before such a link
+  stays dead after the move.
 - `internal/oidc` → `gauntlet/oidc`, no other change (`main.go:1733`).
 - Handlers: two steps. First mikroview keeps `internal/api/{auth,oidc,
   tokens}.go` over gauntlet's stores -- everything they call is in §1.3
@@ -683,7 +697,7 @@ once, which is the price of sharing and the reason fixes land once.
 |---|---|---|
 | Session fixation / predictable ids | 128-bit `crypto/rand` id, new id per login, never reused | same; `newID` panics rather than degrades if the CSPRNG fails |
 | Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt` |
-| Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect`; the CLI in §2.5 depends on it |
+| Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener |
 | Logout that does not revoke | server-side delete; logout-all revokes every session of the user | kept |

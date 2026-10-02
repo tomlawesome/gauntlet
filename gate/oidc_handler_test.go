@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -420,6 +421,55 @@ func TestOIDCLinkStartRefusesAlreadyConnectedAccount(t *testing.T) {
 	}
 }
 
+// TestOIDCLinkRevokesEarlierSessionsInMemory: completing a link drops
+// the account's live sessions on the spot, as a password change does,
+// rather than leaving them to the stored cutoff alone. The link records
+// itself only in SessionsEndedAt, and an older build saving the
+// document while this one runs drops that field (#28). Here the field
+// is stripped from the stored account after the link and the store
+// reloaded from that document: a session from before the link -- the
+// linking browser's old one, and another device's -- must still be
+// refused.
+func TestOIDCLinkRevokesEarlierSessionsInMemory(t *testing.T) {
+	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
+	admin := registerAdmin(t, ts, "admin", "password123")
+	adminUser, ok := g.deps.Users.ByUsername("admin")
+	if !ok {
+		t.Fatal("no admin account")
+	}
+	u, _ := url.Parse(ts.URL)
+	var linkingCookie *http.Cookie
+	for _, c := range admin.Jar.Cookies(u) {
+		if c.Name == testCookieName {
+			linkingCookie = &http.Cookie{Name: c.Name, Value: c.Value}
+		}
+	}
+	if linkingCookie == nil {
+		t.Fatal("the admin client holds no session cookie")
+	}
+	other := g.deps.Sessions.Create(adminUser.ID, time.Now().Add(-time.Minute))
+	otherCookie := &http.Cookie{Name: testCookieName, Value: other.ID}
+
+	oidcCompleteLinkFlow(t, g, ts, admin, fp)
+
+	linked, ok := g.deps.Users.Get(adminUser.ID)
+	if !ok || linked.SessionsEndedAt.IsZero() {
+		t.Fatalf("test setup: the link recorded no SessionsEndedAt (%+v)", linked)
+	}
+	stripped := *linked
+	stripped.SessionsEndedAt = time.Time{}
+	g.deps.Users = openStoreWithUsers(t, stripped)
+
+	for name, c := range map[string]*http.Cookie{"the linking browser's old session": linkingCookie, "another device's session": otherCookie} {
+		if got := protectedStatusWithCookie(t, http.DefaultClient, ts.URL, c); got != http.StatusUnauthorized {
+			t.Errorf("%s, issued before the link, got %d once the stored cutoff was lost; want 401", name, got)
+		}
+	}
+	if got := protectedStatusWithCookie(t, admin, ts.URL, nil); got != http.StatusOK {
+		t.Errorf("the session the link issued got %d, want 200", got)
+	}
+}
+
 // oidcCompleteLinkFlow drives handleOIDCLinkStart + the callback for
 // client (already signed in) end to end, returning the FlowState used.
 func oidcCompleteLinkFlow(t *testing.T, g *Gate, ts *httptest.Server, client *http.Client, fp *testutil.FakeProvider) oidc.FlowState {
@@ -460,7 +510,7 @@ func oidcCompleteLinkFlow(t *testing.T, g *Gate, ts *httptest.Server, client *ht
 	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/?ssoLinked=1" {
 		t.Fatalf("link callback returned %d %q, want 302 to /?ssoLinked=1", resp.StatusCode, resp.Header.Get("Location"))
 	}
-	// LinkOIDCIdentity bumps PasswordChangedAt, which invalidates the
+	// LinkOIDCIdentity bumps SessionsEndedAt, which invalidates the
 	// session client was signed in with -- the callback issues a fresh
 	// one instead, but this response went through noRedirectClient
 	// (never client itself), so client's own jar has to be told about it

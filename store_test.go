@@ -7,12 +7,10 @@
 // moved to testhelpers_test.go since other files share them.
 //
 // mikroview's TOTP-method tests (SetPendingTOTPSecret, ConfirmTOTP,
-// ClearTOTP, RecordTOTPCounter and friends) are not ported: those
-// methods are a later slice (G4). TestUnconfirmedTOTPSecretIsNotAnActiveFactor
-// is kept in reduced form, testing only User.HasActiveTOTP -- the
-// predicate itself is in scope for G2 (docs/design.md §1.3) -- with the
-// Store.HasActiveTOTP(userID) assertions dropped, since that store-level
-// wrapper is not part of G2's API.
+// ClearTOTP and friends) live in totp_test.go instead.
+// TestUnconfirmedTOTPSecretIsNotAnActiveFactor stays here, with the
+// Store.HasActiveTOTP(userID) assertions dropped, since this package has
+// no such wrapper (see totp.go's package comment).
 
 package gauntlet
 
@@ -238,12 +236,57 @@ func TestSetPasswordChangesCredentials(t *testing.T) {
 	}
 }
 
+// TestSetPasswordMovesBothTimestamps: a new password is a password
+// change (PasswordChangedAt, which the login limiter reads) and ends
+// every session issued before it (SessionsEndedAt, #28).
+func TestSetPasswordMovesBothTimestamps(t *testing.T) {
+	s := openTestStore(t)
+	u, _ := s.Register("admin", "old-password", time.Now().Add(-time.Hour))
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.SetPassword("admin", "new-password", at); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	got, _ := s.Get(u.ID)
+	if !got.PasswordChangedAt.Equal(at) || !got.SessionsEndedAt.Equal(at) {
+		t.Errorf("PasswordChangedAt = %v, SessionsEndedAt = %v; want both %v",
+			got.PasswordChangedAt, got.SessionsEndedAt, at)
+	}
+}
+
+// TestSessionCutoffIsTheLaterTimestamp: a session must have been issued
+// after both the last password change and the last time the account's
+// sessions were ended. A document written before SessionsEndedAt
+// existed -- gauntlet v0.2.0, or mikroview, both of which record an SSO
+// link in PasswordChangedAt -- has only the first, and still cuts off
+// there.
+func TestSessionCutoffIsTheLaterTimestamp(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Hour)
+	cases := []struct {
+		name           string
+		changed, ended time.Time
+		want           time.Time
+	}{
+		{"neither", time.Time{}, time.Time{}, time.Time{}},
+		{"only the password change (an older document)", t0, time.Time{}, t0},
+		{"only sessions ended", time.Time{}, t0, t0},
+		{"sessions ended later", t0, t1, t1},
+		{"password changed later", t1, t0, t1},
+	}
+	for _, tc := range cases {
+		u := User{PasswordChangedAt: tc.changed, SessionsEndedAt: tc.ended}
+		if got := u.SessionCutoff(); !got.Equal(tc.want) {
+			t.Errorf("%s: SessionCutoff() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestSetPasswordLeavesTheOldPasswordWorkingWhenPersistFails: a password
 // change that cannot be saved must not take effect in memory either, or
 // a restart before the next good write would silently restore a
 // credential the operator was told was already dead.
 func TestSetPasswordLeavesTheOldPasswordWorkingWhenPersistFails(t *testing.T) {
-	// Register below persists too (createLocked persists as well), so
+	// Register below persists too (createAccount persists as well), so
 	// the fixture needs a backend that saves once before failing, not
 	// one that fails outright.
 	s, err := OpenStore(&saveBudgetBackend{left: 1}, Options{})
@@ -645,7 +688,7 @@ func TestAStoreLeftByTheRemovedNoAuthModeRequiresSetup(t *testing.T) {
 
 // TestConcurrentRegisterCreatesExactlyOneAdmin is the regression test
 // for the first-run registration race. Before the equivalent fix in
-// mikroview, Register checked Count() outside the lock and createLocked
+// mikroview, Register checked Count() outside the lock and createAccount
 // only re-checked for a username collision under it -- so N concurrent
 // registrations with distinct usernames all succeeded, every one of
 // them landing RoleAdmin. Measured 8/8 succeeding, reproducibly, there.
@@ -933,10 +976,10 @@ func TestRoleAtLeastStacksTheThreeTiers(t *testing.T) {
 }
 
 // setTOTPForTest sets userID's TOTPSecret/TOTPConfirmedAt/TOTPLastCounter
-// directly and persists them -- the real way in (SetPendingTOTPSecret,
-// ConfirmTOTP) is a later slice (G4); this exists to reach the fixture
-// states TestUnconfirmedTOTPSecretIsNotAnActiveFactor needs to test the
-// User.HasActiveTOTP predicate, which is in scope now.
+// directly and persists them, for fixture states the real methods
+// (SetPendingTOTPSecret, ConfirmTOTP) cannot reach in one step: a given
+// counter on a confirmed or pending secret, or a secret replaced in
+// place. A test about enrolment itself uses the real methods.
 func setTOTPForTest(t *testing.T, s *Store, userID, secret string, confirmedAt time.Time, counter uint64) {
 	t.Helper()
 	err := s.mutate(func(st *storeState) error {
@@ -970,7 +1013,9 @@ func TestUnconfirmedTOTPSecretIsNotAnActiveFactor(t *testing.T) {
 	}
 
 	// A secret with no confirmation -- mid-setup, or an abandoned one.
-	setTOTPForTest(t, s, u.ID, "JBSWY3DPEHPK3PXP", time.Time{}, 0)
+	if err := s.SetPendingTOTPSecret(u.ID, "JBSWY3DPEHPK3PXP"); err != nil {
+		t.Fatal(err)
+	}
 	got, ok := s.Get(u.ID)
 	if !ok {
 		t.Fatal("expected the user to still exist")
@@ -981,7 +1026,9 @@ func TestUnconfirmedTOTPSecretIsNotAnActiveFactor(t *testing.T) {
 
 	// Confirming it is what activates it.
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	setTOTPForTest(t, s, u.ID, "JBSWY3DPEHPK3PXP", now, 5)
+	if err := s.ConfirmTOTP(u.ID, now, 5); err != nil {
+		t.Fatal(err)
+	}
 	got2, ok := s.Get(u.ID)
 	if !ok {
 		t.Fatal("expected the user to still exist")
@@ -1041,11 +1088,12 @@ func TestAuthenticateUnknownUserStillRunsTheHash(t *testing.T) {
 }
 
 // TestWritesPickUpAnotherProcessesAccountFirst covers the three write
-// paths that did not reload before saving. A whole-document save is
-// built from what this process holds; a store that has not refreshed
-// since a CLI tool (a second process) added an account writes that
-// account away again. Every other write method reloads first, so these
-// must too.
+// paths that once wrote away an account a CLI tool (a second process)
+// had added since this store last loaded: a whole-document save is built
+// from what this process holds. It checks the outcome -- the other
+// process's account survives the write -- not how: today each method
+// reloads before deciding, but the save-conflict replay (mutate) would
+// keep the account even without that reload, so this passes either way.
 func TestWritesPickUpAnotherProcessesAccountFirst(t *testing.T) {
 	cases := []struct {
 		name  string

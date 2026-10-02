@@ -159,6 +159,37 @@ func TestAddPasskeyAtTheLimitReportsADuplicateAsDuplicate(t *testing.T) {
 	}
 }
 
+// TestAddPasskeyKeepsNoSliceTheCallerHolds: the stored credential
+// shares no slice with the value passed in or the value handed back, so
+// a caller reusing either buffer cannot change the stored passkey.
+func TestAddPasskeyKeepsNoSliceTheCallerHolds(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password123", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := testPasskey(1, "")
+	got, err := s.AddPasskey(u.ID, in)
+	if err != nil {
+		t.Fatalf("AddPasskey: %v", err)
+	}
+	want := testPasskey(1, "")
+
+	in.ID[0], in.PublicKey[0], in.Transports[0] = 9, 9, "usb"
+	stored, _ := s.Get(u.ID)
+	pk := stored.Passkeys[0]
+	if !bytes.Equal(pk.ID, want.ID) || !bytes.Equal(pk.PublicKey, want.PublicKey) || pk.Transports[0] != "internal" {
+		t.Errorf("changing the passed-in passkey changed the stored one: %+v", pk)
+	}
+
+	got.ID[0], got.PublicKey[0], got.Transports[0] = 8, 8, "nfc"
+	stored, _ = s.Get(u.ID)
+	pk = stored.Passkeys[0]
+	if !bytes.Equal(pk.ID, want.ID) || !bytes.Equal(pk.PublicKey, want.PublicKey) || pk.Transports[0] != "internal" {
+		t.Errorf("changing the returned passkey changed the stored one: %+v", pk)
+	}
+}
+
 func TestAddPasskeyUnknownUserReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
 	if _, err := s.AddPasskey("no-such-user", testPasskey(1, "")); !errors.Is(err, ErrUserNotFound) {

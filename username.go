@@ -102,7 +102,7 @@ func ValidateUsername(username string) error {
 // half-way to an address ("tom@", "tom@corp") is refused too; there is
 // no legitimate local name that needs one.
 //
-// Called from createLocked -- the single funnel for Register and
+// Called from createAccount -- the single funnel for Register and
 // CreateUser -- and so at creation only. It is never applied at
 // sign-in: an account created before this rule and named as an email
 // keeps working, because refusing it then would lock out someone who

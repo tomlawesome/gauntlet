@@ -1,13 +1,17 @@
-// Copied from mikroview's internal/auth/store.go, with names kept
-// (docs/adr/0001-shared-auth-module.md decision 3). Two changes from
-// mikroview, both from docs/design.md §1.3:
+// Started from mikroview's internal/auth/store.go, with names kept
+// (docs/adr/0001-shared-auth-module.md decision 3), and since changed
+// well beyond it: writes are replayed on a save conflict (mutate.go),
+// the document carries a version (docversion.go), the first admin needs
+// a setup code (setupcode.go), and login lockouts are kept on the
+// account (lockout.go), among others -- each documented where it lives.
+// Two differences in shape, both from docs/design.md §1.3:
 //
 //   - Options carries the *slog.Logger instead of a package-level
 //     persistLog, because a module cannot call an application's own
 //     logging constructor. nil means discard.
 //   - OpenStore(b, opts) replaces mikroview's Open(path)/OpenWithBackend(b):
-//     gauntlet ships no file backend (persist.Backend is the seam; see
-//     persist/persist.go), so there is only the one entry point.
+//     the application picks the backend (persist.Backend is the seam;
+//     see persist/persist.go), so there is only the one entry point.
 package gauntlet
 
 import (
@@ -28,7 +32,7 @@ import (
 )
 
 // minPasswordLength is enforced at every path that sets a user-chosen
-// password (createLocked, SetPassword) -- self-registration, admin-
+// password (createAccount, SetPassword) -- self-registration, admin-
 // created accounts, and any CLI recovery tooling an application builds
 // all funnel through one of those two, so there's exactly one place
 // this needs to live.
@@ -92,7 +96,7 @@ var (
 	// (issuer, subject) pair is already linked to a *different* user --
 	// an OIDC identity can back at most one local account.
 	ErrOIDCIdentityTaken = errors.New("gauntlet: this SSO identity is already linked to a different account")
-	// ErrPasswordTooShort is returned by createLocked/SetPassword for a
+	// ErrPasswordTooShort is returned by createAccount/SetPassword for a
 	// password under minPasswordLength. Deliberately not checked inside
 	// HashPassword itself: that function also hashes two non-user-chosen
 	// values (dummyHash's fixed timing-comparison string, and
@@ -148,7 +152,7 @@ func parseAccounts(data []byte) (storeFile, error) {
 // a server that answers 403 on every admin route forever, with a backup
 // the only way back -- refusing it at startup says so up front instead.
 //
-// A `null` entry (see applyLoaded) is not an account and is not counted
+// A `null` entry (see indexUsers) is not an account and is not counted
 // as one in the message, but a document made only of them is still
 // refused: something wrote a non-empty list there, and reading it as a
 // fresh install would reopen registration on the strength of it.
@@ -250,7 +254,7 @@ type Store struct {
 	// first admin (setupcode.go), nil when none is outstanding. Issued
 	// under mu when the store is found empty -- at open, or on a reload
 	// that applies an emptied document -- and retired the moment an
-	// account exists, in this process (createLocked) or another
+	// account exists, in this process (createAccount) or another
 	// (reloadIfStale). Memory only: never part of the document.
 	setupCodeHash []byte
 	onSetupCode   SetupCodeHandler
@@ -271,9 +275,10 @@ type storeState struct {
 	lastLoginSaved map[string]time.Time
 }
 
-// indexUsers builds the state for a decoded document. Shared by
-// OpenStore, reloadIfStale and the conflict replay in mutate, so the
-// three can't diverge on what loading means.
+// indexUsers builds the state for a decoded document. Every load
+// reaches it through decodeAccounts -- OpenStore, reloadIfStale and the
+// conflict replay in mutate alike -- so the three can't diverge on what
+// loading means.
 func indexUsers(file storeFile) storeState {
 	st := storeState{
 		byID:           make(map[string]*User, len(file.Users)),
@@ -509,18 +514,15 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	}
 
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
-		file, err := parseAccounts(data)
+		st, err := decodeAccounts(data)
 		if err != nil {
-			return err
-		}
-		if err := file.checkAdmins(); err != nil {
 			return err
 		}
 		// version isn't in scope yet here -- persist.Open hasn't
 		// returned it to this statement's left-hand side. applyLoaded
 		// is called with a placeholder and corrected below once
 		// persist.Open's real version is available.
-		s.applyLoaded(file, 0)
+		s.applyLoaded(st, 0)
 		return nil
 	})
 	if err != nil {
@@ -538,11 +540,12 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	return s, nil
 }
 
-// applyLoaded replaces the in-memory index from a decoded document.
-// Shared by OpenStore and reloadIfStale so the two can't diverge on what
-// loading means.
-func (s *Store) applyLoaded(file storeFile, version int64) {
-	s.storeState = indexUsers(file)
+// applyLoaded installs the state decodeAccounts made from a loaded
+// document. Shared by OpenStore and reloadIfStale, which both decode
+// through decodeAccounts as the replay loop does, so the three can't
+// diverge on what loading means.
+func (s *Store) applyLoaded(st *storeState, version int64) {
+	s.storeState = *st
 	s.version = version
 	// A refusal only holds while the refused document is still the one
 	// on disk: this document was just accepted, so any earlier refusal
@@ -639,10 +642,9 @@ func (s *Store) reloadIfStale() {
 	// A document that does not parse is skipped silently, as a read
 	// failure is. One that parses but is refused -- newer than this
 	// build reads, or breaking the admin rule -- is different.
-	file, err := parseAccounts(snap.Payload)
-	if err == nil {
-		err = file.checkAdmins()
-	} else if !errors.Is(err, errNewerDocument) {
+	st, err := decodeAccounts(snap.Payload)
+	if err != nil && !errors.Is(err, errNewerDocument) &&
+		!errors.Is(err, errMultipleAdmins) && !errors.Is(err, errNoAdmin) {
 		return
 	}
 	// Unlike a transient read failure, a refused document is one someone
@@ -667,7 +669,7 @@ func (s *Store) reloadIfStale() {
 		s.mu.Unlock()
 		return
 	}
-	s.applyLoaded(file, snap.Version)
+	s.applyLoaded(st, snap.Version)
 	// The document just applied decides whether a setup code should be
 	// outstanding: accounts retire it, none issues one (announced after
 	// the lock is released, so Options.OnSetupCode never runs under it).
@@ -703,7 +705,7 @@ func (s *Store) Count() int {
 // that hold a *Store already have host access.
 //
 // The "is registration still open" test is passed down as a guard and
-// evaluated inside createLocked's critical section rather than checked
+// evaluated inside createAccount's critical section rather than checked
 // here, because checking it here would be a TOCTOU: Count() takes and
 // releases the lock on its own, so two concurrent Register calls could
 // both observe an empty store and both go on to insert. That window is
@@ -724,12 +726,12 @@ func (s *Store) Register(username, password string, now time.Time) (*User, error
 	// Cheap rejection BEFORE hashing. HashPassword is Argon2id at 64
 	// MiB, and registration is typically unauthenticated and
 	// rate-limit-free -- so without this, a small POST that is going to
-	// be refused anyway still costs 64 MiB and ~66ms, and a handful of
+	// be refused anyway still costs 64 MiB and ~100ms, and a handful of
 	// concurrent ones OOM-kill the container.
 	//
 	// This is a fast path, NOT the correctness boundary: it reads the
 	// guard's fields without holding the write lock, so it can race.
-	// registrationOpenGuard runs again inside createLocked's write,
+	// registrationOpenGuard runs again inside createAccount's write,
 	// against the document being saved, and that remains what actually
 	// guarantees exactly one account can be self-registered.
 	if err := func() error {
@@ -740,11 +742,11 @@ func (s *Store) Register(username, password string, now time.Time) (*User, error
 		return nil, err
 	}
 
-	return s.createLocked(username, password, RoleAdmin, now, registrationOpenGuard)
+	return s.createAccount(username, password, RoleAdmin, now, registrationOpenGuard)
 }
 
 // registrationOpenGuard is Register's precondition: no account may
-// exist yet. createLocked runs it inside the write's op, against st --
+// exist yet. createAccount runs it inside the write's op, against st --
 // the document being saved, which on a replay is the one another
 // process just wrote -- and that is what makes "exactly one account can
 // ever be self-registered" hold, across processes as well as within
@@ -790,7 +792,7 @@ func (s *Store) CreateUser(username, password string, role Role, now time.Time) 
 	// avoids most save conflicts, though correctness no longer depends
 	// on it -- see mutate.
 	s.reloadIfStale()
-	return s.createLocked(username, password, role, now, nil)
+	return s.createAccount(username, password, role, now, nil)
 }
 
 // DeleteUser removes an account by ID and returns it, so the caller can
@@ -937,19 +939,20 @@ func (s *Store) HasLocalAdmin() bool {
 	return admin != nil && admin.LocalPassword()
 }
 
-// createLocked inserts a new account. guard, when non-nil, is evaluated
+// createAccount inserts a new account. guard, when non-nil, is evaluated
 // inside the write, against the state being saved (see mutate), and
 // aborts the insert if it returns an error -- that's the hook callers
 // use to make a precondition ("registration is still open") atomic with
-// the insert itself rather than checking it beforehand and racing.
+// the insert itself rather than checking it beforehand and racing. The
+// caller must not hold mu: the write (mutate) takes it.
 //
 // HashPassword deliberately runs before the lock is acquired: Argon2id
-// is ~100ms by design, and holding the store's write lock for that long
-// would serialize every reader behind each in-flight registration -- an
-// easy self-inflicted DoS. The cost of hashing before the guard runs is
+// costs 64 MiB and ~100ms by design, and holding the store's write lock
+// for that long would serialize every reader behind each in-flight
+// registration -- an easy self-inflicted DoS. The cost of hashing before the guard runs is
 // one wasted hash on the losing side of a race, which is the right
 // trade.
-func (s *Store) createLocked(username, password string, role Role, now time.Time, guard func(*Store, *storeState) error) (*User, error) {
+func (s *Store) createAccount(username, password string, role Role, now time.Time, guard func(*Store, *storeState) error) (*User, error) {
 	// Validated here rather than in Register/CreateUser separately: this
 	// is the single funnel every locally-created account passes through,
 	// so nothing can be added later that skips it.
@@ -1063,7 +1066,7 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	key := oidcKey{issuer: issuer, subject: subject}
 
 	// The unmatchable hash is ~100ms of Argon2id, so it is made before
-	// the write lock, as createLocked and LinkOIDCIdentity make theirs --
+	// the write lock, as createAccount and LinkOIDCIdentity make theirs --
 	// but only when this identity looks new. Most calls are a returning
 	// sign-in that would throw it away, and a wasted hash on every SSO
 	// login is a different cost from LinkOIDCIdentity's one on a rare
@@ -1090,11 +1093,18 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	defer s.mu.Unlock()
 
 	if id, ok := s.oidcIndex[key]; ok {
-		if _, ok := s.byID[id]; ok {
+		if u, ok := s.byID[id]; ok {
 			// LastLogin only -- a missed update here costs nothing
 			// worth failing an otherwise-successful SSO login over, so
-			// this is a best-effort write (same reasoning as
-			// Authenticate's ordinary-login path below).
+			// this is a best-effort write, and like Authenticate's
+			// ordinary-login path it saves only once the saved value is
+			// more than lastLoginGranularity old: otherwise every
+			// returning SSO sign-in would rewrite every account.
+			if now.Sub(s.lastLoginSaved[id]) < lastLoginGranularity {
+				u.LastLogin = now
+				cp := *u
+				return &cp, false, nil
+			}
 			s.mutateBestEffortLocked(func(st *storeState) error {
 				u, ok := st.byID[id]
 				if !ok {
@@ -1275,7 +1285,7 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 	}
 	// Generated before the lock: HashPassword is ~100ms by design, and
 	// holding the write lock across it would serialize every reader --
-	// the same reasoning createLocked documents. Which means it is
+	// the same reasoning createAccount documents. Which means it is
 	// generated for an admin's link too and then not used; the role is
 	// not knowable until the lock is held, and one wasted hash on a rare
 	// operation is cheaper than holding the lock across one.
@@ -1340,12 +1350,17 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 		// should have to come back through the IdP. True for the admin
 		// too, whose password survives: a second way into the account
 		// was just attached, and a session issued before that should be
-		// re-made through one of them. LoginLockedUntil is left as it
-		// is: the admin's password still works, so a lockout earned by
-		// guessing at it stands, and the limiter does not read this
-		// bump as a password change while it does (see
-		// lockoutRecorder).
-		u.PasswordChangedAt = now
+		// re-made through one of them.
+		//
+		// Recorded in SessionsEndedAt, never PasswordChangedAt, for
+		// every role (#28): the login limiter reads PasswordChangedAt as
+		// the moment guesses at the old password stop counting, and a
+		// link changes no password the guesses were aimed at. For the
+		// same reason LoginLockedUntil is left as it is: the admin's
+		// password still works, so a lockout earned by guessing at it
+		// stands -- including one whose save failed and that only the
+		// limiter still holds.
+		u.SessionsEndedAt = now
 		st.oidcIndex[key] = userID
 		return nil
 	})
@@ -1508,11 +1523,11 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 
 // SetPassword replaces username's password hash -- a CLI recovery path
 // needs no current password since container/host access is the trust
-// anchor for that tool. Also records PasswordChangedAt, which is what
-// actually invalidates any session issued before this reset (see
-// User.PasswordChangedAt) -- a CLI tool runs in a different process from
-// the live server, so it has no way to reach into that server's
-// in-memory SessionStore directly.
+// anchor for that tool. Also records PasswordChangedAt (the password
+// changed) and SessionsEndedAt, which is what actually invalidates any
+// session issued before this reset (see User.SessionCutoff) -- a CLI
+// tool runs in a different process from the live server, so it has no
+// way to reach into that server's in-memory SessionStore directly.
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	if len(newPassword) < minPasswordLength {
 		return ErrPasswordTooShort
@@ -1538,6 +1553,7 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		}
 		u.PasswordHash = hash
 		u.PasswordChangedAt = now
+		u.SessionsEndedAt = now
 		// An account that has a password has a local password, by
 		// definition. Stated explicitly rather than left to be derived
 		// from OIDCIssuer, so a linked account (OIDC *and* a local
@@ -1554,9 +1570,7 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		// And it ends any login lockout: the guesses that caused it were
 		// at the old password, and whoever set the new one should be
 		// able to use it at once. The limiter drops its own count of
-		// those guesses by PasswordChangedAt, and takes this clear as
-		// what marks the bump as a password change (see
-		// lockoutRecorder).
+		// those guesses by PasswordChangedAt (see lockoutRecorder).
 		u.LoginLockedUntil = time.Time{}
 		return nil
 	})

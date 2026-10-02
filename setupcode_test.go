@@ -2,6 +2,7 @@ package gauntlet
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"log/slog"
 	"regexp"
@@ -45,13 +46,48 @@ func TestSetupCodeAnnouncedOnEmptyStoreAndChecked(t *testing.T) {
 	if err := s.CheckSetupCode(strings.ToLower(strings.ReplaceAll(code, "-", ""))); err != nil {
 		t.Errorf("CheckSetupCode(lower case, no dashes) = %v, want nil", err)
 	}
-	for _, wrong := range []string{"", "AAAA-AAAA-AAAA-AAAA", code[:len(code)-1] + "A", code + "A"} {
+	assertWrongSetupCodesRefused(t, s, code)
+	if s.Count() != 0 {
+		t.Errorf("checking a code created %d accounts", s.Count())
+	}
+}
+
+// TestSetupCodeEndingInARefusesItsNearMiss is #40: the near-miss above
+// once replaced the code's last character with "A", which is the code
+// itself whenever the real one already ends in A (one open in 32), so
+// the test failed at random. A code ending in A is installed here
+// directly, so that case runs every time.
+func TestSetupCodeEndingInARefusesItsNearMiss(t *testing.T) {
+	s, _ := openEmptyWithHook(t, persist.NewMemory())
+	const canonical = "BCDEFGHJKLMNPQRA"
+	sum := sha256.Sum256([]byte(canonical))
+	s.mu.Lock()
+	s.setupCodeHash = sum[:]
+	s.mu.Unlock()
+	code := FormatResetCode(canonical)
+	if err := s.CheckSetupCode(code); err != nil {
+		t.Fatalf("CheckSetupCode(the installed code %q) = %v, want nil", code, err)
+	}
+	assertWrongSetupCodesRefused(t, s, code)
+}
+
+// assertWrongSetupCodesRefused checks codes that are not code -- empty,
+// a fixed wrong one, a near miss in the last character, one character
+// too many -- are all refused.
+func assertWrongSetupCodesRefused(t *testing.T, s *Store, code string) {
+	t.Helper()
+	last := "A"
+	if strings.HasSuffix(code, "A") {
+		last = "B"
+	}
+	nearMiss := code[:len(code)-1] + last
+	for _, wrong := range []string{"", "AAAA-AAAA-AAAA-AAAA", nearMiss, code + "A"} {
+		if wrong == code {
+			t.Fatalf("test bug: the wrong code %q is the real one", wrong)
+		}
 		if err := s.CheckSetupCode(wrong); !errors.Is(err, ErrSetupCodeInvalid) {
 			t.Errorf("CheckSetupCode(%q) = %v, want ErrSetupCodeInvalid", wrong, err)
 		}
-	}
-	if s.Count() != 0 {
-		t.Errorf("checking a code created %d accounts", s.Count())
 	}
 }
 

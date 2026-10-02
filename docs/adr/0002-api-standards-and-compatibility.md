@@ -3,7 +3,8 @@
 **Status:** Accepted
 **Date:** 2026-09-30
 **Amended:** 2026-10-01 -- decision 1, stored-document versions (#29);
-decision 5, ASVS moved out of v0.2.0 (#31)
+decision 5, ASVS moved out of v0.2.0 (#31). 2026-10-02 -- decision 1,
+added fields raise the version (#28)
 **Relates to:** [ADR-0001](0001-shared-auth-module.md), #22 (CI compatibility
 checks), #23 (Problem Details errors), mikroview #1202
 
@@ -37,8 +38,15 @@ house rule (2026-09-30).
    reads is refused -- on open, on reload and by a write -- so an older
    build never loads one and saves it back without the fields it does
    not know. Migrations are written inside gauntlet when the first
-   format change needs one; until then there is no migration code. The
-   apps never read or write the format themselves.
+   format change needs one; until then there is no migration code.
+   Any change to what a document carries raises that document's
+   version, a field added as much as a shape changed, so an older build
+   refuses it instead of saving it back without the field. An added
+   field must read correctly as its zero value from an older document;
+   adding one then needs no migration code, only the raised number and
+   a round-trip test that the older fixture still opens. Rolling back
+   across a raised version means restoring the copy taken before the
+   upgrade. The apps never read or write the format themselves.
 2. **Additive only from v0.1.0.** Exported identifiers, exported struct
    fields, routes, response fields and stored-document fields are added,
    never renamed or removed, within a major version. Anything to be

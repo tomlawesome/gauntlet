@@ -1,7 +1,9 @@
 openapi: 3.1.0
 info:
   title: gauntlet gate HTTP API
-  version: 0.2.0
+  # Always the VERSION file's value; the release merge request bumps
+  # both, and gate/contracttest fails if they differ.
+  version: 0.1.0
   license:
     name: Apache-2.0
     identifier: Apache-2.0

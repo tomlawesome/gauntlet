@@ -262,9 +262,14 @@ func TestSessionSweepDropsRevokedIDs(t *testing.T) {
 // incremental sweep (#24): no single Create does more than a few
 // entries' worth of sweeping, however large the store, so a big store
 // cannot stall every other caller behind one login. The old sweep walked
-// the whole map on the Create that doubled it -- 131072 entries in one
-// call for this test -- and the count below makes that visible without
-// timing anything.
+// the whole map on the Create that doubled it -- dropping all 65536
+// expired sessions in one call for this test.
+//
+// Measured by what each Create removes from the map, not by sweepVisits:
+// that counter only moves inside the capped loop, so a whole-map walk
+// added anywhere else would never show in it. Every session made before
+// later has expired, so a Create that walked the map would drop far
+// more than sweepBatch at once.
 func TestSessionSweepWorkPerCreateIsBounded(t *testing.T) {
 	const n = 1 << 16
 	s := NewSessionStore(time.Minute, 0)
@@ -275,15 +280,15 @@ func TestSessionSweepWorkPerCreateIsBounded(t *testing.T) {
 	later := t0.Add(2 * time.Minute)
 	most, total := 0, 0
 	for range n {
-		before := s.sweepVisits
+		before := heldSessions(s)
 		s.Create("user-1", later)
-		visited := s.sweepVisits - before
-		total += visited
-		most = max(most, visited)
+		dropped := before + 1 - heldSessions(s)
+		total += dropped
+		most = max(most, dropped)
 	}
-	t.Logf("%d logins over %d expired sessions: at most %d entries checked in one Create, %d in all", n, n, most, total)
+	t.Logf("%d logins over %d expired sessions: at most %d dropped in one Create, %d in all", n, n, most, total)
 	if most > sweepBatch {
-		t.Errorf("one Create checked %d entries, want at most %d", most, sweepBatch)
+		t.Errorf("one Create dropped %d expired sessions, want at most %d", most, sweepBatch)
 	}
 	if got := heldSessions(s); got != n {
 		t.Errorf("%d sessions held, want the %d live ones", got, n)

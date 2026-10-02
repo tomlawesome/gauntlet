@@ -284,7 +284,12 @@ release:version:
 
 release:gitlab:
   stage: release
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  # Pinned by tag and digest, not :latest, because this job creates the
+  # protected tag. v0.24.0 is release-cli's newest release (checked
+  # 2026-10-02). It cannot go through the dependency proxy like the
+  # images above: the proxy only mirrors Docker Hub, and release-cli is
+  # published only on GitLab's own registry.
+  image: registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
   interruptible: false
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'

@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -16,6 +17,23 @@ import (
 
 // gateSourceDir is package gate's source, relative to this package.
 const gateSourceDir = ".."
+
+// versionFile is the module's release version, relative to this package.
+const versionFile = "../../VERSION"
+
+// TestContractDocumentVersionMatchesVERSION: the document's info.version
+// is a second copy of VERSION, so the release merge request has to move
+// both. Without this check nothing noticed when it did not.
+func TestContractDocumentVersionMatchesVERSION(t *testing.T) {
+	raw, err := os.ReadFile(versionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.TrimSpace(string(raw))
+	if got := loadContractDoc(t).Info.Version; got != want {
+		t.Errorf("%s has info.version %q, but VERSION holds %q -- set them to the same value", contractDocPath, got, want)
+	}
+}
 
 // TestContractRoutesMatchDocument checks the route table itself: every
 // pattern Routes registers is an operation in the document, and every

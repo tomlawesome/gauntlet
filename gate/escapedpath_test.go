@@ -104,7 +104,7 @@ func TestEncodedPathDoesNotEscapeMustChangePasswordDoor(t *testing.T) {
 		t.Fatal("admin account missing")
 	}
 	// IssueResetCode is what actually sets MustChangePassword, and it
-	// bumps PasswordChangedAt -- which invalidates the session
+	// bumps SessionsEndedAt -- which invalidates the session
 	// registerAdmin's own login just issued, so a fresh sign-in with
 	// the code (Store.Authenticate accepts a live one in place of the
 	// password) is what carries a session that is actually still stuck

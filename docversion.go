@@ -10,11 +10,17 @@ import (
 // version this build writes, and the highest it reads. v0.1.0 wrote no
 // version at all; a document without one reads as version 1.
 //
-// There is no migration code: none has been needed yet. When a format
-// changes, its constant goes up and the migration from the version
-// below is added then.
+// Any change to what a document carries raises its version, a field
+// added as much as a shape changed, so an older build refuses the
+// document instead of saving it back without the field. An added field
+// must read correctly as its zero value from an older document; then it
+// needs no migration code, only the raised number. None has needed more
+// yet, so there is no migration code.
+//
+// Accounts version 2 (#28) added User.SessionsEndedAt; a version-1
+// document reads it as zero, which is what it meant.
 const (
-	accountsDocumentVersion = 1
+	accountsDocumentVersion = 2
 	tokensDocumentVersion   = 1
 )
 

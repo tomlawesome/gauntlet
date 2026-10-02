@@ -57,8 +57,8 @@
 //     and the method reports its own result from the captured
 //     variables.
 //
-// A method that already holds mu (createLocked, or a branch inside
-// Authenticate) calls mutateLocked instead of mutate; the op is the
+// A method that already holds mu (a branch inside Authenticate or
+// FindOrCreateOIDCUser) calls mutateLocked instead of mutate; the op is the
 // same. Everything the op writes must be built from st and the method's
 // arguments: a value computed once outside and then modified inside the
 // op would be modified again on replay. Generating an ID or hash
@@ -77,7 +77,7 @@
 //     fails loudly, the existing-account LastLogin is best-effort) plus
 //     the username pick (storeState.uniqueUsername), which must read
 //     the index of the state the op is given, st, not s.
-//   - Store.createLocked and its guard: the guard (registration
+//   - Store.createAccount and its guard: the guard (registration
 //     open/closed, single admin) must run inside the op, against st,
 //     since a replay may find that the fresh document already has an
 //     admin.

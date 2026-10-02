@@ -133,9 +133,10 @@ func FormatResetCode(code string) string {
 // until the owner got round to the code would leave the window open for
 // precisely as long as it mattered.
 //
-// PasswordChangedAt is bumped for the same reason SetPassword bumps it
-// -- it is what invalidates sessions issued before this point, including
-// ones held in another process (see User.PasswordChangedAt). The caller
+// PasswordChangedAt and SessionsEndedAt are bumped as SetPassword bumps
+// them: the password was replaced, and SessionsEndedAt is what
+// invalidates sessions issued before this point, including ones held in
+// another process (see User.SessionCutoff). The caller
 // is still expected to drop the live ones it can reach; this is the
 // part that works across a process boundary and a restart.
 //
@@ -181,6 +182,7 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		u.ResetCodeExpiresAt = now.Add(ResetCodeTTL)
 		u.MustChangePassword = true
 		u.PasswordChangedAt = now
+		u.SessionsEndedAt = now
 		// The reset code is the account's password now, so a lockout
 		// earned by guessing at the old one ends here, as in
 		// SetPassword: otherwise the owner could not use the code until

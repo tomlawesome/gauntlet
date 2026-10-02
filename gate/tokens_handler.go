@@ -70,7 +70,7 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 			// The caller's request is wrong, not the deployment's state,
 			// and the message is safe to hand back: it names a field,
 			// not anything about existing tokens.
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			g.writeAuthError(w, r, err, http.StatusBadRequest)
 			return
 		}
 		g.logWarn(err.Error())

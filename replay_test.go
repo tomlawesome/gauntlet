@@ -509,6 +509,45 @@ func TestAuthenticateRedecidesTheResetCodeOnReplay(t *testing.T) {
 	}
 }
 
+// TestAuthenticateRefusesAResetCodeReplacedOnReplay: bob signs in with
+// an admin-issued reset code that checks out against what this process
+// holds. Before the spend is saved, an admin in another process issues
+// bob a new code, which replaces the first. The replay finds a live
+// code still on the account, but not the one bob typed: it must refuse
+// the login and leave the new code unspent, not let the replaced code
+// in by spending its successor.
+func TestAuthenticateRefusesAResetCodeReplacedOnReplay(t *testing.T) {
+	var bobID, code, newCode string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		now := time.Now()
+		if _, err := s.Register("alice", "password123", now); err != nil {
+			t.Fatal(err)
+		}
+		bob, err := s.CreateUser("bob", "password456", RoleUser, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bobID = bob.ID
+		if _, code, err = s.IssueResetCode(bob.ID, now); err != nil {
+			t.Fatal(err)
+		}
+	})
+	b.beforeSave = func() {
+		var err error
+		if _, newCode, err = other.IssueResetCode(bobID, time.Now()); err != nil {
+			t.Errorf("the other process's IssueResetCode: %v", err)
+		}
+	}
+
+	if _, err := s.Authenticate("bob", code, time.Now()); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Authenticate with a reset code another process replaced = %v, want ErrInvalidCredentials", err)
+	}
+	reopened := reopenAccounts(t, b)
+	if _, err := reopened.Authenticate("bob", newCode, time.Now()); err != nil {
+		t.Errorf("the replacement code does not work after the replay: %v -- the replaced code spent it", err)
+	}
+}
+
 // lateWriteBackend is a persist.Memory whose next version check
 // answers with the version as it stood, and only then lets afterVersion
 // write: a reloadIfStale that read the version just before the CLI's
@@ -602,6 +641,84 @@ func TestVerifyAndRecordTOTPRechecksTheCodeOnReplay(t *testing.T) {
 	if ok {
 		t.Error("VerifyAndRecordTOTP = true for a code another process had already recorded: one code won two logins")
 	}
+}
+
+// TestSetPendingTOTPSecretRechecksTheActiveFactorOnReplay: alice starts
+// enrolling an authenticator app in this process while, in another,
+// she finishes enrolling one. The replay must find the factor now
+// active and refuse, not overwrite the confirmed secret with a pending
+// one -- which would leave her authenticator producing codes for a
+// secret the account no longer holds.
+func TestSetPendingTOTPSecretRechecksTheActiveFactorOnReplay(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	var id string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+	})
+	otherSecret := mustEncodedTOTPSecret(t)
+	b.beforeSave = func() {
+		if err := other.SetPendingTOTPSecret(id, otherSecret); err != nil {
+			t.Errorf("the other process's SetPendingTOTPSecret: %v", err)
+		}
+		if err := other.ConfirmTOTP(id, now, 1); err != nil {
+			t.Errorf("the other process's ConfirmTOTP: %v", err)
+		}
+	}
+
+	if err := s.SetPendingTOTPSecret(id, mustEncodedTOTPSecret(t)); !errors.Is(err, ErrTOTPAlreadyActive) {
+		t.Fatalf("SetPendingTOTPSecret across another process's enrolment = %v, want ErrTOTPAlreadyActive", err)
+	}
+	got, _ := reopenAccounts(t, b).Get(id)
+	if got.TOTPSecret != otherSecret || got.TOTPConfirmedAt.IsZero() {
+		t.Errorf("the saved factor is not the one the other process confirmed (confirmed at %v)", got.TOTPConfirmedAt)
+	}
+}
+
+// TestConfirmTOTPRechecksThePendingSecretOnReplay: the same pending
+// secret is confirmed in two processes at once. This one sees it still
+// pending, but the other confirms it first. The replay must refuse with
+// ErrNoPendingTOTP and keep the other's confirmation, not confirm it a
+// second time over the counter that confirmation recorded.
+func TestConfirmTOTPRechecksThePendingSecretOnReplay(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	var id string
+	s, b, other := openRacingStores(t, func(s *Store) {
+		u, err := s.Register("alice", "password123", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = u.ID
+		if err := s.SetPendingTOTPSecret(id, mustEncodedTOTPSecret(t)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	b.beforeSave = func() {
+		if err := other.ConfirmTOTP(id, now, 5); err != nil {
+			t.Errorf("the other process's ConfirmTOTP: %v", err)
+		}
+	}
+
+	if err := s.ConfirmTOTP(id, now.Add(time.Second), 3); !errors.Is(err, ErrNoPendingTOTP) {
+		t.Fatalf("ConfirmTOTP of a secret another process confirmed first = %v, want ErrNoPendingTOTP", err)
+	}
+	got, _ := reopenAccounts(t, b).Get(id)
+	if !got.TOTPConfirmedAt.Equal(now) || got.TOTPLastCounter != 5 {
+		t.Errorf("saved confirmation = %v at counter %d, want the other process's %v at 5", got.TOTPConfirmedAt, got.TOTPLastCounter, now)
+	}
+}
+
+// mustEncodedTOTPSecret is a fresh secret in the form the store keeps.
+func mustEncodedTOTPSecret(t *testing.T) string {
+	t.Helper()
+	secret, err := GenerateTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return EncodeTOTPSecret(secret)
 }
 
 // removedAfterVersionBackend is a persist.Memory whose document is gone

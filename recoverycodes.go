@@ -111,7 +111,7 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 		return nil, ErrNotPersisted
 	}
 
-	// Hashing happens before the lock, same reasoning as createLocked
+	// Hashing happens before the lock, same reasoning as createAccount
 	// and IssueResetCode: HashPassword is ~100ms of Argon2id by design,
 	// and ten of them held under the store's write lock would serialize
 	// every reader for the better part of a second.

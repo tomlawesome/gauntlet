@@ -1,10 +1,6 @@
 // Ported from mikroview's internal/auth/link_second_factor_test.go.
-// Adapted: mikroview's enrolEverySecondFactor drives real enrolment
-// methods (SetPendingTOTPSecret, ConfirmTOTP, GenerateRecoveryCodes,
-// AddPasskey) that are a later slice here (G3/G4); this package's
-// setSecondFactorForTest (testhelpers_test.go) sets the same fields
-// directly instead. What is under test either way is LinkOIDCIdentity's
-// clearing behaviour, which is in scope now.
+// mikroview's enrolEverySecondFactor is setSecondFactorForTest here
+// (testhelpers_test.go), driving the same real enrolment methods.
 
 package gauntlet
 
@@ -122,10 +118,10 @@ func TestLinkOIDCIdentityKeepsTheAdminsSecondFactor(t *testing.T) {
 // operator with a working password and no way to pass the second-factor
 // door it is paired with.
 func TestLinkOIDCIdentityRestoresTheSecondFactorWhenPersistFails(t *testing.T) {
-	// Register, CreateUser and setSecondFactorForTest's own persist each
-	// use one save, so the budget has to cover all three and fail only
-	// on the link itself.
-	s, err := OpenStore(&saveBudgetBackend{left: 3}, Options{})
+	// Register and CreateUser use one save each and
+	// setSecondFactorForTest four, so the budget covers all six and
+	// fails only on the link itself.
+	s, err := OpenStore(&saveBudgetBackend{left: 6}, Options{})
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
@@ -182,13 +178,9 @@ func TestLinkOIDCIdentityClearsAPendingEnrolmentToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser bob: %v", err)
 	}
-	// A pending (unconfirmed) secret, set directly -- the real entry
-	// point (SetPendingTOTPSecret) is a later slice.
-	if err := s.mutate(func(st *storeState) error {
-		st.byID[bob.ID].TOTPSecret = testTOTPSecret
-		return nil
-	}); err != nil {
-		t.Fatalf("persisting pending secret fixture: %v", err)
+	// A pending (unconfirmed) secret, through the real entry point.
+	if err := s.SetPendingTOTPSecret(bob.ID, testTOTPSecret); err != nil {
+		t.Fatalf("SetPendingTOTPSecret: %v", err)
 	}
 
 	if err := s.LinkOIDCIdentity(bob.ID, "https://idp.example", "sub-1", now); err != nil {

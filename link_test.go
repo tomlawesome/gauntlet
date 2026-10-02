@@ -119,20 +119,46 @@ func TestLinkingLeavesARealUnmatchableHash(t *testing.T) {
 // credentials just changed fundamentally. True of the admin too, whose
 // password survives the link (#1252) -- a second way into the account
 // was still just attached, and a caller's own login-completion path
-// hands the browser that did it a fresh session.
+// hands the browser that did it a fresh session. The link records that
+// in SessionsEndedAt and leaves PasswordChangedAt alone: no password
+// changed, and the login limiter reads PasswordChangedAt as one (#28).
 func TestLinkingInvalidatesEarlierSessions(t *testing.T) {
-	s := openTestStore(t)
-	u, _ := s.Register("alice", "password123", time.Now())
+	for _, role := range []Role{RoleAdmin, RoleUser} {
+		t.Run(string(role), func(t *testing.T) {
+			s := openTestStore(t)
+			created := time.Now().Add(-time.Hour)
+			admin, err := s.Register("alice", "password123", created)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := admin.ID
+			if role != RoleAdmin {
+				bob, err := s.CreateUser("bob", "password456", role, created)
+				if err != nil {
+					t.Fatal(err)
+				}
+				id = bob.ID
+			}
+			before, _ := s.Get(id)
 
-	linkedAt := time.Now()
-	if err := s.LinkOIDCIdentity(u.ID, "https://idp.example", "subject-1", linkedAt); err != nil {
-		t.Fatalf("LinkOIDCIdentity: %v", err)
-	}
+			linkedAt := time.Now()
+			if err := s.LinkOIDCIdentity(id, "https://idp.example", "subject-1", linkedAt); err != nil {
+				t.Fatalf("LinkOIDCIdentity: %v", err)
+			}
 
-	after, _ := s.Get(u.ID)
-	if !after.PasswordChangedAt.Equal(linkedAt) {
-		t.Errorf("PasswordChangedAt = %v, want %v -- sessions issued before the link stay valid",
-			after.PasswordChangedAt, linkedAt)
+			after, _ := s.Get(id)
+			if !after.SessionsEndedAt.Equal(linkedAt) {
+				t.Errorf("SessionsEndedAt = %v, want %v -- sessions issued before the link stay valid",
+					after.SessionsEndedAt, linkedAt)
+			}
+			if !after.SessionCutoff().Equal(linkedAt) {
+				t.Errorf("SessionCutoff() = %v, want the link's %v", after.SessionCutoff(), linkedAt)
+			}
+			if !after.PasswordChangedAt.Equal(before.PasswordChangedAt) {
+				t.Errorf("PasswordChangedAt moved from %v to %v: a link is not a password change",
+					before.PasswordChangedAt, after.PasswordChangedAt)
+			}
+		})
 	}
 }
 
@@ -226,7 +252,7 @@ func TestALinkedNonAdminIsNotLocallyRecoverable(t *testing.T) {
 // (which linking replaced with an unmatchable hash) has already stopped
 // working for the operator.
 func TestLinkOIDCIdentityLeavesThePasswordWorkingWhenPersistFails(t *testing.T) {
-	// Register and CreateUser below each persist too (createLocked
+	// Register and CreateUser below each persist too (createAccount
 	// persists as well), so the fixture needs a backend that saves
 	// twice before failing, not one that fails outright. bob must be a
 	// non-admin: linking keeps the admin's password unconditionally

@@ -279,10 +279,12 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // the same write (SetPassword, IssueResetCode); this limiter then drops
 // its own count of those guesses and any lockout over them it has yet
 // to save. That takes lockouts being the *Store itself (see
-// lockoutRecorder). Not every PasswordChangedAt bump is a password
-// change -- linking the admin to SSO bumps it and leaves the password
-// working -- so one counts only while the record carries no lockout:
-// the writes that change a password clear it, the link does not.
+// lockoutRecorder). This build moves PasswordChangedAt only in the
+// writes that change a password, and those clear the lockout too; its
+// SSO link ends sessions through SessionsEndedAt instead (#28). A
+// document an older gauntlet or mikroview wrote may still hold a link's
+// time there, with the password still working, so a bump counts only
+// while the record carries no lockout.
 //
 // A lockout that cannot be saved is logged, and still enforced in
 // memory: the attempt it would refuse is refused either way. It is also
@@ -308,12 +310,13 @@ func (l *LoginLimiter) ReserveAccount(lockouts AccountLockouts, accountID string
 	wasPersisted := !persisted.IsZero()
 	// A lockout on the record means PasswordChangedAt, whatever its
 	// date, was not a password change since that lockout began: a
-	// password change clears the lockout in the same write. The bump
-	// was something else that ends sessions -- linking the admin to SSO
-	// -- and the guesses it would drop were at a password that still
-	// works. A lockout saved just after a real change, decided just
-	// before it, looks the same and is honoured too: it fails closed,
-	// and a second change ends it.
+	// password change clears the lockout in the same write. This build
+	// writes PasswordChangedAt nowhere else, so for its own writes the
+	// rule only matters in two cases. A document an older gauntlet or
+	// mikroview linked to SSO carries the link's time there, with the
+	// password still working, so the guesses it would drop still count.
+	// And a lockout saved just after a real change, decided just before
+	// it, is honoured too: it fails closed, and a second change ends it.
 	if wasPersisted {
 		changed = time.Time{}
 	}
@@ -483,6 +486,13 @@ func (l *LoginLimiter) releaseIn(m map[string][]time.Time, key string, now time.
 // other failed clear is dropped: the record then holds a lockout that
 // has ended, and the next attempt clears it again (ReserveAccount's
 // wasPersisted case).
+//
+// That pending clear lives only in this process's memory. A restart
+// before a retry saves it loses it, and the new process enforces the
+// lockout still on the record until it ends (at most one window) or a
+// password change clears it (#28). Nothing durable says the owner
+// signed in: recording that would itself be a save, and saves are what
+// failed.
 func (l *LoginLimiter) syncLockout(lockouts AccountLockouts, accountID string, now time.Time) {
 	l.persistMu.Lock()
 	defer l.persistMu.Unlock()
