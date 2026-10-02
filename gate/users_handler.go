@@ -33,6 +33,12 @@ type userSummary struct {
 	// (see gauntlet.User's totpSecretBlanked), so no second read per
 	// account is needed.
 	HasTOTP bool `json:"hasTOTP"`
+	// PasskeyCount is how many passkeys this account holds, from
+	// Store.PasskeyCount -- List blanks Passkeys on every copy it
+	// returns, so len(u.Passkeys) there always reads zero. Present
+	// whether or not the application wires passkeys: an account carried
+	// over from mikroview's documents may hold some either way.
+	PasskeyCount int `json:"passkeyCount"`
 }
 
 // handleCreateUser lets an existing admin add another account -- the
@@ -94,6 +100,7 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			HasLocalPassword: u.LocalPassword(),
 			SSO:              u.OIDCIssuer != "",
 			HasTOTP:          u.HasActiveTOTP(),
+			PasskeyCount:     g.deps.Users.PasskeyCount(u.ID),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

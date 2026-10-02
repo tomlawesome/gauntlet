@@ -403,14 +403,14 @@ func TestLinkingSSOInvalidatesExistingSessions(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	client := registerAdmin(t, ts, "admin", "password123")
-	if got := protectedStatus(t, client, ts.URL, nil); got != http.StatusOK {
+	if got := protectedStatusWithCookie(t, client, ts.URL, nil); got != http.StatusOK {
 		t.Fatalf("expected the session to work before the link, got %d", got)
 	}
 	admin, _ := g.deps.Users.ByUsername("admin")
 	if err := g.deps.Users.LinkOIDCIdentity(admin.ID, "https://idp.example", "subject-1", time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if got := protectedStatus(t, client, ts.URL, nil); got != http.StatusUnauthorized {
+	if got := protectedStatusWithCookie(t, client, ts.URL, nil); got != http.StatusUnauthorized {
 		t.Errorf("expected the pre-link session to be invalidated, got %d", got)
 	}
 }
@@ -444,18 +444,18 @@ func TestAnOlderDocumentsLinkStillEndsEarlierSessions(t *testing.T) {
 	ts := newTestServer(t, g)
 
 	before := g.deps.Sessions.Create("linked-admin", linkedAt.Add(-time.Second))
-	if got := protectedStatus(t, http.DefaultClient, ts.URL, &http.Cookie{Name: testCookieName, Value: before.ID}); got != http.StatusUnauthorized {
+	if got := protectedStatusWithCookie(t, http.DefaultClient, ts.URL, &http.Cookie{Name: testCookieName, Value: before.ID}); got != http.StatusUnauthorized {
 		t.Errorf("a session issued before the older document's link got %d, want 401", got)
 	}
 	after := g.deps.Sessions.Create("linked-admin", linkedAt.Add(time.Second))
-	if got := protectedStatus(t, http.DefaultClient, ts.URL, &http.Cookie{Name: testCookieName, Value: after.ID}); got != http.StatusOK {
+	if got := protectedStatusWithCookie(t, http.DefaultClient, ts.URL, &http.Cookie{Name: testCookieName, Value: after.ID}); got != http.StatusOK {
 		t.Errorf("a session issued after the older document's link got %d, want 200", got)
 	}
 }
 
-// protectedStatus is the status GET /api/protected answers client with,
-// sending cookie too when it is not nil.
-func protectedStatus(t *testing.T, client *http.Client, base string, cookie *http.Cookie) int {
+// protectedStatusWithCookie is the status GET /api/protected answers
+// client with, sending cookie too when it is not nil.
+func protectedStatusWithCookie(t *testing.T, client *http.Client, base string, cookie *http.Cookie) int {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, base+"/api/protected", nil)
 	if err != nil {

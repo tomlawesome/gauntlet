@@ -26,9 +26,68 @@ All notable changes to this project are documented in this file.
   returning the new `ErrTokenNameInvalid` (#24). Code that passes
   user-typed names should handle this error. An empty name is still
   allowed. Device ids already followed this rule.
+- Passkeys (G8, #20, [ADR-0004](docs/adr/0004-passkey-ceremony.md)).
+  The new `gauntlet/passkey` package runs the WebAuthn ceremony:
+  `passkey.New(passkey.Config{PublicURL, DisplayName})` builds the
+  relying party from the application's own public URL, and a missing or
+  unusable one (`unset`, `ip`, `insecure`) is a reported status, not a
+  startup failure. Wire it into `gate.Deps.Passkeys` to serve
+  mikroview's passkey routes from `gate.Routes`: list, register
+  begin/finish (begin re-checks the password, as TOTP enrolment does,
+  and refuses an account with no local password), rename, delete,
+  `POST /api/auth/login/factor/begin`, an
+  `assertion` on `POST /api/auth/login/factor`, and the admin
+  `DELETE /api/auth/users/{id}/passkeys`. Left nil, every passkey route
+  answers 404 and nothing links the WebAuthn library. Each login
+  challenge is usable once, and a pending login (the cookie a password
+  step sets when a second factor is needed) is spent by the sign-in
+  that completes it, whichever factor completes it. A registration
+  ceremony is spent by the first finish the library accepts, so one
+  begin (one password entry) stores at most one passkey; a finish the
+  library refuses (wrong origin, bad signature) can still be corrected
+  inside its five minutes. Sealed cookies (the passkey ceremonies, the
+  pending login, the SSO flow) open only in the exact base64 spelling
+  they were written in. The root package
+  gains the seam both sides use (`PasskeyCeremony`, `PasskeyAssertion`,
+  `PasskeyStatus`, and `ErrPasskeyCeremonyInvalid`, which marks a dead
+  ceremony: expired, tampered with, from the other ceremony or already
+  used).
+- `Store.AnyPasskeysExist()` reports whether any account holds a
+  passkey (#20, owner's answer to question 5), so an application can
+  refuse to start when passkeys exist but its relying party is not
+  ready. gauntlet itself never refuses; the decision is the
+  application's.
+- `POST /api/auth/login` lists `passkey` (first) in `secondFactor`, with
+  `passkeyOrigin`, when the account holds a usable passkey;
+  `GET /api/auth/session` gains `passkeys: {count, status, origin}` when
+  the application wires passkeys; `GET /api/auth/users` rows gain
+  `passkeyCount`.
+- New dependency for the `passkey` package (G8, #20; owner
+  approval 2026-09-30): `github.com/go-webauthn/webauthn` v0.18.2
+  (BSD-3-Clause), the newest release, with no advisory in OSV or the Go
+  vulnerability database as of 2026-10-02. It brings
+  `github.com/go-webauthn/x` and eight more modules (CBOR, TPM, JWT,
+  msgp, mapstructure, uuid, float16, fwd). Only `gauntlet/passkey`
+  imports it, so an application that never imports that package never
+  compiles it in. Two of its packages carry other permissive licences,
+  `go-webauthn/x/crypto/secp256k1` (ISC) and `go-webauthn/x/revoke`
+  (BSD-2-Clause), so the licence policy now allows both (owner decision
+  2026-10-02).
 
 ### Changed
 
+- A pending login -- the cookie `POST /api/auth/login` sets when a
+  second factor is needed -- now completes exactly one sign-in (#20,
+  ruling R2). Before, the same cookie could be sent again within its
+  five minutes with another valid code, recovery code or passkey
+  assertion, and each one opened a session. A repeat now gets 401
+  "sign in again" at `login/factor` and `login/factor/begin`; a wrong
+  code still leaves the pending login usable. A spent pending login
+  (and a spent passkey challenge) is remembered for one lifetime past
+  the moment it stops being accepted, so two requests reading the clock
+  either side of that moment cannot reopen it. A pending-login cookie
+  sealed by an earlier version is refused once, and the user signs in
+  again.
 - The first admin is created only with a one-time setup code the server
   announces when it starts with no accounts (#37, ADR-0003; owner,
   2026-10-01). An empty store is not only a fresh install -- a deleted
@@ -244,7 +303,8 @@ All notable changes to this project are documented in this file.
 - A returning SSO sign-in saves `LastLogin` at most hourly, as a
   password login does, instead of rewriting the accounts document on
   every sign-in; `GET /api/auth/users` no longer re-reads each account
-  after listing them (#28).
+  to learn whether it has an authenticator app (#28). Its passkey
+  count still takes one store read per account.
 - The release job's `release-cli` image is pinned by tag and digest
   instead of `:latest` (#28).
 - A request whose `Authorization` header is not a well-formed

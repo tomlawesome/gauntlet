@@ -461,11 +461,11 @@ func TestOIDCLinkRevokesEarlierSessionsInMemory(t *testing.T) {
 	g.deps.Users = openStoreWithUsers(t, stripped)
 
 	for name, c := range map[string]*http.Cookie{"the linking browser's old session": linkingCookie, "another device's session": otherCookie} {
-		if got := protectedStatus(t, http.DefaultClient, ts.URL, c); got != http.StatusUnauthorized {
+		if got := protectedStatusWithCookie(t, http.DefaultClient, ts.URL, c); got != http.StatusUnauthorized {
 			t.Errorf("%s, issued before the link, got %d once the stored cutoff was lost; want 401", name, got)
 		}
 	}
-	if got := protectedStatus(t, admin, ts.URL, nil); got != http.StatusOK {
+	if got := protectedStatusWithCookie(t, admin, ts.URL, nil); got != http.StatusOK {
 		t.Errorf("the session the link issued got %d, want 200", got)
 	}
 }

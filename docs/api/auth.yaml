@@ -22,12 +22,12 @@ info:
     - `503` "setup required" on every route except `GET /api/auth/session`
       and `POST /api/auth/register` while no account exists yet. The SSO
       routes are not exempt: the first account is never an SSO one.
-    - `403` "missing required header" on every `POST` and `DELETE` without
+    - `403` "missing required header" on every `POST`, `PATCH` and `DELETE` without
       the `X-Requested-With` header carrying the application's configured
       value.
     - `401` "unauthorized" on every route that needs a session and has
       none. Exempt from that: session, register, login, login/factor,
-      logout and the two `GET /api/auth/oidc/*` routes.
+      login/factor/begin, logout and the two `GET /api/auth/oidc/*` routes.
     - `403` on a session-gated route when the account's role is not one
       gauntlet knows, when it is stopped at one of two doors (see the
       `X-Auth-Gate` header), or, on the admin routes, when the caller is
@@ -54,7 +54,21 @@ info:
     response fields and status codes are added, never renamed or removed
     (ADR-0002). JSON response bodies are closed (`additionalProperties:
     false`) so the contract tests notice a field the handler added without
-    this document, and a field it dropped or renamed.
+    this document, and a field it dropped or renamed. The one deliberate
+    exception is WebAuthn's own JSON (the passkey routes): the options
+    `register/begin` and `login/factor/begin` answer, and the `credential`
+    and `assertion` request fields, are the W3C's `PublicKeyCredential`
+    shapes, produced and consumed by the WebAuthn library and the browser,
+    not by a frontend's own code. They are open objects here so a library
+    update that adds a W3C field cannot fail the contract.
+
+    **Passkeys.** The passkey routes are always served. When the
+    application wires no passkeys (`Deps.Passkeys` nil) every one of them
+    answers `404`, `login/factor` answers `404` to an `assertion`, the
+    session body has no `passkeys` and `login` never offers `passkey`.
+    While the application's relying party is not ready (no usable public
+    URL), the two begin routes, `register/finish` and the assertion step
+    answer `409` naming the reason; list, rename and delete keep working.
 
 security:
   - sessionCookie: []
@@ -156,8 +170,11 @@ paths:
         signs in and sets the session cookie. On an account holding one it
         does not: it sets a short-lived pending-login cookie and names the
         factors to ask for next, and `POST /api/auth/login/factor` finishes
-        the sign-in. The `secondFactor` list can be empty (an account whose
-        only factor is a passkey): a recovery code still completes it.
+        the sign-in. `passkey` is listed (first, with `passkeyOrigin`) when
+        the relying party is ready and the account holds a passkey
+        registered for it. The `secondFactor` list can be empty (an account
+        whose only passkeys are stale, or an application without
+        passkeys): a recovery code still completes it.
       security:
         - {}
       parameters:
@@ -198,9 +215,15 @@ paths:
         Completes a login `POST /api/auth/login` stopped short of a
         session, using the pending-login cookie it set. `code` is a current
         authenticator-app code or one unused recovery code (spent on use).
-        Shares the login rate limit. Sets the session cookie on success.
+        `assertion` is the browser's answer to the options
+        `POST /api/auth/login/factor/begin` gave, checked against the
+        passkey ceremony cookie that route set; a completed passkey sign-in
+        also hands back the attempt that begin counted. Shares the login
+        rate limit. Sets the session cookie on success.
       security:
         - pendingLoginCookie: []
+        - pendingLoginCookie: []
+          passkeyAssertCookie: []
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -208,7 +231,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CodeRequest"
+              $ref: "#/components/schemas/LoginFactorRequest"
       responses:
         "200":
           description: Signed in; sets the session cookie.
@@ -222,6 +245,53 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/CSRFRefused"
+        "404":
+          $ref: "#/components/responses/PasskeysOff"
+        "409":
+          $ref: "#/components/responses/PasskeysNotReady"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/login/factor/begin:
+    post:
+      operationId: loginFactorBegin
+      summary: Start a passkey sign-in
+      description: |
+        The passkey half of the second login step, reached with the
+        pending-login cookie `POST /api/auth/login` set. Answers the W3C
+        request options for `navigator.credentials.get()`, allowing only
+        the account's passkeys registered for the current relying party,
+        and sets the passkey ceremony cookie (sealed, path
+        `/api/auth/login`, five minutes; each challenge is usable once).
+        Takes the same login rate-limit attempt as `login/factor` and
+        keeps it until the assertion signs in. Takes no body.
+      security:
+        - pendingLoginCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: The request options; sets the passkey ceremony cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialAssertion"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CSRFRefused"
+        "404":
+          $ref: "#/components/responses/PasskeysOff"
+        "409":
+          description: The relying party is not ready (the message names why), or the account has no passkey registered for it.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -554,6 +624,219 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/passkeys:
+    get:
+      operationId: listPasskeys
+      summary: List the caller's own passkeys
+      description: Every passkey on the account, stale ones included (registered under an earlier public URL; still removable, never offered at sign-in).
+      responses:
+        "200":
+          description: The caller's passkeys.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PasskeyRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/PasskeysOff"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/passkeys/register/begin:
+    post:
+      operationId: passkeyRegisterBegin
+      summary: Start registering a passkey
+      description: |
+        Answers the W3C creation options for `navigator.credentials.create()`,
+        excluding the account's passkeys already registered for the current
+        relying party, and sets the registration ceremony cookie (sealed,
+        path `/api/auth/passkeys`, five minutes). Password-gated
+        (rate-limited re-check), as authenticator-app enrolment is; refused
+        for an account with no local password before the body is read.
+        Reachable at the must-enrol-factor door.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
+      responses:
+        "200":
+          description: The creation options; sets the registration ceremony cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialCreation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/PasskeysOff"
+        "409":
+          description: The relying party is not ready (the message names why), or the account has no local password (signs in through SSO).
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/passkeys/register/finish:
+    post:
+      operationId: passkeyRegisterFinish
+      summary: Finish registering a passkey
+      description: |
+        Verifies the browser's credential against the ceremony
+        `register/begin` started and stores it. On the account's first
+        second factor of either kind it ends every session, sets a fresh
+        session cookie for this one, and returns the ten recovery codes,
+        never shown again. Clears the ceremony cookie on success only, so
+        a refused finish can be corrected within the five minutes.
+        Reachable at the must-enrol-factor door.
+      security:
+        - sessionCookie: []
+          passkeyRegisterCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasskeyRegisterFinishRequest"
+      responses:
+        "200":
+          description: Registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasskeyRegisterFinishResponse"
+        "400":
+          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or the credential was refused (wrong origin, bad signature, malformed). The ceremony cookie is kept, so a corrected credential can finish it.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "401":
+          description: No valid session, or the ceremony cookie is missing, expired, tampered with or already used, or this ceremony already stored a passkey or was ended by a refusal -- begin again. A dead or spent ceremony cookie is cleared.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/PasskeysOff"
+        "409":
+          description: The relying party is not ready (the message names why), the passkey is already registered to this account, or the account already holds ten. For a duplicate or a full account the ceremony is ended and its cookie cleared; begin again.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          description: |
+            The passkey could not be stored; or it WAS stored and is active
+            (sessions rotated as on success) but recovery codes could not
+            be saved -- the message says which.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/passkeys/{id}:
+    patch:
+      operationId: renamePasskey
+      summary: Rename one of the caller's passkeys
+      description: Cosmetic, so no password. A blank name becomes `Passkey n`; a long one is cut at 64 characters.
+      parameters:
+        - $ref: "#/components/parameters/PasskeyID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasskeyRenameRequest"
+      responses:
+        "200":
+          description: Renamed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasskeyRow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/PasskeyNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+    delete:
+      operationId: deletePasskey
+      summary: Remove one of the caller's passkeys
+      description: |
+        Password-gated (rate-limited re-check). When this leaves the
+        account with no second factor, its recovery codes are dropped,
+        every session on it ends, this one included, and `signedOut` is
+        true.
+      parameters:
+        - $ref: "#/components/parameters/PasskeyID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasskeyRemoved"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/PasskeyNotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/oidc/login:
     get:
       operationId: oidcLogin
@@ -871,6 +1154,51 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/users/{id}/passkeys:
+    delete:
+      operationId: clearUserPasskeys
+      summary: Remove every passkey on another account (admin)
+      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. Takes no body.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, cleared]
+                properties:
+                  username:
+                    type: string
+                  cleared:
+                    const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The application has no passkeys, or no account has this id.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "409":
+          description: The account is the caller's own.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/TextError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/tokens:
     get:
       operationId: listTokens
@@ -998,7 +1326,17 @@ components:
       type: apiKey
       in: cookie
       name: gate_pending_login
-      description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived.
+      description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived, used by exactly one sign-in -- once a code, recovery code or passkey completes it, it is refused with 401 at login/factor and login/factor/begin.
+    passkeyRegisterCookie:
+      type: apiKey
+      in: cookie
+      name: gate_passkey_register
+      description: Set by `POST /api/auth/passkeys/register/begin`; sealed, path `/api/auth/passkeys`, five minutes.
+    passkeyAssertCookie:
+      type: apiKey
+      in: cookie
+      name: gate_passkey_assert
+      description: Set by `POST /api/auth/login/factor/begin`; sealed, path `/api/auth/login`, five minutes.
     oidcFlowCookie:
       type: apiKey
       in: cookie
@@ -1010,7 +1348,7 @@ components:
       name: X-Requested-With
       in: header
       required: true
-      description: Must equal the application's `Config.CSRFHeaderValue`. Without it every POST and DELETE is refused with 403.
+      description: Must equal the application's `Config.CSRFHeaderValue`. Without it every POST, PATCH and DELETE is refused with 403.
       schema:
         type: string
     UserID:
@@ -1018,6 +1356,14 @@ components:
       in: path
       required: true
       description: The account's `id` from `GET /api/auth/users`.
+      schema:
+        type: string
+
+    PasskeyID:
+      name: id
+      in: path
+      required: true
+      description: The passkey's `id` from `GET /api/auth/passkeys` (its credential ID, base64url without padding).
       schema:
         type: string
 
@@ -1059,7 +1405,8 @@ components:
             only `POST /api/auth/password` is reachable) or
             `must-enrol-factor` (`Config.RequireSecondFactor` is on and the
             account has no second factor; only the TOTP enrol and confirm
-            routes are reachable).
+            routes and the passkey register begin and finish routes are
+            reachable).
           schema:
             type: string
             enum: [must-change-password, must-enrol-factor]
@@ -1093,6 +1440,24 @@ components:
             $ref: "#/components/schemas/TextError"
     SSOOff:
       description: Single sign-on is not configured.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    PasskeysOff:
+      description: This application has no passkeys (`Deps.Passkeys` is nil).
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    PasskeysNotReady:
+      description: The relying party is not ready -- the application has no usable public URL. The message names the reason (`unset`, `ip` or `insecure`), as `GET /api/auth/session`'s `passkeys.status` does.
+      content:
+        text/plain:
+          schema:
+            $ref: "#/components/schemas/TextError"
+    PasskeyNotFound:
+      description: The application has no passkeys, or no passkey on the caller's account has this id.
       content:
         text/plain:
           schema:
@@ -1148,6 +1513,103 @@ components:
         code:
           type: string
           description: An authenticator-app code, or (at login) a recovery code.
+    LoginFactorRequest:
+      type: object
+      additionalProperties: false
+      description: Exactly one of `code` or `assertion`.
+      oneOf:
+        - required: [code]
+        - required: [assertion]
+      properties:
+        code:
+          type: string
+          description: An authenticator-app code, or a recovery code.
+        assertion:
+          type: object
+          additionalProperties: true
+          description: The W3C `PublicKeyCredential` JSON `navigator.credentials.get()` produced for the options `login/factor/begin` gave. An open object -- see "Compatibility" above.
+    CredentialCreation:
+      type: object
+      additionalProperties: true
+      required: [publicKey]
+      description: The W3C `CredentialCreationOptions` JSON (an object holding `publicKey`) the WebAuthn library produced, for `navigator.credentials.create()`. An open object -- see "Compatibility" above.
+    CredentialAssertion:
+      type: object
+      additionalProperties: true
+      required: [publicKey]
+      description: The W3C `CredentialRequestOptions` JSON (an object holding `publicKey`) the WebAuthn library produced, for `navigator.credentials.get()`. An open object -- see "Compatibility" above.
+    PasskeyRow:
+      type: object
+      additionalProperties: false
+      required: [id, name, createdAt, stale, rpId]
+      properties:
+        id:
+          type: string
+          description: The credential ID, base64url without padding.
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          description: Absent until the passkey first signs in.
+        transports:
+          type: array
+          description: How the authenticator said it can be reached (`usb`, `nfc`, `ble`, `internal`, `hybrid`, ...); absent when it said nothing.
+          items:
+            type: string
+        stale:
+          type: boolean
+          description: Registered under a different relying party (the public URL changed since); never offered at sign-in. False whenever the relying party is not ready.
+        rpId:
+          type: string
+          description: The relying-party ID the passkey was registered under.
+    PasskeyRegisterFinishRequest:
+      type: object
+      additionalProperties: false
+      required: [credential]
+      properties:
+        credential:
+          type: object
+          additionalProperties: true
+          description: The W3C `PublicKeyCredential` JSON `navigator.credentials.create()` produced. An open object -- see "Compatibility" above.
+        name:
+          type: string
+          description: A label for the list; blank becomes `Passkey n`, and it is cut at 64 characters.
+    PasskeyRegisterFinishResponse:
+      type: object
+      additionalProperties: false
+      required: [passkey, recoveryCodes]
+      properties:
+        passkey:
+          $ref: "#/components/schemas/PasskeyRow"
+        recoveryCodes:
+          description: Ten codes in clear, exactly once, when this was the account's first second factor; `null` otherwise.
+          type: [array, "null"]
+          items:
+            type: string
+        alreadyIssued:
+          description: Present, and true, only when the account already held recovery codes.
+          const: true
+    PasskeyRenameRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+    PasskeyRemoved:
+      type: object
+      additionalProperties: false
+      required: [removed, signedOut]
+      properties:
+        removed:
+          const: true
+        signedOut:
+          type: boolean
+          description: The account was left with no second factor, so every session on it ended, this one included.
     Account:
       type: object
       additionalProperties: false
@@ -1164,9 +1626,13 @@ components:
       properties:
         secondFactor:
           type: array
-          description: Factors to offer next; today only `totp`. A recovery code is always accepted.
+          description: Factors to offer next, `passkey` first when listed, then `totp`. A recovery code is always accepted.
           items:
             type: string
+            enum: [passkey, totp]
+        passkeyOrigin:
+          type: string
+          description: The origin passkeys work at (scheme, host and port); present only when `passkey` is listed.
     SessionState:
       type: object
       additionalProperties: false
@@ -1205,6 +1671,22 @@ components:
         hasTOTP:
           type: boolean
           description: A confirmed authenticator app, not a pending enrolment.
+        passkeys:
+          type: object
+          additionalProperties: false
+          required: [count, status]
+          description: Present only while authenticated, and only when the application has passkeys at all.
+          properties:
+            count:
+              type: integer
+              description: How many passkeys the account holds, stale ones included.
+            status:
+              type: string
+              enum: [ready, unset, ip, insecure]
+              description: Whether passkeys work here, and why not -- `unset` (no usable public URL), `ip` (it is an IP address), `insecure` (not https).
+            origin:
+              type: string
+              description: Present only when `status` is `ready`.
         signedInSince:
           type: string
           format: date-time
@@ -1212,7 +1694,7 @@ components:
     UserSummary:
       type: object
       additionalProperties: false
-      required: [id, username, role, createdAt, hasLocalPassword, sso, hasTOTP]
+      required: [id, username, role, createdAt, hasLocalPassword, sso, hasTOTP, passkeyCount]
       properties:
         id:
           type: string
@@ -1234,6 +1716,9 @@ components:
           description: Linked to an SSO identity.
         hasTOTP:
           type: boolean
+        passkeyCount:
+          type: integer
+          description: How many passkeys the account holds.
     Token:
       type: object
       additionalProperties: false

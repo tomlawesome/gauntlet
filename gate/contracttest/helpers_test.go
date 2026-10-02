@@ -17,6 +17,7 @@ import (
 	"github.com/tomlawesome/gauntlet/internal/hashcost"
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/passkey"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -158,7 +159,13 @@ func newOIDCTestServer(t *testing.T) (*oidc.StateCodec, *httptest.Server, *testu
 		t.Fatalf("oidc.NewStateCodec: %v", err)
 	}
 	users, code := openStore(t, persist.NewMemory())
-	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec})
+	// Passkeys are wired too, so an SSO-provisioned account can be shown
+	// the 409 register/begin gives an account with no local password.
+	rp, err := passkey.New(passkey.Config{PublicURL: "https://passkeys.example.org", DisplayName: testProductName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec, Passkeys: rp})
 	ts := newTestServer(t, g)
 
 	b, err := json.Marshal(registerRequest{"setup-admin", "setup-admin-password", code})
@@ -249,7 +256,34 @@ type registerRequest struct {
 }
 
 type loginFactorRequest struct {
-	Code string `json:"code"`
+	Code      string          `json:"code,omitempty"`
+	Assertion json.RawMessage `json:"assertion,omitempty"`
+}
+
+type passkeyRegisterFinishRequest struct {
+	Credential json.RawMessage `json:"credential"`
+	Name       string          `json:"name"`
+}
+
+type passkeyRenameRequest struct {
+	Name string `json:"name"`
+}
+
+type passwordRequest struct {
+	Password string `json:"password"`
+}
+
+type passkeyRow struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	LastUsedAt time.Time `json:"lastUsedAt"`
+	Stale      bool      `json:"stale"`
+}
+
+type passkeyRegisterFinishResponse struct {
+	Passkey       passkeyRow `json:"passkey"`
+	RecoveryCodes []string   `json:"recoveryCodes"`
+	AlreadyIssued bool       `json:"alreadyIssued"`
 }
 
 type changePasswordRequest struct {
@@ -290,11 +324,17 @@ type sessionResponse struct {
 	Authenticated bool   `json:"authenticated"`
 	Role          string `json:"role"`
 	SignedInSince string `json:"signedInSince"`
+	Passkeys      *struct {
+		Count  int    `json:"count"`
+		Status string `json:"status"`
+		Origin string `json:"origin"`
+	} `json:"passkeys"`
 }
 
 type userSummary struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	PasskeyCount int    `json:"passkeyCount"`
 }
 
 type totpEnrolResponse struct {

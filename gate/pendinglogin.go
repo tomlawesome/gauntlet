@@ -5,11 +5,14 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
 // pendingLoginCookieName carries a login that has proven the password but
@@ -53,6 +56,11 @@ type pendingLoginState struct {
 	// that anyone guessing from that address could take in between. Only
 	// the right password earns it; the account's own limit still applies.
 	AfterReset bool `json:",omitempty"`
+	// ID makes the pending login one-shot (ruling R2 on #20): 16 random
+	// bytes, hex, claimed in spentPendingLogins by the sign-in that
+	// completes it, so one correct password yields one session. A cookie
+	// without one -- sealed before this field existed -- is refused.
+	ID string
 }
 
 // errPendingLoginInvalid covers every way a pending-login cookie can
@@ -124,7 +132,9 @@ func (c *pendingLoginStateCodec) encode(st pendingLoginState) (string, error) {
 // malformed, tampered, or older than pendingLoginCookieMaxAge as measured
 // from the sealed IssuedAt against now.
 func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pendingLoginState, error) {
-	sealed, err := base64.RawURLEncoding.DecodeString(cookieValue)
+	// Strict: only the spelling encode wrote opens, so a sealed value has
+	// one cookie string, as passkey's seal does (#20).
+	sealed, err := base64.RawURLEncoding.Strict().DecodeString(cookieValue)
 	if err != nil {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}
@@ -144,7 +154,42 @@ func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pend
 	if now.Sub(st.IssuedAt) > pendingLoginCookieMaxAge {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}
+	if st.ID == "" {
+		return pendingLoginState{}, errPendingLoginInvalid
+	}
 	return st, nil
+}
+
+// spentPendingLogins holds the ID of every pending login a sign-in has
+// completed, until one lifetime after the cookie carrying it would be
+// refused anyway: the forget time is the sealed IssuedAt plus
+// pendingLoginCookieMaxAge, the same expiry decode checks, compared on
+// the same wall clock, and the grace of one more pendingLoginCookieMaxAge
+// means a request that read the clock before that expiry cannot find the
+// ID already forgotten by one that read it after (ruling S2 on #20,
+// internal/spent). Shared by every Gate this process runs, like
+// pendingLoginCodec, whose cookies it guards.
+var spentPendingLogins = spent.New(pendingLoginCookieMaxAge)
+
+// pendingLogin reads, opens and checks the pending-login cookie for
+// login/factor and login/factor/begin. A cookie that is missing, does
+// not open, has expired, or whose pending login a sign-in has already
+// completed is refused with 401 "sign in again" and cleared.
+func (g *Gate) pendingLogin(w http.ResponseWriter, r *http.Request, now time.Time) (pendingLoginState, bool) {
+	refuse := func() (pendingLoginState, bool) {
+		g.clearPendingLoginCookie(w)
+		writeUnauthorized(w, "sign in again")
+		return pendingLoginState{}, false
+	}
+	cookie, err := r.Cookie(pendingLoginCookieName)
+	if err != nil {
+		return refuse()
+	}
+	st, err := pendingLoginCodec.decode(cookie.Value, now)
+	if err != nil || spentPendingLogins.Spent(st.ID, now) {
+		return refuse()
+	}
+	return st, true
 }
 
 // setPendingLoginCookie seals a fresh pendingLoginState for userID and
@@ -152,7 +197,11 @@ func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pend
 // against an account holding an active second factor, in place of
 // creating a session.
 func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, afterReset bool, now time.Time) error {
-	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, AfterReset: afterReset})
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return fmt.Errorf("gate: generating pending login id: %w", err)
+	}
+	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, AfterReset: afterReset, ID: hex.EncodeToString(id)})
 	if err != nil {
 		return err
 	}
