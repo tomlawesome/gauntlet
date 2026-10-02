@@ -255,8 +255,24 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 func (g *Gate) now() time.Time { return g.cfg.Now() }
 
 // audit records action against target with detail as actor, through
-// Config.Audit if one is configured -- a no-op otherwise.
-func (g *Gate) audit(actor, action, target, detail string) {
+// Config.Audit if one is configured -- a no-op otherwise. The address r
+// came from (Config.ClientIP) is appended to detail as from="...",
+// quoted because ClientIP may read a header the client set (#45, ASVS
+// 16.2.1): every record a request writes says where it came from.
+func (g *Gate) audit(r *http.Request, actor, action, target, detail string) {
+	from := fmt.Sprintf("from=%q", g.cfg.ClientIP(r))
+	if detail == "" {
+		detail = from
+	} else {
+		detail += "; " + from
+	}
+	g.auditRecord(actor, action, target, detail)
+}
+
+// auditRecord is audit for a detail that already names the address:
+// the sign-in records (recordSignIn), which name the address the
+// limiter counted.
+func (g *Gate) auditRecord(actor, action, target, detail string) {
 	if g.cfg.Audit == nil {
 		return
 	}

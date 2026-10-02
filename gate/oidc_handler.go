@@ -166,7 +166,7 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 	} else {
 		detail += "; local password removed"
 	}
-	g.audit(caller.Username, "account.link_sso", caller.Username, detail)
+	g.audit(r, caller.Username, "account.link_sso", caller.Username, detail)
 
 	// LinkOIDCIdentity sets SessionsEndedAt, which invalidates every
 	// session issued before it -- including the one that just made this

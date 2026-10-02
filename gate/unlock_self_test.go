@@ -230,7 +230,7 @@ func TestRecheckSecondFactorRefusesOverBudget(t *testing.T) {
 		}
 	}
 	w := httptest.NewRecorder()
-	if g.recheckSecondFactor(w, u, gauntlet.GenerateTOTPCode(secret, counter+1), "wrong", now) {
+	if g.recheckSecondFactor(w, httptest.NewRequest(http.MethodPost, "/api/auth/users/x/unlock", nil), u, gauntlet.GenerateTOTPCode(secret, counter+1), "wrong", now) {
 		t.Fatal("a code over budget was accepted")
 	}
 	if w.Code != http.StatusTooManyRequests || !strings.Contains(w.Body.String(), "too many attempts") {

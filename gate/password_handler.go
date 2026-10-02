@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -23,7 +24,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req changePasswordRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -47,7 +48,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// password and a second factor.
 	if !user.MustChangePassword {
 		// Throttled and re-checked by recheckPassword.
-		if _, ok := g.recheckPassword(w, user, req.CurrentPassword, "current password is incorrect", now); !ok {
+		if _, ok := g.recheckPassword(w, r, user, req.CurrentPassword, "current password is incorrect", now); !ok {
 			return
 		}
 
@@ -84,7 +85,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if user.MustChangePassword {
 		detail += ", forced (an administrator's reset or repeated second-factor failures)"
 	}
-	g.audit(user.Username, "account.password_changed", user.Username, detail)
+	g.audit(r, user.Username, "account.password_changed", user.Username, detail)
 
 	g.issueSession(w, r, user.ID, now)
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "otherSessionsEnded": true})
@@ -105,13 +106,15 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 //
 // Writes the 429, or the 401 carrying wrongMsg, itself; on success it
 // returns the freshly authenticated copy of the account.
-func (g *Gate) recheckPassword(w http.ResponseWriter, user *gauntlet.User, password, wrongMsg string, now time.Time) (*gauntlet.User, bool) {
+func (g *Gate) recheckPassword(w http.ResponseWriter, r *http.Request, user *gauntlet.User, password, wrongMsg string, now time.Time) (*gauntlet.User, bool) {
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		g.recheckRefused(r, user)
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return nil, false
 	}
 	current, err := g.deps.Users.Authenticate(user.Username, password, now)
 	if err != nil {
+		g.recheckFailed(r, user, gauntlet.SignInWrongPassword, gauntlet.SignInMethodPassword)
 		writeUnauthorized(w, wrongMsg)
 		return nil, false
 	}
@@ -136,8 +139,9 @@ func (g *Gate) recheckPassword(w http.ResponseWriter, user *gauntlet.User, passw
 // request whose password was wrong.
 //
 // Writes the 429, 500 or the 401 carrying wrongMsg itself.
-func (g *Gate) recheckSecondFactor(w http.ResponseWriter, user *gauntlet.User, code, wrongMsg string, now time.Time) bool {
+func (g *Gate) recheckSecondFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, code, wrongMsg string, now time.Time) bool {
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		g.recheckRefused(r, user)
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return false
 	}
@@ -152,11 +156,27 @@ func (g *Gate) recheckSecondFactor(w http.ResponseWriter, user *gauntlet.User, c
 		return false
 	}
 	if !matched {
+		g.recheckFailed(r, user, gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode)
 		writeUnauthorized(w, wrongMsg)
 		return false
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 	return true
+}
+
+// recheckFailed records a wrong password or code at an in-session
+// re-check (#45, ASVS 16.3.1): user.login_failed, as a failed sign-in
+// is, marked step=recheck. Not a row of the sign-in history: the caller
+// already holds a session, and the history is of sign-ins.
+func (g *Gate) recheckFailed(r *http.Request, user *gauntlet.User, outcome gauntlet.SignInOutcome, method gauntlet.SignInMethod) {
+	g.auditRecord(user.Username, "user.login_failed", user.Username,
+		fmt.Sprintf("outcome=%s method=%s step=recheck from=%q", outcome, method, g.cfg.ClientIP(r)))
+}
+
+// recheckRefused is the rated Warn line for a re-check the limiter
+// refused, as a refused sign-in leaves one.
+func (g *Gate) recheckRefused(r *http.Request, user *gauntlet.User) {
+	g.warnRefused(r, "recheck-refused", fmt.Sprintf("gate: re-check refused by the limiter: account=%q", user.Username))
 }
 
 // refuseProductName writes ErrPasswordContext's 400, and reports true,

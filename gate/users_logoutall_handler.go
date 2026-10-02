@@ -65,7 +65,7 @@ func validSessionEndReason(reason string) bool {
 func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req adminLogoutAllRequest
-	if err := decodeJSONBody(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+	if err := g.decodeJSONBody(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -100,7 +100,7 @@ func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	if notified {
 		notify = "requested"
 	}
-	g.audit(auditActor(r), "user.sessions_ended", target.Username,
+	g.audit(r, auditActor(r), "user.sessions_ended", target.Username,
 		fmt.Sprintf("sessions ended: all (n=%d), reason=%q, notify=%s, %s", ended, req.Reason, notify, browsers))
 	writeJSON(w, http.StatusOK, adminLogoutAllResponse{Username: target.Username, Ended: ended, Notified: notified})
 

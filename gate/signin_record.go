@@ -110,7 +110,7 @@ func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginR
 		case gauntlet.SignInMethodSSO:
 			detail = "via sso; " + from
 		}
-		g.audit(ev.Username, "user.login", ev.Username, detail)
+		g.auditRecord(ev.Username, "user.login", ev.Username, detail)
 	case limiterRefusal(ev.Outcome):
 		g.warnRated("login-refused "+ev.Client.Address, fmt.Sprintf(
 			"gate: sign-in refused by the login limiter: outcome=%s method=%s account=%q %s",
@@ -120,16 +120,16 @@ func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginR
 		if ev.UserID == "" {
 			detail += fmt.Sprintf(" name=%q", ev.Username)
 		}
-		g.audit(name, "user.login_failed", name, detail)
+		g.auditRecord(name, "user.login_failed", name, detail)
 		if ev.UserID == "" {
 			return
 		}
 		if res.lockoutStarted {
-			g.audit(name, "account.locked", name, fmt.Sprintf("until=%s lockouts=%d %s",
+			g.auditRecord(name, "account.locked", name, fmt.Sprintf("until=%s lockouts=%d %s",
 				res.lockedUntil.UTC().Format(time.RFC3339), res.lockouts, from))
 		}
 		if res.disabledNow {
-			g.audit(name, "account.disabled", name, fmt.Sprintf("after %d consecutive failures; %s",
+			g.auditRecord(name, "account.disabled", name, fmt.Sprintf("after %d consecutive failures; %s",
 				gauntlet.MaxConsecutiveLoginFailures, from))
 		}
 	}

@@ -89,6 +89,9 @@ func wantEvents(t *testing.T, got []gauntlet.SignInEvent, want ...string) {
 
 const fixtureFrom = `from="198.51.100.1"`
 
+// fixtureFromSuffix is what gate.audit appends to a request's record.
+const fixtureFromSuffix = "; " + fixtureFrom
+
 // A wrong password is exactly one user.login_failed record, naming the
 // account in full, and no user.login.
 func TestWrongPasswordIsOneLoginFailedRecord(t *testing.T) {

@@ -284,8 +284,8 @@ func TestPasskeyRegisterLoginRoundTrip(t *testing.T) {
 	if sess := sessionOf(t, bilbo, ts); !sess.Authenticated {
 		t.Fatal("registering a passkey should not have signed this browser out")
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey" {
-		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, "name=YubiKey")
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey"+fixtureFromSuffix {
+		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, "name=YubiKey"+fixtureFromSuffix)
 	}
 
 	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
@@ -446,7 +446,7 @@ func TestPasskeyCloneWarningRefusesRegressedSignCount(t *testing.T) {
 	if entry.Target != passkeyBilboUsername {
 		t.Errorf("account.passkey_clone_suspected entry target = %q, want %q", entry.Target, passkeyBilboUsername)
 	}
-	want := fmt.Sprintf("credential=%s presentedCount=3 storedCount=5", out.Passkey.ID)
+	want := fmt.Sprintf("credential=%s presentedCount=3 storedCount=5", out.Passkey.ID) + fixtureFromSuffix
 	if entry.Detail != want {
 		t.Errorf("account.passkey_clone_suspected detail = %q, want %q", entry.Detail, want)
 	}
@@ -743,7 +743,7 @@ func TestPasskeyDeleteLeavingNoFactorSignsOutEverySession(t *testing.T) {
 	if u, ok := g.deps.Users.Get(passkeyBilboID(t, g)); !ok || len(u.RecoveryCodes) != 0 {
 		t.Error("recovery codes outlived the account's last factor")
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != "name=only key" {
+	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != "name=only key"+fixtureFromSuffix {
 		t.Errorf("account.passkey_removed detail = %q", entry.Detail)
 	}
 }
@@ -993,7 +993,7 @@ func TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits(t *testing.T
 	if got := protectedStatus(t, browser, ts); got != http.StatusOK {
 		t.Errorf("the registering browser got %d, want its reissued session to work", got)
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey; recovery codes could not be saved" {
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey; recovery codes could not be saved"+fixtureFromSuffix {
 		t.Errorf("account.passkey_added detail = %q", entry.Detail)
 	}
 }
@@ -2187,7 +2187,7 @@ func TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual(t *tes
 	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
 		t.Errorf("the account holds %d passkeys, want exactly 1", n)
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=thief" {
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=thief"+fixtureFromSuffix {
 		t.Errorf("account.passkey_added detail = %q, want the thief's passkey named", entry.Detail)
 	}
 	again := passkeyRegisterFinishRaw(t, thief, ts, newFake(g), creation, "thief again")

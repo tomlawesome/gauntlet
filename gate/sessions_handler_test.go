@@ -304,7 +304,7 @@ func TestSessionsEndAnotherSession(t *testing.T) {
 		t.Fatalf("%d session-list audit lines, want 1", n)
 	}
 	entry := findAuditEntry(t, g, "account.sessions_ended")
-	if entry.Detail != "sessions ended: one, ref="+laptopRef+", via session list" || entry.Actor != totpBobUsername || entry.Target != totpBobUsername {
+	if entry.Detail != "sessions ended: one, ref="+laptopRef+`, via session list; from="192.0.2.44"` || entry.Actor != totpBobUsername || entry.Target != totpBobUsername {
 		t.Errorf("audit entry = %+v", entry)
 	}
 	if strings.Contains(entry.Detail, "Firefox") || strings.Contains(entry.Detail, "203.0.113.10") {

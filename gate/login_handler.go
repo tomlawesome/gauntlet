@@ -109,12 +109,17 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 			g.deps.Limiter.ReleaseAfterReset(res.ipKey, accountID)
 		}
 	}
-	if !ok && accountID != "" && g.isKnownBrowser(r, accountID, now) &&
-		g.deps.Limiter.ReserveKnownBrowser(g.deps.Users, accountID, now) {
-		// Whatever the ordinary path reserved has been handed back
-		// above, a reset pass included, so this is the only
-		// reservation the attempt holds.
-		ok, res.afterReset, res.knownBrowser, res.refusal = true, false, true, ""
+	if !ok && accountID != "" && g.isKnownBrowser(r, accountID, now) {
+		if d := g.deps.Limiter.ReserveKnownBrowserDecision(g.deps.Users, accountID, now); d.Allowed {
+			// Whatever the ordinary path reserved has been handed back
+			// above, a reset pass included, so this is the only
+			// reservation the attempt holds. A failure through it that
+			// disables sign-in is recorded as one on the ordinary path
+			// is (#45); filling the allowance is no lockout.
+			ok, res.afterReset, res.knownBrowser, res.refusal = true, false, true, ""
+			res.lockoutStarted, res.lockedUntil = false, time.Time{}
+			res.disabledNow, res.lockouts = d.DisabledNow, d.Lockouts
+		}
 	}
 	if !ok {
 		if res.refusal == "" {
@@ -201,7 +206,7 @@ func (g *Gate) releaseAfterReset(res loginReservation) {
 // IP (gauntlet.LoginLimiter) -- see reserveLogin.
 func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req credentialsRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -339,7 +344,7 @@ type loginFactorRequest struct {
 // getting their own.
 func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	var req loginFactorRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}

@@ -36,7 +36,7 @@ type registerRequest struct {
 // code, not the operator's typing of a username or password.
 func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -87,6 +87,6 @@ func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.issueSession(w, r, user.ID, now)
-	g.audit(user.Username, "user.register", user.Username, "role="+string(user.Role))
+	g.audit(r, user.Username, "user.register", user.Username, "role="+string(user.Role))
 	writeJSON(w, http.StatusCreated, map[string]any{"username": user.Username, "role": user.Role})
 }

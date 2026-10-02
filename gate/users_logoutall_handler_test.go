@@ -94,7 +94,7 @@ func TestAdminLogoutAllEndsEverySession(t *testing.T) {
 
 	entries := auditEntries(g.cfg.Audit.(*auditRecorder), "user.sessions_ended")
 	want := auditEntry{"admin", "user.sessions_ended", totpBobUsername,
-		`sessions ended: all (n=2), reason="laptop reported stolen", notify=none, remembered browsers forgotten`}
+		`sessions ended: all (n=2), reason="laptop reported stolen", notify=none, remembered browsers forgotten` + fixtureFromSuffix}
 	if len(entries) != 1 || entries[0] != want {
 		t.Errorf("audit = %+v, want exactly %+v", entries, want)
 	}

@@ -172,14 +172,14 @@ func (g *Gate) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req passkeyRegisterBeginRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	// The freshly authenticated copy is also the re-read the exclude
 	// list needs: this account's passkeys as of now, not as of Protect's
 	// session check.
-	current, ok := g.recheckPassword(w, user, req.Password, "incorrect password", g.now())
+	current, ok := g.recheckPassword(w, r, user, req.Password, "incorrect password", g.now())
 	if !ok {
 		return
 	}
@@ -273,7 +273,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req passkeyRegisterFinishRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -338,7 +338,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	if mintErr != nil {
 		detail += "; recovery codes could not be saved"
 	}
-	g.audit(current.Username, "account.passkey_added", current.Username, detail)
+	g.audit(r, current.Username, "account.passkey_added", current.Username, detail)
 
 	if mintErr != nil {
 		// Not answered like "already issued" (null codes, 200): nothing
@@ -374,7 +374,7 @@ func (g *Gate) handlePasskeyRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req passkeyRenameRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -416,7 +416,7 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req passkeyDeleteRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -427,7 +427,7 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := g.now()
-	if _, ok := g.recheckPassword(w, user, req.Password, "incorrect password", now); !ok {
+	if _, ok := g.recheckPassword(w, r, user, req.Password, "incorrect password", now); !ok {
 		return
 	}
 
@@ -447,7 +447,7 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		signedOut = true
 	}
 
-	g.audit(user.Username, "account.passkey_removed", user.Username, "name="+removed.Name)
+	g.audit(r, user.Username, "account.passkey_removed", user.Username, "name="+removed.Name)
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "signedOut": signedOut})
 }
 
@@ -572,7 +572,7 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 				stored = fmt.Sprint(pk.SignCount)
 			}
 		}
-		g.audit(user.Username, "account.passkey_clone_suspected", user.Username,
+		g.audit(r, user.Username, "account.passkey_clone_suspected", user.Username,
 			fmt.Sprintf("credential=%s presentedCount=%d storedCount=%s",
 				base64.RawURLEncoding.EncodeToString(verified.CredentialID), verified.SignCount, stored))
 		return refuse(passkeyNotVerified)
@@ -637,6 +637,6 @@ func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	g.audit(auditActor(r), "user.passkeys_cleared", target.Username, "passkeys removed by admin")
+	g.audit(r, auditActor(r), "user.passkeys_cleared", target.Username, "passkeys removed by admin")
 	writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": true})
 }

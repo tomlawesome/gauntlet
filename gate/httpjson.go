@@ -45,11 +45,18 @@ var errTrailingJSON = errors.New("gate: unexpected data after JSON value")
 // http.MaxBytesReader (see maxJSONBodyBytes), DisallowUnknownFields, and
 // a check that nothing follows the decoded value -- see this file's
 // header comment for why both are stricter than mikroview's own.
-func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
+//
+// A body over the limit also leaves a rated Warn line with the address
+// (#45, ASVS 16.3.3): it is a request no frontend sends.
+func (g *Gate) decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			g.warnRefused(r, "oversize", fmt.Sprintf("gate: request body over %d bytes refused", maxJSONBodyBytes))
+		}
 		return err
 	}
 	if dec.More() {

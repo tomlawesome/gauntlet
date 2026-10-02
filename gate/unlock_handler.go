@@ -36,7 +36,7 @@ type unlockCodeRequest struct {
 // with the disable; and the code dies with it (single use).
 func (g *Gate) handleUnlockCode(w http.ResponseWriter, r *http.Request) {
 	var req unlockCodeRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -64,7 +64,7 @@ func (g *Gate) handleUnlockCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.audit(user.Username, "account.unlock_code_used", user.Username,
+	g.audit(r, user.Username, "account.unlock_code_used", user.Username,
 		"sign-in disable lifted with the one-time unlock code from the server's log; password, second factors and sessions unchanged")
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "unlocked": true})
 }

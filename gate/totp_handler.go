@@ -56,7 +56,7 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req totpEnrolRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -64,7 +64,7 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	// Password-gated (recheckPassword): planting a factor the account's
 	// owner never sees locks them out at their next login.
 	now := g.now()
-	if _, ok := g.recheckPassword(w, user, req.Password, "incorrect password", now); !ok {
+	if _, ok := g.recheckPassword(w, r, user, req.Password, "incorrect password", now); !ok {
 		return
 	}
 
@@ -129,7 +129,7 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req totpConfirmRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -217,7 +217,7 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		detail += "; recovery codes issued"
 	}
 
-	g.audit(user.Username, "account.totp_enabled", user.Username, detail)
+	g.audit(r, user.Username, "account.totp_enabled", user.Username, detail)
 
 	writeJSON(w, http.StatusOK, totpConfirmResponse{Enabled: true, RecoveryCodes: codes, AlreadyIssued: alreadyIssued})
 }
@@ -242,14 +242,14 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req totpDeleteRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	now := g.now()
 	// Password-gated and throttled by recheckPassword.
-	if _, ok := g.recheckPassword(w, user, req.Password, "incorrect password", now); !ok {
+	if _, ok := g.recheckPassword(w, r, user, req.Password, "incorrect password", now); !ok {
 		return
 	}
 
@@ -270,7 +270,7 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		signedOut = true
 	}
 
-	g.audit(user.Username, "account.totp_disabled", user.Username, "removed by account owner")
+	g.audit(r, user.Username, "account.totp_disabled", user.Username, "removed by account owner")
 	writeJSON(w, http.StatusOK, map[string]any{"disabled": true, "signedOut": signedOut})
 }
 
@@ -304,6 +304,6 @@ func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.audit(auditActor(r), "user.totp_cleared", target.Username, "authenticator app removed by admin")
+	g.audit(r, auditActor(r), "user.totp_cleared", target.Username, "authenticator app removed by admin")
 	writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": true})
 }

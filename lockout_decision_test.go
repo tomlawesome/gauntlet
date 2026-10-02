@@ -95,3 +95,29 @@ func TestReserveAccountWrapsTheDecision(t *testing.T) {
 		t.Fatal("an attempt during the lockout was admitted")
 	}
 }
+
+// ReserveKnownBrowserDecision reports the disable a known browser's
+// failures bring on (#45), so gate audits it as it does the ordinary
+// path's; ReserveKnownBrowser is its Allowed.
+func TestReserveKnownBrowserDecisionReportsTheDisable(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+	at := failConsecutively(t, l, s, id, MaxConsecutiveLoginFailures-5, escalationStart)
+
+	for i := range 4 {
+		d := l.ReserveKnownBrowserDecision(s, id, at)
+		if !d.Allowed || d.DisabledNow || d.Disabled {
+			t.Fatalf("known-browser attempt %d = %+v, want only Allowed", i+1, d)
+		}
+	}
+	d := l.ReserveKnownBrowserDecision(s, id, at)
+	if !d.Allowed || !d.DisabledNow || d.Lockouts != MaxConsecutiveLoginFailures/5 {
+		t.Fatalf("the attempt that fills the allowance = %+v, want Allowed and DisabledNow", d)
+	}
+	if d := l.ReserveKnownBrowserDecision(s, id, at.Add(time.Hour)); d.Allowed || !d.Disabled || d.DisabledNow {
+		t.Errorf("an attempt once disabled = %+v, want Disabled", d)
+	}
+	if l.ReserveKnownBrowser(s, id, at.Add(time.Hour)) {
+		t.Error("ReserveKnownBrowser admitted an attempt on a disabled account")
+	}
+}
