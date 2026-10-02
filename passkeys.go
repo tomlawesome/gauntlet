@@ -18,10 +18,10 @@
 // concurrent submissions of the same assertion both clear against the
 // same not-yet-advanced stored count and both win a session, the
 // passkey shape of totp.go's VerifyAndRecordTOTP race. There is no
-// reason for a new caller to have the unsafe two-step option. Likewise
-// not carried over: AnyPasskeysExist, mikroview's own start-up check for
-// whether its RelyingParty configuration can still serve existing
-// credentials -- an application concern, not this package's.
+// reason for a new caller to have the unsafe two-step option.
+// AnyPasskeysExist is carried over (owner, #20 question 5): the
+// start-up decision it feeds stays the application's, but the question
+// it answers is about the store.
 package gauntlet
 
 import (
@@ -560,4 +560,25 @@ func (s *Store) PasskeyCount(userID string) int {
 		return 0
 	}
 	return len(u.Passkeys)
+}
+
+// AnyPasskeysExist reports whether any account on this store holds at
+// least one passkey, stale ones included. It is for an application's
+// start-up check: mikroview refuses to start when accounts hold passkeys
+// but its relying party is not ready (gauntlet.PasskeyCeremony's Status
+// is unset, ip or insecure), rather than booting with credentials that
+// can never complete a login. That decision is the application's;
+// gauntlet/passkey always builds and only reports its status (ADR-0004
+// decision 4). An install with no passkeys starts the same whatever the
+// status. Reads the current document first, like every read here.
+func (s *Store) AnyPasskeysExist() bool {
+	s.reloadIfStale()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range s.byID {
+		if len(u.Passkeys) > 0 {
+			return true
+		}
+	}
+	return false
 }

@@ -16,9 +16,6 @@
 //     the concurrent-write race this package cares about at the store
 //     level; RenamePasskey and RecordPasskeyAssertionIfFresh use the
 //     same "replace the whole slice" pattern this proved safe for.
-//
-// Also dropped: TestAnyPasskeysExist (AnyPasskeysExist is not carried
-// over -- see passkeys.go's package comment).
 package gauntlet
 
 import (
@@ -28,6 +25,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 func TestAddPasskeyNormalisesAnEmptyNameToANumberedDefault(t *testing.T) {
@@ -745,5 +744,71 @@ func TestPasskeyWritesLeaveStateWhenPersistFails(t *testing.T) {
 	}
 	if got, _ := s.Get(u.ID); len(got.Passkeys) != 1 || len(got.RecoveryCodes) != 10 {
 		t.Errorf("ClearAllSecondFactors' in-memory state changed even though the write failed: %d passkeys, %d codes", len(got.Passkeys), len(got.RecoveryCodes))
+	}
+}
+
+// TestAnyPasskeysExist is ported from mikroview's test of the same name:
+// false on a fresh store and on an account whose only factor is TOTP,
+// true once any account holds a passkey, false again once the last one
+// is removed.
+func TestAnyPasskeysExist(t *testing.T) {
+	s := openTestStore(t)
+	if s.AnyPasskeysExist() {
+		t.Error("a fresh store reports a passkey that doesn't exist")
+	}
+
+	admin, err := s.Register("admin", "password123", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTOTPForTest(t, s, admin.ID, "JBSWY3DPEHPK3PXP", time.Now(), 1)
+	if s.AnyPasskeysExist() {
+		t.Error("an account with a TOTP factor but no passkey reports one existing")
+	}
+
+	other, err := s.CreateUser("bilbo", "password123", RoleUser, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(other.ID, testPasskey(1, "")); err != nil {
+		t.Fatal(err)
+	}
+	if !s.AnyPasskeysExist() {
+		t.Error("an account holding a passkey must make AnyPasskeysExist true")
+	}
+
+	if _, err := s.DeletePasskey(other.ID, []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if s.AnyPasskeysExist() {
+		t.Error("AnyPasskeysExist should go false again once the only passkey is removed")
+	}
+}
+
+// TestAnyPasskeysExistReadsAnotherProcessesWrite: a passkey added by a
+// second store on the same backend -- another process -- is seen
+// without a restart, as every read on the store sees such writes.
+func TestAnyPasskeysExistReadsAnotherProcessesWrite(t *testing.T) {
+	m := persist.NewMemory()
+	server, err := OpenStore(m, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := server.Register("admin", "password123", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.AnyPasskeysExist() {
+		t.Fatal("a fresh account reports a passkey")
+	}
+	other, err := OpenStore(m, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.AddPasskey(u.ID, testPasskey(1, "added elsewhere")); err != nil {
+		t.Fatal(err)
+	}
+	if !server.AnyPasskeysExist() {
+		t.Error("the running store did not see a passkey another process added")
 	}
 }

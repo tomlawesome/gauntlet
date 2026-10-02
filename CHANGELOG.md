@@ -52,6 +52,11 @@ All notable changes to this project are documented in this file.
   `PasskeyStatus`, and `ErrPasskeyCeremonyInvalid`, which marks a dead
   ceremony: expired, tampered with, from the other ceremony or already
   used).
+- `Store.AnyPasskeysExist()` reports whether any account holds a
+  passkey (#20, owner's answer to question 5), so an application can
+  refuse to start when passkeys exist but its relying party is not
+  ready. gauntlet itself never refuses; the decision is the
+  application's.
 - `POST /api/auth/login` lists `passkey` (first) in `secondFactor`, with
   `passkeyOrigin`, when the account holds a usable passkey;
   `GET /api/auth/session` gains `passkeys: {count, status, origin}` when

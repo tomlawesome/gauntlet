@@ -87,7 +87,10 @@ mikroview's fake authenticator copies and this module reuses.
    fail into an explained state" (#1250), kept because its deployments
    reached by IP must keep starting on the day of #1202. Refusing to
    start when accounts already hold passkeys and the relying party is
-   not ready stays an application rule.
+   not ready stays an application rule: the application, not
+   gauntlet, decides it, from `Status()` and the store's
+   `AnyPasskeysExist()` (added for this on the owner's answer to #20
+   question 5), as mikroview's `passkeyStartupRefusal` does.
 
 5. **Policy, written in code rather than left to defaults:** user
    presence required; user verification requested but not required

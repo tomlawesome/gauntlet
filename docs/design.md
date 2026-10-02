@@ -206,7 +206,7 @@ func (s *Store) List() []User                                              // se
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
 // Passkeys: AddPasskey, RenamePasskey, DeletePasskey, RecordPasskeyAssertionIfFresh, ClearPasskeys,
-// ClearAllSecondFactors, PasskeyCount -- storage methods only; no WebAuthn import.
+// ClearAllSecondFactors, PasskeyCount, AnyPasskeysExist -- storage methods only; no WebAuthn import.
 // The ceremony seam (G8, ADR-0004), implemented by gauntlet/passkey and driven by gate:
 type PasskeyStatus string // PasskeyStatusReady "ready", PasskeyStatusUnset "unset", PasskeyStatusIP "ip", PasskeyStatusInsecure "insecure"
 type PasskeyCeremony interface {
@@ -648,8 +648,9 @@ Not done in this work; recorded so the API above is checked against it.
   Sessions, LoginLimiter, SecureCookie, Tokens, OIDC, OIDCState,
   OIDCPolicy, RelyingParty` (`server.go:354-458`) map one-to-one onto
   `gate.Deps`/`gate.Config`. Its startup refusal when accounts hold
-  passkeys but the relying party is not ready stays its own (#20,
-  question 5).
+  passkeys but the relying party is not ready stays its own decision,
+  made from `Status()` and `Store.AnyPasskeysExist()` in place of its
+  own copy of that method (#20, question 5).
 - `DeriveKey`/`KDFParams` stay exported so mikroview's retention
   encryption keeps importing them from the same place its passwords
   come from.
