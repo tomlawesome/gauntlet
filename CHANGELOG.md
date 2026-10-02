@@ -50,11 +50,12 @@ All notable changes to this project are documented in this file.
   way. The accounts document is unchanged.
 - The known-browser allowance (#44): a browser that completes a sign-in
   now gets a `gate_known_browser` cookie (`HttpOnly`, `SameSite=Lax`,
-  `Secure` per `SecureCookie`, path `/api/auth/login`, 45 days), set at
-  every session issue and replaced at each one, and while the account
-  is locked out, or the client's address is at its limit, that browser
-  keeps an allowance of its own -- the limiter's attempts per window --
-  so a stranger who knows a username can no longer lock its owner out.
+  `Secure` per `SecureCookie`, path `/api/auth`, 45 days), set at every
+  session issue and replaced at each one (the path covers every route
+  that issues a session, so one browser holds one entry however it
+  signed in), and while the account is locked out, or the client's
+  address is at its limit, that browser keeps an allowance of its own
+  -- the limiter's attempts per window -- so a stranger who knows a username can no longer lock its owner out.
   It is refused once the account is disabled, and every failure through
   it counts toward the 50. The cookie's value is 32 random bytes; the
   account keeps only its SHA-256 (new `User.KnownBrowsers`,

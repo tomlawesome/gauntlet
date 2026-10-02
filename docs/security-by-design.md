@@ -401,7 +401,7 @@ store, keep and protect:
 | 15.4.1–15.4.3 safe concurrency | 3 | Met | Store and session mutexes, copy-then-save (`mutate.go`), `-race` in CI, check-and-spend under one lock for TOTP, recovery codes and ceremonies |
 | 3.3.1 cookie `Secure` | 1 | Met, conditional | `gate.Config.SecureCookie`; the application must set it where TLS terminates, and `gate.New` logs one warning naming the setting when it is left false (#47) |
 | 3.3.2 `SameSite` fits the purpose | 2 | Met | `Lax` on every cookie (`gate/cookie.go` `writeCookie`) |
-| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies and the known-browser cookie (`gate_known_browser`, path `/api/auth/login`, #44) are scoped to their routes, which the prefix forbids |
+| 3.3.3 `__Host-` prefix | 2 | Met, conditional | The session cookie is `__Host-` + `CookieName` while `SecureCookie` is true (`gate/cookie.go` `sessionCookieName`, #47); under plain HTTP a browser would drop a `__Host-` cookie, so the bare name is used there. The ceremony cookies and the known-browser cookie (`gate_known_browser`, path `/api/auth`, #44) are scoped to their routes, which the prefix forbids |
 | 3.3.4 `HttpOnly` | 2 | Met | Every cookie |
 | 3.3.5 cookie under 4096 bytes | 3 | Met | Session id 32 characters; known-browser token 43; sealed values a few hundred bytes |
 | 3.5.1 CSRF | 1 | Met | `X-Requested-With` on unsafe methods plus `SameSite=Lax` (`gate/protect.go:118-123`, `:313`); bearer requests skip it because no cookie is involved |

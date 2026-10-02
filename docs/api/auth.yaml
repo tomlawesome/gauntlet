@@ -47,9 +47,11 @@ info:
 
     **Known-browser cookie.** Every route that sets the session cookie
     also sets `gate_known_browser` (#44): `HttpOnly`, `SameSite=Lax`,
-    `Secure` while `Config.SecureCookie` is true, path `/api/auth/login`
-    (so it is sent only to `login`, `login/factor` and
-    `login/factor/begin`), no `__Host-` prefix (that needs path `/`),
+    `Secure` while `Config.SecureCookie` is true, path `/api/auth` (every
+    route that sets the session cookie is under it, so each one replaces
+    the browser's value instead of adding another; only `login`,
+    `login/factor` and `login/factor/begin` use it for the allowance),
+    no `__Host-` prefix (that needs path `/`),
     `Max-Age` 45 days. Its value is 32 random bytes, base64url, and names
     nothing; the account's record holds only its SHA-256, and a fresh
     value replaces it at every sign-in. While the account is locked out,

@@ -17,19 +17,26 @@ const (
 	// knownBrowserCookieName is generic ("gate_"), as
 	// pendingLoginCookieName is. No __Host- prefix, unlike the session
 	// cookie: that prefix requires Path=/, and this cookie is scoped
-	// to the login routes. It names nothing -- the value is 32 random
+	// to gate's own routes. It names nothing -- the value is 32 random
 	// bytes, and only its SHA-256 is on the account's record.
 	knownBrowserCookieName = "gate_known_browser"
 
-	// knownBrowserCookiePath is the prefix that covers login,
-	// login/factor and login/factor/begin, the three routes the
-	// allowance applies to, and no others: the browser sends the
-	// cookie nowhere it is not read.
-	knownBrowserCookiePath = loginPath
+	// knownBrowserCookiePath is the prefix of every route gate serves
+	// that issues a session -- login and login/factor, register, the
+	// password change, sign out everywhere, TOTP confirm, passkey
+	// register/finish and the SSO callback -- as well as the three
+	// login routes the allowance applies to. Every session issue must
+	// see the browser's old token to replace it (rememberBrowser);
+	// scoped to the login routes alone, an issue anywhere else added a
+	// second entry for the same browser, and with only
+	// gauntlet.MaxKnownBrowsers to an account, one browser could evict
+	// the owner's others. Still not "/": the application's own routes
+	// never receive it.
+	knownBrowserCookiePath = "/api/auth"
 )
 
 // knownBrowserToken returns the known-browser token r carries, or "".
-// Only requests to the login routes carry it (knownBrowserCookiePath).
+// Only requests under /api/auth carry it (knownBrowserCookiePath).
 func knownBrowserToken(r *http.Request) string {
 	cookie, err := r.Cookie(knownBrowserCookieName)
 	if err != nil {
@@ -55,10 +62,11 @@ func (g *Gate) isKnownBrowser(r *http.Request, accountID string, now time.Time) 
 // the store enforces from the entry's IssuedAt, so the browser forgets
 // the token when the server would refuse it anyway.
 //
-// The old token reaches here only from a login route, the cookie's
-// path; elsewhere -- a password change, an SSO callback -- the browser
-// does not send it, its old entry stays on the record, unreachable, and
-// ages out or is evicted as the oldest.
+// Every route that issues a session is under the cookie's path, so the
+// old token reaches here from each of them -- a password change or an
+// SSO callback as much as a login -- and a browser keeps one entry
+// however it came by its session. (The SSO callback is a cross-site
+// top-level navigation, on which a SameSite=Lax cookie is sent.)
 //
 // A write that fails is logged and the sign-in goes on: the session is
 // what the caller asked for, and the browser keeps whatever token it

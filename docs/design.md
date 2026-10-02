@@ -547,9 +547,12 @@ browser would drop a `__Host-` cookie), `gate.New` warning once when
 browser already held, since the new cookie replaces it (#47); the
 known-browser cookie `gate_known_browser` set at every session issue
 (`issueSession`, #44), `HttpOnly`, `SameSite=Lax`, `Secure` per
-`SecureCookie`, path `/api/auth/login` and no `__Host-` prefix (which
-needs path `/`), `Max-Age` 45 days to match the server's own check
-(§1.3), read only once the limiter has refused an attempt; the OIDC flow cookie
+`SecureCookie`, path `/api/auth` -- every route that issues a session
+is under it, so each issue sees the browser's old token and replaces
+it rather than adding a second entry against the cap of three -- and
+no `__Host-` prefix (which needs path `/`), `Max-Age` 45 days to match
+the server's own check (§1.3), read for the allowance only once the
+limiter has refused an attempt; the OIDC flow cookie
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by

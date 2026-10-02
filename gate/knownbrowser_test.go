@@ -65,9 +65,9 @@ func TestSignInSetsAndRotatesTheKnownBrowserCookie(t *testing.T) {
 	if c == nil {
 		t.Fatal("a sign-in set no known-browser cookie")
 	}
-	if c.Path != "/api/auth/login" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode ||
+	if c.Path != "/api/auth" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode ||
 		c.MaxAge != int((45*24*time.Hour).Seconds()) || c.Secure {
-		t.Errorf("cookie = %+v, want path /api/auth/login, HttpOnly, SameSite=Lax, Max-Age 45 days, not Secure in a plain-HTTP fixture", c)
+		t.Errorf("cookie = %+v, want path /api/auth, HttpOnly, SameSite=Lax, Max-Age 45 days, not Secure in a plain-HTTP fixture", c)
 	}
 	if raw, err := base64.RawURLEncoding.DecodeString(c.Value); err != nil || len(raw) != 32 {
 		t.Errorf("value %q is not 32 bytes of base64url", c.Value)
@@ -288,5 +288,50 @@ func TestAForgedOrForeignKnownBrowserCookieGetsNothing(t *testing.T) {
 		if status := signInFrom(t, client, ts, totpBobUsername, totpBobPassword); status != http.StatusTooManyRequests {
 			t.Errorf("%s during bob's lockout = %d, want 429", name, status)
 		}
+	}
+}
+
+// A session issued outside the login routes -- here a password change
+// -- replaces the browser's token rather than adding one, because the
+// cookie's path covers every /api/auth route that issues a session: so
+// one browser cannot eat the account's cap of three and evict the
+// owner's others. B signs in first, then A again, then C; A's password
+// change must leave B remembered, and three entries in all.
+func TestASessionIssuedOutsideLoginRotatesTheKnownBrowser(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	id := totpBobID(t, g)
+	browserA := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	_, recovery, _ := totpEnrolAndConfirm(t, browserA, ts)
+
+	signInWithRecovery := func(client *http.Client, code string) {
+		t.Helper()
+		if status := signInFrom(t, client, ts, totpBobUsername, totpBobPassword); status != http.StatusOK {
+			t.Fatalf("password step = %d", status)
+		}
+		if status, body := readAll(t, submitLoginFactor(t, client, ts, code)); status != http.StatusOK {
+			t.Fatalf("recovery-code step = %d %s", status, body)
+		}
+	}
+	browserB := &http.Client{Jar: mustCookieJar(t)}
+	signInWithRecovery(browserB, recovery[0])
+	signInWithRecovery(browserA, recovery[1])
+	browserC := &http.Client{Jar: mustCookieJar(t)}
+	signInWithRecovery(browserC, recovery[2])
+	tokenA := knownToken(t, browserA, ts)
+
+	resp := postJSON(t, browserA, ts.URL+"/api/auth/password",
+		changePasswordRequest{CurrentPassword: totpBobPassword, NewPassword: totpBobPassword + "-2"})
+	if status, body := readAll(t, resp); status != http.StatusOK {
+		t.Fatalf("password change = %d %s", status, body)
+	}
+	now := g.now()
+	if !g.deps.Users.KnowsBrowser(id, knownToken(t, browserB, ts), now) {
+		t.Error("browser A's password change evicted browser B")
+	}
+	if g.deps.Users.KnowsBrowser(id, tokenA, now) || !g.deps.Users.KnowsBrowser(id, knownToken(t, browserA, ts), now) {
+		t.Error("the password change did not replace browser A's token")
+	}
+	if u, _ := g.deps.Users.Get(id); len(u.KnownBrowsers) != 3 {
+		t.Errorf("the account remembers %d browsers for three, want 3", len(u.KnownBrowsers))
 	}
 }
