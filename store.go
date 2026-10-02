@@ -1090,11 +1090,18 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	defer s.mu.Unlock()
 
 	if id, ok := s.oidcIndex[key]; ok {
-		if _, ok := s.byID[id]; ok {
+		if u, ok := s.byID[id]; ok {
 			// LastLogin only -- a missed update here costs nothing
 			// worth failing an otherwise-successful SSO login over, so
-			// this is a best-effort write (same reasoning as
-			// Authenticate's ordinary-login path below).
+			// this is a best-effort write, and like Authenticate's
+			// ordinary-login path it saves only once the saved value is
+			// more than lastLoginGranularity old: otherwise every
+			// returning SSO sign-in would rewrite every account.
+			if now.Sub(s.lastLoginSaved[id]) < lastLoginGranularity {
+				u.LastLogin = now
+				cp := *u
+				return &cp, false, nil
+			}
 			s.mutateBestEffortLocked(func(st *storeState) error {
 				u, ok := st.byID[id]
 				if !ok {

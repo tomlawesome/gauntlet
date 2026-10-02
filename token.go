@@ -132,12 +132,12 @@ var (
 	// list, an audit trail and log lines) as well as a scope key, and
 	// an unbounded or control-bearing one is a typo that becomes a
 	// permanently, invisibly dead token at best.
-	ErrTokenDeviceInvalid = errors.New("gauntlet: device id must be at most 64 characters of printable text")
+	ErrTokenDeviceInvalid = errors.New("gauntlet: device id must be printable text of at most 64 bytes (fewer characters for non-Latin letters)")
 	// ErrTokenNameInvalid is returned by Create for a name that is too
 	// long or carries control/formatting characters. The name is a
 	// display value in the same places the device id is, and bounded
 	// for the same reasons (see ErrTokenDeviceInvalid).
-	ErrTokenNameInvalid = errors.New("gauntlet: token name must be at most 64 characters of printable text")
+	ErrTokenNameInvalid = errors.New("gauntlet: token name must be printable text of at most 64 bytes (fewer characters for non-Latin letters)")
 )
 
 // defaultTokenKinds is TokenOptions.Kinds' value when left empty --

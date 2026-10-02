@@ -195,10 +195,13 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 		if len(u.Passkeys) >= maxPasskeysPerAccount {
 			return ErrPasskeyLimitReached
 		}
-		p := pk
+		// Copied in and out, as the other passkey methods do: the
+		// stored credential must not share its ID, PublicKey or
+		// Transports with the caller's value or with what is returned.
+		p := pk.clone()
 		p.Name = normalisePasskeyName(pk.Name, len(u.Passkeys)+1)
 		u.Passkeys = append(u.Passkeys, p)
-		added = p
+		added = p.clone()
 		return nil
 	})
 	if err != nil {

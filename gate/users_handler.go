@@ -27,15 +27,11 @@ type userSummary struct {
 	HasLocalPassword bool      `json:"hasLocalPassword"`
 	SSO              bool      `json:"sso"`
 	// HasTOTP mirrors mikroview's admin-list pill: true once this
-	// account holds a confirmed authenticator-app factor. Filled in by
-	// re-reading each account through Store.Get (see
-	// handleListUsers below) rather than trusting u.HasActiveTOTP() on
-	// a List entry -- List blanks TOTPSecret on every copy it returns,
-	// so that would read false for every account regardless of the
-	// truth (totp.go's own doc comment names this exact trap; there is
-	// no Store.HasActiveTOTP(id) convenience wrapper, since Get already
-	// gives a caller an unblanked copy to call the User method on
-	// directly).
+	// account holds a confirmed authenticator-app factor. Read from the
+	// List entry itself: List blanks TOTPSecret on every copy it
+	// returns, but HasActiveTOTP still answers truly on a blanked copy
+	// (see gauntlet.User's totpSecretBlanked), so no second read per
+	// account is needed.
 	HasTOTP bool `json:"hasTOTP"`
 }
 
@@ -89,15 +85,6 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	users := g.deps.Users.List()
 	out := make([]userSummary, 0, len(users))
 	for _, u := range users {
-		// Asked of the store directly rather than of u, deliberately --
-		// see userSummary.HasTOTP's own doc comment for the trap this
-		// avoids. Get returns an unblanked copy, so HasActiveTOTP on it
-		// reads the real value; a failed lookup (the account was
-		// deleted between List and this call) just leaves it false.
-		hasTOTP := false
-		if current, ok := g.deps.Users.Get(u.ID); ok {
-			hasTOTP = current.HasActiveTOTP()
-		}
 		out = append(out, userSummary{
 			ID:               u.ID,
 			Username:         u.Username,
@@ -106,7 +93,7 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			LastLogin:        u.LastLogin,
 			HasLocalPassword: u.LocalPassword(),
 			SSO:              u.OIDCIssuer != "",
-			HasTOTP:          hasTOTP,
+			HasTOTP:          u.HasActiveTOTP(),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

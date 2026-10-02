@@ -87,6 +87,51 @@ func TestFindOrCreateOIDCUserReusesExistingIdentity(t *testing.T) {
 	}
 }
 
+// TestFindOrCreateOIDCUserSavesLastLoginAtMostHourly: a returning SSO
+// sign-in follows Authenticate's rule (TestAuthenticateSavesLastLoginAtMostHourly)
+// -- LastLogin is saved only once the saved value is more than
+// lastLoginGranularity old, and otherwise kept in memory where Get sees
+// it, so SSO sign-ins do not each rewrite every account.
+func TestFindOrCreateOIDCUserSavesLastLoginAtMostHourly(t *testing.T) {
+	b := &countingBackend{Memory: persist.NewMemory()}
+	s, _ := openLockoutStore(t, b)
+	start := time.Now().UTC().Truncate(time.Millisecond)
+
+	signIn := func(at time.Time) *User {
+		t.Helper()
+		u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", at)
+		if err != nil {
+			t.Fatalf("FindOrCreateOIDCUser at %v: %v", at, err)
+		}
+		return u
+	}
+
+	first := signIn(start) // provisions the account: one save
+	before := b.saves.Load()
+	if u := signIn(start.Add(time.Minute)); !u.LastLogin.Equal(start.Add(time.Minute)) {
+		t.Errorf("returned LastLogin = %v, want %v", u.LastLogin, start.Add(time.Minute))
+	}
+	if got := b.saves.Load() - before; got != 0 {
+		t.Errorf("a returning sign-in a minute after the saved one caused %d saves, want 0", got)
+	}
+	if u, _ := s.Get(first.ID); !u.LastLogin.Equal(start.Add(time.Minute)) {
+		t.Errorf("LastLogin = %v in memory, want the second sign-in's %v", u.LastLogin, start.Add(time.Minute))
+	}
+
+	later := start.Add(lastLoginGranularity + time.Minute)
+	signIn(later)
+	if got := b.saves.Load() - before; got != 1 {
+		t.Errorf("a sign-in %v after the saved one caused %d saves, want 1", lastLoginGranularity+time.Minute, got)
+	}
+	reopened, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := reopened.Get(first.ID); !u.LastLogin.Equal(later) {
+		t.Errorf("saved LastLogin = %v, want %v", u.LastLogin, later)
+	}
+}
+
 func TestFindOrCreateOIDCUserNeverAutoLinksByUsernameHint(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
