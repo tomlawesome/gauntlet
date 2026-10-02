@@ -1755,3 +1755,67 @@ func passkeyRegisterBeginAs(t *testing.T, client *http.Client, ts *httptest.Serv
 	}
 	return &out
 }
+
+// TestPasskeyNotOfferedToAnAccountWithNoLocalPassword (ruling R4 on
+// #20): an SSO-only account is refused at register/begin with 409,
+// before any body is read, as TOTP enrolment refuses it. A passkey such
+// an account already holds -- here hand-written into the accounts
+// document, as mikroview's data or a converted account could carry one
+// -- is still removed by the admin clear route.
+func TestPasskeyNotOfferedToAnAccountWithNoLocalPassword(t *testing.T) {
+	g := passkeyGate(t)
+	hash, err := gauntlet.HashPassword("password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	g.deps.Users = openStoreWithUsers(t, gauntlet.User{
+		ID: "admin-1", Username: "admin", PasswordHash: hash, Role: gauntlet.RoleAdmin,
+		CreatedAt: now, HasLocalPassword: true,
+	}, gauntlet.User{
+		ID: "sso-1", Username: "sam", Role: gauntlet.RoleUser, CreatedAt: now,
+		OIDCIssuer: "https://idp.example.org", OIDCSubject: "sam-subject",
+		Passkeys: []gauntlet.Passkey{{ID: []byte("carried-over"), RPID: g.deps.Passkeys.RPID(), Name: "old key", CreatedAt: now}},
+	})
+	ts := newTestServer(t, g)
+	asSession := func(userID string) *http.Client {
+		jar := mustCookieJar(t)
+		u, err := url.Parse(ts.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		jar.SetCookies(u, []*http.Cookie{{Name: testCookieName, Value: g.deps.Sessions.Create(userID, now).ID, Path: "/"}})
+		return &http.Client{Jar: jar}
+	}
+	sam, admin := asSession("sso-1"), asSession("admin-1")
+
+	for name, body := range map[string]any{"with a password": passkeyRegisterBeginRequest{Password: "anything"}, "with no body": nil} {
+		var resp *http.Response
+		if body == nil {
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/passkeys/register/begin", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(csrfHeaderName, testCSRFValue)
+			if resp, err = sam.Do(req); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			resp = postJSON(t, sam, ts.URL+"/api/auth/passkeys/register/begin", body)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "identity provider") {
+			t.Errorf("register/begin for an SSO-only account %s got %d %q, want 409 naming the identity provider", name, resp.StatusCode, raw)
+		}
+	}
+
+	if list := passkeysList(t, sam, ts); len(list) != 1 {
+		t.Fatalf("the SSO account lists %d passkeys, want its carried-over one", len(list))
+	}
+	clear := deleteJSON(t, admin, ts.URL+"/api/auth/users/sso-1/passkeys", nil)
+	_ = clear.Body.Close()
+	if clear.StatusCode != http.StatusOK || g.deps.Users.PasskeyCount("sso-1") != 0 {
+		t.Errorf("admin clear on the SSO account got %d and left %d passkeys, want 200 and none", clear.StatusCode, g.deps.Users.PasskeyCount("sso-1"))
+	}
+}
