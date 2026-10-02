@@ -166,7 +166,10 @@ func TestIssueResetCodeKillsTheOldPasswordAndLetsTheCodeIn(t *testing.T) {
 		t.Error("expected the reset to flag the account for a forced password change")
 	}
 	if !user.PasswordChangedAt.Equal(now) {
-		t.Errorf("PasswordChangedAt = %v, want %v -- it is what ends sessions issued before the reset", user.PasswordChangedAt, now)
+		t.Errorf("PasswordChangedAt = %v, want %v -- the reset replaced the password", user.PasswordChangedAt, now)
+	}
+	if !user.SessionsEndedAt.Equal(now) {
+		t.Errorf("SessionsEndedAt = %v, want %v -- it is what ends sessions issued before the reset", user.SessionsEndedAt, now)
 	}
 	if user.ResetCodeHash != "" {
 		t.Error("expected the returned copy to carry no credential verifier")

@@ -239,6 +239,16 @@ All notable changes to this project are documented in this file.
   after listing them (#28).
 - The release job's `release-cli` image is pinned by tag and digest
   instead of `:latest` (#28).
+- Linking the admin to SSO no longer ends a login lockout whose save
+  had failed (#28). The link used to record itself in
+  `PasswordChangedAt`, which the login limiter reads as a password
+  change. A new stored field, `User.SessionsEndedAt`, now records when
+  an account's sessions were ended -- by a new password, a reset code or
+  an SSO link -- and `PasswordChangedAt` moves only when the password
+  does. `User.SessionCutoff()` returns the later of the two, and the
+  gate refuses a session issued before it. Documents written before this
+  field existed, by gauntlet or mikroview, record a link in
+  `passwordChangedAt` only, and those sessions stay ended.
 
 ## [0.1.0] - 2026-09-30
 

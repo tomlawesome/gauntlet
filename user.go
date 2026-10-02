@@ -12,11 +12,13 @@
 // copy-then-save writes (Store.mutate) and the unexported
 // totpSecretBlanked and passkeysBlanked marks that let a blanked copy
 // still answer HasActiveTOTP and HasSecondFactor. The stored fields are
-// mikroview's, byte for byte. User carries every field mikroview's own
-// User carries -- including TOTP, recovery codes, reset codes and passkeys --
-// because Store persists the whole document on every save (docs/design.md
-// Summary): a field this package didn't know about would be silently
-// dropped on the first write. The methods that generate, verify or
+// mikroview's, byte for byte, plus two of gauntlet's own that
+// mikroview's documents lack and read as zero: loginLockedUntil (#19)
+// and sessionsEndedAt (#28). User carries every field mikroview's own
+// User carries -- including TOTP, recovery codes, reset codes and
+// passkeys -- because Store persists the whole document on every save
+// (docs/design.md Summary): a field this package didn't know about would
+// be silently dropped on the first write. The methods that generate, verify or
 // clear those fields live beside them: totp.go, recoverycodes.go,
 // resetcode.go and passkeys.go; the predicates docs/design.md §1.3
 // lists (LocalPassword, HasActiveTOTP, HasSecondFactor) are below.
@@ -78,13 +80,21 @@ type User struct {
 	Role         Role      `json:"role"`
 	CreatedAt    time.Time `json:"createdAt"`
 	LastLogin    time.Time `json:"lastLogin,omitzero"`
-	// PasswordChangedAt lets a session be invalidated by a password
-	// reset that happens in a *different process* -- a CLI recovery tool
-	// has no access to a running server's in-memory SessionStore.
-	// Comparing a session's IssuedAt against this field works across
-	// that boundary since both are read from/written to the same
-	// persisted store.
+	// PasswordChangedAt is when the password itself last changed
+	// (SetPassword, IssueResetCode). The login limiter reads it as the
+	// moment guesses at the old password stop counting (lockoutRecorder),
+	// and it is one of SessionCutoff's two inputs: documents written
+	// before SessionsEndedAt existed record an SSO link here too.
 	PasswordChangedAt time.Time `json:"passwordChangedAt,omitzero"`
+	// SessionsEndedAt is when every session issued before it was ended,
+	// whatever ended them: a new password, a reset code, an SSO link
+	// (#28). It lets a session be invalidated by a change that happens
+	// in a *different process* -- a CLI recovery tool has no access to a
+	// running server's in-memory SessionStore -- since a session's
+	// IssuedAt is compared against it through the persisted store (see
+	// SessionCutoff). Gauntlet's own field: mikroview's documents lack
+	// it, and read it as zero.
+	SessionsEndedAt time.Time `json:"sessionsEndedAt,omitzero"`
 	// OIDCIssuer/OIDCSubject identify this account's linked SSO identity,
 	// if any -- both empty for a purely local-password account. Together
 	// they're the immutable identity key FindOrCreateOIDCUser matches
@@ -130,8 +140,8 @@ type User struct {
 	// begins or clears, never per failed attempt (see ReserveAccount), so
 	// a lockout survives a restart without every wrong guess becoming a
 	// disk write. A new password (SetPassword, IssueResetCode) clears it
-	// in the same write; LinkOIDCIdentity, which bumps PasswordChangedAt
-	// but leaves the admin's password working, does not.
+	// in the same write; LinkOIDCIdentity, which ends sessions but leaves
+	// the admin's password working, does not.
 	LoginLockedUntil time.Time `json:"loginLockedUntil,omitzero"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
@@ -218,6 +228,21 @@ func (u *User) clone() *User {
 		}
 	}
 	return &cp
+}
+
+// SessionCutoff is the moment before which every session for this
+// account is dead: the later of SessionsEndedAt and PasswordChangedAt,
+// zero when neither is set. A session issued before it must be refused.
+//
+// PasswordChangedAt is still an input because documents written before
+// SessionsEndedAt existed -- by gauntlet v0.2.0 and by mikroview, whose
+// SSO link records itself there -- carry the only record of when their
+// sessions ended in it.
+func (u *User) SessionCutoff() time.Time {
+	if u.SessionsEndedAt.After(u.PasswordChangedAt) {
+		return u.SessionsEndedAt
+	}
+	return u.PasswordChangedAt
 }
 
 // LocalPassword reports whether this account has a real, user-chosen

@@ -190,7 +190,7 @@ type resetPasswordResponse struct {
 //     see gauntlet.ErrNoLocalPassword.
 //
 // The account's live sessions go with the reset, twice over: the store
-// bumps PasswordChangedAt (which ends them across processes and
+// bumps SessionsEndedAt (which ends them across processes and
 // restarts) and this drops the ones in memory immediately, the same
 // pattern handleDeleteUser and handleChangePassword use.
 func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {

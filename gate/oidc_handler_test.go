@@ -460,7 +460,7 @@ func oidcCompleteLinkFlow(t *testing.T, g *Gate, ts *httptest.Server, client *ht
 	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/?ssoLinked=1" {
 		t.Fatalf("link callback returned %d %q, want 302 to /?ssoLinked=1", resp.StatusCode, resp.Header.Get("Location"))
 	}
-	// LinkOIDCIdentity bumps PasswordChangedAt, which invalidates the
+	// LinkOIDCIdentity bumps SessionsEndedAt, which invalidates the
 	// session client was signed in with -- the callback issues a fresh
 	// one instead, but this response went through noRedirectClient
 	// (never client itself), so client's own jar has to be told about it

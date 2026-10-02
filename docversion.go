@@ -14,6 +14,7 @@ import (
 // changes, its constant goes up and the migration from the version
 // below is added then.
 const (
+	// TODO(#28): User.SessionsEndedAt was added on version 1; whether it raises this to 2 waits on the owner's question 9.
 	accountsDocumentVersion = 1
 	tokensDocumentVersion   = 1
 )

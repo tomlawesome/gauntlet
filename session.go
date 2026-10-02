@@ -27,8 +27,8 @@ type Session struct {
 	// IssuedAt is set once at Create and never changed by Validate's
 	// sliding-expiration renewal -- it answers "when did this specific
 	// login happen," used to invalidate a session issued before a
-	// password reset (see User.PasswordChangedAt), which ExpiresAt alone
-	// can't express.
+	// password reset or an SSO link (see User.SessionCutoff), which
+	// ExpiresAt alone can't express.
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 }

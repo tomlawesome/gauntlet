@@ -18,11 +18,12 @@ import (
 // or dropped JSON tag changes what loading it and saving it back
 // writes, so TestMikroviewUsersJSONFixtureRoundTripsByteIdentical fails
 // -- which a fixture marshalled from the structs themselves, as this
-// one was before #29, could never do. Change it only alongside a new
-// document version.
+// one was before #29, could never do. Change it only alongside a change
+// to the stored format (see docversion.go).
 //
-// Mikroview users.json-shaped, never real user data: an admin with
-// every field populated, including every second-factor kind (TOTP, two
+// Mikroview users.json-shaped, plus gauntlet's own sessionsEndedAt and
+// loginLockedUntil, never real user data: an admin with every field
+// populated, including every second-factor kind (TOTP, two
 // recovery codes, a passkey, an outstanding reset code, a lockout --
 // data shape only; a real account would not carry all of these live at
 // once), a plain local user, an SSO-linked account with no local
@@ -41,6 +42,7 @@ const accountsFixture = `{
       "createdAt": "2026-01-02T03:04:05Z",
       "lastLogin": "2026-01-02T04:04:05Z",
       "passwordChangedAt": "2026-01-02T03:04:05Z",
+      "sessionsEndedAt": "2026-01-02T03:06:05Z",
       "hasLocalPassword": true,
       "roleChangedAt": "2026-01-02T03:05:05Z",
       "resetCodeHash": "$argon2id$fixture-reset-code-hash",

@@ -238,6 +238,51 @@ func TestSetPasswordChangesCredentials(t *testing.T) {
 	}
 }
 
+// TestSetPasswordMovesBothTimestamps: a new password is a password
+// change (PasswordChangedAt, which the login limiter reads) and ends
+// every session issued before it (SessionsEndedAt, #28).
+func TestSetPasswordMovesBothTimestamps(t *testing.T) {
+	s := openTestStore(t)
+	u, _ := s.Register("admin", "old-password", time.Now().Add(-time.Hour))
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.SetPassword("admin", "new-password", at); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	got, _ := s.Get(u.ID)
+	if !got.PasswordChangedAt.Equal(at) || !got.SessionsEndedAt.Equal(at) {
+		t.Errorf("PasswordChangedAt = %v, SessionsEndedAt = %v; want both %v",
+			got.PasswordChangedAt, got.SessionsEndedAt, at)
+	}
+}
+
+// TestSessionCutoffIsTheLaterTimestamp: a session must have been issued
+// after both the last password change and the last time the account's
+// sessions were ended. A document written before SessionsEndedAt
+// existed -- gauntlet v0.2.0, or mikroview, both of which record an SSO
+// link in PasswordChangedAt -- has only the first, and still cuts off
+// there.
+func TestSessionCutoffIsTheLaterTimestamp(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Hour)
+	cases := []struct {
+		name           string
+		changed, ended time.Time
+		want           time.Time
+	}{
+		{"neither", time.Time{}, time.Time{}, time.Time{}},
+		{"only the password change (an older document)", t0, time.Time{}, t0},
+		{"only sessions ended", time.Time{}, t0, t0},
+		{"sessions ended later", t0, t1, t1},
+		{"password changed later", t1, t0, t1},
+	}
+	for _, tc := range cases {
+		u := User{PasswordChangedAt: tc.changed, SessionsEndedAt: tc.ended}
+		if got := u.SessionCutoff(); !got.Equal(tc.want) {
+			t.Errorf("%s: SessionCutoff() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestSetPasswordLeavesTheOldPasswordWorkingWhenPersistFails: a password
 // change that cannot be saved must not take effect in memory either, or
 // a restart before the next good write would silently restore a

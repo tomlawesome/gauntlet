@@ -168,7 +168,7 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 	}
 	g.audit(caller.Username, "account.link_sso", caller.Username, detail)
 
-	// LinkOIDCIdentity sets PasswordChangedAt, which invalidates every
+	// LinkOIDCIdentity sets SessionsEndedAt, which invalidates every
 	// session issued before it -- including the one that just made this
 	// request. A fresh session is issued so the person stays signed in
 	// on this browser, while any other session they had is now dead.

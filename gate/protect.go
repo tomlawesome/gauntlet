@@ -129,11 +129,11 @@ func bearerToken(r *http.Request) (string, bool) {
 
 // sessionUser resolves r's session cookie to a user, if any -- shared by
 // Protect and handleSession so the invalidation rules (expiry, unknown
-// user, and a session issued before the user's last password reset --
-// see gauntlet.User.PasswordChangedAt) live in exactly one place. A
-// session that fails the PasswordChangedAt check is proactively revoked
-// here rather than left to expire naturally, since it is already known
-// to be invalid.
+// user, and a session issued before the account's sessions were last
+// ended -- a password change, a reset or an SSO link; see
+// gauntlet.User.SessionCutoff) live in exactly one place. A session that
+// fails that check is proactively revoked here rather than left to
+// expire naturally, since it is already known to be invalid.
 func (g *Gate) sessionUser(r *http.Request, now time.Time) (*gauntlet.User, bool) {
 	cookie, err := r.Cookie(g.cfg.CookieName)
 	if err != nil {
@@ -147,7 +147,7 @@ func (g *Gate) sessionUser(r *http.Request, now time.Time) (*gauntlet.User, bool
 	if !ok {
 		return nil, false
 	}
-	if sess.IssuedAt.Before(user.PasswordChangedAt) {
+	if sess.IssuedAt.Before(user.SessionCutoff()) {
 		g.deps.Sessions.Revoke(sess.ID)
 		return nil, false
 	}

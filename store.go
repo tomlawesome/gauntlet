@@ -1350,12 +1350,17 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 		// should have to come back through the IdP. True for the admin
 		// too, whose password survives: a second way into the account
 		// was just attached, and a session issued before that should be
-		// re-made through one of them. LoginLockedUntil is left as it
-		// is: the admin's password still works, so a lockout earned by
-		// guessing at it stands, and the limiter does not read this
-		// bump as a password change while it does (see
-		// lockoutRecorder).
-		u.PasswordChangedAt = now
+		// re-made through one of them.
+		//
+		// Recorded in SessionsEndedAt, never PasswordChangedAt, for
+		// every role (#28): the login limiter reads PasswordChangedAt as
+		// the moment guesses at the old password stop counting, and a
+		// link changes no password the guesses were aimed at. For the
+		// same reason LoginLockedUntil is left as it is: the admin's
+		// password still works, so a lockout earned by guessing at it
+		// stands -- including one whose save failed and that only the
+		// limiter still holds.
+		u.SessionsEndedAt = now
 		st.oidcIndex[key] = userID
 		return nil
 	})
@@ -1518,11 +1523,11 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 
 // SetPassword replaces username's password hash -- a CLI recovery path
 // needs no current password since container/host access is the trust
-// anchor for that tool. Also records PasswordChangedAt, which is what
-// actually invalidates any session issued before this reset (see
-// User.PasswordChangedAt) -- a CLI tool runs in a different process from
-// the live server, so it has no way to reach into that server's
-// in-memory SessionStore directly.
+// anchor for that tool. Also records PasswordChangedAt (the password
+// changed) and SessionsEndedAt, which is what actually invalidates any
+// session issued before this reset (see User.SessionCutoff) -- a CLI
+// tool runs in a different process from the live server, so it has no
+// way to reach into that server's in-memory SessionStore directly.
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	if len(newPassword) < minPasswordLength {
 		return ErrPasswordTooShort
@@ -1548,6 +1553,7 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		}
 		u.PasswordHash = hash
 		u.PasswordChangedAt = now
+		u.SessionsEndedAt = now
 		// An account that has a password has a local password, by
 		// definition. Stated explicitly rather than left to be derived
 		// from OIDCIssuer, so a linked account (OIDC *and* a local
@@ -1564,9 +1570,7 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		// And it ends any login lockout: the guesses that caused it were
 		// at the old password, and whoever set the new one should be
 		// able to use it at once. The limiter drops its own count of
-		// those guesses by PasswordChangedAt, and takes this clear as
-		// what marks the bump as a password change (see
-		// lockoutRecorder).
+		// those guesses by PasswordChangedAt (see lockoutRecorder).
 		u.LoginLockedUntil = time.Time{}
 		return nil
 	})
