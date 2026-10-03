@@ -30,7 +30,8 @@ type fakeGitHub struct {
 	log      []string                // "METHOD path" in order
 	failOn   string                  // "METHOD path-prefix" answered 500
 	uploads  int
-	failNth  int // answer the Nth upload with 500
+	failNth  int  // answer the Nth upload with 500
+	noDigest bool // report assets without a digest, as GitHub does for older uploads
 }
 
 type fakeRelease struct {
@@ -81,6 +82,21 @@ func (g *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		rel := &fakeRelease{id: g.nextID, assets: map[string]ghAsset{}, data: map[string][]byte{}}
 		g.releases[req["tag_name"].(string)] = rel
 		g.writeRelease(w, http.StatusCreated, rel)
+	case r.Method == http.MethodGet && strings.HasPrefix(p, repo+"/releases/assets/"):
+		id, _ := strconv.ParseInt(strings.TrimPrefix(p, repo+"/releases/assets/"), 10, 64)
+		if r.Header.Get("Accept") != "application/octet-stream" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, rel := range g.releases {
+			for name, a := range rel.assets {
+				if a.ID == id {
+					_, _ = w.Write(rel.data[name])
+					return
+				}
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
 	case r.Method == http.MethodDelete && strings.HasPrefix(p, repo+"/releases/assets/"):
 		id, _ := strconv.ParseInt(strings.TrimPrefix(p, repo+"/releases/assets/"), 10, 64)
 		for _, rel := range g.releases {
@@ -115,7 +131,11 @@ func (g *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 				data, _ := io.ReadAll(r.Body)
 				g.nextID++
 				sum := sha256.Sum256(data)
-				rel.assets[name] = ghAsset{ID: g.nextID, Name: name, Size: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(sum[:])}
+				a := ghAsset{ID: g.nextID, Name: name, Size: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(sum[:])}
+				if g.noDigest {
+					a.Digest = ""
+				}
+				rel.assets[name] = a
 				rel.data[name] = data
 				w.WriteHeader(http.StatusCreated)
 				_, _ = w.Write([]byte(`{}`))
@@ -142,14 +162,21 @@ func (g *fakeGitHub) writeRelease(w http.ResponseWriter, code int, rel *fakeRele
 }
 
 // signedListDir is a signed list, its checksum and signature, as
-// blocklist:sign leaves them, plus a token file.
+// blocklist:sign leaves them, the key pair beside them in priv/ and
+// keys/ (where resign and publishArgs look), plus a token file.
 func signedListDir(t *testing.T) (list, tokenFile string) {
 	t.Helper()
-	privDir, _ := keypair(t, "a")
+	privDir, pubDir := keypair(t, "a")
 	dir := t.TempDir()
 	list = writeList(t, dir, "")
 	if code, _, stderr := runCLI(t, "sign", "--keys", privDir, "--in", list); code != 0 {
 		t.Fatalf("sign: %s", stderr)
+	}
+	if err := os.Rename(privDir, filepath.Join(dir, "priv")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(pubDir, filepath.Join(dir, "keys")); err != nil {
+		t.Fatal(err)
 	}
 	tokenFile = filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(fakeToken+"\n"), 0o600); err != nil {
@@ -159,7 +186,27 @@ func signedListDir(t *testing.T) (list, tokenFile string) {
 }
 
 func publishArgs(g *fakeGitHub, list, tokenFile, dated string) []string {
-	return []string{"publish-github", "--api", g.URL, "--token-file", tokenFile, "--in", list, "--dated-tag", dated}
+	return []string{"publish-github", "--api", g.URL, "--token-file", tokenFile, "--in", list,
+		"--keys", filepath.Join(filepath.Dir(list), "keys"), "--dated-tag", dated}
+}
+
+// A list whose signature does not verify against the trusted keys is
+// never uploaded, though it is otherwise a good list.
+func TestPublishGitHubVerifiesTheSignatureFirst(t *testing.T) {
+	t.Parallel()
+	g := newFakeGitHub(t)
+	list, tok := signedListDir(t)
+	other, _ := keypair(t, "b")
+	if code, _, stderr := runCLI(t, "sign", "--keys", other, "--in", list); code != 0 {
+		t.Fatalf("sign with an untrusted key: %s", stderr)
+	}
+	code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...)
+	if code != 1 {
+		t.Fatalf("published a list signed by an untrusted key: %d %s", code, stderr)
+	}
+	if len(g.log) != 0 {
+		t.Fatalf("GitHub was called before the signature was checked: %v", g.log)
+	}
 }
 
 func TestPublishGitHubCreatesBothReleases(t *testing.T) {
@@ -220,7 +267,7 @@ func TestPublishGitHubReplacesCurrentOnly(t *testing.T) {
 	if err := os.WriteFile(list, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeSum(t, list)
+	resign(t, list)
 	if code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.11.02")...); code != 0 {
 		t.Fatal(stderr)
 	}
@@ -258,7 +305,7 @@ func TestPublishGitHubDatedReleaseIsNeverRewritten(t *testing.T) {
 	b, _ := os.ReadFile(list)
 	b = []byte(strings.Replace(string(b), "# min-count: 1000", "# min-count: 1001", 1))
 	_ = os.WriteFile(list, b, 0o644)
-	writeSum(t, list)
+	resign(t, list)
 	code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...)
 	if code != 1 || !strings.Contains(stderr, "never rewritten") {
 		t.Fatalf("rewrote a dated release: %d %s", code, stderr)
@@ -334,23 +381,40 @@ func TestPublishGitHubReportsGitHubErrors(t *testing.T) {
 	}
 }
 
-func TestAssetSame(t *testing.T) {
+// Without a digest from GitHub, a dated release's file is compared by
+// its bytes: a corrected list of the same size is still a different
+// list, and an identical one is still recognised.
+func TestPublishGitHubComparesBytesWithoutADigest(t *testing.T) {
 	t.Parallel()
-	data := []byte("abc")
-	sum := sha256.Sum256(data)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
-	if !(ghAsset{Digest: digest, Size: 99}).same(data) {
-		t.Error("a matching digest must win over the size")
+	g := newFakeGitHub(t)
+	g.noDigest = true
+	list, tok := signedListDir(t)
+	if code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...); code != 0 {
+		t.Fatal(stderr)
 	}
-	if (ghAsset{Digest: digest, Size: 3}).same([]byte("abd")) {
-		t.Error("same size, different bytes, matched")
+	if code, stdout, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...); code != 0 {
+		t.Fatalf("rerun of the same list: %s", stderr)
+	} else if !strings.Contains(stdout, "already there") {
+		t.Fatalf("the same list was not recognised:\n%s", stdout)
 	}
-	if !(ghAsset{Size: 3}).same(data) || (ghAsset{Size: 4}).same(data) {
-		t.Error("without a digest, size decides")
+
+	b, _ := os.ReadFile(list)
+	n := len(b)
+	b = []byte(strings.Replace(string(b), "# min-count: 1000", "# min-count: 1001", 1))
+	if len(b) != n {
+		t.Fatal("the corrected list must be the same size")
+	}
+	_ = os.WriteFile(list, b, 0o644)
+	resign(t, list)
+	code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...)
+	if code != 1 || !strings.Contains(stderr, "never rewritten") {
+		t.Fatalf("a same-size, different list passed as already there: %d %s", code, stderr)
 	}
 }
 
-func writeSum(t *testing.T, list string) {
+// resign rewrites an edited list's checksum and signature, with the
+// key signedListDir left beside it.
+func resign(t *testing.T, list string) {
 	t.Helper()
 	b, err := os.ReadFile(list)
 	if err != nil {
@@ -358,5 +422,8 @@ func writeSum(t *testing.T, list string) {
 	}
 	if err := os.WriteFile(list+".sha256", []byte(sha256Line(b, filepath.Base(list))), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if code, _, stderr := runCLI(t, "sign", "--keys", filepath.Join(filepath.Dir(list), "priv"), "--in", list); code != 0 {
+		t.Fatalf("sign: %s", stderr)
 	}
 }

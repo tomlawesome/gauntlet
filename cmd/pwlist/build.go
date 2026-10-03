@@ -393,8 +393,12 @@ type checkpointFile struct {
 
 // resume loads the checkpoint if there is a usable one, and otherwise
 // starts from nothing. A checkpoint is unusable if it is older than 24
-// hours (the corpus may have moved on), was made with other settings,
-// or does not parse; each case is logged, never fatal.
+// hours (the corpus may have moved on), was saved in the future, was
+// made with other settings, or does not parse; each case is logged,
+// never fatal. A future save time means the clock was wrong then or is
+// now, so its age is unknown: trusting it would let a checkpoint from a
+// clock set ahead be resumed long after the 24 hours are up, building
+// a list partly from an old copy of the corpus.
 func (b *builder) resume() *state {
 	fresh := &state{top: &topN{n: b.top}}
 	if b.checkpoint == "" {
@@ -414,6 +418,8 @@ func (b *builder) resume() *state {
 		reason = err.Error()
 	case cp.Format != checkpointFormat:
 		reason = fmt.Sprintf("format %q", cp.Format)
+	case cp.Saved.After(b.now()):
+		reason = fmt.Sprintf("saved %s, which is in the future", cp.Saved.Format(time.RFC3339))
 	case b.now().Sub(cp.Saved) > checkpointMaxAge:
 		reason = fmt.Sprintf("saved %s, more than 24 hours ago", cp.Saved.Format(time.RFC3339))
 	case cp.Prefixes != b.prefixes || cp.ChunkSize != b.chunkSize || cp.Top != b.top:
