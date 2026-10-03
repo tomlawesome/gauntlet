@@ -347,7 +347,7 @@ func TestVerifyTOTPRefusesMalformedCodeWithoutPanicking(t *testing.T) {
 // fresh secret's early codes).
 func TestClearTOTPRemovesEveryPart(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestClearTOTPLeavesStateWhenPersistFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestClearTOTPLeavesStateWhenPersistFails(t *testing.T) {
 func TestEnrolThenConfirmActivatesTheFactor(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestEnrolThenConfirmActivatesTheFactor(t *testing.T) {
 func TestSetPendingTOTPSecretRefusesToReplaceAnActiveFactor(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +509,7 @@ func TestSetPendingTOTPSecretRefusesToReplaceAnActiveFactor(t *testing.T) {
 func TestSetPendingTOTPSecretResetsTheReplayCounter(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +534,7 @@ func TestSetPendingTOTPSecretResetsTheReplayCounter(t *testing.T) {
 func TestConfirmTOTPNeedsSomethingPending(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestConfirmTOTPNeedsSomethingPending(t *testing.T) {
 func TestVerifyAndRecordTOTPAcceptsOnceThenRefusesReplay(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,7 +607,7 @@ func TestVerifyAndRecordTOTPAcceptsOnceThenRefusesReplay(t *testing.T) {
 func TestVerifyAndRecordTOTPRefusesWrongCodeAndUnknownUser(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +642,7 @@ func TestTOTPWritesLeaveStateWhenPersistFails(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		u, err := s.Register("admin", "password123", now)
+		u, err := s.Register("admin", "password-placeholder-1", now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -713,7 +713,7 @@ func TestTOTPWritesLeaveStateWhenPersistFails(t *testing.T) {
 func TestVerifyAndRecordTOTPIgnoresAPendingSecret(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}

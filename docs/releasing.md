@@ -43,10 +43,7 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
      pipeline; open the pipeline for the newest commit on `dev` instead
    - the common-password list in `blocklist/embedded/` is still the
      placeholder, or was built more than 90 days ago -- run
-     `scripts/update-blocklist.sh` as in step 2 and merge again.
-     v0.2.0 alone may ship the placeholder, with no built-in list,
-     because the first signed list did not exist yet (owner,
-     2026-10-02); every later version is refused again
+     `scripts/update-blocklist.sh` as in step 2 and merge again
 
    Once release:version succeeds, **release:gitlab** runs by itself --
    there's no second button to press. It creates the tag `v<VERSION>`
@@ -88,10 +85,10 @@ registry and then to releases on the public GitHub mirror, where
 applications fetch it. Step 2 above copies the published list into
 each release.
 
-Until the setup below is done there is no real list:
-`blocklist/embedded/` holds a placeholder, and `Embedded()` blocks
-nothing. Every fetched list is refused for want of a trusted key, and
-release:version refuses to tag (v0.2.0 excepted, step 3 above).
+Before the setup below was done there was no real list:
+`blocklist/embedded/` held a placeholder, `Embedded()` blocked nothing,
+and release:version refused to tag. The first list was embedded from
+the run of 2026-10-03.
 
 ### Setup the owner does once
 
@@ -176,7 +173,10 @@ environment = ["GAUNTLET_GITHUB_RELEASE_TOKEN_FILE=/etc/gauntlet-github/token"]
   host = "unix:///run/user/988/docker.sock"
   volumes = ["/etc/gauntlet-github:/etc/gauntlet-github:ro", "/cache"]
 ```
-Use the runner user's real uid in place of `988`. The
+Use the runner user's real uid in place of `988`. The `environment`
+line must sit above the first `[runners.…]` heading in that entry
+(`[runners.cache]` or `[runners.docker]`): below one, TOML files it
+under that section and the job never sees it. The
 `environment` line tells the job where the token file is; it holds a
 path, never the token. Each job fails at once if its file is not there.
 

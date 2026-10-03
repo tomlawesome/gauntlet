@@ -56,7 +56,7 @@ func sessionsFixture(t *testing.T) (*Gate, *httptest.Server, *http.Client, []str
 	}
 	g.cfg.Audit = &auditRecorder{}
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 
@@ -166,7 +166,7 @@ func sessionListAuditCount(g *Gate) int {
 func TestSessionsAnonymousIsUnauthorized(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	_ = registerAdmin(t, ts, "admin", "password123")
+	_ = registerAdmin(t, ts, "admin", "password-placeholder-1")
 	anon := &http.Client{Jar: mustCookieJar(t)}
 
 	if status, _ := listSessions(t, anon, ts); status != http.StatusUnauthorized {

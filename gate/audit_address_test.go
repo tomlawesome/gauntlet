@@ -22,7 +22,7 @@ func TestEveryAuditRecordCarriesTheAddress(t *testing.T) {
 	audit := &auditRecorder{}
 	g.cfg.Audit = audit
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: "carol", Password: totpBobPassword, Role: "user"}).Body.Close()
 	bobID := totpBobID(t, g)

@@ -30,7 +30,7 @@ func openLockoutStore(t *testing.T, b persist.Backend) (*Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := s.Register("alice", "password123", time.Now())
+	u, err := s.Register("alice", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

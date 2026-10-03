@@ -81,16 +81,16 @@ func TestResetPassLeavesOtherAccountsLimited(t *testing.T) {
 	if err := g.deps.Users.SetPassword(totpBobUsername, newPW, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if got := loginStatus(t, ts.URL, "admin", "password123"); got != http.StatusTooManyRequests {
+	if got := loginStatus(t, ts.URL, "admin", "password-placeholder-1"); got != http.StatusTooManyRequests {
 		t.Errorf("another account's correct password from the full address got %d, want 429", got)
 	}
-	if got := loginStatus(t, ts.URL, "nobody", "password123"); got != http.StatusTooManyRequests {
+	if got := loginStatus(t, ts.URL, "nobody", "password-placeholder-1"); got != http.StatusTooManyRequests {
 		t.Errorf("an unknown name from the full address got %d, want 429", got)
 	}
 	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusOK {
 		t.Fatalf("the reset account's new password got %d, want 200", got)
 	}
-	if got := loginStatus(t, ts.URL, "admin", "password123"); got != http.StatusTooManyRequests {
+	if got := loginStatus(t, ts.URL, "admin", "password-placeholder-1"); got != http.StatusTooManyRequests {
 		t.Errorf("another account after the reset account signed in got %d, want 429: the pass freed an address slot", got)
 	}
 	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusTooManyRequests {
@@ -206,7 +206,7 @@ func TestLoginRefusedByTheAccountLimitHandsBackTheAddressReservation(t *testing.
 	g.deps.Limiter = mustNewLoginLimiter(t, threshold, time.Minute)
 	g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 	if _, err := g.deps.Users.CreateUser("bob", "password456", gauntlet.RoleUser, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestLoginRefusedByTheAccountLimitHandsBackTheAddressReservation(t *testing.
 	}
 	const ip = "198.51.100.99"
 	for range 2 * threshold {
-		if got := loginAttempt(ip, "admin", "password123"); got != http.StatusTooManyRequests {
+		if got := loginAttempt(ip, "admin", "password-placeholder-1"); got != http.StatusTooManyRequests {
 			t.Fatalf("an attempt at the locked-out admin got %d, want 429", got)
 		}
 	}

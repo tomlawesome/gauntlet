@@ -382,7 +382,8 @@ blocklist:publish:
       artifacts: true
   cache: []
   script:
-    - test -n "${GAUNTLET_GITHUB_RELEASE_TOKEN_FILE:-}" && test -r "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" || { echo "GAUNTLET_GITHUB_RELEASE_TOKEN_FILE must name the GitHub token file mounted on the gauntlet-publish runner"; exit 1; }
+    - test -n "${GAUNTLET_GITHUB_RELEASE_TOKEN_FILE:-}" || { echo "GAUNTLET_GITHUB_RELEASE_TOKEN_FILE is not set -- the gauntlet-publish runner's [[runners]] entry needs its environment line, above its first [runners.*] heading (docs/releasing.md step 4)"; exit 1; }
+    - test -r "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" || { echo "cannot read $GAUNTLET_GITHUB_RELEASE_TOKEN_FILE -- check the runner's volume mount, the file's owner, and that the runner user's Docker was restarted after the directory was created (docs/releasing.md steps 3-4)"; exit 1; }
     - go build -trimpath -ldflags "-X main.version=$(tr -d '[:space:]' < VERSION)" -o pwlist ./cmd/pwlist
     - ./pwlist verify --keys blocklist/keys --in out/top10k.txt
     - |
@@ -446,8 +447,7 @@ release:version:
   script:
     - apk add --no-cache git bash >/dev/null  # release-version-check.sh is bash (#56)
     # The release carries the common-password list, so refuse to tag
-    # while it is the placeholder or more than 90 days old (#52). v0.2.0
-    # alone may ship the placeholder (owner, 2026-10-02).
+    # while it is the placeholder or more than 90 days old (#52).
     - scripts/blocklist-age-check.sh
     - |
       set -eu

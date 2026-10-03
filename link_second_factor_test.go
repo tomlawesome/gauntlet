@@ -22,10 +22,10 @@ import (
 func TestLinkOIDCIdentityClearsEverySecondFactorForANonAdmin(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	if _, err := s.Register("alice", "password12345", now); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-345", now); err != nil {
 		t.Fatalf("Register alice (the admin): %v", err)
 	}
-	bob, err := s.CreateUser("bob", "password12345", RoleUser, now)
+	bob, err := s.CreateUser("bob", "password-placeholder-345", RoleUser, now)
 	if err != nil {
 		t.Fatalf("CreateUser bob: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestLinkOIDCIdentityClearsEverySecondFactorForANonAdmin(t *testing.T) {
 func TestLinkOIDCIdentityKeepsTheAdminsSecondFactor(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	admin, err := s.Register("alice", "password12345", now)
+	admin, err := s.Register("alice", "password-placeholder-345", now)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -126,10 +126,10 @@ func TestLinkOIDCIdentityRestoresTheSecondFactorWhenPersistFails(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	now := time.Now()
-	if _, err := s.Register("alice", "password12345", now); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-345", now); err != nil {
 		t.Fatalf("Register alice (the admin): %v", err)
 	}
-	bob, err := s.CreateUser("bob", "password12345", RoleUser, now)
+	bob, err := s.CreateUser("bob", "password-placeholder-345", RoleUser, now)
 	if err != nil {
 		t.Fatalf("CreateUser bob: %v", err)
 	}
@@ -171,10 +171,10 @@ func TestLinkOIDCIdentityRestoresTheSecondFactorWhenPersistFails(t *testing.T) {
 func TestLinkOIDCIdentityClearsAPendingEnrolmentToo(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	if _, err := s.Register("alice", "password12345", now); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-345", now); err != nil {
 		t.Fatalf("Register alice (the admin): %v", err)
 	}
-	bob, err := s.CreateUser("bob", "password12345", RoleUser, now)
+	bob, err := s.CreateUser("bob", "password-placeholder-345", RoleUser, now)
 	if err != nil {
 		t.Fatalf("CreateUser bob: %v", err)
 	}

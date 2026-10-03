@@ -20,7 +20,7 @@ import (
 func TestLinkingDestroysANonAdminsLocalPassword(t *testing.T) {
 	s := openTestStore(t)
 
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	u, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -56,7 +56,7 @@ func TestLinkingDestroysANonAdminsLocalPassword(t *testing.T) {
 func TestLinkingKeepsTheAdminsLocalPassword(t *testing.T) {
 	s := openTestStore(t)
 
-	admin, err := s.Register("alice", "password123", time.Now())
+	admin, err := s.Register("alice", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestLinkingKeepsTheAdminsLocalPassword(t *testing.T) {
 	// The password itself, not just the flag: a link that left
 	// HasLocalPassword true over an unmatchable hash would report a way
 	// in that does not exist.
-	if _, err := s.Authenticate("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Authenticate("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Errorf("the admin's password stopped working after linking: %v", err)
 	}
 	linked, _ := s.ByUsername("alice")
@@ -95,7 +95,7 @@ func TestLinkingLeavesARealUnmatchableHash(t *testing.T) {
 	s := openTestStore(t)
 	// An ordinary user: the admin keeps its real hash now (#1252), so
 	// the replacement only happens here.
-	_, _ = s.Register("alice", "password123", time.Now())
+	_, _ = s.Register("alice", "password-placeholder-1", time.Now())
 	u, _ := s.CreateUser("bob", "password456", RoleUser, time.Now())
 
 	before, _ := s.Get(u.ID)
@@ -127,7 +127,7 @@ func TestLinkingInvalidatesEarlierSessions(t *testing.T) {
 		t.Run(string(role), func(t *testing.T) {
 			s := openTestStore(t)
 			created := time.Now().Add(-time.Hour)
-			admin, err := s.Register("alice", "password123", created)
+			admin, err := s.Register("alice", "password-placeholder-1", created)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +166,7 @@ func TestLinkingInvalidatesEarlierSessions(t *testing.T) {
 // IdP account to a colleague's -- or to the admin's.
 func TestLinkingRefusesAnIdentityHeldByAnotherAccount(t *testing.T) {
 	s := openTestStore(t)
-	alice, _ := s.Register("alice", "password123", time.Now())
+	alice, _ := s.Register("alice", "password-placeholder-1", time.Now())
 	bob, _ := s.CreateUser("bob", "password456", RoleUser, time.Now())
 
 	if err := s.LinkOIDCIdentity(alice.ID, "https://idp.example", "shared-subject", time.Now()); err != nil {
@@ -194,7 +194,7 @@ func TestLinkingRefusesAnIdentityHeldByAnotherAccount(t *testing.T) {
 // would stay in the index and go on signing in as this account.
 func TestLinkingRefusesASecondIdentityForTheSameAccount(t *testing.T) {
 	s := openTestStore(t)
-	admin, _ := s.Register("alice", "password123", time.Now())
+	admin, _ := s.Register("alice", "password-placeholder-1", time.Now())
 
 	if err := s.LinkOIDCIdentity(admin.ID, "https://idp.example", "subject-1", time.Now()); err != nil {
 		t.Fatalf("first link: %v", err)
@@ -214,7 +214,7 @@ func TestLinkingRefusesASecondIdentityForTheSameAccount(t *testing.T) {
 
 func TestLinkingIsIdempotentForTheSameAccount(t *testing.T) {
 	s := openTestStore(t)
-	u, _ := s.Register("alice", "password123", time.Now())
+	u, _ := s.Register("alice", "password-placeholder-1", time.Now())
 
 	if err := s.LinkOIDCIdentity(u.ID, "https://idp.example", "subject-1", time.Now()); err != nil {
 		t.Fatalf("first link: %v", err)
@@ -230,7 +230,7 @@ func TestLinkingIsIdempotentForTheSameAccount(t *testing.T) {
 // recovery for an account that has none.
 func TestALinkedNonAdminIsNotLocallyRecoverable(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("alice", "password123", time.Now())
+	_, _ = s.Register("alice", "password-placeholder-1", time.Now())
 	u, _ := s.CreateUser("bob", "password456", RoleUser, time.Now())
 	if err := s.LinkOIDCIdentity(u.ID, "https://idp.example", "subject-1", time.Now()); err != nil {
 		t.Fatalf("LinkOIDCIdentity: %v", err)
@@ -261,7 +261,7 @@ func TestLinkOIDCIdentityLeavesThePasswordWorkingWhenPersistFails(t *testing.T) 
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	u, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -297,7 +297,7 @@ func TestLinkOIDCIdentityLeavesThePasswordWorkingWhenPersistFails(t *testing.T) 
 func TestLinkingKillsAnOutstandingResetCode(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	_, _ = s.Register("alice", "password123", now)
+	_, _ = s.Register("alice", "password-placeholder-1", now)
 	u, _ := s.CreateUser("bob", "password456", RoleUser, now)
 	_, code, err := s.IssueResetCode(u.ID, now)
 	if err != nil {

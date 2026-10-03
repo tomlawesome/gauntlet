@@ -25,7 +25,7 @@ func rfc6750Fixture(t *testing.T) (*Gate, string, *http.Client, string) {
 	g := newTestGate(t)
 	g.Handle(gauntlet.TokenKindAPI, kindEchoHandlerAnyMethod("/api/readonly"))
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)

@@ -98,7 +98,7 @@ func TestMutateReplaysTheChangeOnAConflictingWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -154,7 +154,7 @@ func TestMutateGivesUpAfterFiveConflictsAndChangesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -247,7 +247,7 @@ func TestMutateBoundsTheWholeWriteByOneDeadline(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := plain.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := plain.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		b := &slowConflictingBackend{Memory: m, delay: 60 * time.Millisecond, honourCtx: honourCtx}
@@ -290,7 +290,7 @@ func TestMutateOpErrorChangesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	b.saves = 0
@@ -324,7 +324,7 @@ func TestMutateRefusesToWriteOverADocumentItCannotApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -370,7 +370,7 @@ func openVanishingStore(t *testing.T) (*Store, *vanishingBackend, *User) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -470,7 +470,7 @@ func TestMutateRefusesToSaveAStateItWouldRefuseToOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alice, err := s.Register("alice", "password123", time.Now())
+	alice, err := s.Register("alice", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +549,7 @@ func TestStoreLogsADocumentRemovalOncePerRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	create := func(name string) error {
@@ -644,7 +644,7 @@ func TestBestEffortWritesStayQuietAfterARemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alice, err := s.Register("alice", "password123", start)
+	alice, err := s.Register("alice", "password-placeholder-1", start)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +665,7 @@ func TestBestEffortWritesStayQuietAfterARemoval(t *testing.T) {
 	ab.gone, tb.gone = true, true
 	for i := 1; i <= 3; i++ {
 		now := start.Add(time.Duration(i) * 2 * time.Hour) // past each last-seen granularity
-		if _, err := s.Authenticate("alice", "password123", now); err != nil {
+		if _, err := s.Authenticate("alice", "password-placeholder-1", now); err != nil {
 			t.Fatalf("login %d after removal = %v", i, err)
 		}
 		if _, ok := ts.Authenticate(raw, TokenKindAPI, now); !ok {
@@ -712,7 +712,7 @@ func TestMutateBestEffortKeepsTheChangeInMemoryAndLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alice, err := s.Register("alice", "password123", time.Now())
+	alice, err := s.Register("alice", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +757,7 @@ func TestMutateInstallsTheFreshDocumentAnOpRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -1124,7 +1124,7 @@ func TestMutateNoChangeSavesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	b.saves = 0

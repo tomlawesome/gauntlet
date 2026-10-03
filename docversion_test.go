@@ -102,7 +102,7 @@ func TestReloadIfStaleRefusesANewerAccountsDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	snap, err := m.Load(context.Background())
@@ -178,7 +178,7 @@ func TestMutateRefusesToWriteOverANewerAccountsDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	b.beforeSave = func() { overwrite(t, m, newerAccountsDocument) }
@@ -333,7 +333,7 @@ func TestReloadRefusesANullDocument(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		snap, err := m.Load(context.Background())

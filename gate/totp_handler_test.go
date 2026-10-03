@@ -35,7 +35,7 @@ func totpFixture(t *testing.T) (*Gate, *httptest.Server, *http.Client) {
 	t.Helper()
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 	return g, ts, admin
@@ -554,7 +554,7 @@ func TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail(t *testing.T)
 	users := openTrackedStore(t, backend)
 	g.deps.Users = users
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 
@@ -599,7 +599,7 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 	users := openTrackedStore(t, backend)
 	g.deps.Users = users
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 

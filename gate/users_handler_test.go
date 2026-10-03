@@ -21,7 +21,7 @@ import (
 func TestAdminCanCreateAdditionalUsers(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"})
 	defer func() { _ = resp.Body.Close() }()
@@ -33,7 +33,7 @@ func TestAdminCanCreateAdditionalUsers(t *testing.T) {
 func TestAdminCanCreateViewerAndSessionReportsIt(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "watcher", Password: "password456", Role: "viewer"})
 	defer func() { _ = resp.Body.Close() }()
@@ -59,7 +59,7 @@ func TestAdminCanCreateViewerAndSessionReportsIt(t *testing.T) {
 func TestCreateUserDefaultsToUserRole(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456"})
 	defer func() { _ = resp.Body.Close() }()
@@ -79,7 +79,7 @@ func TestCreateUserDefaultsToUserRole(t *testing.T) {
 func TestCreateUserRejectsUnrecognizedRole(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "someone", Password: "password456", Role: "owner"})
 	defer func() { _ = resp.Body.Close() }()
@@ -94,7 +94,7 @@ func TestCreateUserRejectsUnrecognizedRole(t *testing.T) {
 func TestAdminCreateUserRejectsDuplicateUsername(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
 
 	resp := postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password789", Role: "user"})
@@ -107,7 +107,7 @@ func TestAdminCreateUserRejectsDuplicateUsername(t *testing.T) {
 func TestAdminCannotCreateASecondAdmin(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "second", Password: "password456", Role: "admin"})
 	defer func() { _ = resp.Body.Close() }()
@@ -123,7 +123,7 @@ func TestAdminCannotCreateASecondAdmin(t *testing.T) {
 func TestNonAdminCannotCreateUsers(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
 
 	userClient := &http.Client{Jar: mustCookieJar(t)}
@@ -139,7 +139,7 @@ func TestNonAdminCannotCreateUsers(t *testing.T) {
 func TestUserListIsAdminOnly(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
 
 	userClient := &http.Client{Jar: mustCookieJar(t)}
@@ -176,7 +176,7 @@ func TestUserListIsAdminOnly(t *testing.T) {
 func TestDeletingAUserRevokesTheirSessionAndTokens(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
 
 	operator, ok := g.deps.Users.ByUsername("operator")
@@ -237,7 +237,7 @@ func TestDeletingAUserRevokesTheirSessionAndTokens(t *testing.T) {
 func TestDeletingTheAdminIsRefused(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	admin, ok := g.deps.Users.ByUsername("admin")
 	if !ok {
@@ -269,7 +269,7 @@ func TestDeletingTheAdminIsRefused(t *testing.T) {
 func TestDeleteUserNotFound(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/does-not-exist", nil)
 	req.Header.Set(csrfHeaderName, testCSRFValue)
@@ -293,7 +293,7 @@ func TestDeleteUserNotFound(t *testing.T) {
 func TestCreateAdminRoleRequestGetsSpecificMessage(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "second", Password: "password456", Role: "admin"})
 	defer func() { _ = resp.Body.Close() }()
@@ -376,7 +376,7 @@ func TestListUsersDoesNotCheckPasskeysPerAccount(t *testing.T) {
 	users := openTrackedStore(t, backend)
 	g := newTestGateWithUsers(t, users)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	getUsers := func() []userSummary {
 		t.Helper()

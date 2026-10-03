@@ -16,12 +16,12 @@ import (
 func TestChangePasswordRotatesTheSessionAndEndsOthers(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	other := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, other, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"}).Body.Close()
+	_ = postJSON(t, other, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"}).Body.Close()
 
-	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password123", NewPassword: "new-password-1"})
+	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password-placeholder-1", NewPassword: "new-password-1"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected the change to succeed, got %d", resp.StatusCode)
@@ -51,7 +51,7 @@ func TestChangePasswordRotatesTheSessionAndEndsOthers(t *testing.T) {
 func TestChangePasswordRefusesAWrongCurrentPassword(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "wrong", NewPassword: "new-password-1"})
 	defer func() { _ = resp.Body.Close() }()
@@ -63,15 +63,15 @@ func TestChangePasswordRefusesAWrongCurrentPassword(t *testing.T) {
 func TestChangePasswordRefusesAShortOrUnchangedPassword(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	short := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password123", NewPassword: "short"})
+	short := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password-placeholder-1", NewPassword: "short"})
 	defer func() { _ = short.Body.Close() }()
 	if short.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for a too-short new password, got %d", short.StatusCode)
 	}
 
-	unchanged := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password123", NewPassword: "password123"})
+	unchanged := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password-placeholder-1", NewPassword: "password-placeholder-1"})
 	defer func() { _ = unchanged.Body.Close() }()
 	if unchanged.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for an unchanged password, got %d", unchanged.StatusCode)
@@ -81,9 +81,9 @@ func TestChangePasswordRefusesAShortOrUnchangedPassword(t *testing.T) {
 func TestChangePasswordRequiresASession(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password123", NewPassword: "new-password-1"})
+	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password-placeholder-1", NewPassword: "new-password-1"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 401 with no session, got %d", resp.StatusCode)
@@ -120,10 +120,10 @@ func TestChangePasswordStoreFailureIsLogged(t *testing.T) {
 	logs := &lockedBuffer{}
 	g.cfg.Log = slog.New(slog.NewTextHandler(logs, nil))
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	backend.left = 0
-	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password123", NewPassword: "new-password-1"})
+	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password-placeholder-1", NewPassword: "new-password-1"})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("a failing store got %d, want 500", resp.StatusCode)

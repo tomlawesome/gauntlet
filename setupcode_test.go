@@ -134,7 +134,7 @@ func TestSetupCodeHookReplacesLog(t *testing.T) {
 
 func TestSetupCodeInertOnceAnAccountExists(t *testing.T) {
 	s, code := openEmptyWithHook(t, persist.NewMemory())
-	if _, err := s.Register("admin", "password12345", time.Now()); err != nil {
+	if _, err := s.Register("admin", "password-placeholder-345", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if err := s.CheckSetupCode(code); !errors.Is(err, ErrRegistrationClosed) {
@@ -189,7 +189,7 @@ func TestSetupCodeFollowsReloadedDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore (other process): %v", err)
 	}
-	if _, err := other.Register("admin", "password12345", time.Now()); err != nil {
+	if _, err := other.Register("admin", "password-placeholder-345", time.Now()); err != nil {
 		t.Fatalf("Register in the other process: %v", err)
 	}
 	s.reloadIfStale()
