@@ -252,11 +252,19 @@ func (b *builder) fetch(ctx context.Context, prefix int, floor int64) ([]entry, 
 	return nil, 0, fmt.Errorf("prefix %s: gave up after %d attempts: %w", p, maxAttempts, lastErr)
 }
 
+// backoffCeiling is the upper bound of the jittered wait before retry
+// number n (1-based): it doubles each retry from 1 s, reaching the 8 s
+// cap (maxBackoff) by the last retry a fetch actually makes
+// (maxAttempts-1), and stays there for any n beyond that.
+func backoffCeiling(n int) time.Duration {
+	return min(minBackoff<<(n+1), maxBackoff)
+}
+
 // backoff is the wait before retry number n (1-based): a random time
-// between 250 ms and 250 ms * 2^(n-1), capped at 8 s, or the server's
-// Retry-After if that is longer, capped at two minutes.
+// between 250 ms and backoffCeiling(n), or the server's Retry-After if
+// that is longer, capped at two minutes.
 func backoff(n int, retryAfter time.Duration) time.Duration {
-	ceiling := min(minBackoff<<(n-1), maxBackoff)
+	ceiling := backoffCeiling(n)
 	d := minBackoff + time.Duration(rand.Int64N(int64(ceiling-minBackoff)+1)) //nolint:gosec // jitter, not a secret
 	if retryAfter > d {
 		d = min(retryAfter, maxRetryAfter)
