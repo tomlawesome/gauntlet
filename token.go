@@ -538,7 +538,9 @@ func (s *TokenStore) reloadIfStale() {
 		return
 	}
 	st, err := s.decodeTokens(snap.Payload)
-	if errors.Is(err, errNewerDocument) {
+	// A newer document and the literal null are both refused loudly:
+	// someone wrote them, and the operator should hear why once.
+	if errors.Is(err, errNewerDocument) || errors.Is(err, errNullDocument) {
 		s.mu.Lock()
 		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
 		s.mu.Unlock()

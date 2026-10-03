@@ -319,3 +319,71 @@ func TestOpenRefusesANullDocument(t *testing.T) {
 		refused("sign-in history", doc, err)
 	}
 }
+
+// TestReloadRefusesANullDocument: a document that turns into the JSON
+// literal null while the store is running is refused the loud way a
+// newer one is -- the store keeps serving what it holds, logs why once,
+// and refuses to write over it -- rather than being skipped silently as
+// a transient read failure.
+func TestReloadRefusesANullDocument(t *testing.T) {
+	t.Run("accounts", func(t *testing.T) {
+		var logs bytes.Buffer
+		m := persist.NewMemory()
+		s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := m.Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Save(context.Background(), []byte("null"), snap.Version); err != nil {
+			t.Fatal(err)
+		}
+		for range 3 { // each read runs reloadIfStale
+			if _, ok := s.ByUsername("alice"); !ok {
+				t.Fatal("the in-memory accounts were dropped")
+			}
+		}
+		if n := strings.Count(logs.String(), "null"); n != 1 {
+			t.Errorf("expected exactly one log line about the null document, got %d:\n%s", n, logs.String())
+		}
+		if _, err := s.CreateUser("carol", "password456", RoleUser, time.Now()); err == nil {
+			t.Error("a write over the null document was accepted")
+		}
+		assertPayload(t, m, "null")
+	})
+	t.Run("tokens", func(t *testing.T) {
+		var logs bytes.Buffer
+		m := persist.NewMemory()
+		s, err := OpenTokenStore(m, TokenOptions{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.Create("first", TokenKindAPI, "", nil, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := m.Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Save(context.Background(), []byte("null"), snap.Version); err != nil {
+			t.Fatal(err)
+		}
+		for range 3 {
+			if len(s.List()) != 1 {
+				t.Fatal("the in-memory tokens were dropped")
+			}
+		}
+		if n := strings.Count(logs.String(), "null"); n != 1 {
+			t.Errorf("expected exactly one log line about the null document, got %d:\n%s", n, logs.String())
+		}
+		if _, _, err := s.Create("second", TokenKindAPI, "", nil, time.Now()); err == nil {
+			t.Error("a write over the null document was accepted")
+		}
+		assertPayload(t, m, "null")
+	})
+}

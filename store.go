@@ -787,10 +787,11 @@ func (s *Store) reloadIfStale() {
 
 	// A document that does not parse is skipped silently, as a read
 	// failure is. One that parses but is refused -- newer than this
-	// build reads, or breaking the admin or unique-username rule -- is
-	// different.
+	// build reads, the literal null, or breaking the admin or
+	// unique-username rule -- is different.
 	st, err := decodeAccounts(snap.Payload)
 	if err != nil && !errors.Is(err, errNewerDocument) &&
+		!errors.Is(err, errNullDocument) &&
 		!errors.Is(err, errMultipleAdmins) && !errors.Is(err, errNoAdmin) &&
 		!errors.Is(err, errDuplicateUsername) {
 		return
