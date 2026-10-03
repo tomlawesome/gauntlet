@@ -34,8 +34,6 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    Click **release:version**. It can only be pressed once every job in
    the lint and test stages has passed.
 
-   <!-- screenshot: the pipeline's job list with release:version highlighted, ready to press -->
-
    release:version refuses to cut a tag in four cases:
    - the tag already exists -- bump `VERSION` and merge again
    - `VERSION` isn't a plain three-part version, or doesn't sort above
@@ -116,8 +114,6 @@ with *Repository access: Only select repositories* →
 `tomlawesome/gauntlet`, and *Repository permissions → Contents: Read
 and write* (releases need it; nothing else is needed).
 
-<!-- screenshot: the fine-grained token form with repository access and the Contents: Read and write permission set -->
-
 Give it an
 expiry and a calendar reminder: when it expires, the GitHub copy stops
 updating and applications keep the last list. Do not turn on GitHub's
@@ -182,8 +178,6 @@ path, never the token. Each job fails at once if its file is not there.
 create a schedule: description `blocklist`, target branch `dev`, a
 monthly interval (for example `17 3 2 * *`, 03:17 UTC on the 2nd), and
 a variable `BLOCKLIST_BUILD` = `true`.
-
-<!-- screenshot: the pipeline schedule form with the description, target branch, interval and BLOCKLIST_BUILD variable filled in -->
 
 Each run downloads 20-40 GB
 from HIBP over about four hours. Optionally, under
