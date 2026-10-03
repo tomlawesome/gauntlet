@@ -6,12 +6,16 @@ import (
 	"io"
 	"net/http"
 	"unicode"
+	"unicode/utf8"
 )
 
 // MaxSessionEndReason bounds the reason an admin may give for ending
-// another account's sessions, in bytes. It reaches the audit log and,
-// through Config.Notify, the account owner's mail, so it is short and
-// plain: control and format characters are refused, not stripped.
+// another account's sessions, in characters (runes): what the API
+// document's maxLength counts, so a reason it accepts is never refused
+// for being written in accented or non-Latin letters. It reaches the
+// audit log and, through Config.Notify, the account owner's mail, so it
+// is short and plain: control and format characters are refused, not
+// stripped.
 const MaxSessionEndReason = 200
 
 // adminLogoutAllRequest is POST /api/auth/users/{id}/logout-all's
@@ -34,7 +38,7 @@ type adminLogoutAllResponse struct {
 // carries no control or format character. (JSON decoding has already
 // replaced any invalid UTF-8 with U+FFFD.)
 func validSessionEndReason(reason string) bool {
-	if len(reason) > MaxSessionEndReason {
+	if utf8.RuneCountInString(reason) > MaxSessionEndReason {
 		return false
 	}
 	for _, r := range reason {
@@ -56,7 +60,7 @@ func validSessionEndReason(reason string) bool {
 // The caller's own account is refused with 409: they have POST
 // /api/auth/logout-all, which keeps the browser they are using signed
 // in. 404 for no such account; 400 for a reason over
-// MaxSessionEndReason bytes, or holding a control or format character.
+// MaxSessionEndReason characters, or holding a control or format character.
 // The body is optional.
 //
 // Once the response is written, Config.Notify, if set, is asked to tell
@@ -70,7 +74,7 @@ func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validSessionEndReason(req.Reason) {
-		http.Error(w, fmt.Sprintf("the reason must be at most %d bytes of plain text", MaxSessionEndReason), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("the reason must be at most %d characters of plain text", MaxSessionEndReason), http.StatusBadRequest)
 		return
 	}
 	caller := UserFromContext(r)

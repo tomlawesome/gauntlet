@@ -1357,11 +1357,13 @@ func TestPasskeyRegisterCeremonyEndsAtAStoreRefusal(t *testing.T) {
 	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
 		t.Errorf("the account holds %d passkeys, want 1", n)
 	}
-	// A spent cookie is refused before the body is read.
+	// The body is judged before the cookie, so a spent cookie with a
+	// malformed body is a 400 that leaves the cookie for the next
+	// request to clear.
 	resp, raw = postWithCookie(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish",
 		map[string]any{"unknown": 1}, &http.Cookie{Name: sealed.Name, Value: sealed.Value})
-	if resp.StatusCode != http.StatusUnauthorized || !cookieCleared(resp, passkeyRegisterCookieName) {
-		t.Errorf("a spent ceremony cookie with a malformed body got %d %q, want 401 and cleared before the body is read", resp.StatusCode, raw)
+	if resp.StatusCode != http.StatusBadRequest || cookieCleared(resp, passkeyRegisterCookieName) {
+		t.Errorf("a spent ceremony cookie with a malformed body got %d %q, want 400 with the cookie left alone", resp.StatusCode, raw)
 	}
 }
 
@@ -1860,6 +1862,32 @@ func TestPasskeyRegisterFinishJudgesTheBodyBeforeTheCookie(t *testing.T) {
 		&http.Cookie{Name: passkeyRegisterCookieName, Value: "garbage"})
 	if resp.StatusCode != http.StatusBadRequest || cookieCleared(resp, passkeyRegisterCookieName) {
 		t.Errorf("dead cookie + unknown body field: got %d %q cleared=%v, want 400 with the cookie left alone", resp.StatusCode, body, cookieCleared(resp, passkeyRegisterCookieName))
+	}
+}
+
+// TestPasskeyRegisterFinishBadBodyIsA400WithOrWithoutACeremony: the
+// body is judged before the ceremony cookie is even looked for, so a
+// malformed body is 400 whether the cookie is absent or live, and a
+// live cookie survives it for a corrected finish.
+func TestPasskeyRegisterFinishBadBodyIsA400WithOrWithoutACeremony(t *testing.T) {
+	_, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	bad := map[string]any{"credential": map[string]any{}, "name": "x", "extra": 1}
+
+	resp := postJSON(t, bilbo, ts.URL+passkeyRegisterFinishPath, bad)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad body with no ceremony cookie got %d, want 400", resp.StatusCode)
+	}
+
+	passkeyRegisterBegin(t, bilbo, ts)
+	resp = postJSON(t, bilbo, ts.URL+passkeyRegisterFinishPath, bad)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad body with a live ceremony cookie got %d, want 400", resp.StatusCode)
+	}
+	if cookieCleared(resp, passkeyRegisterCookieName) || !jarHolds(t, bilbo, ts, passkeyRegisterFinishPath, passkeyRegisterCookieName) {
+		t.Error("a bad body cleared the live ceremony cookie")
 	}
 }
 
