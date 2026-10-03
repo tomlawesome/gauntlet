@@ -127,7 +127,6 @@ func TestPwnedAnswers(t *testing.T) {
 		"miss":               {rangeBody(), false},
 		"padding is no hit":  {rangeBody(suffix + ":0"), false},
 		"trailing line feed": {rangeBody(suffix+":7") + "\r\n", true},
-		"empty range":        {"", false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -165,6 +164,8 @@ func TestPwnedFailsRatherThanGuesses(t *testing.T) {
 		"too large":       {strings.Repeat(rangeBody()+"\r\n", maxRangeBody/len(rangeBody())+2), 0},
 		"one huge line":   {strings.Repeat("A", 100<<10), 0},
 		"cut short":       {cutShort, 0},
+		"empty body":      {"", 0},
+		"blank lines":     {"\r\n\r\n", 0},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
