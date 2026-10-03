@@ -18,7 +18,48 @@
 #   a floor added here as a reviewed change, not slip in unmeasured.
 #
 # Measured 2026-09-26 from `go test ./... -race -coverprofile=...` on
-# this checkout: persist at 90.9%.
+# this checkout: persist at 90.9%. Re-measured on G2 (issue #3): the
+# root `gauntlet` package (accounts, passwords, roles, username
+# validation, ids) at 91.2%. That package's key here is the empty
+# string, quoted: the coverage profile's package key is the directory
+# holding each source file relative to the module root, and the root
+# package's files (store.go, etc.) have no directory component --
+# os.path.dirname("store.go") is "", not ".". coverage-floor.py strips
+# a double-quoted key the same way real YAML would. G5 (issue #6): oidc at
+# 86.98%; internal/testutil at 0.0% -- the fake OIDC provider, exercised
+# through oidc's own tests but carrying none of its own, the "known debt
+# ... packages with no test files" case this script already expects.
+# Re-measured on G3 (issue #4), which adds sessions, tokens and the login
+# limiter to the root package: still 91.8%, rounding down to the same
+# 91 floor. internal/evict is new in G3, at 100.0%.
+# Re-measured on G4 (issue #5, second-factor data and stdlib flows): the
+# root package at 95.4%; 95.0% once merged with G3, still at the 95 floor.
+# G6 stage 1 (issue #7): gate is new, at 91.2%.
+# internal/hashcost is new with #24, at 75.0%: the one statement no
+# test can reach is its refusal outside a test binary.
+# G8 (issue #20): passkey is new, at 39.9% from its relying-party and
+# sealing tests alone, then 90.8% once its ceremony tests could drive
+# the fake authenticator; internal/passkeytest (that fake) is new at
+# 91.6%. What neither reaches is a failing crypto/rand or JSON encoder.
+# gate re-measured with the passkey routes and their tests: 92.0%.
+# internal/spent (the one-time-key set, #20 R2) is new at 100.0%.
+# passkey re-measured once its spent set moved to internal/spent and
+# its credential conversion got a round-trip test: 92.8%.
+# #52: blocklist is new at 95.5%, internal/listsig at 97.8% and
+# cmd/pwlist at 90.7%. What they leave uncovered is mostly a failing
+# disk or JSON encoder, and pwlist's main() itself.
 
 floors:
   persist: 90
+  "": 95 # the root `gauntlet` package -- see the note above on the empty key
+  oidc: 86
+  internal/testutil: 0
+  internal/evict: 100
+  gate: 92
+  internal/hashcost: 75
+  passkey: 92
+  internal/passkeytest: 91
+  internal/spent: 100
+  blocklist: 95
+  internal/listsig: 97
+  cmd/pwlist: 90

@@ -2,18 +2,57 @@
 # file is the CI that gates every merge request and every push to the
 # default branch, `dev`. Modelled on birdcage's `.gitlab-ci.yml`, but far
 # smaller: gauntlet ships a tag, not an image, so there is no build,
-# release, image or live-stack e2e stage here -- see docs/testing.md.
+# image or live-stack e2e stage here -- see docs/testing.md. The
+# `release` stage is a button on a green `dev` pipeline that creates the
+# annotated `v<VERSION>` tag and its GitLab release (docs/releasing.md).
+#
+# GitHub `tomlawesome/gauntlet` is a read-only public mirror (#17, owner
+# 2026-09-29): the `sync` stage pushes `dev`, `preview`, `main` and `v*`
+# tags there, so apps can `go get` a tag by the module path. It reads
+# MIRROR_TO_GITHUB and GITHUB_MIRROR_SSH_KEY, protected project CI/CD
+# variables only the owner sets; nothing here sets them, and without them
+# the job never runs.
 #
 # Runner lane (ai/agent-infra#3): `light` is 4 CPU / 6 GB, which is ample
-# for a dependency-free Go module. `big` is not needed here.
+# for a dependency-free Go module. `big` is not needed here. The two
+# exceptions are the common-password list's blocklist:sign, on the
+# `gauntlet-signing` runner that holds the signing key, and
+# blocklist:publish, on the `gauntlet-publish` runner that holds the
+# GitHub release token (#52, ADR-0005).
 
 stages:
   - lint
   - test
+  - blocklist
+  - release
+  - sync
 
 default:
   tags: [light]
   interruptible: true
+  # Every job starts in a fresh container, and five of the six build a
+  # pinned tool from source on top of fetching the module graph. Both
+  # caches live under the project dir (GOMODCACHE/GOCACHE below) so one
+  # cache entry carries them between pipelines; the key turns over when
+  # a dependency or a tool version changes.
+  # Each job gets its own entry (CI_JOB_NAME_SLUG in the prefix). The
+  # lint jobs run at the same time and each builds a different tool, so
+  # with one shared entry the last job to finish overwrote the others'
+  # work and the cache took several pipelines to settle after every key
+  # change (refs #24). Per job, each entry holds exactly what that job
+  # builds and is warm from the next pipeline on.
+  # Protected refs get their own cache. A merge-request pipeline can
+  # write anything into .gocache/, and a push pipeline on dev carries
+  # the protected variables in every job's environment, so the two must
+  # never share a cache entry.
+  cache:
+    key:
+      prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+      files:
+        - go.sum
+        - .gitlab-ci.yml
+    paths:
+      - .gocache/
   # Infra-only retry: a job that fails because the runner died or hung
   # gets one automatic second try; a job that fails because the code is
   # wrong does not, and never silently passes on a retry.
@@ -27,12 +66,18 @@ default:
 
 variables:
   GOFLAGS: "-mod=readonly"
+  GOMODCACHE: $CI_PROJECT_DIR/.gocache/mod
+  GOCACHE: $CI_PROJECT_DIR/.gocache/build
   # Same image, same tag, as birdcage's GOLANG_IMAGE -- routed through the
   # group's dependency proxy the same way, so this pull is cached on the
   # GitLab server rather than re-crossing the WAN on every job (refs
-  # ai/birdcage#128).
-  GOLANG_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/golang:1.27
-  ALPINE_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/alpine:3.24
+  # ai/birdcage#128). Pinned by digest as release:gitlab's image is: the
+  # same image runs blocklist:sign and blocklist:publish beside the
+  # signing key and the GitHub token, and a tag alone follows whatever
+  # the registry serves for it. Move the digest with the tag when
+  # bumping Go (docker buildx imagetools inspect golang:<tag>).
+  GOLANG_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/golang:1.27@sha256:e0174e51e81218523251d85d248a90d24c3d5e81543b4f07a5d66229397db190
+  ALPINE_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Avoids the duplicate branch+MR pipeline birdcage's own `.gate` anchor
 # avoids: a merge request always gets a pipeline, and so does a push to
@@ -89,6 +134,22 @@ lint:vulncheck:
     - go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
     - govulncheck ./...
 
+# The exported Go API against the last release tag (ADR-0002, #22):
+# fails on a removed or renamed identifier, passes on additions. apidiff
+# runs through `go run` at a pinned pseudo-version inside the script, so
+# it never enters go.mod; scripts/apidiff.sh runs the same check locally.
+# Full history and the tags are fetched so the base tag is there to diff.
+lint:apidiff:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - git fetch --tags --force --quiet origin
+    - scripts/apidiff.sh
+
 # gitleaks is a Go module, so it installs the same way golangci-lint and
 # govulncheck do above -- no separate image or Docker Hub pull needed.
 # `--redact` keeps a matched secret's own bytes out of the job log even
@@ -112,8 +173,43 @@ test:go:
   image: $GOLANG_IMAGE
   <<: [*gate, *git_safe]
   timeout: 15m
+  # Run the suite as a NON-ROOT user, as birdcage#93 does. persist's
+  # permission tests (unreadable or unwritable store files) skip
+  # themselves as uid 0 -- correctly, because root ignores the mode bits
+  # they set -- and this image runs as root, so until 2026-09-30 those
+  # error paths ran only on workstations and CI read persist 2.3 points
+  # below the local figure, under its floor (refs #16).
+  #
+  # The shared cache is handed to tester rather than moved, so the job
+  # keeps it; tester writes the profile to its own directory, and root
+  # copies it back for the artifact.
+  #
+  # The copy sits in the same script item as `go test` and runs whatever
+  # the tests returned: a later item never runs once one fails, and
+  # `artifacts.when: always` cannot upload a coverage.out that was never
+  # copied out (refs #24). `|| rc=$?` keeps a failure from ending the
+  # shell under `set -e` before the copy; the item then fails with the
+  # tests' own exit code. It must not `exit 0` on success -- all items
+  # share one shell, so that would skip the coverage lines below.
   script:
-    - go test ./... -race -coverprofile=coverage.out
+    - |
+      set -eu
+      useradd --create-home --uid 1001 tester
+      mkdir -p .gocache
+      chown -R tester:tester .gocache
+      install -d -o tester -g tester /tmp/gotest
+    - |
+      rc=0
+      su tester -c "cd '$CI_PROJECT_DIR' && \
+        HOME=/home/tester \
+        GOCACHE='$GOCACHE' \
+        GOMODCACHE='$GOMODCACHE' \
+        GOFLAGS='$GOFLAGS' \
+        go test ./... -race -coverprofile=/tmp/gotest/coverage.out" || rc=$?
+      if [ -f /tmp/gotest/coverage.out ]; then
+        cp /tmp/gotest/coverage.out coverage.out
+      fi
+      [ "$rc" -eq 0 ] || exit "$rc"
     - go tool cover -func=coverage.out | tail -1
     - python3 scripts/coverage-floor.py coverage.out
   coverage: '/total:\s+\(statements\)\s+([\d.]+)%/'
@@ -122,3 +218,321 @@ test:go:
     when: always
     paths:
       - coverage.out
+
+# The OpenAPI contract tests (ADR-0002) live in their own Go module,
+# gate/contracttest, so their validator, kin-openapi, stays out of the
+# library's go.mod and out of every app that imports gauntlet (#30).
+# Commands run from the repository root never enter a nested module, so
+# none of the jobs above reach it; this one vets, lints and runs it. The
+# coverage floor, apidiff and the licence check are about the library
+# itself and do not look here.
+test:contract:
+  stage: test
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 15m
+  cache:
+    key:
+      prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+      files:
+        - gate/contracttest/go.sum
+        - .gitlab-ci.yml
+    paths:
+      - .gocache/
+  script:
+    - cd gate/contracttest
+    - go vet ./...
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+    - golangci-lint run ./...
+    - go test ./... -race
+
+# ---------------------------------------------------------------------------
+# BLOCKLIST
+# ---------------------------------------------------------------------------
+# The common-password list (#52, ADR-0005): the SHA-1 hashes of the
+# 10,000 most prevalent Pwned Passwords, rebuilt from HIBP's range API,
+# signed, and published -- first to this project's generic package
+# registry, then, because this project is private, to releases on the
+# public GitHub mirror, which is where blocklist.Refresher and
+# scripts/update-blocklist.sh fetch it (owner, 2026-10-02).
+#
+# These jobs run only in the pipeline the `blocklist` pipeline schedule
+# starts: a monthly schedule on `dev` (owner, 2026-10-02) carrying the
+# variable BLOCKLIST_BUILD=true. Every other job above is `.gate`d off
+# for schedules, and the release and sync jobs need a push, so that
+# pipeline holds these three and nothing else.
+#
+# Three jobs on three runners, so no one job or runner holds two of:
+# the network path to HIBP, the signing key, the publishing
+# credentials. build talks to HIBP and holds nothing; sign holds the key
+# and talks to nobody; publish holds the job token and the GitHub token
+# and checks the signature against the committed keys before uploading.
+#
+# The sample path: a pipeline run by hand from any branch with
+# BLOCKLIST_SAMPLE=true runs blocklist:build alone over the first 2,048
+# prefixes (about 2 MB from HIBP instead of 20-40 GB). Its output is
+# marked `# sample:`, which `pwlist sign`, `pwlist verify` and every
+# Refresher refuse, and sign and publish never run for it.
+.blocklist_full: &blocklist_full
+  rules:
+    - if: $BLOCKLIST_SAMPLE == "true"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $BLOCKLIST_BUILD == "true" && $CI_COMMIT_REF_PROTECTED == "true"
+
+blocklist:build:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  <<: *git_safe
+  needs: []
+  # A four-hour run must not be cancelled by an unrelated merge to dev.
+  interruptible: false
+  # About a million requests, 32 at a time; HIBP's CDN answers most
+  # from cache. The checkpoint lets a retried job pick up after the
+  # last finished chunk instead of starting again.
+  timeout: 4h
+  rules:
+    - if: $BLOCKLIST_SAMPLE == "true"
+      variables:
+        PWLIST_PREFIXES: "2048"
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $BLOCKLIST_BUILD == "true" && $CI_COMMIT_REF_PROTECTED == "true"
+      variables:
+        PWLIST_PREFIXES: "1048576"
+  # The usual Go cache, plus the run's checkpoint. The checkpoint's key
+  # carries the pipeline id, so a retry of this job resumes but the next
+  # scheduled run starts clean: nothing from HIBP is kept between runs.
+  cache:
+    - key:
+        prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+        files:
+          - go.sum
+          - .gitlab-ci.yml
+      paths:
+        - .gocache/
+    - key: blocklist-checkpoint-$CI_PIPELINE_ID
+      paths:
+        - .blocklist/
+      when: always
+  script:
+    - go build -trimpath -ldflags "-X main.version=$(tr -d '[:space:]' < VERSION)" -o pwlist ./cmd/pwlist
+    - mkdir -p .blocklist out
+    - ./pwlist build --prefixes "$PWLIST_PREFIXES" --checkpoint .blocklist/checkpoint.json --out out/top10k.txt
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - out/top10k.txt
+      - out/top10k.txt.sha256
+
+# Runs on the `gauntlet-signing` runner only: protected, locked to this
+# project, with /etc/gauntlet-signing mounted read-only (docs/releasing.md,
+# "The common-password list"). It builds pwlist from this commit's
+# source rather than taking a binary from the build job, so nothing made
+# on the shared lane ever runs next to the key. `sign` refuses a list
+# whose checksum does not match or that does not parse; the verify after
+# it fails the job if the key that signed is not one of the committed
+# blocklist/keys/*.pub.
+blocklist:sign:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  tags: [gauntlet-signing]
+  interruptible: false
+  timeout: 5m
+  <<: [*blocklist_full, *git_safe]
+  needs:
+    - job: blocklist:build
+      artifacts: true
+  cache: []
+  script:
+    - test -d /etc/gauntlet-signing || { echo "/etc/gauntlet-signing is not mounted -- is this the gauntlet-signing runner?"; exit 1; }
+    - go build -trimpath -o pwlist ./cmd/pwlist
+    - ./pwlist sign --keys /etc/gauntlet-signing --in out/top10k.txt
+    - ./pwlist verify --keys blocklist/keys --in out/top10k.txt
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - out/top10k.txt
+      - out/top10k.txt.sha256
+      - out/top10k.txt.sig
+
+# Uploads the signed list to the GitLab package registry, then copies
+# the same files to the GitHub mirror's releases. Each host gets it
+# twice: under a version named for its build date, which is never
+# written again, and under `current`, which is replaced. GitHub's
+# `pwned-top10k-current` release is what blocklist.DefaultURL reads.
+# Within each version the checksum goes last: a Refresher fetches the
+# checksum first and stops if it is unchanged, so it never pairs the
+# new list with the old checksum.
+#
+# It runs on the `gauntlet-publish` runner -- protected, locked to this
+# project -- because that runner mounts the GitHub token file read-only;
+# the shared `light` lane must never see it. The token is never a CI
+# variable: GAUNTLET_GITHUB_RELEASE_TOKEN_FILE holds only the path of
+# the mounted file. The GitLab job token is written to a 0600 header
+# file by a shell builtin rather than passed on curl's command line,
+# where the process list would show it; the GitHub token is read from
+# its file by pwlist itself and sent only as a header.
+blocklist:publish:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  tags: [gauntlet-publish]
+  interruptible: false
+  timeout: 10m
+  <<: [*blocklist_full, *git_safe]
+  needs:
+    - job: blocklist:sign
+      artifacts: true
+  cache: []
+  script:
+    - test -n "${GAUNTLET_GITHUB_RELEASE_TOKEN_FILE:-}" || { echo "GAUNTLET_GITHUB_RELEASE_TOKEN_FILE is not set -- the gauntlet-publish runner's [[runners]] entry needs its environment line, above its first [runners.*] heading (docs/releasing.md step 4)"; exit 1; }
+    - test -r "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" || { echo "cannot read $GAUNTLET_GITHUB_RELEASE_TOKEN_FILE -- check the runner's volume mount, the file's owner, and that the runner user's Docker was restarted after the directory was created (docs/releasing.md steps 3-4)"; exit 1; }
+    - go build -trimpath -ldflags "-X main.version=$(tr -d '[:space:]' < VERSION)" -o pwlist ./cmd/pwlist
+    - ./pwlist verify --keys blocklist/keys --in out/top10k.txt
+    - |
+      set -eu
+      built="$(sed -n 's/^# built: //p' out/top10k.txt | head -n 1)"
+      dated="$(printf '%s' "$built" | cut -c1-10 | tr - .)"
+      case "$dated" in
+        [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
+        *) echo "cannot read the build date from out/top10k.txt: '$built'"; exit 1 ;;
+      esac
+      headers="$(mktemp)"
+      chmod 600 "$headers"
+      printf 'JOB-TOKEN: %s\n' "$CI_JOB_TOKEN" > "$headers"
+      base="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/pwned-top10k"
+      for version in "$dated" current; do
+        for f in top10k.txt top10k.txt.sig top10k.txt.sha256; do
+          echo "uploading $version/$f to the GitLab package registry"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            --header "@$headers" --upload-file "out/$f" "$base/$version/$f"
+          echo
+        done
+      done
+      rm -f "$headers"
+      ./pwlist publish-github --repo tomlawesome/gauntlet \
+        --token-file "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" \
+        --in out/top10k.txt \
+        --dated-tag "pwned-top10k-$dated" --current-tag pwned-top10k-current
+      echo "published the list built $built as $dated and current, on GitLab and GitHub"
+
+# ---------------------------------------------------------------------------
+# RELEASE
+# ---------------------------------------------------------------------------
+# Birdcage's release:promote / release:gitlab pair, cut down: there are no
+# images, so the whole cut is "tag this commit". release:version is the
+# button; it reads the tracked VERSION file and refuses a tag that already
+# exists, so a forgotten bump fails closed. release:gitlab then creates
+# the annotated tag and the release. release-cli acts with the rights of
+# whoever pressed the button, and `v*` tags are protected, so only the
+# owner can actually cut one (#17). The tag's own pipeline runs the sync
+# job below, which carries the tag object to the GitHub mirror.
+#
+# release:version also rejects a VERSION that isn't a strict semantic
+# version, one that doesn't sort above every tag already cut, and a
+# commit that isn't the current tip of dev -- an old pipeline's button
+# must not tag a commit dev has moved past (refs #26). The checks are in
+# scripts/release-version-check.sh so they can be tested offline.
+release:version:
+  stage: release
+  image: $ALPINE_IMAGE
+  interruptible: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
+      when: manual
+      # A manual job is allow_failure by default; forcing it false would
+      # leave every dev pipeline reading "blocked" for a release nobody
+      # intends to cut yet. A human is watching the job they pressed.
+      allow_failure: true
+  # No `needs:` on purpose: without one the button is not playable until
+  # every job in every earlier stage has passed, which is the bar.
+  cache: []
+  script:
+    - apk add --no-cache git bash >/dev/null  # release-version-check.sh is bash (#56)
+    # The release carries the common-password list, so refuse to tag
+    # while it is the placeholder or more than 90 days old (#52).
+    - scripts/blocklist-age-check.sh
+    - |
+      set -eu
+      version="$(tr -d '[:space:]' < VERSION)"
+      remote_tags="$(git ls-remote --tags origin)"
+      dev_sha="$(git ls-remote origin refs/heads/dev | cut -f1)"
+      scripts/release-version-check.sh "$version" "$remote_tags" "$dev_sha" "$CI_COMMIT_SHA" > release.env
+      cat release.env
+  artifacts:
+    reports:
+      dotenv: release.env
+    expire_in: 90 days
+
+release:gitlab:
+  stage: release
+  # Pinned by tag and digest, not :latest, because this job creates the
+  # protected tag. v0.24.0 is release-cli's newest release (checked
+  # 2026-10-02). It cannot go through the dependency proxy like the
+  # images above: the proxy only mirrors Docker Hub, and release-cli is
+  # published only on GitLab's own registry.
+  image: registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
+  interruptible: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
+  needs:
+    - job: release:version
+      artifacts: true
+  cache: []
+  script:
+    - echo "tagging $CI_COMMIT_SHA as $RELEASE_TAG"
+  release:
+    tag_name: $RELEASE_TAG
+    tag_message: gauntlet $RELEASE_TAG
+    ref: $CI_COMMIT_SHA
+    name: $RELEASE_TAG
+    description: |
+      gauntlet $RELEASE_TAG -- see CHANGELOG.md for what changed.
+
+      Apps take it with `go get github.com/tomlawesome/gauntlet@$RELEASE_TAG`
+      (the GitHub mirror carries the tag) or by the GitLab path.
+
+# ---------------------------------------------------------------------------
+# SYNC
+# ---------------------------------------------------------------------------
+# Copied from birdcage's sync:mirror-to-github. Its own rules, not `.gate`:
+# it fires only on a push pipeline -- a merge landing on one of the three
+# long-lived branches, or a release tag -- and only once the owner has set
+# MIRROR_TO_GITHUB. The variables are protected, so they reach a pipeline
+# only on a protected branch or tag; `v*` tags have to be protected for a
+# release to reach GitHub (#17). GitLab is the only writer: nothing is ever
+# fetched back from GitHub.
+sync:mirror-to-github:
+  stage: sync
+  image: $ALPINE_IMAGE
+  needs: []
+  interruptible: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $MIRROR_TO_GITHUB == "true" && ($CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "preview" || $CI_COMMIT_BRANCH == "main")'
+      variables:
+        MIRROR_REF: refs/heads/$CI_COMMIT_BRANCH
+    - if: '$CI_PIPELINE_SOURCE == "push" && $MIRROR_TO_GITHUB == "true" && $CI_COMMIT_TAG =~ /^v[0-9]/'
+      variables:
+        MIRROR_REF: refs/tags/$CI_COMMIT_TAG
+  variables:
+    GIT_DEPTH: 0
+  # The job only pushes; the cache holds nothing it needs.
+  cache: []
+  script:
+    - apk add --no-cache git openssh-client curl jq >/dev/null
+    - test -n "$GITHUB_MIRROR_SSH_KEY" || { echo "GITHUB_MIRROR_SSH_KEY is not set -- is ${CI_COMMIT_TAG:-$CI_COMMIT_BRANCH} protected?"; exit 1; }
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    # GitLab's variable editor trims the key's final newline and OpenSSH
+    # refuses a key without one; put it back, and prove the key loads
+    # before trying GitHub -- without printing any of it.
+    - tr -d '\r' < "$GITHUB_MIRROR_SSH_KEY" > ~/.ssh/mirror_key && chmod 600 ~/.ssh/mirror_key
+    - '[ -n "$(tail -c1 ~/.ssh/mirror_key)" ] && echo >> ~/.ssh/mirror_key || true'
+    - 'head -1 ~/.ssh/mirror_key | grep -q "PRIVATE KEY" || { echo "GITHUB_MIRROR_SSH_KEY does not begin with a PRIVATE KEY header"; exit 1; }'
+    - 'ssh-keygen -y -f ~/.ssh/mirror_key > /dev/null || { echo "GITHUB_MIRROR_SSH_KEY is not a readable private key"; exit 1; }'
+    - curl -fsS https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com \(.)"' > ~/.ssh/known_hosts
+    - test -s ~/.ssh/known_hosts
+    - export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+    - git remote add github git@github.com:tomlawesome/gauntlet.git 2>/dev/null || git remote set-url github git@github.com:tomlawesome/gauntlet.git
+    # Push the ref by name, not HEAD. The runner checks out a detached
+    # commit, and a release tag is an annotated object pointing at one:
+    # `HEAD:refs/tags/v0.1.0` would land on GitHub as a bare tag with the
+    # release note gone. Fetch the ref first so it exists locally.
+    - git fetch --no-tags origin "+$MIRROR_REF:$MIRROR_REF"
+    - git push github "$MIRROR_REF:$MIRROR_REF"

@@ -76,6 +76,14 @@ func (m *Memory) Save(ctx context.Context, payload []byte, expect int64) (int64,
 	return m.version, nil
 }
 
+// ProtectedAtRest implements AtRest: true, because Memory has no
+// storage -- nothing it holds outlives the process, so there is no
+// copy at rest to take. It is what lets a test open a gauntlet.Store
+// over Memory without the encryption an application's backend needs
+// (#50); a test backend of its own that stands in for storage says the
+// same for the same reason.
+func (m *Memory) ProtectedAtRest() bool { return true }
+
 // Version implements VersionReader. For Memory this costs nothing more
 // than Load, but it exists so callers written against the interface
 // exercise the same code path they use against a backend where it does.
