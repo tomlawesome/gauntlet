@@ -1347,7 +1347,7 @@ paths:
         account's sessions or none: there is no admin route to end one
         session, or to list another account's sessions (#53).
 
-        The body is optional. `reason` is at most 200 bytes of plain text
+        The body is optional. `reason` is at most 200 characters of plain text
         (no control or format characters); it goes into the audit record
         and to the application's `Config.Notify`, which may mail the
         account's owner. `notified` is true when the application was
@@ -2286,7 +2286,7 @@ components:
         reason:
           type: string
           maxLength: 200
-          description: Why, for the audit and the account owner's notice. At most 200 bytes (the length shown here counts characters); control and format characters are refused with `400`.
+          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters are refused with `400`.
     AdminLogoutAllResponse:
       type: object
       additionalProperties: false
