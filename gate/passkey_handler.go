@@ -230,7 +230,7 @@ type passkeyRegisterFinishResponse struct {
 // finishes racing on one cookie only one can store; a stored passkey
 // (200), a store refusal (409 duplicate or limit, 500 on a failed save)
 // and a lost race all end it, and the cookie is cleared with the answer.
-// A cookie already spent is refused before the body is read.
+// A cookie already spent is refused once the body has been read.
 //
 // Refusals that do not end the ceremony are the library's, told apart
 // from a dead ceremony by gauntlet.ErrPasskeyCeremonyInvalid: a dead
@@ -258,6 +258,15 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 		g.writePasskeysNotReady(w)
 		return
 	}
+	// The body first, as handleLoginFactor does: a malformed one is the
+	// caller's mistake whatever the cookie holds, so it answers 400 and
+	// leaves a live ceremony alone instead of reporting it dead.
+	var req passkeyRegisterFinishRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
 	cookie, err := r.Cookie(passkeyRegisterCookieName)
 	if err != nil {
 		g.clearPasskeyRegisterCookie(w)
@@ -269,12 +278,6 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	if spentRegistrations.Spent(key, now) {
 		g.clearPasskeyRegisterCookie(w)
 		writeUnauthorized(w, "start registration again")
-		return
-	}
-
-	var req passkeyRegisterFinishRequest
-	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
