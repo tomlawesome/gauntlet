@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,10 +58,21 @@ const (
 )
 
 // File names the accepted copy is kept under, in RefreshConfig.Dir.
+// storedPair holds the list and its signature together, so one rename
+// replaces both: written as two files, a crash between the renames left
+// a signature beside a list it does not sign, and the next start threw
+// the good list away. storedList and storedSig are the older two-file
+// layout, still read when there is no storedPair, and removed once one
+// is written.
 const (
+	storedPair = "top10k.signed"
 	storedList = "top10k.txt"
 	storedSig  = "top10k.txt.sig"
 )
+
+// pairHeader starts storedPair's first line, which ends with the
+// signature's length in bytes; the signature follows, then the list.
+const pairHeader = "gauntlet-stored-list/1 "
 
 // RefreshConfig configures NewRefresher.
 type RefreshConfig struct {
@@ -71,8 +83,9 @@ type RefreshConfig struct {
 	URL string
 	// Dir is the directory the accepted list is kept in, so a restart
 	// starts from it rather than the older embedded copy. Required. It
-	// is created (0700) if missing; the files in it are written 0600,
-	// each by writing a temporary file and renaming it into place.
+	// is created (0700) if missing; the list and its signature are kept
+	// in one file, written 0600 to a temporary file and renamed into
+	// place.
 	// What is read back from it is verified again, exactly as a
 	// download is.
 	Dir string
@@ -238,17 +251,13 @@ func (r *Refresher) nextDelay() time.Duration {
 // is silent; one that does not verify is reported once and ignored --
 // the next successful refresh overwrites it.
 func (r *Refresher) loadStored() {
-	data, err := os.ReadFile(filepath.Join(r.dir, storedList))
+	data, sig, err := r.readStored()
 	if errors.Is(err, fs.ErrNotExist) {
 		return
 	}
 	var l *List
 	if err == nil {
-		var sig []byte
-		sig, err = os.ReadFile(filepath.Join(r.dir, storedSig))
-		if err == nil {
-			l, err = r.check(data, sig)
-		}
+		l, err = r.check(data, sig)
 	}
 	if err != nil {
 		r.log.Warn("blocklist: ignoring the stored common-password list; using the embedded copy until a refresh succeeds",
@@ -259,6 +268,44 @@ func (r *Refresher) loadStored() {
 		return
 	}
 	r.current.Store(l)
+}
+
+// readStored reads the kept list and signature: storedPair if it
+// exists, otherwise the older two-file layout. A list in neither layout
+// is fs.ErrNotExist.
+func (r *Refresher) readStored() (data, sig []byte, err error) {
+	b, err := os.ReadFile(filepath.Join(r.dir, storedPair))
+	if !errors.Is(err, fs.ErrNotExist) {
+		if err != nil {
+			return nil, nil, err
+		}
+		return decodePair(b)
+	}
+	if data, err = os.ReadFile(filepath.Join(r.dir, storedList)); err != nil {
+		return nil, nil, err
+	}
+	if sig, err = os.ReadFile(filepath.Join(r.dir, storedSig)); err != nil {
+		// The list is there, so a missing signature is damage, not a
+		// first start: %v, so it does not read as fs.ErrNotExist.
+		return nil, nil, fmt.Errorf("the stored signature: %v", err) //nolint:errorlint // see above
+	}
+	return data, sig, nil
+}
+
+func encodePair(data, sig []byte) []byte {
+	b := fmt.Appendf(nil, "%s%d\n", pairHeader, len(sig))
+	b = append(b, sig...)
+	return append(b, data...)
+}
+
+func decodePair(b []byte) (data, sig []byte, err error) {
+	line, rest, _ := bytes.Cut(b, []byte("\n"))
+	num, ok := bytes.CutPrefix(line, []byte(pairHeader))
+	n, err := strconv.Atoi(string(num))
+	if !ok || err != nil || n < 0 || n > len(rest) {
+		return nil, nil, errors.New("the stored list file does not start with a valid header")
+	}
+	return rest[n:], rest[:n], nil
 }
 
 // refresh runs one check, logging its failure.
@@ -397,22 +444,22 @@ func parseSum(b []byte) ([sha256.Size]byte, error) {
 	return sum, nil
 }
 
-// store keeps data and sig in Dir. Each file is written to a temporary
+// store keeps data and sig in Dir as one file, written to a temporary
 // file in the same directory, synced, and renamed over the old one, so
-// a reader -- this process after a restart -- never sees half a file.
-// The pair is not replaced as one: a crash between the two renames
-// leaves a new signature beside the old list, which fails verification
-// at the next start; that start falls back to the embedded copy and
-// its first refresh writes the pair again. The signature is renamed
-// first so that a list file is never newer than the signature for it.
+// a reader -- this process after a restart -- sees the old pair or the
+// new one, never half of either. Files in the older two-file layout
+// are then removed; storedPair is read first, so one left behind by a
+// failed removal is never used.
 func (r *Refresher) store(data, sig []byte) error {
 	if err := os.MkdirAll(r.dir, 0o700); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(r.dir, storedSig, sig); err != nil {
+	if err := writeFileAtomic(r.dir, storedPair, encodePair(data, sig)); err != nil {
 		return err
 	}
-	return writeFileAtomic(r.dir, storedList, data)
+	_ = os.Remove(filepath.Join(r.dir, storedList))
+	_ = os.Remove(filepath.Join(r.dir, storedSig))
+	return nil
 }
 
 func writeFileAtomic(dir, name string, data []byte) (err error) {

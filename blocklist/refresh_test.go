@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -185,20 +186,21 @@ func TestRefreshAdoptsAVerifiedNewerList(t *testing.T) {
 		t.Fatalf("want one Info and no Warn, log:\n%s", f.log)
 	}
 	// Kept on disk, 0600 in a 0700 directory, byte for byte.
-	for name, want := range map[string][]byte{storedList: data, storedSig: sig} {
-		p := filepath.Join(f.dir, name)
-		got, err := os.ReadFile(p)
-		if err != nil || !bytes.Equal(got, want) {
-			t.Fatalf("%s not stored as published: %v", name, err)
-		}
-		if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode %v, want 0600", name, fi.Mode().Perm())
-		}
+	p := filepath.Join(f.dir, storedPair)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotData, gotSig, err := decodePair(b); err != nil || !bytes.Equal(gotData, data) || !bytes.Equal(gotSig, sig) {
+		t.Fatalf("not stored as published: %v", err)
+	}
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+		t.Errorf("%s mode %v, want 0600", storedPair, fi.Mode().Perm())
 	}
 	if fi, _ := os.Stat(f.dir); fi.Mode().Perm() != 0o700 {
 		t.Errorf("dir mode %v, want 0700", fi.Mode().Perm())
 	}
-	if entries, _ := os.ReadDir(f.dir); len(entries) != 2 {
+	if entries, _ := os.ReadDir(f.dir); len(entries) != 1 {
 		t.Errorf("temporary files left behind: %v", entries)
 	}
 }
@@ -279,35 +281,60 @@ func TestRestartStartsFromTheStoredCopy(t *testing.T) {
 }
 
 func TestRestartIgnoresABadStoredCopy(t *testing.T) {
+	writePair := func(t *testing.T, f *fixture, b []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(f.dir, storedPair), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// oldLayout replaces the stored copy with the two-file layout.
+	oldLayout := func(t *testing.T, f *fixture, data, sig []byte) {
+		t.Helper()
+		if err := os.Remove(filepath.Join(f.dir, storedPair)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.dir, storedList), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if sig != nil {
+			if err := os.WriteFile(filepath.Join(f.dir, storedSig), sig, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	cases := map[string]func(t *testing.T, f *fixture){
 		"list altered": func(t *testing.T, f *fixture) {
-			p := filepath.Join(f.dir, storedList)
-			b, _ := os.ReadFile(p)
+			b, _ := os.ReadFile(filepath.Join(f.dir, storedPair))
 			b[len(b)-2] ^= 1
-			if err := os.WriteFile(p, b, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writePair(t, f, b)
 		},
-		"signature missing": func(t *testing.T, f *fixture) {
-			if err := os.Remove(filepath.Join(f.dir, storedSig)); err != nil {
-				t.Fatal(err)
-			}
+		"no header": func(t *testing.T, f *fixture) {
+			writePair(t, f, []byte("not a stored list"))
+		},
+		"signature length past the end": func(t *testing.T, f *fixture) {
+			writePair(t, f, fmt.Appendf(nil, "%s%d\n", pairHeader, 1<<20))
 		},
 		"signed by another key": func(t *testing.T, f *fixture) {
 			_, other := newKey(t)
-			b, _ := os.ReadFile(filepath.Join(f.dir, storedList))
-			if err := os.WriteFile(filepath.Join(f.dir, storedSig), sign(t, b, other), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			data := listFile(testBuilt, listHashes("a"))
+			writePair(t, f, encodePair(data, sign(t, data, other)))
 		},
 		"list unreadable": func(t *testing.T, f *fixture) {
-			p := filepath.Join(f.dir, storedList)
+			p := filepath.Join(f.dir, storedPair)
 			if err := os.Remove(p); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Mkdir(p, 0o700); err != nil {
 				t.Fatal(err)
 			}
+		},
+		"old layout, signature missing": func(t *testing.T, f *fixture) {
+			oldLayout(t, f, listFile(testBuilt, listHashes("a")), nil)
+		},
+		"old layout, list altered": func(t *testing.T, f *fixture) {
+			data, sig := f.signedList(t, testBuilt, "a")
+			data[len(data)-2] ^= 1
+			oldLayout(t, f, data, sig)
 		},
 	}
 	for name, damage := range cases {
@@ -328,6 +355,60 @@ func TestRestartIgnoresABadStoredCopy(t *testing.T) {
 				t.Fatalf("want one Warn, log:\n%s", f.log)
 			}
 		})
+	}
+}
+
+// A crash while a newer list is being stored leaves the previous good
+// list in use at the next start, never a list beside another list's
+// signature that fails verification. The damage below is what an
+// interrupted store can leave: the newer signature already in place
+// under the separate signature file name, and a half-written temporary
+// file.
+func TestACrashWhileStoringKeepsTheGoodList(t *testing.T) {
+	f := newFixture(t)
+	data, sig := f.signedList(t, testBuilt, "a")
+	f.reg.publish(data, sig)
+	f.refresher(t, &List{}).refresh(context.Background())
+
+	newer, newerSig := f.signedList(t, testBuilt.Add(time.Hour), "b")
+	if err := os.WriteFile(filepath.Join(f.dir, storedSig), newerSig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, ".top10k.signed.12345"), newer[:len(newer)/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f.log = &logBuf{}
+	r := f.refresher(t, &List{})
+	if !r.Current().Built().Equal(testBuilt) || r.Current().Len() != size {
+		t.Fatalf("after an interrupted store the good list was lost: Built=%v, log:\n%s", r.Current().Built(), f.log)
+	}
+}
+
+// A copy kept in the older two-file layout is still loaded, and the
+// next list adopted replaces it with the single file.
+func TestRestartReadsTheOldTwoFileLayout(t *testing.T) {
+	f := newFixture(t)
+	if err := os.MkdirAll(f.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, sig := f.signedList(t, testBuilt, "a")
+	for name, b := range map[string][]byte{storedList: data, storedSig: sig} {
+		if err := os.WriteFile(filepath.Join(f.dir, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := f.refresher(t, &List{})
+	if !r.Current().Built().Equal(testBuilt) || r.Current().Len() != size {
+		t.Fatalf("the old layout was not loaded: Built=%v, log:\n%s", r.Current().Built(), f.log)
+	}
+
+	data2, sig2 := f.signedList(t, testBuilt.Add(time.Hour), "b")
+	f.reg.publish(data2, sig2)
+	r.refresh(context.Background())
+	entries, _ := os.ReadDir(f.dir)
+	if len(entries) != 1 || entries[0].Name() != storedPair {
+		t.Fatalf("after a store Dir holds %v, want only %s", entries, storedPair)
 	}
 }
 
