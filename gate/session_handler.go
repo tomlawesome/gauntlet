@@ -31,7 +31,9 @@ type sessionResponse struct {
 	// (always on since #49), not gauntlet.User.HasSecondFactor's raw
 	// fact, so an SSO account with no local password, which the door
 	// never applies to, does not get told to enrol something nothing
-	// is checking for.
+	// is checking for. It is also false while MustChangePassword holds,
+	// since Protect's enrol routes answer 403 until the password is
+	// changed (protect.go's !user.MustChangePassword guard).
 	MustEnrolSecondFactor bool `json:"mustEnrolSecondFactor"`
 	// HasTOTP reports gauntlet.User.HasActiveTOTP: a confirmed
 	// authenticator-app factor, not a pending enrolment.
@@ -73,7 +75,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp.HasLocalPassword = user.LocalPassword()
 		resp.SSOConnected = user.OIDCSubject != ""
 		resp.MustChangePassword = user.MustChangePassword
-		resp.MustEnrolSecondFactor = user.LocalPassword() && !user.HasSecondFactor()
+		resp.MustEnrolSecondFactor = !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor()
 		resp.HasTOTP = user.HasActiveTOTP()
 		if g.deps.Passkeys != nil {
 			resp.Passkeys = &sessionPasskeysInfo{
