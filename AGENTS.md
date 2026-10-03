@@ -5,26 +5,49 @@ delivery and credential rules live there).
 
 ## What this is
 
-A shared Go library: local accounts, sessions, tokens, OIDC and the HTTP
-auth middleware birdcage and (later) mikroview both need, so a security
-fix lands once instead of being copied between the two. See
-[docs/design.md](docs/design.md) and
+A shared Go library: local accounts, sessions, tokens, OIDC, the passkey
+(WebAuthn) ceremony and the HTTP auth middleware birdcage and (later)
+mikroview both need, so a security fix lands once instead of being
+copied between the two. See [docs/design.md](docs/design.md) and
 [docs/adr/0001-shared-auth-module.md](docs/adr/0001-shared-auth-module.md).
 
-**Belongs in the apps, not here:** any concrete storage backend (a file,
-a database table -- each app supplies its own `persist.Backend`), the
-WebAuthn ceremony (`passkey/`, deferred to G8), and anything that reaches
-back into birdcage's or mikroview's own types.
+`passkey/` (G8, [ADR-0004](docs/adr/0004-passkey-ceremony.md)) is a leaf:
+no non-test file in `gate` or the root package may import it or
+go-webauthn, so an app that never imports it never links the library.
+`go list -deps ./gate | grep -i webauthn` must print nothing.
+
+**Belongs in the apps, not here:** a database-table backend (each app
+supplies its own `persist.Backend`), the public URL a relying party is
+built from, and anything that reaches back into birdcage's or
+mikroview's own types. Encryption at rest is the one exception:
+`persist.Encrypt` seals the document before any app backend stores it,
+and the encrypted file backend (`persist.EncryptedFileBackend`) is that
+wrapper over a file (#18, #50, ADR-0005); finding and reading the key
+file stays with the app.
 
 **Mikroview's auth code is the reference this module is read against**,
 continuously, until mikroview actually moves onto it (birdcage ADR-0005
 decision 3, mikroview #1202) -- not a one-time source to copy from.
+Read it from mikroview's GitLab `dev` (`git -C ~/projects/mikroview show
+gitlab/dev:<path>`), never the GitHub `origin/dev`: mikroview is
+GitLab-first and the mirror lags by days (owner, 2026-09-27).
 
 ## Delivery host
 
 GitLab-first: `gitlab.tomlawson.io/ai/gauntlet` (project id 56), default
-branch `dev`. A GitHub mirror is created only once v0.1.0 tags (owner,
-2026-09-26) -- no mirror, no GitHub issues or pull requests before that.
+branch `dev`. The public GitHub mirror, `github.com/tomlawesome/gauntlet`,
+is created at v0.1.0 so birdcage can `go get` the tag by its module path
+(#17, owner 2026-09-29, replacing 2026-09-27's "mirror at v0.2.0"). GitHub
+is the mirror only: no GitHub issues or pull requests.
+
+## Runner tags
+
+Every job runs on the shared `light` lane except the common-password
+list's two (#52, ADR-0007): `blocklist:sign` on `gauntlet-signing`
+(signing key at `/etc/gauntlet-signing/`) and `blocklist:publish` on
+`gauntlet-publish` (GitHub release token at `/etc/gauntlet-github/`).
+Both are protected, locked to this project, and set up by the owner
+(docs/releasing.md); no other job may use those tags.
 
 ## Closing issues from commits
 
@@ -38,17 +61,23 @@ an issue.
 
 None in G1-G4. `golang.org/x/crypto/argon2`, `github.com/coreos/go-oidc/v3`
 and `golang.org/x/oauth2` are approved for G2/G5 (birdcage #8,
-owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. `go-webauthn`
-is not approved; it waits for G8. Anything else goes to the owner first.
+owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. For v0.2.0
+(owner 2026-09-30): `golang.org/x/exp/cmd/apidiff` in CI only and
+`github.com/getkin/kin-openapi` v0.149.0 (MIT) in tests only, both for
+#22 and ADR-0002; `github.com/go-webauthn/webauthn` v0.18.2 in `passkey/`
+for G8 (#20), and in its test fake (`internal/passkeytest`) and the
+contract module. Anything else goes to the owner first.
 
 ## Checks
 
 ```
+gofmt -l .                     # must print nothing
 go build ./... && go vet ./... && go test ./... -race -coverprofile=coverage.out
 python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
 scripts/licence-check.sh
-govulncheck ./...
+scripts/apidiff.sh             # exported API vs the last v* tag
+GOTOOLCHAIN=go1.27.0 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # CI's version, this module's Go
 gitleaks detect --no-banner
 python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"
 ```

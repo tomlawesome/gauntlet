@@ -9,9 +9,10 @@ contributors.
 
 ## Branching
 
-Branch from and target `dev` for issue work. `dev` is the default branch;
-there is no `preview`/`main` promotion pipeline here -- a tagged release
-is the promotion, not a protected branch.
+Branch from `dev` and send merge requests to `dev`, the default branch.
+Nothing is promoted through `preview` or `main` here, as it is in other
+projects. A release is a version tag, created by a button in the `dev`
+pipeline; see [docs/releasing.md](docs/releasing.md).
 
 ## Before starting work
 
@@ -25,9 +26,11 @@ description or a commit message.
   observable behavior over internal implementation details.
 - A bug fix should include a regression test reproducing the bug where
   practical.
-- Where gauntlet's code is copied from mikroview's, the port carries
-  mikroview's own tests across with it rather than being re-tested from
-  scratch. See [docs/testing.md](docs/testing.md).
+- Where gauntlet's code is copied from mikroview (the application
+  gauntlet's auth code was factored out of; see [the
+  README](README.md)), the port carries mikroview's own tests across
+  with it. It is not re-tested from scratch. See
+  [docs/testing.md](docs/testing.md).
 
 ## Secrets
 

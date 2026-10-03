@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "nextSeq": 8,
+  "rows": [
+    {"seq": 3, "at": "2026-10-02T09:00:00Z", "until": "2026-10-02T09:00:00Z", "count": 1, "userId": "7d2e9b10", "username": "admin", "outcome": "success", "method": "code", "address": "2001:db8::1", "userAgent": "Mozilla/5.0"},
+    {"seq": 5, "at": "2026-10-02T09:10:00Z", "until": "2026-10-02T09:14:00Z", "count": 5, "userId": "1f0c6a3e", "username": "bob", "outcome": "wrong_password", "method": "password", "address": "198.51.100.4", "userAgent": "Mozilla/5.0 (X11; Linux x86_64)", "lockedUntil": "2026-10-02T09:29:00Z"},
+    {"seq": 6, "at": "2026-10-02T09:20:00Z", "until": "2026-10-02T09:20:00Z", "count": 1, "username": "Hu••••••••", "outcome": "no_such_user", "method": "password", "address": "203.0.113.9"},
+    {"seq": 7, "at": "2026-10-02T09:30:00Z", "until": "2026-10-02T09:35:00Z", "count": 412, "outcome": "unrecorded"}
+  ]
+}

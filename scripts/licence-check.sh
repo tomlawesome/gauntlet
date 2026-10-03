@@ -39,7 +39,11 @@ fi
 
 echo "licence-check: allowed licences: $ALLOWED_LICENSES"
 
-go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
+# `go install pkg@version` ignores this module's go.mod, so on a host whose
+# default Go is older than the module's it builds go-licenses with the old
+# toolchain, which then cannot classify the newer standard library and
+# fails. Build it with the toolchain this module selects instead.
+GOTOOLCHAIN="$(go env GOVERSION)" go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
 
 # --ignore excludes only gauntlet's own module path from the check it
 # runs against dependencies; it does not add gauntlet's own licence
