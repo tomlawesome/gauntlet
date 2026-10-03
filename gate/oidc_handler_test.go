@@ -1024,3 +1024,14 @@ func TestOIDCCallbackFailureLogIsRated(t *testing.T) {
 		t.Errorf("got %d warnings for three identical failures, want one: %q", len(logs.msgs), logs.msgs)
 	}
 }
+
+// The OIDC flow cookie must reach both OIDC routes; the routes stay
+// string literals for the contract tests, so this keeps them from
+// drifting out from under the cookie's Path (#58).
+func TestOIDCFlowCookiePathCoversItsRoutes(t *testing.T) {
+	for _, route := range []string{oidcLoginPath, oidcCallbackPath} {
+		if !strings.HasPrefix(route, oidcFlowCookiePath+"/") {
+			t.Errorf("route %q is not under the OIDC flow cookie's Path %q", route, oidcFlowCookiePath)
+		}
+	}
+}
