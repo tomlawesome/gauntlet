@@ -1027,8 +1027,9 @@ paths:
         `?ssoError=` and one of `state_mismatch`, `provider_error`,
         `verification_failed`, `not_permitted`, `login_failed`,
         `link_session_changed`, `link_identity_taken`, `link_failed`. The
-        flow cookie is cleared on every path. The first account created
-        through SSO while none exists becomes the admin.
+        flow cookie is cleared on every path. While no account exists
+        yet this route answers 503 like every other route except
+        session and register: the first account is never an SSO one.
       security:
         - oidcFlowCookie: []
       parameters:
