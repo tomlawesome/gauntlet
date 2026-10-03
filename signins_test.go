@@ -620,6 +620,38 @@ func TestSignInHistoryRemovedDocumentLogsOnceAndKeepsMemory(t *testing.T) {
 	}
 }
 
+// TestSignInHistoryReadNoticesANullDocumentWithoutASave pins
+// gauntlet#58 (fix review FR3): save never runs while nothing is
+// dirty, so a document replaced with the JSON literal null while no
+// one is signing in used to go unnoticed until the next sign-in's
+// save finally looked. List and Summary now check for themselves.
+func TestSignInHistoryReadNoticesANullDocumentWithoutASave(t *testing.T) {
+	m := persist.NewMemory()
+	logs := &signInLogRecorder{}
+	h := openTestHistory(t, m, SignInHistoryOptions{Log: slog.New(logs)})
+	h.Record(successFrom("u1", "bob", "192.0.2.1"), signInBase)
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Save(context.Background(), []byte("null"), snap.Version); err != nil {
+		t.Fatal(err)
+	}
+
+	h.List(SignInQuery{})
+	total, _ := h.Summary()
+	if total != 1 {
+		t.Errorf("Summary total = %d, want the in-memory row kept (1) -- nothing should be overwritten", total)
+	}
+	if n := logs.count("null"); n != 1 {
+		t.Errorf("messages mentioning null = %d, want exactly 1 logging the replacement without any sign-in or save", n)
+	}
+}
+
 // signInLogRecorder keeps every message logged.
 type signInLogRecorder struct {
 	mu   sync.Mutex

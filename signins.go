@@ -274,6 +274,12 @@ type SignInHistory struct {
 	overflowAt   time.Time // the bucket overflowSeq's row stands for
 	overflowSeq  uint64
 	failLogged   bool
+	// lastCheckedVersion is the backend version checkIfStale last read
+	// and decoded, so a List or Summary call does not re-Load and
+	// re-decode the same not-yet-saved version on every read while
+	// nothing is dirty -- distinct from version, which only save's own
+	// replay ever advances.
+	lastCheckedVersion int64
 
 	// saveSem lets one save run at a time, the writer's or Flush's.
 	saveSem   chan struct{}
@@ -493,6 +499,7 @@ func (h *SignInHistory) wake() {
 // List returns the rows q selects, newest first, and whether more
 // matching rows lie beyond the page.
 func (h *SignInHistory) List(q SignInQuery) (rows []SignInRow, more bool) {
+	h.checkIfStale()
 	limit := q.Limit
 	if limit <= 0 {
 		limit = DefaultSignInListLimit
@@ -522,6 +529,7 @@ func (h *SignInHistory) List(q SignInQuery) (rows []SignInRow, more bool) {
 // began: how full it is, and how far back it goes. since is zero when
 // it holds none.
 func (h *SignInHistory) Summary() (total int, since time.Time) {
+	h.checkIfStale()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.st.rows) > 0 {
@@ -608,6 +616,52 @@ func (h *SignInHistory) document() document[signInState] {
 		encode:  encodeSignIns,
 		decode:  decodeSignIns,
 	}
+}
+
+// checkIfStale is List and Summary's cheap read-time check, the kind
+// the accounts and tokens stores already have (Store.reloadIfStale):
+// without it, a document this store cannot apply -- most notably the
+// JSON literal null -- was found and logged only at the next save,
+// and save does not run at all while nothing is being recorded, so a
+// file replaced while idle went unnoticed until the next sign-in.
+//
+// Cheap because it costs a version comparison, not a document
+// transfer, when the backend is a persist.VersionReader (every backend
+// this module ships is); callers without that capability are skipped
+// rather than paying a full Load on every read. A version not yet seen
+// by this check is read and decoded only to see whether it is one this
+// store can apply -- a legitimate newer document from another writer
+// decodes clean and changes nothing here; only save's own replay ever
+// adopts it. Nothing in memory is overwritten either way.
+func (h *SignInHistory) checkIfStale() {
+	if h.backend == nil {
+		return
+	}
+	vr, ok := h.backend.(persist.VersionReader)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reloadTimeout)
+	defer cancel()
+	current, exists, err := vr.Version(ctx)
+	if err != nil || !exists {
+		return
+	}
+	h.mu.Lock()
+	stale := current != h.version && current != h.lastCheckedVersion
+	h.mu.Unlock()
+	if !stale {
+		return
+	}
+	_, _, loadErr := h.document().load(ctx)
+	h.mu.Lock()
+	h.lastCheckedVersion = current
+	if loadErr != nil {
+		h.logFailureLocked(loadErr)
+	} else {
+		h.failLogged = false
+	}
+	h.mu.Unlock()
 }
 
 // save writes the history. The rows are copied under mu; the encode,
