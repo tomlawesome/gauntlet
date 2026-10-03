@@ -28,10 +28,10 @@ const pendingLoginCookieName = "gate_pending_login"
 
 // pendingLoginCookiePath scopes the cookie to the two routes that ever
 // need it: the login that sets it and the factor step that reads it.
-// "/api/auth/login" is a prefix of "/api/auth/login/factor" too (RFC
-// 6265's path-match rule), so one Path value covers both without
-// widening it to the whole API the way the session cookie's "/" does.
-const pendingLoginCookiePath = "/api/auth/login"
+// loginPath (protect.go) is a prefix of loginFactorPath too (RFC 6265's
+// path-match rule), so one Path value covers both without widening it
+// to the whole API the way the session cookie's "/" does.
+const pendingLoginCookiePath = loginPath
 
 // pendingLoginCookieMaxAge bounds both the cookie's own Max-Age and the
 // tolerance pendingLoginStateCodec.decode checks IssuedAt against -- kept
