@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `SessionStore.RevokeAllForUserCount`: signs a user out everywhere and
+  returns how many sessions it ended, counted under the same lock (#58).
+
+### Security
+
+- A running accounts or tokens store no longer adopts an older, valid
+  copy of its file put back while the service runs, which undid later
+  changes and revived revoked tokens. Each document now carries a save
+  counter inside the sealed part; a lower one is refused and logged
+  once, the store keeps what it holds and refuses writes until the file
+  is replaced or the process restarts. The accounts document is now
+  version 6 and the tokens document version 2; older ones open and are
+  stamped on their next save. A file rolled back while the service is
+  stopped is still accepted on start (docs/design.md §4) (#59).
+
+### Fixed
+
+Low-severity findings from the v0.2.0 audit (#58):
+
+- `GET /api/auth/session` no longer says `mustEnrolSecondFactor` while
+  a forced password change still blocks the enrol routes.
+- Two first passkey registrations finishing at the same moment no
+  longer revoke each other's new session.
+- The `ended` count from an admin's sign-out-everywhere can no longer
+  be one short when a login lands during it.
+- Lowering the sign-in history's `MaxRows` below the rows it holds now
+  logs the dropped rows once instead of dropping them silently.
+- The sign-in history notices a replaced or `null` file on its next
+  read, not only at the next sign-in.
+- Registering with a setup code another, lagging process has just spent
+  now says the code was already used, not that registration is closed.
+- `VerifyPassword` caps the thread count it reads from a stored hash,
+  beside its memory, time, salt and key-length caps.
+- The file backend's save honours its context deadline while waiting
+  for the sidecar lock file, and its doc comment no longer calls
+  deleting that `.lock` file harmless.
+- A published password list refused for a build time in the future is
+  checked again at each refresh and adopted once the clock catches up.
+- `pwlist build`'s retry waits now reach the documented 8 s ceiling.
+
 ## [0.2.0] - 2026-10-03
 
 ### Added
