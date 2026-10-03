@@ -64,7 +64,7 @@ const usage = `usage:
   pwlist sign   --keys DIR [--in top10k.txt]
   pwlist verify --keys DIR [--in top10k.txt]
   pwlist keygen --out DIR --name NAME
-  pwlist publish-github --token-file FILE --dated-tag pwned-top10k-YYYY.MM.DD [--in top10k.txt] [--current-tag T] [--repo O/R] [--target REF]
+  pwlist publish-github --token-file FILE --dated-tag pwned-top10k-YYYY.MM.DD [--in top10k.txt] [--keys DIR] [--current-tag T] [--repo O/R] [--target REF]
 `
 
 // run is main without the process: exit code 0 on success, 1 on a
@@ -224,24 +224,34 @@ func cmdVerify(_ context.Context, args []string, stdout, stderr io.Writer) error
 		_, _ = fmt.Fprintln(stderr, "pwlist verify: --keys is required")
 		return errUsage
 	}
-	data, err := checkedList(*in)
+	data, err := verifiedList(*in, *keysDir)
 	if err != nil {
-		return err
-	}
-	ring, err := readPublicKeys(*keysDir)
-	if err != nil {
-		return err
-	}
-	sig, err := os.ReadFile(*in + ".sig")
-	if err != nil {
-		return err
-	}
-	if err := listsig.Verify(data, sig, ring); err != nil {
 		return err
 	}
 	l, _ := blocklist.Parse(data) // checkedList parsed it already
 	_, _ = fmt.Fprintf(stdout, "pwlist verify: %s is good: %d hashes, built %s\n", *in, l.Len(), l.Built().Format(time.RFC3339))
 	return nil
+}
+
+// verifiedList is checkedList plus the signature beside the list,
+// checked against the public keys (*.pub) in keysDir.
+func verifiedList(path, keysDir string) ([]byte, error) {
+	data, err := checkedList(path)
+	if err != nil {
+		return nil, err
+	}
+	ring, err := readPublicKeys(keysDir)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := os.ReadFile(path + ".sig")
+	if err != nil {
+		return nil, err
+	}
+	if err := listsig.Verify(data, sig, ring); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // checkedList reads a list, checks it against the .sha256 beside it and

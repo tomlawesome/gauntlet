@@ -162,14 +162,21 @@ func (g *fakeGitHub) writeRelease(w http.ResponseWriter, code int, rel *fakeRele
 }
 
 // signedListDir is a signed list, its checksum and signature, as
-// blocklist:sign leaves them, plus a token file.
+// blocklist:sign leaves them, the key pair beside them in priv/ and
+// keys/ (where resign and publishArgs look), plus a token file.
 func signedListDir(t *testing.T) (list, tokenFile string) {
 	t.Helper()
-	privDir, _ := keypair(t, "a")
+	privDir, pubDir := keypair(t, "a")
 	dir := t.TempDir()
 	list = writeList(t, dir, "")
 	if code, _, stderr := runCLI(t, "sign", "--keys", privDir, "--in", list); code != 0 {
 		t.Fatalf("sign: %s", stderr)
+	}
+	if err := os.Rename(privDir, filepath.Join(dir, "priv")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(pubDir, filepath.Join(dir, "keys")); err != nil {
+		t.Fatal(err)
 	}
 	tokenFile = filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(fakeToken+"\n"), 0o600); err != nil {
@@ -179,7 +186,27 @@ func signedListDir(t *testing.T) (list, tokenFile string) {
 }
 
 func publishArgs(g *fakeGitHub, list, tokenFile, dated string) []string {
-	return []string{"publish-github", "--api", g.URL, "--token-file", tokenFile, "--in", list, "--dated-tag", dated}
+	return []string{"publish-github", "--api", g.URL, "--token-file", tokenFile, "--in", list,
+		"--keys", filepath.Join(filepath.Dir(list), "keys"), "--dated-tag", dated}
+}
+
+// A list whose signature does not verify against the trusted keys is
+// never uploaded, though it is otherwise a good list.
+func TestPublishGitHubVerifiesTheSignatureFirst(t *testing.T) {
+	t.Parallel()
+	g := newFakeGitHub(t)
+	list, tok := signedListDir(t)
+	other, _ := keypair(t, "b")
+	if code, _, stderr := runCLI(t, "sign", "--keys", other, "--in", list); code != 0 {
+		t.Fatalf("sign with an untrusted key: %s", stderr)
+	}
+	code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...)
+	if code != 1 {
+		t.Fatalf("published a list signed by an untrusted key: %d %s", code, stderr)
+	}
+	if len(g.log) != 0 {
+		t.Fatalf("GitHub was called before the signature was checked: %v", g.log)
+	}
 }
 
 func TestPublishGitHubCreatesBothReleases(t *testing.T) {
@@ -240,7 +267,7 @@ func TestPublishGitHubReplacesCurrentOnly(t *testing.T) {
 	if err := os.WriteFile(list, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeSum(t, list)
+	resign(t, list)
 	if code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.11.02")...); code != 0 {
 		t.Fatal(stderr)
 	}
@@ -278,7 +305,7 @@ func TestPublishGitHubDatedReleaseIsNeverRewritten(t *testing.T) {
 	b, _ := os.ReadFile(list)
 	b = []byte(strings.Replace(string(b), "# min-count: 1000", "# min-count: 1001", 1))
 	_ = os.WriteFile(list, b, 0o644)
-	writeSum(t, list)
+	resign(t, list)
 	code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...)
 	if code != 1 || !strings.Contains(stderr, "never rewritten") {
 		t.Fatalf("rewrote a dated release: %d %s", code, stderr)
@@ -378,14 +405,16 @@ func TestPublishGitHubComparesBytesWithoutADigest(t *testing.T) {
 		t.Fatal("the corrected list must be the same size")
 	}
 	_ = os.WriteFile(list, b, 0o644)
-	writeSum(t, list)
+	resign(t, list)
 	code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...)
 	if code != 1 || !strings.Contains(stderr, "never rewritten") {
 		t.Fatalf("a same-size, different list passed as already there: %d %s", code, stderr)
 	}
 }
 
-func writeSum(t *testing.T, list string) {
+// resign rewrites an edited list's checksum and signature, with the
+// key signedListDir left beside it.
+func resign(t *testing.T, list string) {
 	t.Helper()
 	b, err := os.ReadFile(list)
 	if err != nil {
@@ -393,5 +422,8 @@ func writeSum(t *testing.T, list string) {
 	}
 	if err := os.WriteFile(list+".sha256", []byte(sha256Line(b, filepath.Base(list))), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if code, _, stderr := runCLI(t, "sign", "--keys", filepath.Join(filepath.Dir(list), "priv"), "--in", list); code != 0 {
+		t.Fatalf("sign: %s", stderr)
 	}
 }

@@ -104,6 +104,7 @@ func cmdPublishGitHub(ctx context.Context, args []string, stdout, stderr io.Writ
 	repo := fs.String("repo", "tomlawesome/gauntlet", "the GitHub repository, OWNER/NAME")
 	tokenFile := fs.String("token-file", "", "file holding the GitHub token (read, never printed)")
 	in := fs.String("in", "top10k.txt", "the signed list; FILE.sha256 and FILE.sig go with it")
+	keysDir := fs.String("keys", "blocklist/keys", "directory holding the trusted public keys (*.pub) the signature must verify against")
 	current := fs.String("current-tag", "pwned-top10k-current", "the release whose files are replaced each run")
 	dated := fs.String("dated-tag", "", "this run's own release, never rewritten, e.g. pwned-top10k-2026.10.02")
 	target := fs.String("target", "dev", "the branch or commit on GitHub a newly created tag points at")
@@ -116,18 +117,15 @@ func cmdPublishGitHub(ctx context.Context, args []string, stdout, stderr io.Writ
 		_, _ = fmt.Fprintln(stderr, "pwlist publish-github: --token-file is required; --current-tag and --dated-tag must be two different pwned-top10k-* tags")
 		return errUsage
 	}
-	// Publish only what verifies as a list: the same check `sign`
-	// makes, so a sample or a damaged file never reaches the mirror.
-	// The signature itself was checked against the committed keys by
-	// `verify` earlier in the job.
-	data, err := checkedList(*in)
+	// Publish only what `verify` accepts: checksum, format and the
+	// signature against the trusted keys. Checked here, not only by an
+	// earlier CI step, so a run by hand or a changed job can never put
+	// an unsigned or wrongly signed list where applications fetch it.
+	data, err := verifiedList(*in, *keysDir)
 	if err != nil {
 		return err
 	}
 	l, _ := blocklist.Parse(data)
-	if _, err := os.Stat(*in + ".sig"); err != nil {
-		return err
-	}
 	token, err := readToken(*tokenFile)
 	if err != nil {
 		return err
