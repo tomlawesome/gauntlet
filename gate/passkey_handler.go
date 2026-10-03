@@ -337,7 +337,10 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 		g.issueSession(w, r, current.ID, now)
 	}
 	g.clearPasskeyRegisterCookie(w)
-	detail := "name=" + stored.Name
+	// Quoted, as from= and the other user-supplied fields are: the name
+	// is the user's own text, and a newline or terminal escape in it
+	// must not forge or hide a line in the audit log.
+	detail := fmt.Sprintf("name=%q", stored.Name)
 	if mintErr != nil {
 		detail += "; recovery codes could not be saved"
 	}
@@ -450,7 +453,7 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		signedOut = true
 	}
 
-	g.audit(r, user.Username, "account.passkey_removed", user.Username, "name="+removed.Name)
+	g.audit(r, user.Username, "account.passkey_removed", user.Username, fmt.Sprintf("name=%q", removed.Name))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "signedOut": signedOut})
 }
 
