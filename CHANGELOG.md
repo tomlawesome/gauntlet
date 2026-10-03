@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `gauntlet.AccountLockoutRecords`, an optional extension of
+  `AccountLockouts`: a host application's own lockout store that
+  implements it keeps the disabled flag and the count of lockouts
+  across a restart, not only the lockout's end. `AccountLockouts` alone
+  still works and loses those two on restart, as before (#57).
 - Failed sign-ins, lockouts and refused requests are recorded, with the
   client address (#45). Through `gate.Config.Audit`: `user.login_failed`
   for each failed password, code, passkey assertion or refused SSO
