@@ -11,3 +11,12 @@ sighting; a third sighting of the same check gets an issue.
   bits are padding the decoder ignores, so some edits changed no byte.
   Reproduced 2 in 300 local runs. **Fixed** in the same branch: the test
   now flips a bit of the decoded bytes (2000/2000 passes).
+
+## lint:go: runner out of disk while restoring the cache
+
+- 2026-10-03 · 9bb92c5 (preview → main, !25) · pipeline 2029, job
+  30713, `lint:go` · `no space left on device` while extracting the Go
+  cache, then `go build` read a truncated module file (`expected
+  'package', found 'EOF'`). The same commit passed on !24. A retry
+  (job 30721) passed. Cause is the shared `light` runner's disk, not
+  this project.
