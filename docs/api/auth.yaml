@@ -1003,8 +1003,10 @@ paths:
       description: |
         A browser navigation, not a fetch. Sets the flow cookie
         (`gate_oidc_flow`, path `/api/auth/oidc`, five minutes) and
-        redirects to the identity provider. Reachable with no session and
-        while no account exists.
+        redirects to the identity provider. Reachable with no session,
+        but not before the first account exists: SSO never creates it,
+        so this route answers 503 until the local setup code has been
+        used.
       security:
         - {}
       responses:
@@ -1014,6 +1016,8 @@ paths:
           $ref: "#/components/responses/SSOOff"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
 
   /api/auth/oidc/callback:
     get:
@@ -1051,6 +1055,8 @@ paths:
           $ref: "#/components/responses/Redirect"
         "404":
           $ref: "#/components/responses/SSOOff"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
 
   /api/auth/oidc/link:
     post:
