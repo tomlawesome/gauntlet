@@ -605,6 +605,11 @@ All notable changes to this project are documented in this file.
     resuming from a stale snapshot.
   - `scripts/update-blocklist.sh` refuses a list older than the embedded
     one unless `--force` is given.
+  - CI base images are pinned by digest, as the release job's already
+    was, so the jobs that hold the signing key and the GitHub token run
+    exactly the image that was reviewed.
+  - The API document no longer says SSO can create the first account;
+    the first account has always come from the local setup code.
 
 - `POST /api/tokens` with a name the token store refuses answers 400
   with the reason, instead of 500 "unable to create token" (#25).
