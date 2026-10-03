@@ -25,7 +25,7 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 4 (#28, #44) and
+  version 1 unchanged, gauntlet writes accounts as version 5 (#28, #44, #50) and
   tokens as version 1, and a document newer than the running build is
   refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
@@ -985,7 +985,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Pitfall | Mikroview today | Module keeps |
 |---|---|---|
 | Session fixation / predictable ids | 128-bit `crypto/rand` id, new id per login, never reused | same; `newID` panics rather than degrades if the CSPRNG fails |
-| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt` |
+| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51) |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
