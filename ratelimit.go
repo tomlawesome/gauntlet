@@ -226,11 +226,15 @@ func consecutiveFailures(episodes, threshold, inWindow int) int {
 }
 
 // recorder is where the limiter reads and writes accountID's lockout
-// state: the *Store's own record, or this limiter's memory standing in
-// for one (memoryLockouts).
+// state: the *Store's own record, a host store's whole record
+// (AccountLockoutRecords), or this limiter's memory standing in for one
+// (memoryLockouts).
 func (l *LoginLimiter) recorder(lockouts AccountLockouts) lockoutRecorder {
 	if r, ok := lockouts.(lockoutRecorder); ok {
 		return r
+	}
+	if r, ok := lockouts.(AccountLockoutRecords); ok {
+		return recordLockouts{r: r}
 	}
 	return boundLockouts{mem: &l.mem, base: lockouts}
 }
@@ -389,8 +393,9 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // sign-in, in one write. While one is in force every attempt is refused,
 // whether or not this process saw the attempts that caused it. The
 // first attempt after it ends clears it, keeping the count. nil, or an
-// AccountLockouts other than the *Store, keeps what the record cannot
-// hold in this limiter's memory only (memoryLockouts).
+// AccountLockouts other than the *Store that is not an
+// AccountLockoutRecords, keeps what the record cannot hold in this
+// limiter's memory only (memoryLockouts).
 //
 // Each lockout lasts three times as long as the one before (lockoutFor):
 // with the consumers' 5 attempts per 5 minutes, 5, 15, 45, 135, 405 and
@@ -464,10 +469,10 @@ type AccountDecision struct {
 // AccountDecision. ReserveAccount is this call's Allowed.
 func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision {
 	rec := l.recorder(lockouts)
-	stored, record, changed := l.readRecord(rec, accountID, now)
+	stored, record, changed, reset := l.readRecord(rec, accountID, now)
 
 	l.mu.Lock()
-	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
+	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
 	if cur.disabled() || now.Before(cur.until) {
 		// Refused. A decision this limiter has yet to save is tried
 		// again here, once per lockoutRetryInterval; so is a clamped
@@ -536,11 +541,12 @@ func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountI
 }
 
 // readRecord reads accountID's lockout state from rec: as stored, as the
-// limit is decided on (record), and the password change that guesses
-// before it no longer count from (changed, zero for none). It is read
+// limit is decided on (record), the password change that guesses
+// before it no longer count from (changed, zero for none), and whether
+// that change was an admin's reset code (reset). It is read
 // before mu is taken, since the store has its own lock and may reload.
-func (l *LoginLimiter) readRecord(rec lockoutRecorder, accountID string, now time.Time) (stored, record lockoutState, changed time.Time) {
-	stored, changed = rec.lockoutRecord(accountID)
+func (l *LoginLimiter) readRecord(rec lockoutRecorder, accountID string, now time.Time) (stored, record lockoutState, changed time.Time, reset bool) {
+	stored, changed, reset = rec.lockoutRecord(accountID)
 	// A change dated after now is a clock that stepped back since, or a
 	// process whose clock runs ahead. Taken as it is, every guess would
 	// be "before the change" on every call and the limit would be off
@@ -574,7 +580,7 @@ func (l *LoginLimiter) readRecord(rec lockoutRecorder, accountID string, now tim
 	if limit := now.Add(l.lockoutFor(stored.episodes)); stored.until.After(limit) {
 		record.until = limit
 	}
-	return stored, record, changed
+	return stored, record, changed, reset
 }
 
 // currentLocked is the lockout state accountID's limit is decided on:
@@ -585,11 +591,14 @@ func (l *LoginLimiter) readRecord(rec lockoutRecorder, accountID string, now tim
 // was over guesses at the old password, so the change supersedes it and
 // it is dropped, and no retry saves it over the change afterwards --
 // except a disable it carries that the record does not hold yet: a new
-// password does not lift a disable, saved or not.
-func (l *LoginLimiter) currentLocked(accountID string, stored, record lockoutState, changed time.Time) (lockoutState, pendingLockout, bool) {
+// password does not lift a disable, saved or not. A reset code does
+// (reset): the admin who issued it lifted the disable on the record
+// (IssueResetCode), so one still unsaved here goes too, rather than
+// refusing the code and later being written back over the reset.
+func (l *LoginLimiter) currentLocked(accountID string, stored, record lockoutState, changed time.Time, reset bool) (lockoutState, pendingLockout, bool) {
 	p, pending := l.wantLockout[accountID]
 	if pending && !changed.IsZero() && p.decidedAt.Before(changed) {
-		if p.state.disabled() && !stored.disabled() {
+		if p.state.disabled() && !stored.disabled() && !reset {
 			p.state = lockoutState{disabledAt: p.state.disabledAt}
 			l.wantLockout[accountID] = p
 		} else {
@@ -633,11 +642,11 @@ func (l *LoginLimiter) settleLocked(accountID string, cur, next lockoutState, p 
 // not a completed sign-in (#44). SignedIn is.
 func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string, now time.Time) {
 	rec := l.recorder(lockouts)
-	stored, record, changed := l.readRecord(rec, accountID, now)
+	stored, record, changed, reset := l.readRecord(rec, accountID, now)
 
 	l.mu.Lock()
 	l.releaseIn(l.accounts, loginBucket+accountID, now)
-	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
+	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
 	next := cur
 	if now.Before(cur.until) && next.episodes > 0 {
 		next.episodes--
@@ -665,13 +674,13 @@ func (l *LoginLimiter) ReleaseAccount(lockouts AccountLockouts, accountID string
 // ReleaseAccount or ReleaseKnownBrowser, not as well as either.
 func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now time.Time) {
 	rec := l.recorder(lockouts)
-	stored, record, changed := l.readRecord(rec, accountID, now)
+	stored, record, changed, reset := l.readRecord(rec, accountID, now)
 
 	l.mu.Lock()
 	delete(l.accounts, loginBucket+accountID)
 	delete(l.accounts, knownBrowserBucket+accountID)
 	delete(l.secondFactor, accountID)
-	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
+	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
 	sync := l.settleLocked(accountID, cur, lockoutState{}, p, pending, now)
 	l.mu.Unlock()
 
@@ -697,9 +706,10 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 //
 // For the *Store the write is the same one Store.UnlockLogin makes, and
 // refused the same way: ErrUserNotFound for an account that does not
-// exist, nothing written when there is nothing to clear. With nil or any
-// other AccountLockouts, the lockout's end is cleared there and the rest
-// in this limiter's memory (memoryLockouts).
+// exist, nothing written when there is nothing to clear. An
+// AccountLockoutRecords has its whole record cleared in one write. With
+// nil or any other AccountLockouts, the lockout's end is cleared there
+// and the rest in this limiter's memory (memoryLockouts).
 //
 // Taken under persistMu, so a save this limiter already had in flight
 // lands before the unlock rather than after it. An attempt that read the
@@ -714,12 +724,18 @@ func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) e
 
 	l.persistMu.Lock()
 	defer l.persistMu.Unlock()
+	// Save first, and drop what this limiter holds only once the save
+	// has landed: an admin told the unlock failed takes the account to
+	// be still disabled, so this limiter must go on refusing it too.
+	if err := rec.setLockoutRecord(accountID, lockoutState{}); err != nil {
+		return err
+	}
 	l.mu.Lock()
 	delete(l.accounts, loginBucket+accountID)
 	delete(l.accounts, knownBrowserBucket+accountID)
 	delete(l.wantLockout, accountID)
 	l.mu.Unlock()
-	return rec.setLockoutRecord(accountID, lockoutState{})
+	return nil
 }
 
 // ReserveKnownBrowser is ReserveAccount for a browser accountID
@@ -766,10 +782,10 @@ func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID s
 // ReserveKnownBrowser is this call's Allowed.
 func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision {
 	rec := l.recorder(lockouts)
-	stored, record, changed := l.readRecord(rec, accountID, now)
+	stored, record, changed, reset := l.readRecord(rec, accountID, now)
 
 	l.mu.Lock()
-	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
+	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
 	if cur.disabled() {
 		// Refused, and a disable this limiter has yet to save is tried
 		// again, as ReserveAccount does while refusing.
@@ -840,13 +856,13 @@ func (l *LoginLimiter) knownEntriesLocked(key string, changed, now time.Time) []
 // password alone is not a completed sign-in. SignedIn is.
 func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time) {
 	rec := l.recorder(lockouts)
-	stored, record, changed := l.readRecord(rec, accountID, now)
+	stored, record, changed, reset := l.readRecord(rec, accountID, now)
 
 	l.mu.Lock()
 	key := knownBrowserBucket + accountID
 	full := len(l.knownEntriesLocked(key, changed, now)) >= l.threshold
 	l.releaseIn(l.accounts, key, now)
-	cur, p, pending := l.currentLocked(accountID, stored, record, changed)
+	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
 	next := cur
 	if full {
 		if next.episodes > 0 {
@@ -885,7 +901,7 @@ func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID s
 func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) {
 	var changed time.Time
 	if r, ok := lockouts.(lockoutRecorder); ok {
-		_, changed = r.lockoutRecord(accountID)
+		_, changed, _ = r.lockoutRecord(accountID)
 	}
 
 	l.mu.Lock()

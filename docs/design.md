@@ -313,6 +313,12 @@ type AccountLockouts interface {                                    // *Store im
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
 }
+type AccountLockoutRecords interface {                              // new: a host store keeps the disable and count too
+    AccountLockouts
+    LoginLockoutRecord(accountID string) LoginLockoutRecord
+    SetLoginLockoutRecord(accountID string, rec LoginLockoutRecord) error // all three fields in one write
+}
+type LoginLockoutRecord struct { LockedUntil time.Time; Lockouts int; DisabledAt time.Time }
 
 type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
 type SignInMethod string  // password, code, passkey, sso
@@ -424,6 +430,13 @@ so `SecondFactorFailed` sets `MustChangePassword` and ends every session
 on the account (`SessionsEndedAt`), in one save: the change-password
 door asks for no current password, so only a fresh sign-in with both
 factors may reach it. That run is kept in memory only.
+
+A host's own store need implement only `AccountLockouts`, the lockout's
+end; the limiter then keeps the disable and the count of lockouts in its
+memory, so a restart re-enables a disabled account and starts the
+lockouts short again. A store that also implements
+`AccountLockoutRecords` keeps all three on its own record, written
+together in one save, and they survive a restart as on the `*Store`.
 
 Unlocking (#44). An admin lifts another account's disable, lockout and
 count with `POST /api/auth/users/{id}/unlock`, through

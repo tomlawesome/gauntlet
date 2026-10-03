@@ -210,3 +210,31 @@ func TestRegisterReopensOnceTheRefusedDocumentIsReplaced(t *testing.T) {
 		t.Fatalf("expected Register to succeed once the refused document was replaced, got %v", err)
 	}
 }
+
+// caseVariantDocument holds two usernames that differ only in case.
+// createAccount refuses the second, so only a hand edit or a foreign
+// writer produces it.
+const caseVariantDocument = `{"users":[` +
+	`{"id":"u1","username":"Admin","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"},` +
+	`{"id":"u2","username":"admin","passwordHash":"$argon2id$fake","role":"user","createdAt":"2026-01-01T00:00:00Z"}]}`
+
+// TestOpenRefusesADocumentWithCaseVariantUsernames: usernames are looked
+// up case-insensitively, so of two that differ only in case one could
+// never sign in again. The document is refused at startup instead, with
+// an error saying why.
+func TestOpenRefusesADocumentWithCaseVariantUsernames(t *testing.T) {
+	m := persist.NewMemory()
+	primeMemory(t, m, caseVariantDocument)
+
+	s, err := OpenStore(m, Options{})
+	if err == nil {
+		t.Fatalf("OpenStore accepted case-variant usernames (count: %d)", s.Count())
+	}
+	var startup *persist.StartupError
+	if !errors.As(err, &startup) {
+		t.Fatalf("expected a *persist.StartupError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "same username") {
+		t.Errorf("expected the error to say usernames clash, got: %v", err)
+	}
+}

@@ -106,6 +106,10 @@ var (
 	// errNoAdmin is the decode error for an accounts document that holds
 	// accounts but none of them is the admin. See checkAdmins.
 	errNoAdmin = errors.New("accounts document holds accounts but no admin")
+	// errDuplicateUsername is the decode error for an accounts document
+	// in which two accounts have the same username, ignoring case. See
+	// checkUsernames.
+	errDuplicateUsername = errors.New("more than one account has the same username, ignoring case; usernames must be unique")
 	// ErrOIDCAlreadyLinked is returned by LinkOIDCIdentity when the
 	// account is already connected to a different (issuer, subject).
 	ErrOIDCAlreadyLinked = errors.New("gauntlet: account is already connected to an SSO identity")
@@ -192,6 +196,30 @@ func (f storeFile) checkAdmins() error {
 			return fmt.Errorf("%w (found %d accounts and %d null entries)", errNoAdmin, accounts, nulls)
 		}
 		return fmt.Errorf("%w (found %d)", errNoAdmin, accounts)
+	}
+	return nil
+}
+
+// checkUsernames refuses a document in which two usernames differ only
+// in case. Sign-in looks a username up case-insensitively and
+// createAccount refuses such a pair, so only a hand edit or a foreign
+// writer makes one -- and loading it would leave one of the two unable
+// ever to sign in, with nothing saying why.
+func (f storeFile) checkUsernames() error {
+	seen := make(map[string]bool, len(f.Users))
+	clashes := 0
+	for _, u := range f.Users {
+		if u == nil {
+			continue
+		}
+		key := strings.ToLower(u.Username)
+		if seen[key] {
+			clashes++
+		}
+		seen[key] = true
+	}
+	if clashes > 0 {
+		return fmt.Errorf("%w (found %d)", errDuplicateUsername, clashes)
 	}
 	return nil
 }
@@ -439,13 +467,16 @@ func encodeAccounts(st *storeState) ([]byte, error) {
 }
 
 // decodeAccounts is the document as it is opened: parsed and checked
-// (parseAccounts, checkAdmins) before it becomes a state.
+// (parseAccounts, checkAdmins, checkUsernames) before it becomes a state.
 func decodeAccounts(data []byte) (*storeState, error) {
 	file, err := parseAccounts(data)
 	if err != nil {
 		return nil, err
 	}
 	if err := file.checkAdmins(); err != nil {
+		return nil, err
+	}
+	if err := file.checkUsernames(); err != nil {
 		return nil, err
 	}
 	st := indexUsers(file)
@@ -756,10 +787,12 @@ func (s *Store) reloadIfStale() {
 
 	// A document that does not parse is skipped silently, as a read
 	// failure is. One that parses but is refused -- newer than this
-	// build reads, or breaking the admin rule -- is different.
+	// build reads, or breaking the admin or unique-username rule -- is
+	// different.
 	st, err := decodeAccounts(snap.Payload)
 	if err != nil && !errors.Is(err, errNewerDocument) &&
-		!errors.Is(err, errMultipleAdmins) && !errors.Is(err, errNoAdmin) {
+		!errors.Is(err, errMultipleAdmins) && !errors.Is(err, errNoAdmin) &&
+		!errors.Is(err, errDuplicateUsername) {
 		return
 	}
 	// Unlike a transient read failure, a refused document is one someone

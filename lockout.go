@@ -8,6 +8,12 @@ import (
 // AccountLockouts is where a LoginLimiter keeps an account's login
 // lockout so it survives a restart. *Store implements it, on the
 // account's own record.
+//
+// It holds only the lockout's end. A host's own store that implements
+// just this loses, on restart, a disabled sign-in (the account signs in
+// again) and the count of lockouts (the next one is short again): the
+// limiter keeps those in its memory. Implement AccountLockoutRecords
+// too to keep them.
 type AccountLockouts interface {
 	// LoginLockedUntil returns when accountID's lockout ends, or the
 	// zero time if it has none or does not exist.
@@ -15,6 +21,35 @@ type AccountLockouts interface {
 	// SetLoginLockedUntil records a lockout ending at until; the zero
 	// time clears it.
 	SetLoginLockedUntil(accountID string, until time.Time) error
+}
+
+// AccountLockoutRecords is an AccountLockouts that also keeps a disabled
+// sign-in and the count of lockouts, so they survive a restart too. A
+// LoginLimiter given one reads and writes all three through it and
+// keeps none of them in its memory. *Store does not need it.
+type AccountLockoutRecords interface {
+	AccountLockouts
+	// LoginLockoutRecord returns accountID's record, all zero if it has
+	// none or does not exist.
+	LoginLockoutRecord(accountID string) LoginLockoutRecord
+	// SetLoginLockoutRecord saves rec as accountID's record, all three
+	// fields in one write: a disable saved without its lockout, or the
+	// other way round, would be read back as a state the limiter never
+	// decided. An all-zero rec clears it.
+	SetLoginLockoutRecord(accountID string, rec LoginLockoutRecord) error
+}
+
+// LoginLockoutRecord is what a LoginLimiter keeps on an account through
+// AccountLockoutRecords: the fields *Store keeps on User as
+// LoginLockedUntil, LoginLockoutCount and LoginDisabledAt.
+type LoginLockoutRecord struct {
+	// LockedUntil is when the lockout ends; zero for none.
+	LockedUntil time.Time
+	// Lockouts is the count of lockouts since the last completed
+	// sign-in; each lasts longer than the one before.
+	Lockouts int
+	// DisabledAt is when sign-in was disabled; zero while it is not.
+	DisabledAt time.Time
 }
 
 // LoginLockedUntil implements AccountLockouts.
@@ -103,20 +138,27 @@ func (a lockoutState) disabled() bool { return !a.disabledAt.IsZero() }
 // PasswordChangedAt, so the limiter still takes a bump as a password
 // change only while the record carries no lockout.
 //
-// Unexported, so only *Store has it. A limiter given nil or any other
-// AccountLockouts keeps the count of lockouts and a disabled sign-in in
-// its own memory instead (memoryLockouts), and keeps counting guesses
-// made before a password change until they age out of the window, as
-// before.
+// Unexported, so only *Store has it. A limiter given an
+// AccountLockoutRecords uses it through recordLockouts. One given nil or
+// any other AccountLockouts keeps the count of lockouts and a disabled
+// sign-in in its own memory instead (memoryLockouts), so a restart loses
+// both. Either way it keeps counting guesses made before a password
+// change until they age out of the window, as before.
+//
+// reset reports that the password change was an admin's reset code, the
+// account still holding it unspent: that change also lifted a disable
+// (IssueResetCode), so a disable the limiter has yet to save goes too.
 type lockoutRecorder interface {
-	lockoutRecord(accountID string) (st lockoutState, passwordChangedAt time.Time)
+	lockoutRecord(accountID string) (st lockoutState, passwordChangedAt time.Time, reset bool)
 	// setLockoutRecord writes st to accountID's record in one write, or
 	// nothing if the record already says st.
 	setLockoutRecord(accountID string, st lockoutState) error
 }
 
 // lockoutRecord implements lockoutRecorder.
-func (s *Store) lockoutRecord(accountID string) (lockoutState, time.Time) {
+// An unspent code is taken as a reset whether or not it has expired:
+// it still dates the last password change, which was the admin's.
+func (s *Store) lockoutRecord(accountID string) (lockoutState, time.Time, bool) {
 	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -125,9 +167,9 @@ func (s *Store) lockoutRecord(accountID string) (lockoutState, time.Time) {
 			until:      u.LoginLockedUntil,
 			episodes:   max(u.LoginLockoutCount, 0), // a hand-edited negative count is none
 			disabledAt: u.LoginDisabledAt,
-		}, u.PasswordChangedAt
+		}, u.PasswordChangedAt, u.MustChangePassword && u.ResetCodeHash != ""
 	}
-	return lockoutState{}, time.Time{}
+	return lockoutState{}, time.Time{}, false
 }
 
 // setLockoutRecord implements lockoutRecorder. Like SetLoginLockedUntil,
@@ -196,7 +238,7 @@ func (s *Store) requirePasswordChange(accountID string, now time.Time) error {
 // password last changed if lockouts can say (see lockoutRecorder).
 func readLockout(lockouts AccountLockouts, accountID string) (lockedUntil, passwordChangedAt time.Time) {
 	if r, ok := lockouts.(lockoutRecorder); ok {
-		st, changed := r.lockoutRecord(accountID)
+		st, changed, _ := r.lockoutRecord(accountID)
 		return st.until, changed
 	}
 	return lockouts.LoginLockedUntil(accountID), time.Time{}
@@ -224,14 +266,14 @@ type boundLockouts struct {
 	base AccountLockouts // nil: the lockout's end is kept in mem too
 }
 
-func (b boundLockouts) lockoutRecord(accountID string) (lockoutState, time.Time) {
+func (b boundLockouts) lockoutRecord(accountID string) (lockoutState, time.Time, bool) {
 	b.mem.mu.Lock()
 	st := b.mem.states[accountID]
 	b.mem.mu.Unlock()
 	if b.base != nil {
 		st.until = b.base.LoginLockedUntil(accountID)
 	}
-	return st, time.Time{}
+	return st, time.Time{}, false
 }
 
 func (b boundLockouts) setLockoutRecord(accountID string, st lockoutState) error {
@@ -248,4 +290,26 @@ func (b boundLockouts) setLockoutRecord(accountID string, st lockoutState) error
 		b.mem.states[accountID] = st
 	}
 	return nil
+}
+
+// recordLockouts is a host's AccountLockoutRecords as a lockoutRecorder.
+// Like boundLockouts it never knows when a password changed, so never of
+// a reset either.
+type recordLockouts struct{ r AccountLockoutRecords }
+
+func (w recordLockouts) lockoutRecord(accountID string) (lockoutState, time.Time, bool) {
+	rec := w.r.LoginLockoutRecord(accountID)
+	return lockoutState{
+		until:      rec.LockedUntil,
+		episodes:   max(rec.Lockouts, 0), // a negative count is none, as on the *Store
+		disabledAt: rec.DisabledAt,
+	}, time.Time{}, false
+}
+
+func (w recordLockouts) setLockoutRecord(accountID string, st lockoutState) error {
+	return w.r.SetLoginLockoutRecord(accountID, LoginLockoutRecord{
+		LockedUntil: st.until,
+		Lockouts:    st.episodes,
+		DisabledAt:  st.disabledAt,
+	})
 }
