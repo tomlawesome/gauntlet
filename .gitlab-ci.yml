@@ -71,9 +71,13 @@ variables:
   # Same image, same tag, as birdcage's GOLANG_IMAGE -- routed through the
   # group's dependency proxy the same way, so this pull is cached on the
   # GitLab server rather than re-crossing the WAN on every job (refs
-  # ai/birdcage#128).
-  GOLANG_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/golang:1.27
-  ALPINE_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/alpine:3.24
+  # ai/birdcage#128). Pinned by digest as release:gitlab's image is: the
+  # same image runs blocklist:sign and blocklist:publish beside the
+  # signing key and the GitHub token, and a tag alone follows whatever
+  # the registry serves for it. Move the digest with the tag when
+  # bumping Go (docker buildx imagetools inspect golang:<tag>).
+  GOLANG_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/golang:1.27@sha256:e0174e51e81218523251d85d248a90d24c3d5e81543b4f07a5d66229397db190
+  ALPINE_IMAGE: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Avoids the duplicate branch+MR pipeline birdcage's own `.gate` anchor
 # avoids: a merge request always gets a pipeline, and so does a push to
