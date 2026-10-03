@@ -226,11 +226,15 @@ func consecutiveFailures(episodes, threshold, inWindow int) int {
 }
 
 // recorder is where the limiter reads and writes accountID's lockout
-// state: the *Store's own record, or this limiter's memory standing in
-// for one (memoryLockouts).
+// state: the *Store's own record, a host store's whole record
+// (AccountLockoutRecords), or this limiter's memory standing in for one
+// (memoryLockouts).
 func (l *LoginLimiter) recorder(lockouts AccountLockouts) lockoutRecorder {
 	if r, ok := lockouts.(lockoutRecorder); ok {
 		return r
+	}
+	if r, ok := lockouts.(AccountLockoutRecords); ok {
+		return recordLockouts{r: r}
 	}
 	return boundLockouts{mem: &l.mem, base: lockouts}
 }
@@ -389,8 +393,9 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // sign-in, in one write. While one is in force every attempt is refused,
 // whether or not this process saw the attempts that caused it. The
 // first attempt after it ends clears it, keeping the count. nil, or an
-// AccountLockouts other than the *Store, keeps what the record cannot
-// hold in this limiter's memory only (memoryLockouts).
+// AccountLockouts other than the *Store that is not an
+// AccountLockoutRecords, keeps what the record cannot hold in this
+// limiter's memory only (memoryLockouts).
 //
 // Each lockout lasts three times as long as the one before (lockoutFor):
 // with the consumers' 5 attempts per 5 minutes, 5, 15, 45, 135, 405 and
@@ -701,9 +706,10 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 //
 // For the *Store the write is the same one Store.UnlockLogin makes, and
 // refused the same way: ErrUserNotFound for an account that does not
-// exist, nothing written when there is nothing to clear. With nil or any
-// other AccountLockouts, the lockout's end is cleared there and the rest
-// in this limiter's memory (memoryLockouts).
+// exist, nothing written when there is nothing to clear. An
+// AccountLockoutRecords has its whole record cleared in one write. With
+// nil or any other AccountLockouts, the lockout's end is cleared there
+// and the rest in this limiter's memory (memoryLockouts).
 //
 // Taken under persistMu, so a save this limiter already had in flight
 // lands before the unlock rather than after it. An attempt that read the
