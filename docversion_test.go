@@ -20,15 +20,15 @@ import (
 // secrets or passkeys, gone without a word.
 
 // newerAccountsDocument is an accounts document from a build one format
-// version ahead of this one (this build writes version 5, #43),
+// version ahead of this one (this build writes version 6, #59),
 // otherwise valid: one admin, one user.
-const newerAccountsDocument = `{"version":6,"users":[` +
+const newerAccountsDocument = `{"version":7,"users":[` +
 	`{"id":"u1","username":"alice","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"},` +
 	`{"id":"u2","username":"bob","passwordHash":"$argon2id$fake","role":"user","createdAt":"2026-01-01T00:00:00Z"}]}`
 
 // newerTokensDocument is the same for tokens: one token, in a document
 // one format version ahead.
-const newerTokensDocument = `{"version":2,"tokens":[` +
+const newerTokensDocument = `{"version":3,"tokens":[` +
 	`{"id":"t-newer","name":"from-a-newer-build","kind":"api","hashedValue":"fixture-hash","createdAt":"2026-01-01T00:00:00Z"}]}`
 
 // assertNamesBothVersions fails unless err names the document's version
@@ -55,7 +55,7 @@ func assertNamesBothVersions(t *testing.T, err error, got, known int) {
 func TestOpenRefusesANewerAccountsDocument(t *testing.T) {
 	for name, doc := range map[string]string{
 		"same shape":      newerAccountsDocument,
-		"different shape": `{"version":6,"users":{"alice":{"role":"admin"}}}`,
+		"different shape": `{"version":7,"users":{"alice":{"role":"admin"}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := persist.NewMemory()
@@ -69,7 +69,7 @@ func TestOpenRefusesANewerAccountsDocument(t *testing.T) {
 			if !errors.As(err, &startup) {
 				t.Fatalf("expected a *persist.StartupError, got %T: %v", err, err)
 			}
-			assertNamesBothVersions(t, err, 6, 5)
+			assertNamesBothVersions(t, err, 7, 6)
 		})
 	}
 }
@@ -87,7 +87,7 @@ func TestOpenTokenStoreRefusesANewerTokensDocument(t *testing.T) {
 	if !errors.As(err, &startup) {
 		t.Fatalf("expected a *persist.StartupError, got %T: %v", err, err)
 	}
-	assertNamesBothVersions(t, err, 2, 1)
+	assertNamesBothVersions(t, err, 3, 2)
 }
 
 // TestReloadIfStaleRefusesANewerAccountsDocument: a newer document
@@ -118,15 +118,15 @@ func TestReloadIfStaleRefusesANewerAccountsDocument(t *testing.T) {
 			t.Fatalf("a newer document was applied: bob loaded as %+v", u)
 		}
 	}
-	if n := strings.Count(logs.String(), "version 6"); n != 1 {
+	if n := strings.Count(logs.String(), "version 7"); n != 1 {
 		t.Errorf("expected exactly one log line about the newer document, got %d:\n%s", n, logs.String())
 	}
-	if !strings.Contains(logs.String(), "version 5") {
+	if !strings.Contains(logs.String(), "version 6") {
 		t.Errorf("the log line does not name the version this build reads:\n%s", logs.String())
 	}
 
 	_, err = s.CreateUser("carol", "password456", RoleUser, time.Now())
-	assertNamesBothVersions(t, err, 6, 5)
+	assertNamesBothVersions(t, err, 7, 6)
 	assertPayload(t, m, newerAccountsDocument)
 }
 
@@ -157,12 +157,12 @@ func TestTokenStoreReloadRefusesANewerTokensDocument(t *testing.T) {
 			}
 		}
 	}
-	if n := strings.Count(logs.String(), "version 2"); n != 1 {
+	if n := strings.Count(logs.String(), "version 3"); n != 1 {
 		t.Errorf("expected exactly one log line about the newer document, got %d:\n%s", n, logs.String())
 	}
 
 	_, _, err = s.Create("second", TokenKindAPI, "", nil, time.Now())
-	assertNamesBothVersions(t, err, 2, 1)
+	assertNamesBothVersions(t, err, 3, 2)
 	assertPayload(t, m, newerTokensDocument)
 }
 
@@ -184,7 +184,7 @@ func TestMutateRefusesToWriteOverANewerAccountsDocument(t *testing.T) {
 	b.beforeSave = func() { overwrite(t, m, newerAccountsDocument) }
 
 	_, err = s.CreateUser("carol", "password456", RoleUser, time.Now())
-	assertNamesBothVersions(t, err, 6, 5)
+	assertNamesBothVersions(t, err, 7, 6)
 	assertPayload(t, m, newerAccountsDocument)
 }
 
@@ -203,13 +203,14 @@ func TestTokenStoreRefusesToWriteOverANewerTokensDocument(t *testing.T) {
 	b.beforeSave = func() { overwrite(t, m, newerTokensDocument) }
 
 	_, _, err = s.Create("second", TokenKindAPI, "", nil, time.Now())
-	assertNamesBothVersions(t, err, 2, 1)
+	assertNamesBothVersions(t, err, 3, 2)
 	assertPayload(t, m, newerTokensDocument)
 }
 
 // TestAV010AccountsDocumentLoadsAndGainsAVersion: v0.1.0 wrote no
-// version. Such a document opens as version 1, unchanged, and the next
-// save writes it as this build's version, 5.
+// version and no seq. Such a document opens as version 1 with the
+// counter at zero, unchanged, and the next save writes it as this
+// build's version, 6, stamped at seq 1 (#59).
 func TestAV010AccountsDocumentLoadsAndGainsAVersion(t *testing.T) {
 	m := persist.NewMemory()
 	primeMemory(t, m, `{"users":[`+
@@ -229,14 +230,15 @@ func TestAV010AccountsDocumentLoadsAndGainsAVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 5,\n  \"users\": [") {
-		t.Errorf("the saved accounts document does not carry version 5:\n%s", snap.Payload)
+	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 6,\n  \"seq\": 1,\n  \"users\": [") {
+		t.Errorf("the saved accounts document does not carry version 6 stamped at seq 1:\n%s", snap.Payload)
 	}
 }
 
 // TestAV010TokensDocumentLoadsAndIsWrapped: v0.1.0 wrote the tokens
-// document as a bare array. It opens as version 1, unchanged, and the
-// next save writes it as an object with a version and a tokens list.
+// document as a bare array, with no seq either. It opens as version 1
+// with the counter at zero, unchanged, and the next save writes it as
+// an object with a version, a seq stamped at 1 (#59), and a tokens list.
 func TestAV010TokensDocumentLoadsAndIsWrapped(t *testing.T) {
 	m := persist.NewMemory()
 	primeMemory(t, m, `[{"id":"t1","name":"old","kind":"api","hashedValue":"fixture-hash","createdAt":"2026-01-01T00:00:00Z"}]`)
@@ -255,8 +257,8 @@ func TestAV010TokensDocumentLoadsAndIsWrapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 1,\n  \"tokens\": [\n    {\n      \"id\": \"t1\",") {
-		t.Errorf("the saved document is not version 1 wrapping the token:\n%s", snap.Payload)
+	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 2,\n  \"seq\": 1,\n  \"tokens\": [\n    {\n      \"id\": \"t1\",") {
+		t.Errorf("the saved document is not version 2 stamped at seq 1, wrapping the token:\n%s", snap.Payload)
 	}
 }
 
@@ -386,4 +388,163 @@ func TestReloadRefusesANullDocument(t *testing.T) {
 		}
 		assertPayload(t, m, "null")
 	})
+}
+
+// The sequence counter (#59): a running store reloads a document
+// whenever its bytes change on disk, and judges "changed", not "newer"
+// (docs/design.md §4). Without a counter inside the seal, an older,
+// valid copy put back while the service runs -- a backup restore that
+// missed the stop step -- is adopted at the next read, undoing whatever
+// changed since and reviving whatever it revoked, with nothing logged.
+// The four tests below are the acceptance case: save, copy the file
+// aside, save again, put the copy back, and the next read keeps the
+// newer state and logs the refusal exactly once -- for both the
+// read-path (reloadIfStale) and the write-path (mutate's conflict
+// reload), accounts and tokens alike.
+
+// TestReloadIfStaleRefusesARolledBackAccountsDocument is the read-path
+// half for accounts.
+func TestReloadIfStaleRefusesARolledBackAccountsDocument(t *testing.T) {
+	var logs bytes.Buffer
+	m := persist.NewMemory()
+	s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An operator restores an older, valid backup while the service runs.
+	if _, err := m.Save(context.Background(), rolledBack.Payload, current.Version); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 3 { // each read runs reloadIfStale
+		if _, ok := s.ByUsername("bob"); !ok {
+			t.Fatal("the rolled-back document was adopted: bob is gone")
+		}
+	}
+	if n := strings.Count(logs.String(), "sequence counter"); n != 1 {
+		t.Errorf("expected exactly one log line about the rolled-back document, got %d:\n%s", n, logs.String())
+	}
+
+	if _, err := s.CreateUser("carol", "password456", RoleUser, time.Now()); !errors.Is(err, errStaleDocument) {
+		t.Errorf("CreateUser over the rolled-back document = %v, want errStaleDocument", err)
+	}
+	assertPayload(t, m, string(rolledBack.Payload))
+}
+
+// TestReloadIfStaleRefusesARolledBackTokensDocument is the read-path
+// half for tokens -- the exact scenario docs/design.md §4 names: a
+// restored copy reviving a token that was revoked since it was taken.
+func TestReloadIfStaleRefusesARolledBackTokensDocument(t *testing.T) {
+	var logs bytes.Buffer
+	m := persist.NewMemory()
+	s, err := OpenTokenStore(m, TokenOptions{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, tok, err := s.Create("first", TokenKindAPI, "", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Revoke(tok.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Save(context.Background(), rolledBack.Payload, current.Version); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 3 { // each read runs reloadIfStale
+		if _, ok := s.Authenticate(raw, TokenKindAPI, time.Now()); ok {
+			t.Fatal("the rolled-back document revived a revoked token")
+		}
+	}
+	if n := strings.Count(logs.String(), "sequence counter"); n != 1 {
+		t.Errorf("expected exactly one log line about the rolled-back document, got %d:\n%s", n, logs.String())
+	}
+
+	if _, _, err := s.Create("second", TokenKindAPI, "", nil, time.Now()); !errors.Is(err, errStaleDocument) {
+		t.Errorf("Create over the rolled-back document = %v, want errStaleDocument", err)
+	}
+	assertPayload(t, m, string(rolledBack.Payload))
+}
+
+// TestMutateRefusesToWriteOverARolledBackAccountsDocument is the
+// write-path half for accounts: the rollback lands between this store's
+// read and its save, so the save's conflict reload meets it -- the same
+// path a too-new document is refused on (TestMutateRefusesToWriteOver-
+// ANewerAccountsDocument above).
+func TestMutateRefusesToWriteOverARolledBackAccountsDocument(t *testing.T) {
+	m := persist.NewMemory()
+	b := &otherProcessBackend{Memory: m}
+	s, err := OpenStore(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.beforeSave = func() { overwrite(t, m, string(rolledBack.Payload)) }
+
+	_, err = s.CreateUser("carol", "password456", RoleUser, time.Now())
+	if !errors.Is(err, errStaleDocument) {
+		t.Errorf("CreateUser across a rolled-back conflict = %v, want errStaleDocument", err)
+	}
+	assertPayload(t, m, string(rolledBack.Payload))
+}
+
+// TestTokenStoreRefusesToWriteOverARolledBackTokensDocument is the
+// write-path half for tokens.
+func TestTokenStoreRefusesToWriteOverARolledBackTokensDocument(t *testing.T) {
+	m := persist.NewMemory()
+	b := &otherProcessBackend{Memory: m}
+	s, err := OpenTokenStore(b, TokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tok, err := s.Create("first", TokenKindAPI, "", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Revoke(tok.ID); err != nil {
+		t.Fatal(err)
+	}
+	b.beforeSave = func() { overwrite(t, m, string(rolledBack.Payload)) }
+
+	_, _, err = s.Create("second", TokenKindAPI, "", nil, time.Now())
+	if !errors.Is(err, errStaleDocument) {
+		t.Errorf("Create across a rolled-back conflict = %v, want errStaleDocument", err)
+	}
+	assertPayload(t, m, string(rolledBack.Payload))
 }

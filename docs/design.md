@@ -1090,11 +1090,20 @@ start afresh (#39).
 Restore or replace a store file only with the service stopped. A
 running store reloads any file that changed on disk and judges
 "changed", not "newer": an older but valid copy put back while it runs
-is adopted at the next request, undoing later changes and reviving
-revoked tokens, with nothing logged. #59 (v0.3.0) adds a sequence
-counter inside the sealed document so a running store refuses an older
-copy; a copy put back while the service is stopped is accepted on start
-either way.
+would otherwise be adopted at the next request, undoing later changes
+and reviving revoked tokens, with nothing logged. #59 (v0.3.0) closes
+that: each document carries a sequence counter inside the seal,
+incremented on every save, and a running store refuses to adopt a
+document naming a lower one than it has already loaded or written --
+the file on disk is left alone, the store keeps what it holds, logs
+once why, and refuses writes until the file is replaced or the process
+restarts, the same way a document from a newer build is already
+refused.
+
+This still has no reach across a restart: the store remembers nothing
+of the counter once the process exits, so a copy put back while the
+service is stopped -- the restore this section asks for -- is accepted
+on start either way.
 
 ## 5. Build plan
 

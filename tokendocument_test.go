@@ -1,10 +1,10 @@
 package gauntlet
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,9 +99,15 @@ func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after save: %v", err)
 	}
-	if !bytes.Equal(snap.Payload, original) {
-		t.Errorf("saved document differs from the original fixture:\n--- original ---\n%s\n--- saved ---\n%s",
-			original, snap.Payload)
+	// tokensFixture is version 1, with no seq field (#59): it loads with
+	// the counter at zero and this no-op save stamps it at 1, alongside
+	// the version bump to 2 -- the same "older document, stamped on its
+	// next save" rule accountsFixture's own round trip exercises
+	// (roundtrip_test.go).
+	want := strings.Replace(string(original), `"version": 1,`, "\"version\": 2,\n  \"seq\": 1,", 1)
+	if string(snap.Payload) != want {
+		t.Errorf("saved document differs from the original fixture (version bumped, seq stamped at 1):\n--- want ---\n%s\n--- saved ---\n%s",
+			want, snap.Payload)
 	}
 
 	// Now exercise authentication on s1: the droplist-pull row must

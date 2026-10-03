@@ -200,7 +200,10 @@ func TestSetupCodeFollowsReloadedDocument(t *testing.T) {
 	// The other process empties the document again (a restore of an
 	// empty file, say): setup is required again, under a new code.
 	version := s.version
-	if _, err := m.Save(t.Context(), []byte(`{"version":1,"users":[]}`), version); err != nil {
+	// seq (#59) is set ahead of what s has already seen (alice's
+	// account, seq 1), or this empty document -- a legitimate reset --
+	// would itself be refused as a rollback.
+	if _, err := m.Save(t.Context(), []byte(`{"version":1,"seq":2,"users":[]}`), version); err != nil {
 		t.Fatalf("emptying the document: %v", err)
 	}
 	s.reloadIfStale()

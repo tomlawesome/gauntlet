@@ -227,7 +227,11 @@ func TestFindOrCreateOIDCUserRefusesOnReplayAgainstAnEmptiedDocument(t *testing.
 		}
 	})
 	b.beforeSave = func() {
-		if _, err := b.Memory.Save(t.Context(), []byte(`{"version":1,"users":[]}`), other.version); err != nil {
+		// seq (#59) ahead of what s has already seen (alice's account),
+		// so this emptying is a legitimate write, not a rollback the
+		// sequence check would refuse before FindOrCreateOIDCUser's own
+		// checkAdmins-based refusal (ErrSetupRequired) is reached.
+		if _, err := b.Memory.Save(t.Context(), []byte(`{"version":1,"seq":2,"users":[]}`), other.version); err != nil {
 			t.Errorf("the other process emptying the document: %v", err)
 		}
 	}

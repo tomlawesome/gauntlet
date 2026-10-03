@@ -141,8 +141,15 @@ type oidcKey struct {
 // #29. A v0.1.0 document has no version; it reads as 0, loads as
 // version 1, and is written with the version on its next save.
 type storeFile struct {
-	Version int     `json:"version"`
-	Users   []*User `json:"users"`
+	Version int `json:"version"`
+	// Seq is the save counter #59 added (version 6): it goes up by one
+	// on every save, inside persist.Encrypt's seal like the rest of the
+	// document, so a running store can tell an older, valid copy of the
+	// file restored over it from a change it should adopt -- see
+	// errStaleDocument. An older document has no field and reads as
+	// zero.
+	Seq   int64   `json:"seq"`
+	Users []*User `json:"users"`
 }
 
 // parseAccounts parses a stored accounts document, refusing one newer
@@ -156,6 +163,10 @@ func parseAccounts(data []byte) (storeFile, error) {
 	if err := checkDocumentVersion("accounts", version, accountsDocumentVersion); err != nil {
 		return storeFile{}, err
 	}
+	// Deliberately returned unmarshalled below rather than checked here:
+	// the caller (decodeAccounts) knows the watermark to check Seq
+	// against, which this function -- shared with OpenStore's very
+	// first load, which has none yet -- does not.
 	var file storeFile
 	if err := json.Unmarshal(data, &file); err != nil {
 		return storeFile{}, err
@@ -390,6 +401,16 @@ type storeState struct {
 	// lastLoginGranularity), since the in-memory value may be ahead of
 	// it.
 	lastLoginSaved map[string]time.Time
+	// seq is the document's own save counter as of the last load or
+	// save (#59, storeFile.Seq) -- also this process's watermark: a
+	// freshly decoded document naming a lower one is refused (see
+	// errStaleDocument) rather than replacing this state. accounts()'s
+	// bump advances it by one immediately before every save attempt.
+	// Lowercase like every other field here, deliberately: storeState
+	// is embedded in the exported Store, and a capitalized field would
+	// promote into Store's own public API for what is purely internal
+	// bookkeeping.
+	seq int64
 }
 
 // indexUsers builds the state for a decoded document. Every load
@@ -402,6 +423,7 @@ func indexUsers(file storeFile) storeState {
 		byName:         make(map[string]string, len(file.Users)),
 		oidcIndex:      make(map[oidcKey]string, len(file.Users)),
 		lastLoginSaved: make(map[string]time.Time, len(file.Users)),
+		seq:            file.Seq,
 	}
 	for _, u := range file.Users {
 		// A JSON array containing `null` unmarshals successfully into a
@@ -429,6 +451,7 @@ func (st *storeState) clone() *storeState {
 		byName:         make(map[string]string, len(st.byName)),
 		oidcIndex:      make(map[oidcKey]string, len(st.oidcIndex)),
 		lastLoginSaved: make(map[string]time.Time, len(st.lastLoginSaved)),
+		seq:            st.seq,
 	}
 	for id, u := range st.byID {
 		cp.byID[id] = u.clone()
@@ -463,14 +486,23 @@ func (st *storeState) recordSaved() {
 
 // encodeAccounts is the state as the document is saved.
 func encodeAccounts(st *storeState) ([]byte, error) {
-	return json.MarshalIndent(storeFile{Version: accountsDocumentVersion, Users: st.users()}, "", "  ")
+	return json.MarshalIndent(storeFile{Version: accountsDocumentVersion, Seq: st.seq, Users: st.users()}, "", "  ")
 }
 
 // decodeAccounts is the document as it is opened: parsed and checked
-// (parseAccounts, checkAdmins, checkUsernames) before it becomes a state.
-func decodeAccounts(data []byte) (*storeState, error) {
+// (parseAccounts, checkDocumentSeq, checkAdmins, checkUsernames) before
+// it becomes a state. minSeq is the highest sequence counter this
+// process has already loaded or written (storeState.Seq); a document
+// naming a lower one is refused (errStaleDocument) before its users are
+// even looked at. Every caller that already has a live watermark to
+// protect passes it; OpenStore's very first load, with nothing yet to
+// protect, passes 0.
+func decodeAccounts(data []byte, minSeq int64) (*storeState, error) {
 	file, err := parseAccounts(data)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkDocumentSeq("accounts", file.Seq, minSeq); err != nil {
 		return nil, err
 	}
 	if err := file.checkAdmins(); err != nil {
@@ -490,13 +522,21 @@ func (s *Store) accounts() document[storeState] {
 		what:    "accounts",
 		clone:   (*storeState).clone,
 		encode:  encodeAccounts,
-		decode:  decodeAccounts,
+		// s.seq is read here, not under a separate lock:
+		// every call this closure reaches runs while mutate already
+		// holds the store's write lock for the whole of the replay
+		// (mutateLocked), so it is this write's own watermark, fixed
+		// for every reload a conflict makes it do.
+		decode: func(data []byte) (*storeState, error) {
+			return decodeAccounts(data, s.seq)
+		},
 		// The single-admin rule, checked on the way out as well as on
 		// the way in: an op that broke it would otherwise save a
 		// document the next OpenStore refuses.
 		check: func(st *storeState) error {
 			return storeFile{Users: st.users()}.checkAdmins()
 		},
+		bump: func(st *storeState) { st.seq++ },
 	}
 }
 
@@ -646,7 +686,11 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	}
 
 	version, existed, err := persist.Open(context.Background(), b, "the accounts store", func(data []byte) error {
-		st, err := decodeAccounts(data)
+		// s.seq is 0 here: nothing is loaded yet, so there is
+		// nothing a lower counter could roll back -- the known limit
+		// docs/design.md §4 records, since this process has no memory
+		// of the counter across a restart.
+		st, err := decodeAccounts(data, s.seq)
 		if err != nil {
 			return err
 		}
@@ -780,6 +824,7 @@ func (s *Store) reloadIfStale() {
 	}
 	s.mu.RLock()
 	alreadyRefused := s.hasRefusedVersion && snap.Version == s.refusedVersion
+	minSeq := s.seq
 	s.mu.RUnlock()
 	if snap.Version == beforeLoad || alreadyRefused {
 		return
@@ -787,10 +832,12 @@ func (s *Store) reloadIfStale() {
 
 	// A document that does not parse is skipped silently, as a read
 	// failure is. One that parses but is refused -- newer than this
-	// build reads, the literal null, or breaking the admin or
-	// unique-username rule -- is different.
-	st, err := decodeAccounts(snap.Payload)
+	// build reads, older than this process has already seen (#59), the
+	// literal null, or breaking the admin or unique-username rule -- is
+	// different.
+	st, err := decodeAccounts(snap.Payload, minSeq)
 	if err != nil && !errors.Is(err, errNewerDocument) &&
+		!errors.Is(err, errStaleDocument) &&
 		!errors.Is(err, errNullDocument) &&
 		!errors.Is(err, errMultipleAdmins) && !errors.Is(err, errNoAdmin) &&
 		!errors.Is(err, errDuplicateUsername) {

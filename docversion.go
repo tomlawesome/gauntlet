@@ -34,12 +34,23 @@ import (
 // no build that wrote it accepted a password the live check had not
 // answered for. A build that reads up to version 4 refuses a version-5
 // document rather than drop a recheck that is owed.
+// Version 6 (#59) added the top-level "seq" counter (see
+// errStaleDocument below); an older document reads it as zero and is
+// stamped with this process's own count on its next save, like any
+// other added field.
 //
 // The sign-in history (#53, signins.go) is the third document, version 1
-// from its first release: {"version":1,"nextSeq":n,"rows":[...]}.
+// from its first release: {"version":1,"nextSeq":n,"rows":[...]}, and
+// carries no "seq" counter of its own: it saves but never re-reads a
+// document another process may have written, so there is nothing for it
+// to refuse (docs/design.md §4).
+//
+// Tokens' version 2 (#59) is the same "seq" addition as accounts'
+// version 6, numbered on its own track since the two documents'
+// versions have never moved together.
 const (
-	accountsDocumentVersion = 5
-	tokensDocumentVersion   = 1
+	accountsDocumentVersion = 6
+	tokensDocumentVersion   = 2
 	signInsDocumentVersion  = 1
 )
 
@@ -50,6 +61,34 @@ const (
 // loaded it would drop every field it does not know on its next save,
 // and with them a newer build's TOTP secrets or passkeys.
 var errNewerDocument = errors.New("it was written by a newer gauntlet, and this build would drop what it does not know on the next save")
+
+// errStaleDocument is the decode error for a stored document whose
+// "seq" counter (#59) is lower than the highest this process has
+// already loaded or written. A running store judges a change on disk by
+// "changed", not "newer" (docs/design.md §4): an older, valid copy of
+// the file put back while the service runs -- a backup restore that
+// missed the stop step -- would otherwise be adopted at the next
+// request, undoing whatever changed since and reviving whatever it
+// revoked, with nothing logged. Refused the same way a newer-version
+// document is refused (errNewerDocument): the file on disk is left
+// alone, this process keeps what it holds, and every write meets the
+// same refusal until the file is replaced or the process restarts.
+//
+// This process has no memory of the counter across a restart -- a
+// rollback made while the service is stopped is accepted when it starts
+// again, the known limit docs/design.md §4 records.
+var errStaleDocument = errors.New("it was written earlier than the copy this process already has -- only an older copy restored over a newer one goes backward like that")
+
+// checkDocumentSeq refuses a document whose counter, got, is lower than
+// haveSeen, the highest this process has loaded or written so far. what
+// names the document in the error, as checkDocumentVersion does for a
+// too-new one.
+func checkDocumentSeq(what string, got, haveSeen int64) error {
+	if got >= haveSeen {
+		return nil
+	}
+	return fmt.Errorf("the %s document's sequence counter is %d, and this process has already seen %d: %w", what, got, haveSeen, errStaleDocument)
+}
 
 // errSealedDocument is the decode error for a document that is
 // persist.Encrypt's sealed envelope rather than an accounts, tokens or
