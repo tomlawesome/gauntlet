@@ -331,6 +331,9 @@ func TestOIDCLoginRedirectsToProviderAndSetsFlowCookie(t *testing.T) {
 	if loc == "" {
 		t.Fatal("expected a redirect Location")
 	}
+	if !strings.HasPrefix(loc, fp.Issuer()+"/authorize") {
+		t.Errorf("redirect Location = %q, want the provider's authorization endpoint %s/authorize", loc, fp.Issuer())
+	}
 	var flowCookie *http.Cookie
 	for _, c := range resp.Cookies() {
 		if c.Name == oidcFlowCookieName {
@@ -340,7 +343,6 @@ func TestOIDCLoginRedirectsToProviderAndSetsFlowCookie(t *testing.T) {
 	if flowCookie == nil {
 		t.Fatal("expected the OIDC flow cookie to be set")
 	}
-	_ = fp
 	_ = g
 }
 
