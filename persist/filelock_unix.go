@@ -23,9 +23,9 @@ type fileLock struct {
 // syscall.Flock has no deadline parameter, so the blocking call runs in
 // its own goroutine; lockFile itself waits on that goroutine or on
 // ctx.Done. If ctx wins, the goroutine is left to finish on its own --
-// when it eventually acquires the lock, it closes the file at once so the
-// abandoned lock is not held forever, but the caller gets ctx.Err()
-// without waiting for that to happen.
+// when the lock call eventually returns, it closes the file at once, so
+// an abandoned lock is not held forever and the handle never leaks; the
+// caller gets ctx.Err() without waiting for that to happen.
 func lockFile(ctx context.Context, path string) (*fileLock, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -43,9 +43,8 @@ func lockFile(ctx context.Context, path string) (*fileLock, error) {
 		return &fileLock{f: f}, nil
 	case <-ctx.Done():
 		go func() {
-			if err := <-acquired; err == nil {
-				_ = f.Close()
-			}
+			<-acquired // locked or failed, the handle is no longer needed
+			_ = f.Close()
 		}()
 		return nil, ctx.Err()
 	}
