@@ -30,7 +30,8 @@ type fakeGitHub struct {
 	log      []string                // "METHOD path" in order
 	failOn   string                  // "METHOD path-prefix" answered 500
 	uploads  int
-	failNth  int // answer the Nth upload with 500
+	failNth  int  // answer the Nth upload with 500
+	noDigest bool // report assets without a digest, as GitHub does for older uploads
 }
 
 type fakeRelease struct {
@@ -81,6 +82,21 @@ func (g *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		rel := &fakeRelease{id: g.nextID, assets: map[string]ghAsset{}, data: map[string][]byte{}}
 		g.releases[req["tag_name"].(string)] = rel
 		g.writeRelease(w, http.StatusCreated, rel)
+	case r.Method == http.MethodGet && strings.HasPrefix(p, repo+"/releases/assets/"):
+		id, _ := strconv.ParseInt(strings.TrimPrefix(p, repo+"/releases/assets/"), 10, 64)
+		if r.Header.Get("Accept") != "application/octet-stream" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, rel := range g.releases {
+			for name, a := range rel.assets {
+				if a.ID == id {
+					_, _ = w.Write(rel.data[name])
+					return
+				}
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
 	case r.Method == http.MethodDelete && strings.HasPrefix(p, repo+"/releases/assets/"):
 		id, _ := strconv.ParseInt(strings.TrimPrefix(p, repo+"/releases/assets/"), 10, 64)
 		for _, rel := range g.releases {
@@ -115,7 +131,11 @@ func (g *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 				data, _ := io.ReadAll(r.Body)
 				g.nextID++
 				sum := sha256.Sum256(data)
-				rel.assets[name] = ghAsset{ID: g.nextID, Name: name, Size: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(sum[:])}
+				a := ghAsset{ID: g.nextID, Name: name, Size: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(sum[:])}
+				if g.noDigest {
+					a.Digest = ""
+				}
+				rel.assets[name] = a
 				rel.data[name] = data
 				w.WriteHeader(http.StatusCreated)
 				_, _ = w.Write([]byte(`{}`))
@@ -334,19 +354,34 @@ func TestPublishGitHubReportsGitHubErrors(t *testing.T) {
 	}
 }
 
-func TestAssetSame(t *testing.T) {
+// Without a digest from GitHub, a dated release's file is compared by
+// its bytes: a corrected list of the same size is still a different
+// list, and an identical one is still recognised.
+func TestPublishGitHubComparesBytesWithoutADigest(t *testing.T) {
 	t.Parallel()
-	data := []byte("abc")
-	sum := sha256.Sum256(data)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
-	if !(ghAsset{Digest: digest, Size: 99}).same(data) {
-		t.Error("a matching digest must win over the size")
+	g := newFakeGitHub(t)
+	g.noDigest = true
+	list, tok := signedListDir(t)
+	if code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...); code != 0 {
+		t.Fatal(stderr)
 	}
-	if (ghAsset{Digest: digest, Size: 3}).same([]byte("abd")) {
-		t.Error("same size, different bytes, matched")
+	if code, stdout, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...); code != 0 {
+		t.Fatalf("rerun of the same list: %s", stderr)
+	} else if !strings.Contains(stdout, "already there") {
+		t.Fatalf("the same list was not recognised:\n%s", stdout)
 	}
-	if !(ghAsset{Size: 3}).same(data) || (ghAsset{Size: 4}).same(data) {
-		t.Error("without a digest, size decides")
+
+	b, _ := os.ReadFile(list)
+	n := len(b)
+	b = []byte(strings.Replace(string(b), "# min-count: 1000", "# min-count: 1001", 1))
+	if len(b) != n {
+		t.Fatal("the corrected list must be the same size")
+	}
+	_ = os.WriteFile(list, b, 0o644)
+	writeSum(t, list)
+	code, _, stderr := runCLI(t, publishArgs(g, list, tok, "pwned-top10k-2026.10.02")...)
+	if code != 1 || !strings.Contains(stderr, "never rewritten") {
+		t.Fatalf("a same-size, different list passed as already there: %d %s", code, stderr)
 	}
 }
 

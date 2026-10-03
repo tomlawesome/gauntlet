@@ -30,8 +30,8 @@ import (
 // blocklist.DefaultURL reads; its three files are replaced each run.
 // `pwned-top10k-<YYYY.MM.DD>` is the run's own and is never rewritten:
 // a file already there is left alone if it is the same file (by the
-// SHA-256 digest GitHub reports, or by size where it reports none) and
-// is an error if it is not, so a retried job finishes the job instead of
+// SHA-256 digest GitHub reports, or by downloading it where it reports
+// none) and is an error if it is not, so a retried job finishes the job instead of
 // failing on what its first attempt already did.
 //
 // Neither release is marked "latest", so the repository's latest
@@ -77,13 +77,20 @@ type ghAsset struct {
 }
 
 // same reports whether a holds exactly data: by its SHA-256 digest
-// when GitHub gives one, and only by size when it does not.
-func (a ghAsset) same(data []byte) bool {
+// when GitHub gives one, and otherwise by downloading it and comparing
+// bytes. Size never decides: every list is 10,000 hashes and a header
+// of near-fixed width, so a corrected list is usually the same size as
+// the wrong one it must not be mistaken for.
+func (g *github) same(ctx context.Context, a ghAsset, data []byte) (bool, error) {
 	if a.Digest != "" {
 		sum := sha256.Sum256(data)
-		return a.Digest == "sha256:"+hex.EncodeToString(sum[:])
+		return a.Digest == "sha256:"+hex.EncodeToString(sum[:]), nil
 	}
-	return a.Size == int64(len(data))
+	got, err := g.download(ctx, a.ID, int64(len(data))+1)
+	if err != nil {
+		return false, fmt.Errorf("download %s to compare it: %w", a.Name, err)
+	}
+	return bytes.Equal(got, data), nil
 }
 
 type ghRelease struct {
@@ -195,7 +202,11 @@ func (g *github) publish(ctx context.Context, tag, name, target, built, in strin
 			}
 		}
 		if existing != nil && !replace {
-			if !existing.same(data) {
+			same, err := g.same(ctx, *existing, data)
+			if err != nil {
+				return err
+			}
+			if !same {
 				return fmt.Errorf("%s already holds a different %s; a dated release is never rewritten", tag, assetName)
 			}
 			_, _ = fmt.Fprintf(stdout, "pwlist publish-github: %s/%s already there\n", tag, assetName)
@@ -257,6 +268,26 @@ func (g *github) upload(ctx context.Context, rel *ghRelease, name string, data [
 	return g.do(ctx, http.MethodPost, u.String(), "application/octet-stream", data, http.StatusCreated, nil)
 }
 
+// download fetches an asset's bytes, reading at most limit of them:
+// GitHub answers with a redirect to its download host, which the client
+// follows without the Authorization header.
+func (g *github) download(ctx context.Context, id, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/releases/assets/%d", g.api, g.repo, id), nil)
+	if err != nil {
+		return nil, err
+	}
+	g.header(req, "application/octet-stream")
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: %s", req.URL.Redacted(), resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
+}
+
 type statusError struct {
 	code int
 	msg  string
@@ -272,10 +303,7 @@ func (g *github) do(ctx context.Context, method, u, contentType string, body []b
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", g.userAgent)
+	g.header(req, "application/vnd.github+json")
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -301,4 +329,11 @@ func (g *github) do(ctx context.Context, method, u, contentType string, body []b
 		}
 	}
 	return nil
+}
+
+func (g *github) header(req *http.Request, accept string) {
+	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", g.userAgent)
 }
