@@ -714,12 +714,18 @@ func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) e
 
 	l.persistMu.Lock()
 	defer l.persistMu.Unlock()
+	// Save first, and drop what this limiter holds only once the save
+	// has landed: an admin told the unlock failed takes the account to
+	// be still disabled, so this limiter must go on refusing it too.
+	if err := rec.setLockoutRecord(accountID, lockoutState{}); err != nil {
+		return err
+	}
 	l.mu.Lock()
 	delete(l.accounts, loginBucket+accountID)
 	delete(l.accounts, knownBrowserBucket+accountID)
 	delete(l.wantLockout, accountID)
 	l.mu.Unlock()
-	return rec.setLockoutRecord(accountID, lockoutState{})
+	return nil
 }
 
 // ReserveKnownBrowser is ReserveAccount for a browser accountID

@@ -150,6 +150,39 @@ func TestLimiterUnlockLoginDropsAnUnsavedDisable(t *testing.T) {
 	}
 }
 
+// An unlock whose save fails leaves the limiter's disable in place: the
+// admin is told the unlock failed, so guessing must not resume. Once a
+// save succeeds, the unlock clears it.
+func TestLimiterUnlockLoginThatFailsToSaveKeepsTheDisable(t *testing.T) {
+	b := &flakySaveBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+	at := failConsecutively(t, l, s, id, MaxConsecutiveLoginFailures-1, escalationStart)
+	b.fail.Store(true)
+	if !l.ReserveAccount(s, id, at) {
+		t.Fatal("the fiftieth attempt was refused")
+	}
+	if !mustGet(t, s, id).LoginDisabledAt.IsZero() {
+		t.Fatal("precondition: the disable was expected to fail to save")
+	}
+
+	if err := l.UnlockLogin(s, id); err == nil {
+		t.Fatal("UnlockLogin reported success although its save failed")
+	}
+	later := at.Add(time.Hour)
+	if l.ReserveAccount(s, id, later) {
+		t.Fatal("a failed unlock let guessing resume")
+	}
+
+	b.fail.Store(false)
+	if err := l.UnlockLogin(s, id); err != nil {
+		t.Fatal(err)
+	}
+	if !l.ReserveAccount(s, id, later.Add(time.Minute)) {
+		t.Error("the limiter refused the account it had just unlocked")
+	}
+}
+
 // disabledAdminBackend returns a backend holding one admin, "alice",
 // whose sign-in fifty failures have disabled, with a second factor and
 // a non-admin "bob"; and alice's ID.
