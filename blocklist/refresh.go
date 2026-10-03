@@ -105,7 +105,9 @@ type RefreshConfig struct {
 //     adopted;
 //   - Parse accepts it: format v1, exactly 10,000 strictly ascending
 //     hashes;
-//   - it was built no more than 24 hours in the future, and later than
+//   - when downloaded, it was built no more than 24 hours in the
+//     future (the copy in Dir, adopted earlier, skips this test, so a
+//     clock that is behind at boot does not discard it), and later than
 //     the list in use, which starts as the newer of the embedded copy
 //     and the copy in Dir. A list older than the one compiled into
 //     this release is therefore never used.
@@ -296,6 +298,9 @@ func (r *Refresher) refreshLocked(ctx context.Context) error {
 		return err
 	}
 	l, err := r.check(data, sig)
+	if err == nil && l.Built().After(r.now().Add(futureMargin)) {
+		err = contentError{fmt.Errorf("the list claims to be built at %s, in the future", l.Built().Format(time.RFC3339))}
+	}
 	if err == nil && !l.Built().After(cur.Built()) {
 		err = contentError{fmt.Errorf("the published list (built %s) is not newer than the one in use (built %s)",
 			l.Built().Format(time.RFC3339), cur.Built().Format(time.RFC3339))}
@@ -315,9 +320,12 @@ func (r *Refresher) refreshLocked(ctx context.Context) error {
 	return nil
 }
 
-// check is every content test a list must pass, for a download and for
-// the copy in Dir alike. The signature comes first, so nothing parses
-// bytes nobody trusted.
+// check is the signature and format test a list must pass, for a
+// download and for the copy in Dir alike. The signature comes first, so
+// nothing parses bytes nobody trusted. The future-date test is not
+// here: it applies to downloads only (refreshLocked), because a host
+// that boots with its clock behind must not throw away the copy it
+// already verified and adopted.
 func (r *Refresher) check(data, sig []byte) (*List, error) {
 	ring, err := r.keys()
 	if err != nil {
@@ -329,9 +337,6 @@ func (r *Refresher) check(data, sig []byte) (*List, error) {
 	l, err := Parse(data)
 	if err != nil {
 		return nil, contentError{err}
-	}
-	if l.Built().After(r.now().Add(futureMargin)) {
-		return nil, contentError{fmt.Errorf("the list claims to be built at %s, in the future", l.Built().Format(time.RFC3339))}
 	}
 	return l, nil
 }

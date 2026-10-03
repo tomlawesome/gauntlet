@@ -331,6 +331,22 @@ func TestRestartIgnoresABadStoredCopy(t *testing.T) {
 	}
 }
 
+// A host that boots with its clock behind still starts from the copy it
+// verified and adopted earlier: the future-date check is for downloads.
+func TestRestartKeepsTheStoredCopyWhenTheClockIsBehind(t *testing.T) {
+	f := newFixture(t)
+	data, sig := f.signedList(t, testBuilt, "a")
+	f.reg.publish(data, sig)
+	f.refresher(t, &List{}).refresh(context.Background())
+
+	f.now = testBuilt.Add(-72 * time.Hour)
+	f.log = &logBuf{}
+	r := f.refresher(t, &List{})
+	if !r.Current().Built().Equal(testBuilt) || r.Current().Len() != size {
+		t.Fatalf("the stored copy was not loaded with the clock behind: Built=%v, log:\n%s", r.Current().Built(), f.log)
+	}
+}
+
 // An application upgraded to a release whose embedded copy is newer
 // than the one it kept on disk uses the embedded copy.
 func TestRestartPrefersANewerEmbeddedCopy(t *testing.T) {
