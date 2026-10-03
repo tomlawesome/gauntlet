@@ -121,10 +121,13 @@ All notable changes to this project are documented in this file.
   `Refresher` (`NewRefresher`, `RefreshConfig`): it checks the public
   GitHub mirror once a day by default, accepts a list only if its
   checksum and signature verify and it is newer than the one in use,
-  and keeps it in a directory the application names. Until the first
-  signed list is published, `Embedded()` is empty and blocks nothing,
-  and a release refuses to tag. `Refresher.Contains` lets a refresher
-  stand wherever a list is expected.
+  and keeps it in a directory the application names. The release
+  carries the first signed list, built 2026-10-03; a release refuses
+  to tag without a list or with one over 90 days old.
+  `Refresher.Contains` lets a refresher stand wherever a list is
+  expected. An application's own tests that register accounts with
+  common passwords such as `password123` now get
+  `ErrPasswordBlocked`, and need other test passwords.
 - New passwords are checked before they are set (#43): `Register`,
   `CreateUser` and `SetPassword`, and so gate's register, create-user
   and change-password routes, refuse a password that is on the
@@ -275,12 +278,6 @@ All notable changes to this project are documented in this file.
   SSO sign-in now writes `user.login` too (`via sso; from=...`), which
   it never did (#45). An audit consumer matching on the old detail
   needs updating.
-
-- release:version lets v0.2.0, and only v0.2.0, ship with the
-  common-password list still the placeholder, so `Embedded()` blocks
-  nothing in that release; the first signed list does not exist yet.
-  Every later version is refused again until a real list is in place
-  (refs #52, owner 2026-10-02).
 
 - **Breaking.** `OpenStore` now refuses a backend that stores the
   accounts document in the clear -- one that does not implement

@@ -15,9 +15,6 @@ trap 'rm -rf "$WORK"' EXIT
 # 2026-10-02T00:00:00Z
 NOW=1790899200
 DAY=86400
-# Any version but 0.2.0, so the placeholder is refused below whatever
-# the VERSION file says.
-export RELEASE_VERSION=0.3.0
 
 # mk DIR BUILT: a directory holding a list header with that built line,
 # and a signature file. Only the header matters to this script.
@@ -74,20 +71,16 @@ mk "$WORK/placeholder" 2026-09-22T00:00:00Z
 echo "placeholder" > "$WORK/placeholder/PLACEHOLDER"
 expect fail "a list with the placeholder still beside it" "$WORK/placeholder" "$NOW"
 
-# v0.2.0 alone may ship the bare placeholder (owner, 2026-10-02).
-export RELEASE_VERSION=0.2.0
-expect fail "a list with the placeholder beside it, at v0.2.0" "$WORK/placeholder" "$NOW"
+# v0.2.0's one-off allowance for the bare placeholder went when the
+# first real list was embedded (#52): the version no longer matters.
 rm -rf "$WORK/placeholder"
 mkdir -p "$WORK/placeholder"
 echo "placeholder" > "$WORK/placeholder/PLACEHOLDER"
-expect pass "the placeholder at v0.2.0" "$WORK/placeholder" "$NOW"
-mk "$d" 2026-06-01T12:00:00Z
-expect fail "a stale list at v0.2.0" "$d" "$NOW"
-for v in 0.2.1 0.3.0 0.1.0 1.0.0; do
+for v in 0.2.0 0.3.0; do
   export RELEASE_VERSION="$v"
   expect fail "the placeholder at v$v" "$WORK/placeholder" "$NOW"
 done
-export RELEASE_VERSION=0.3.0
+unset RELEASE_VERSION
 
 # The arithmetic itself, at a leap day, the epoch and past 2038 (where
 # a 32-bit printf would overflow): each date is exactly its own age-0
