@@ -45,6 +45,22 @@ func (g *Gate) redirectWithSSOError(w http.ResponseWriter, r *http.Request, code
 	http.Redirect(w, r, g.cfg.LoginPath+"?ssoError="+code, http.StatusFound)
 }
 
+// failSSO is redirectWithSSOError plus a Warn line, so an operator whose
+// users keep landing back on the login page can see why. identity is
+// the verified identity, or nil before one exists; its subject and
+// issuer are quoted, as the provider chose them. Rated like the other
+// refusals a stranger can send at will (warnRated): most of these need
+// no more than a request to the callback URL.
+func (g *Gate) failSSO(w http.ResponseWriter, r *http.Request, code string, identity *oidc.Identity) {
+	address := g.cfg.ClientIP(r)
+	msg := fmt.Sprintf("gate: SSO callback failed: ssoError=%s from=%q", code, address)
+	if identity != nil {
+		msg += fmt.Sprintf(" subject=%q issuer=%q", identity.Subject, identity.Issuer)
+	}
+	g.warnRated("sso "+code+" "+address, msg)
+	g.redirectWithSSOError(w, r, code)
+}
+
 // handleOIDCLogin starts a login: generates fresh PKCE/state/nonce
 // values (oidc.FlowState), seals them into a short-lived cookie, and
 // redirects the browser to the provider. 404s if OIDC isn't configured
@@ -142,13 +158,13 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.FlowState, identity *oidc.Identity, now time.Time) {
 	caller, ok := g.sessionUser(r, now)
 	if !ok || caller.ID != fs.LinkUserID {
-		g.redirectWithSSOError(w, r, "link_session_changed")
+		g.failSSO(w, r, "link_session_changed", identity)
 		return
 	}
 
 	if err := g.deps.Users.LinkOIDCIdentity(caller.ID, identity.Issuer, identity.Subject, now); err != nil {
 		if err == gauntlet.ErrOIDCIdentityTaken {
-			g.redirectWithSSOError(w, r, "link_identity_taken")
+			g.failSSO(w, r, "link_identity_taken", identity)
 			return
 		}
 		g.logWarn("linking SSO identity to account " + caller.ID + " failed: " + err.Error())
@@ -207,14 +223,14 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// taken.
 	g.clearOIDCFlowCookie(w)
 	if cookieErr != nil {
-		g.redirectWithSSOError(w, r, "state_mismatch")
+		g.failSSO(w, r, "state_mismatch", nil)
 		return
 	}
 
 	now := g.now()
 	fs, err := g.deps.OIDCState.Decode(cookie.Value, oidcFlowCookieMaxAge, now)
 	if err != nil {
-		g.redirectWithSSOError(w, r, "state_mismatch")
+		g.failSSO(w, r, "state_mismatch", nil)
 		return
 	}
 
@@ -222,31 +238,31 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if q.Get("error") != "" {
 		// The provider itself reported a failure (access_denied, etc) --
 		// never surfaced verbatim, see this handler's doc comment.
-		g.redirectWithSSOError(w, r, "provider_error")
+		g.failSSO(w, r, "provider_error", nil)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(fs.State)) != 1 {
-		g.redirectWithSSOError(w, r, "state_mismatch")
+		g.failSSO(w, r, "state_mismatch", nil)
 		return
 	}
 	code := q.Get("code")
 	if code == "" {
-		g.redirectWithSSOError(w, r, "provider_error")
+		g.failSSO(w, r, "provider_error", nil)
 		return
 	}
 
 	tok, err := g.deps.OIDC.Exchange(r.Context(), code, fs.CodeVerifier)
 	if err != nil {
-		g.redirectWithSSOError(w, r, "provider_error")
+		g.failSSO(w, r, "provider_error", nil)
 		return
 	}
 	identity, err := g.deps.OIDC.VerifyIDToken(r.Context(), tok)
 	if err != nil {
-		g.redirectWithSSOError(w, r, "verification_failed")
+		g.failSSO(w, r, "verification_failed", nil)
 		return
 	}
 	if !oidc.VerifyNonce(identity.Nonce, fs.Nonce) {
-		g.redirectWithSSOError(w, r, "state_mismatch")
+		g.failSSO(w, r, "state_mismatch", nil)
 		return
 	}
 
@@ -281,7 +297,7 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	user, _, err := g.deps.Users.FindOrCreateOIDCUser(identity.Issuer, identity.Subject, ssoUsernameHint(identity), now)
 	if err != nil {
-		g.redirectWithSSOError(w, r, "login_failed")
+		g.failSSO(w, r, "login_failed", identity)
 		return
 	}
 
