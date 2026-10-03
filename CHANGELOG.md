@@ -610,6 +610,14 @@ All notable changes to this project are documented in this file.
     exactly the image that was reviewed.
   - The API document no longer says SSO can create the first account;
     the first account has always come from the local setup code.
+  - Passkey names are quoted in the `account.passkey_added` and
+    `account.passkey_removed` audit details (`name="..."`), so a name
+    holding a newline or an escape code cannot forge audit lines. Readers
+    that parsed the bare `name=` form must expect the quotes.
+  - Five second-factor failures in a row force a password change on an
+    account whose record carries a lockout and an older-style
+    password-change date too; before, the run of failures reset on every
+    attempt for such an account.
 
 - `POST /api/tokens` with a name the token store refuses answers 400
   with the reason, instead of 500 "unable to create token" (#25).
