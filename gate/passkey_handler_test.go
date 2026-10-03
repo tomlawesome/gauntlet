@@ -106,7 +106,7 @@ func passkeyFixture(t *testing.T) (*Gate, *httptest.Server, *http.Client) {
 	t.Helper()
 	g := passkeyGate(t)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword, Role: "user"}).Body.Close()
 	return g, ts, admin
@@ -992,7 +992,7 @@ func TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits(t *testing.T
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
 	g.deps.Users = openTrackedStore(t, backend)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword, Role: "user"}).Body.Close()
 
@@ -1255,7 +1255,7 @@ func TestPasskeyLoginGivesTheBeginReservationBack(t *testing.T) {
 func TestPasskeyRoutesAnswer404WhenPasskeysAreOff(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword, Role: "user"}).Body.Close()
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
@@ -1421,13 +1421,13 @@ func TestPasskeyRegisterExpiredCeremony(t *testing.T) {
 			const base = "http://gate.test"
 			client := &http.Client{Jar: mustCookieJar(t), Transport: inProcess{g.Protect(mux)}}
 
-			reg := postJSON(t, client, base+"/api/auth/register", registerRequest{Username: "admin", Password: "password123", SetupCode: setupCodeFor(t, g)})
+			reg := postJSON(t, client, base+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-1", SetupCode: setupCodeFor(t, g)})
 			_ = reg.Body.Close()
 			if reg.StatusCode != http.StatusCreated {
 				t.Fatalf("register returned %d", reg.StatusCode)
 			}
 
-			begin := postJSON(t, client, base+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "password123"})
+			begin := postJSON(t, client, base+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "password-placeholder-1"})
 			var creation protocol.CredentialCreation
 			if err := json.NewDecoder(begin.Body).Decode(&creation); err != nil {
 				t.Fatal(err)
@@ -1672,7 +1672,7 @@ func TestPasskeyCounterSaveFailureDoesNotSpendBudget(t *testing.T) {
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
 	g.deps.Users = openTrackedStore(t, backend)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword, Role: "user"}).Body.Close()
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
@@ -1815,7 +1815,7 @@ func passkeyRegisterBeginAs(t *testing.T, client *http.Client, ts *httptest.Serv
 // -- is still removed by the admin clear route.
 func TestPasskeyNotOfferedToAnAccountWithNoLocalPassword(t *testing.T) {
 	g := passkeyGate(t)
-	hash, err := gauntlet.HashPassword("password123")
+	hash, err := gauntlet.HashPassword("password-placeholder-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2273,7 +2273,7 @@ func TestARespelledRegisterCookieIsRefusedAfterTheOwnersFinish(t *testing.T) {
 		mux.Handle("/", g.Routes())
 		const base = "http://gate.test"
 		client := &http.Client{Jar: mustCookieJar(t), Transport: inProcess{g.Protect(mux)}}
-		reg := postJSON(t, client, base+"/api/auth/register", registerRequest{Username: "admin", Password: "password123", SetupCode: setupCodeFor(t, g)})
+		reg := postJSON(t, client, base+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-1", SetupCode: setupCodeFor(t, g)})
 		_ = reg.Body.Close()
 		if reg.StatusCode != http.StatusCreated {
 			t.Fatalf("register returned %d", reg.StatusCode)
@@ -2284,7 +2284,7 @@ func TestARespelledRegisterCookieIsRefusedAfterTheOwnersFinish(t *testing.T) {
 		var sealed, variant string
 		for _, fraction := range []time.Duration{0, 100 * time.Millisecond, 120 * time.Millisecond, 123 * time.Millisecond} {
 			time.Sleep(time.Until(start.Add(time.Second + fraction)))
-			begin := postJSON(t, client, base+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "password123"})
+			begin := postJSON(t, client, base+"/api/auth/passkeys/register/begin", passkeyRegisterBeginRequest{Password: "password-placeholder-1"})
 			creation = protocol.CredentialCreation{}
 			if err := json.NewDecoder(begin.Body).Decode(&creation); err != nil {
 				t.Fatal(err)

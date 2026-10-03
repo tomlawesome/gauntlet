@@ -18,7 +18,7 @@ import (
 // second factor entered again, each wrong one counted on the account's
 // re-check budget.
 
-const selfUnlockAdminPassword = "password123"
+const selfUnlockAdminPassword = "password-placeholder-1"
 
 // enrolAdminTOTP enrols and confirms an authenticator app on the
 // fixture's admin, returning its secret, its recovery codes and the

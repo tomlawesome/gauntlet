@@ -100,7 +100,7 @@ func TestReloadIfStaleDoesNotRevertAConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

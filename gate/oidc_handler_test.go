@@ -352,7 +352,7 @@ func TestOIDCRoutesAreNotFoundWithoutOIDC(t *testing.T) {
 	// registerAdminNoFactor: the test signs in again below with only a
 	// password, which needs a full session, not the pending login a
 	// confirmed factor would leave it with -- not what this test is about.
-	registerAdminNoFactor(t, ts, "admin", "password123")
+	registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
 
 	for _, tc := range []struct {
 		method, path string
@@ -375,8 +375,8 @@ func TestOIDCRoutesAreNotFoundWithoutOIDC(t *testing.T) {
 	}
 
 	admin := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, admin, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"}).Body.Close()
-	enrolTOTPFactor(t, admin, ts, "password123") // POST /api/auth/oidc/link is not an enrolment route
+	_ = postJSON(t, admin, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"}).Body.Close()
+	enrolTOTPFactor(t, admin, ts, "password-placeholder-1") // POST /api/auth/oidc/link is not an enrolment route
 	linkResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
 	defer func() { _ = linkResp.Body.Close() }()
 	if linkResp.StatusCode != http.StatusNotFound {
@@ -386,7 +386,7 @@ func TestOIDCRoutesAreNotFoundWithoutOIDC(t *testing.T) {
 
 func TestOIDCLinkStartRefusesAlreadySSOOnlyAccount(t *testing.T) {
 	g, ts, _ := newEmptyOIDCTestGate(t, oidc.Policy{})
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 	// A second account, SSO-provisioned from the start.
 	u, _, err := g.deps.Users.FindOrCreateOIDCUser("https://idp.example", "subject-1", "frodo", time.Now())
 	if err != nil {
@@ -411,7 +411,7 @@ func TestOIDCLinkStartRefusesAlreadySSOOnlyAccount(t *testing.T) {
 
 func TestOIDCLinkStartRefusesAlreadyConnectedAccount(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	// Link once, successfully.
 	fs := oidcCompleteLinkFlow(t, g, ts, admin, fp)
@@ -436,7 +436,7 @@ func TestOIDCLinkStartRefusesAlreadyConnectedAccount(t *testing.T) {
 // refused.
 func TestOIDCLinkRevokesEarlierSessionsInMemory(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	adminUser, ok := g.deps.Users.ByUsername("admin")
 	if !ok {
 		t.Fatal("no admin account")
@@ -529,7 +529,7 @@ func oidcCompleteLinkFlow(t *testing.T, g *Gate, ts *httptest.Server, client *ht
 // comes back is already linked to a *different* account.
 func TestOIDCLinkCallbackRefusesIdentityAlreadyLinkedElsewhere(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	// A different account already holds this (issuer, subject).
 	if _, _, err := g.deps.Users.FindOrCreateOIDCUser(fp.Issuer(), "test-subject-123", "someoneelse", time.Now()); err != nil {
@@ -578,7 +578,7 @@ func TestOIDCLinkCallbackRefusesIdentityAlreadyLinkedElsewhere(t *testing.T) {
 // comes back" branch.
 func TestOIDCLinkCallbackSessionChangedRefused(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
 	defer func() { _ = startResp.Body.Close() }()
@@ -622,7 +622,7 @@ func TestOIDCLinkCallbackSessionChangedRefused(t *testing.T) {
 // on linking, unlike the admin.
 func TestOIDCLinkNonAdminLosesLocalPassword(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users",
 		createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
 	operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
@@ -715,7 +715,7 @@ func TestOIDCCallbackBadSignatureRefused(t *testing.T) {
 // credentials working.
 func TestOIDCLinkHappyPath(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
 	defer func() { _ = startResp.Body.Close() }()
@@ -966,7 +966,7 @@ func TestOIDCCallbackFailuresAreLogged(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-			admin := registerAdmin(t, ts, "admin", "password123")
+			admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 			req := tc.request(t, g, ts, fp, admin)
 			logs := &warnRecorder{}
 			g.cfg.Log = slog.New(logs)

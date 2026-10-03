@@ -54,7 +54,7 @@ func TestSessionCookieHostPrefixWhenSecure(t *testing.T) {
 	ts := newTestServer(t, g)
 
 	client := &http.Client{Jar: mustCookieJar(t)}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: setupCodeFor(t, g)})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: setupCodeFor(t, g)})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("register: status %d, want 201", resp.StatusCode)
@@ -109,7 +109,7 @@ func TestSessionCookieBareNameWhenInsecure(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	client := &http.Client{Jar: mustCookieJar(t)}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: setupCodeFor(t, g)})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: setupCodeFor(t, g)})
 	_ = resp.Body.Close()
 	if sessionCookieFrom(resp, testCookieName) == nil {
 		t.Errorf("register set cookies %v, want the bare %s", resp.Cookies(), testCookieName)
@@ -144,7 +144,7 @@ func TestSessionCookieMaxAgeIsSessionCeiling(t *testing.T) {
 	g.deps.Sessions = gauntlet.NewSessionStore(time.Hour, ceiling)
 	ts := newTestServer(t, g)
 	client := &http.Client{Jar: mustCookieJar(t)}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: setupCodeFor(t, g)})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: setupCodeFor(t, g)})
 	_ = resp.Body.Close()
 	c := sessionCookieFrom(resp, testCookieName)
 	if c == nil {
@@ -194,14 +194,14 @@ func TestLoginRevokesSessionItReplaces(t *testing.T) {
 	ts := newTestServer(t, g)
 	// No second factor, so the password alone issues the replacing
 	// session (parked at the enrolment door, which does not matter here).
-	admin := registerAdminNoFactor(t, ts, "admin", "password12345")
+	admin := registerAdminNoFactor(t, ts, "admin", "password-placeholder-345")
 	first := jarSessionID(t, admin, ts, testCookieName)
 	now := g.now()
 	if _, ok := g.deps.Sessions.Validate(first, now); !ok {
 		t.Fatal("the registration session should be live before the second login")
 	}
 
-	resp := postJSON(t, admin, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password12345"})
+	resp := postJSON(t, admin, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-345"})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("second login: status %d, want 200", resp.StatusCode)
@@ -219,7 +219,7 @@ func TestLoginRevokesSessionItReplaces(t *testing.T) {
 
 	// Someone else's session in this browser: not this account's to end.
 	other := g.deps.Sessions.Create("someone-else", now)
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/login", strings.NewReader(`{"username":"admin","password":"password12345"}`))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/login", strings.NewReader(`{"username":"admin","password":"password-placeholder-345"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

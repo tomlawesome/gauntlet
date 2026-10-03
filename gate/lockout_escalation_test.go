@@ -167,7 +167,7 @@ func TestOnlyACompletedSignInResetsTheLockoutCount(t *testing.T) {
 	failLoginWindow(t, g, ts, clock, "admin")
 	failLoginWindow(t, g, ts, clock, "admin")
 	clock.set(g.deps.Users.LoginLockedUntil(admin.ID).Add(time.Second))
-	if r := tryLogin(t, ts, "admin", "password123"); r.status != http.StatusOK {
+	if r := tryLogin(t, ts, "admin", "password-placeholder-1"); r.status != http.StatusOK {
 		t.Fatalf("the admin's sign-in got %d, want 200", r.status)
 	}
 	if got := failLoginWindow(t, g, ts, clock, "admin"); got != 5*time.Minute {

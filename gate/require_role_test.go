@@ -74,7 +74,7 @@ func TestExemptAddsBeyondBuiltInSet(t *testing.T) {
 	defer ts.Close()
 	testServerGates.Store(ts, g)
 
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp, err := http.Get(ts.URL + "/api/public-thing")
 	if err != nil {
@@ -87,7 +87,7 @@ func TestExemptAddsBeyondBuiltInSet(t *testing.T) {
 }
 
 // primeMustChangePasswordAdmin returns a Store whose one account --
-// "admin", password "password123" -- already carries
+// "admin", password "password-placeholder-1" -- already carries
 // MustChangePassword=true. No method in this stage's Store sets that
 // field (SetPassword is the only public write path, and it clears the
 // flag as part of what it does), so the fixture primes a persist.Memory
@@ -95,7 +95,7 @@ func TestExemptAddsBeyondBuiltInSet(t *testing.T) {
 // accounts file would.
 func primeMustChangePasswordAdmin(t *testing.T) *gauntlet.Store {
 	t.Helper()
-	hash, err := gauntlet.HashPassword("password123")
+	hash, err := gauntlet.HashPassword("password-placeholder-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor(t *testing.T) {
 	ts := newTestServer(t, g)
 
 	client := &http.Client{Jar: mustCookieJar(t)}
-	loginResp := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
+	loginResp := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
 	_ = loginResp.Body.Close()
 	if loginResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected login to succeed, got %d", loginResp.StatusCode)
@@ -142,7 +142,7 @@ func TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor(t *testing.T) {
 func TestForcedAuthGateHeaderNamesTheDoor(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdminNoFactor(t, ts, "admin", "password123")
+	client := registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {

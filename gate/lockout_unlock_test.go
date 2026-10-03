@@ -192,7 +192,7 @@ func unlockCodeFixture(t *testing.T) (*Gate, *httptest.Server, string) {
 	m := persist.NewMemory()
 	first := newTestGateWithUsers(t, openTrackedStore(t, m))
 	firstTS := newTestServer(t, first)
-	admin := registerAdmin(t, firstTS, "admin", "password123")
+	admin := registerAdmin(t, firstTS, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, firstTS.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 	adminUser, _ := first.deps.Users.ByUsername("admin")
@@ -258,7 +258,7 @@ func TestUnlockCodeLiftsOnlyTheAdminsDisable(t *testing.T) {
 	}
 	// startTOTPLogin requires the password step to answer with a TOTP
 	// challenge rather than a session.
-	startTOTPLogin(t, ts, "admin", "password123")
+	startTOTPLogin(t, ts, "admin", "password-placeholder-1")
 
 	if status, body := redeemUnlockCode(t, client, ts, "admin", code); status != wantStatus || body != wantBody {
 		t.Errorf("the code a second time = %d %q, want the wrong-code answer", status, body)

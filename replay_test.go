@@ -48,7 +48,7 @@ func TestGenerateRecoveryCodesIfAbsentRedecidesOnReplay(t *testing.T) {
 	now := time.Now()
 	var aliceID string
 	s, b, other := openRacingStores(t, func(s *Store) {
-		alice, err := s.Register("alice", "password123", now)
+		alice, err := s.Register("alice", "password-placeholder-1", now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,7 +101,7 @@ func reopenAccounts(t *testing.T, b *otherProcessBackend) *Store {
 func TestRegisterRedecidesRegistrationOpenOnReplay(t *testing.T) {
 	s, b, other := openRacingStores(t, nil)
 	b.beforeSave = func() {
-		if _, err := other.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := other.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Errorf("the other process's Register: %v", err)
 		}
 	}
@@ -120,7 +120,7 @@ func TestRegisterRedecidesRegistrationOpenOnReplay(t *testing.T) {
 // add a second carol whose index entry shadows the first.
 func TestCreateUserRedecidesUsernameOnReplay(t *testing.T) {
 	s, b, other := openRacingStores(t, func(s *Store) {
-		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -147,7 +147,7 @@ func TestCreateUserRedecidesUsernameOnReplay(t *testing.T) {
 func TestTransferAdminRedecidesTheCurrentAdminOnReplay(t *testing.T) {
 	s, b, other := openRacingStores(t, func(s *Store) {
 		now := time.Now()
-		if _, err := s.Register("alice", "password123", now); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", now); err != nil {
 			t.Fatal(err)
 		}
 		for _, name := range []string{"bob", "carol"} {
@@ -181,7 +181,7 @@ func TestTransferAdminRedecidesTheCurrentAdminOnReplay(t *testing.T) {
 // is not bob.
 func TestFindOrCreateOIDCUserRedecidesUsernameOnReplay(t *testing.T) {
 	s, b, other := openRacingStores(t, func(s *Store) {
-		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -222,7 +222,7 @@ func TestFindOrCreateOIDCUserRedecidesUsernameOnReplay(t *testing.T) {
 // SSO-only user into a document with no admin.
 func TestFindOrCreateOIDCUserRefusesOnReplayAgainstAnEmptiedDocument(t *testing.T) {
 	s, b, other := openRacingStores(t, func(s *Store) {
-		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -247,7 +247,7 @@ func TestFindOrCreateOIDCUserRefusesOnReplayAgainstAnEmptiedDocument(t *testing.
 // not provision a second one for the same identity.
 func TestFindOrCreateOIDCUserFindsTheAccountAnotherProcessProvisioned(t *testing.T) {
 	s, b, other := openRacingStores(t, func(s *Store) {
-		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -286,7 +286,7 @@ func TestAuthenticateRefusesAnAccountAnotherProcessDeletedMidLogin(t *testing.T)
 	var bobID string
 	s, b, other := openRacingStores(t, func(s *Store) {
 		now := time.Now()
-		if _, err := s.Register("alice", "password123", now); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", now); err != nil {
 			t.Fatal(err)
 		}
 		bob, err := s.CreateUser("bob", "password456", RoleUser, now)
@@ -351,7 +351,7 @@ func TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted(t *te
 	var oldID string
 	s, b, other := openRacingStores(t, func(s *Store) {
 		now := time.Now()
-		if _, err := s.Register("alice", "password123", now); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", now); err != nil {
 			t.Fatal(err)
 		}
 		u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "bob", now)
@@ -415,7 +415,7 @@ func TestVerifyAndRecordTOTPRefusesAMatchItCouldNotRecord(t *testing.T) {
 	}
 	var id string
 	s, b, _ := openRacingStores(t, func(s *Store) {
-		u, err := s.Register("alice", "password123", now)
+		u, err := s.Register("alice", "password-placeholder-1", now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -447,7 +447,7 @@ func TestRecordPasskeyAssertionIfFreshRefusesAnAssertionItCouldNotRecord(t *test
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	var id string
 	s, b, _ := openRacingStores(t, func(s *Store) {
-		u, err := s.Register("alice", "password123", now)
+		u, err := s.Register("alice", "password-placeholder-1", now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -478,7 +478,7 @@ func TestAuthenticateRedecidesTheResetCodeOnReplay(t *testing.T) {
 	var code string
 	s, b, other := openRacingStores(t, func(s *Store) {
 		now := time.Now()
-		if _, err := s.Register("alice", "password123", now); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", now); err != nil {
 			t.Fatal(err)
 		}
 		bob, err := s.CreateUser("bob", "password456", RoleUser, now)
@@ -520,7 +520,7 @@ func TestAuthenticateRefusesAResetCodeReplacedOnReplay(t *testing.T) {
 	var bobID, code, newCode string
 	s, b, other := openRacingStores(t, func(s *Store) {
 		now := time.Now()
-		if _, err := s.Register("alice", "password123", now); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", now); err != nil {
 			t.Fatal(err)
 		}
 		bob, err := s.CreateUser("bob", "password456", RoleUser, now)
@@ -620,7 +620,7 @@ func TestVerifyAndRecordTOTPRechecksTheCodeOnReplay(t *testing.T) {
 	}
 	var id string
 	s, b, other := openRacingStores(t, func(s *Store) {
-		u, err := s.Register("alice", "password123", now)
+		u, err := s.Register("alice", "password-placeholder-1", now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -653,7 +653,7 @@ func TestSetPendingTOTPSecretRechecksTheActiveFactorOnReplay(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	var id string
 	s, b, other := openRacingStores(t, func(s *Store) {
-		u, err := s.Register("alice", "password123", now)
+		u, err := s.Register("alice", "password-placeholder-1", now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -687,7 +687,7 @@ func TestConfirmTOTPRechecksThePendingSecretOnReplay(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	var id string
 	s, b, other := openRacingStores(t, func(s *Store) {
-		u, err := s.Register("alice", "password123", now)
+		u, err := s.Register("alice", "password-placeholder-1", now)
 		if err != nil {
 			t.Fatal(err)
 		}

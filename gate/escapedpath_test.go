@@ -76,7 +76,7 @@ func TestEncodedPathDoesNotBypassBootstrapGate(t *testing.T) {
 func TestEncodedPathDoesNotBypassSessionGate(t *testing.T) {
 	g := newTestGate(t)
 	ts := newEscapedPathTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123").Jar = nil
+	registerAdmin(t, ts, "admin", "password-placeholder-1").Jar = nil
 
 	resp, err := http.Get(ts.URL + "/api/auth%2Fsession")
 	if err != nil {
@@ -102,7 +102,7 @@ func TestEncodedPathDoesNotEscapeMustChangePasswordDoor(t *testing.T) {
 	// TOTP code instead of a full session, which is not what this test
 	// is about -- it pins the MustChangePassword door, reached first in
 	// Protect regardless of the second-factor door's own state.
-	registerAdminNoFactor(t, ts, "admin", "password123")
+	registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
 
 	u, ok := g.deps.Users.ByUsername("admin")
 	if !ok {

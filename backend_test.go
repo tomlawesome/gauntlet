@@ -18,10 +18,10 @@ import (
 
 func TestBackendRegisterAndAuthenticate(t *testing.T) {
 	s := openTestStore(t)
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if _, err := s.Authenticate("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Authenticate("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Errorf("Authenticate: %v", err)
 	}
 	if _, err := s.Authenticate("alice", "wrong", time.Now()); err != ErrInvalidCredentials {
@@ -38,7 +38,7 @@ func TestBackendSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := first.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := first.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, err := first.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
@@ -70,7 +70,7 @@ func TestBackendPicksUpAnotherProcessesWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := server.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := server.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -86,7 +86,7 @@ func TestBackendPicksUpAnotherProcessesWrite(t *testing.T) {
 	if _, err := server.Authenticate("alice", "newpassword999", time.Now()); err != nil {
 		t.Errorf("the running store did not pick up the other process's change: %v", err)
 	}
-	if _, err := server.Authenticate("alice", "password123", time.Now()); err == nil {
+	if _, err := server.Authenticate("alice", "password-placeholder-1", time.Now()); err == nil {
 		t.Error("the old password still works on the running store")
 	}
 }
@@ -100,7 +100,7 @@ func TestBackendCorruptDocumentIsAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

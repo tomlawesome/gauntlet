@@ -21,7 +21,7 @@ func TestRegisterRefusesWrongOrMissingSetupCode(t *testing.T) {
 	client := &http.Client{Jar: mustCookieJar(t)}
 
 	for _, code := range []string{"", "AAAA-AAAA-AAAA-AAAA"} {
-		resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: code})
+		resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: code})
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("register with setup code %q: status %d, want 401", code, resp.StatusCode)
@@ -51,7 +51,7 @@ func TestRegisterAcceptsSetupCodeInAnyTypedForm(t *testing.T) {
 	typed := strings.ToLower(strings.ReplaceAll(code, "-", ""))
 
 	client := &http.Client{Jar: mustCookieJar(t)}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: typed})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: typed})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("register with the code typed as %q: status %d, want 201", typed, resp.StatusCode)
@@ -61,7 +61,7 @@ func TestRegisterAcceptsSetupCodeInAnyTypedForm(t *testing.T) {
 	}
 
 	// Used up by state: the same code opens nothing once an account exists.
-	resp = postJSON(t, &http.Client{}, ts.URL+"/api/auth/register", registerRequest{Username: "second", Password: "password12345", SetupCode: code})
+	resp = postJSON(t, &http.Client{}, ts.URL+"/api/auth/register", registerRequest{Username: "second", Password: "password-placeholder-345", SetupCode: code})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("register after the first account: status %d, want 409", resp.StatusCode)
@@ -75,14 +75,14 @@ func TestRegisterSetupCodeGuessesAreRateLimited(t *testing.T) {
 
 	var last int
 	for range 5 {
-		resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: "AAAA-AAAA-AAAA-AAAA"})
+		resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: "AAAA-AAAA-AAAA-AAAA"})
 		_ = resp.Body.Close()
 		last = resp.StatusCode
 	}
 	if last != http.StatusUnauthorized {
 		t.Fatalf("fifth wrong code: status %d, want 401", last)
 	}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: setupCodeFor(t, g)})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: setupCodeFor(t, g)})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("sixth attempt from the same address: status %d, want 429 even with the right code", resp.StatusCode)
@@ -105,7 +105,7 @@ func TestRegisterRightCodeReleasesTheAttempt(t *testing.T) {
 			t.Fatalf("short password with the right code: status %d, want 400", resp.StatusCode)
 		}
 	}
-	resp := postJSON(t, &http.Client{Jar: mustCookieJar(t)}, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password12345", SetupCode: code})
+	resp := postJSON(t, &http.Client{Jar: mustCookieJar(t)}, ts.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: code})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("register after five right-code mistakes: status %d, want 201", resp.StatusCode)

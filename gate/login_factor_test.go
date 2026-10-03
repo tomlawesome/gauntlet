@@ -277,7 +277,7 @@ func TestLoginUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
 	g.deps.Limiter = mustNewLoginLimiter(t, 5, time.Minute)
 	g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	loginAttempt := func(ip, password string) *http.Response {
 		body := `{"username":"admin","password":"` + password + `"}`
@@ -306,7 +306,7 @@ func TestLoginUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
 	// A sixth attempt, from yet another fresh IP, with the *correct*
 	// password: the IP bucket has room, but the username bucket is
 	// already at the limit.
-	resp := loginAttempt("198.51.100.99", "password123")
+	resp := loginAttempt("198.51.100.99", "password-placeholder-1")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("a correct password against an exhausted username bucket got %d, want 429", resp.StatusCode)
@@ -414,7 +414,7 @@ func budgetFixture(t *testing.T) (*Gate, *httptest.Server, *http.Client, *budget
 	users := openTrackedStore(t, backend)
 	g.deps.Users = users
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 	return g, ts, admin, backend

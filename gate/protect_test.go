@@ -59,7 +59,7 @@ func TestBootstrapRegisterRequiresCSRFHeader(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	b, _ := json.Marshal(credentialsRequest{Username: "admin", Password: "password123"})
+	b, _ := json.Marshal(credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/register", strings.NewReader(string(b)))
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestAuthSessionReportsSignedInSince(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp, err := client.Get(ts.URL + "/api/auth/session")
 	if err != nil {
@@ -130,7 +130,7 @@ func TestRegisterCreatesAdminAndStartsASession(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	sessResp, err := client.Get(ts.URL + "/api/auth/session")
 	if err != nil {
@@ -149,7 +149,7 @@ func TestRegisterRefusesAnEmailShapedUsername(t *testing.T) {
 	ts := newTestServer(t, g)
 
 	client := &http.Client{}
-	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "tom@example.com", Password: "password123", SetupCode: setupCodeFor(t, g)})
+	resp := postJSON(t, client, ts.URL+"/api/auth/register", registerRequest{Username: "tom@example.com", Password: "password-placeholder-1", SetupCode: setupCodeFor(t, g)})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
@@ -167,7 +167,7 @@ func TestRegisterClosesAfterFirstUser(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/register", credentialsRequest{Username: "second", Password: "password456"})
 	defer func() { _ = resp.Body.Close() }()
@@ -180,7 +180,7 @@ func TestAPIGatedOnceAUserExists(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp, err := http.Get(ts.URL + "/api/protected")
 	if err != nil {
@@ -208,15 +208,15 @@ func TestLoginThenAccessProtectedRoute(t *testing.T) {
 	// registerAdminNoFactor: a confirmed factor would turn the
 	// password-only login below into a pending login, not the full
 	// session this test is about.
-	registerAdminNoFactor(t, ts, "admin", "password123").Jar = nil // registration's own session is not what this test checks
+	registerAdminNoFactor(t, ts, "admin", "password-placeholder-1").Jar = nil // registration's own session is not what this test checks
 
 	client := &http.Client{Jar: mustCookieJar(t)}
-	loginResp := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
+	loginResp := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
 	_ = loginResp.Body.Close()
 	if loginResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected login to succeed, got %d", loginResp.StatusCode)
 	}
-	enrolTOTPFactor(t, client, ts, "password123") // /api/protected is not an enrolment route
+	enrolTOTPFactor(t, client, ts, "password-placeholder-1") // /api/protected is not an enrolment route
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {
@@ -233,7 +233,7 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "wrong"})
 	defer func() { _ = resp.Body.Close() }()
@@ -245,7 +245,7 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 func TestLoginRejectsUnknownUsernameWithIdenticalBody(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	wrongPW := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "wrong"})
 	defer func() { _ = wrongPW.Body.Close() }()
@@ -267,12 +267,12 @@ func TestLoginRateLimited(t *testing.T) {
 	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	ts := newTestServer(t, g)
 
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	for i := 0; i < 2; i++ {
 		_ = postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "wrong"}).Body.Close()
 	}
-	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
+	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("expected 429 after exceeding the rate limit, got %d (even with the correct password)", resp.StatusCode)
@@ -287,13 +287,13 @@ func TestLoginLockoutSurvivesALimiterRestart(t *testing.T) {
 	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
 	ts := newTestServer(t, g)
 
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 	for i := 0; i < 2; i++ {
 		_ = postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "wrong"}).Body.Close()
 	}
 
 	g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
-	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password123"})
+	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("expected the persisted lockout to refuse the account after a restart, got %d", resp.StatusCode)
@@ -304,7 +304,7 @@ func TestLogoutRevokesSession(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, client, ts.URL+"/api/auth/logout", map[string]any{}).Body.Close()
 
 	resp, err := client.Get(ts.URL + "/api/protected")
@@ -320,7 +320,7 @@ func TestLogoutRevokesSession(t *testing.T) {
 func TestLogoutAllRejectsAnonymousCaller(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, &http.Client{}, ts.URL+"/api/auth/logout-all", map[string]any{})
 	defer func() { _ = resp.Body.Close() }()
@@ -359,8 +359,8 @@ func TestLogoutAllEndsEverySessionButTheCallers(t *testing.T) {
 	// session as a side effect (TOTP confirm's own revoke-other-sessions
 	// rule) -- neither is what this test, about logout-all itself, is
 	// about, so both device sessions are created directly instead.
-	setup := registerAdminNoFactor(t, ts, "admin", "password123")
-	enrolTOTPFactor(t, setup, ts, "password123") // logout-all and /api/protected are not enrolment routes
+	setup := registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
+	enrolTOTPFactor(t, setup, ts, "password-placeholder-1") // logout-all and /api/protected are not enrolment routes
 
 	admin, ok := g.deps.Users.ByUsername("admin")
 	if !ok {
@@ -403,7 +403,7 @@ func TestLogoutAllEndsEverySessionButTheCallers(t *testing.T) {
 func TestPasswordResetInvalidatesExistingSessions(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	pre, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {
@@ -434,7 +434,7 @@ func TestPasswordResetInvalidatesExistingSessions(t *testing.T) {
 func TestLinkingSSOInvalidatesExistingSessions(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	if got := protectedStatusWithCookie(t, client, ts.URL, nil); got != http.StatusOK {
 		t.Fatalf("expected the session to work before the link, got %d", got)
 	}
@@ -453,7 +453,7 @@ func TestLinkingSSOInvalidatesExistingSessions(t *testing.T) {
 // issued before that time stays dead; one issued after it works.
 func TestAnOlderDocumentsLinkStillEndsEarlierSessions(t *testing.T) {
 	linkedAt := time.Now().Add(-time.Minute)
-	hash, err := gauntlet.HashPassword("password123")
+	hash, err := gauntlet.HashPassword("password-placeholder-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +513,7 @@ func protectedStatusWithCookie(t *testing.T, client *http.Client, base string, c
 func TestMutatingRequestWithoutCSRFHeaderIsRejectedOnceAuthActive(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/logout", nil)
 	if err != nil {
@@ -540,7 +540,7 @@ func TestExpiredSessionIsRefused(t *testing.T) {
 	// need one -- and registerAdmin's extra enrol/confirm round trips
 	// would risk outliving the 1ms session this test needs to survive
 	// registration itself.
-	client := registerAdminNoFactor(t, ts, "admin", "password123")
+	client := registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
 
 	time.Sleep(5 * time.Millisecond)
 
@@ -560,7 +560,7 @@ func TestExpiredSessionIsRefused(t *testing.T) {
 func TestRequireSecondFactorBlocksAccountWithNone(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdminNoFactor(t, ts, "admin", "password123")
+	client := registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {
@@ -583,7 +583,7 @@ func TestRequireSecondFactorFalseStillBlocksAccountWithNone(t *testing.T) {
 	g := newTestGate(t)
 	g.cfg.RequireSecondFactor = false //nolint:staticcheck // pinning that the deprecated field is ignored
 	ts := newTestServer(t, g)
-	client := registerAdminNoFactor(t, ts, "admin", "password123")
+	client := registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
 
 	resp, err := client.Get(ts.URL + "/api/protected")
 	if err != nil {
@@ -594,7 +594,7 @@ func TestRequireSecondFactorFalseStillBlocksAccountWithNone(t *testing.T) {
 		t.Errorf("expected RequireSecondFactor=false to still block an unenrolled local account, got %d", resp.StatusCode)
 	}
 
-	enrol := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: "password123"})
+	enrol := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: "password-placeholder-1"})
 	defer func() { _ = enrol.Body.Close() }()
 	if enrol.StatusCode != http.StatusOK {
 		t.Errorf("expected the TOTP enrolment route to stay reachable while stuck at the door, got %d", enrol.StatusCode)
@@ -607,7 +607,7 @@ func TestRequireSecondFactorFalseStillBlocksAccountWithNone(t *testing.T) {
 func TestAuthSessionEmitsFalseBooleans(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp, err := client.Get(ts.URL + "/api/auth/session")
 	if err != nil {

@@ -31,7 +31,7 @@ import (
 
 func TestAddPasskeyNormalisesAnEmptyNameToANumberedDefault(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestAddPasskeyNormalisesAnEmptyNameToANumberedDefault(t *testing.T) {
 
 func TestAddPasskeyTrimsAndBoundsAGivenName(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestAddPasskeyTrimsAndBoundsAGivenName(t *testing.T) {
 
 func TestAddPasskeyRefusesADuplicateCredentialID(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestAddPasskeyRefusesADuplicateCredentialID(t *testing.T) {
 
 func TestAddPasskeyRefusesAnEleventhCredential(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestAddPasskeyRefusesAnEleventhCredential(t *testing.T) {
 // advice that would be wrong for a key the account already holds.
 func TestAddPasskeyAtTheLimitReportsADuplicateAsDuplicate(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestAddPasskeyAtTheLimitReportsADuplicateAsDuplicate(t *testing.T) {
 // a caller reusing either buffer cannot change the stored passkey.
 func TestAddPasskeyKeepsNoSliceTheCallerHolds(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestAddPasskeyRefusesWhenNotPersisted(t *testing.T) {
 
 func TestRenamePasskeyChangesTheStoredName(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestRenamePasskeyChangesTheStoredName(t *testing.T) {
 
 func TestRenamePasskeyUnknownCredentialReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestRenamePasskeyUnknownCredentialReturnsNotFound(t *testing.T) {
 func TestDeletePasskeyKeepsRecoveryCodesWhileAnotherFactorRemains(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestDeletePasskeyKeepsRecoveryCodesWhileAnotherFactorRemains(t *testing.T) 
 func TestDeletePasskeyClearsRecoveryCodesWhenItWasTheLastFactor(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestDeletePasskeyClearsRecoveryCodesWhenItWasTheLastFactor(t *testing.T) {
 func TestDeletePasskeyWithActiveTOTPKeepsRecoveryCodes(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestDeletePasskeyWithActiveTOTPKeepsRecoveryCodes(t *testing.T) {
 
 func TestDeletePasskeyUnknownCredentialReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestDeletePasskeyUnknownCredentialReturnsNotFound(t *testing.T) {
 func TestClearTOTPKeepsRecoveryCodesWhileAPasskeyRemains(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestClearTOTPKeepsRecoveryCodesWhileAPasskeyRemains(t *testing.T) {
 func TestClearTOTPWithNoPasskeysStillClearsRecoveryCodes(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestClearTOTPWithNoPasskeysStillClearsRecoveryCodes(t *testing.T) {
 func TestClearPasskeysRemovesAllAndAppliesTheSameConditionalRule(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestClearPasskeysUnknownUserReturnsNotFound(t *testing.T) {
 func TestClearAllSecondFactorsClearsEverythingUnconditionally(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestClearAllSecondFactorsUnknownUserReturnsNotFound(t *testing.T) {
 func TestRecordPasskeyAssertionIfFreshAcceptsAndAdvances(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +547,7 @@ func TestRecordPasskeyAssertionIfFreshAcceptsAndAdvances(t *testing.T) {
 func TestRecordPasskeyAssertionIfFreshAcceptsAPasskeyThatNeverCounts(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func TestRecordPasskeyAssertionIfFreshWhileStorageFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +628,7 @@ func TestRecordPasskeyAssertionIfFreshWhileStorageFails(t *testing.T) {
 
 func TestRecordPasskeyAssertionIfFreshUnknownCredentialReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +640,7 @@ func TestRecordPasskeyAssertionIfFreshUnknownCredentialReturnsNotFound(t *testin
 func TestHasSecondFactorCoversEveryCombination(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestHasSecondFactorCoversEveryCombination(t *testing.T) {
 // way it blanks TOTPSecret.
 func TestListBlanksPasskeysAndPasskeyCountReadsTheLiveData(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -717,7 +717,7 @@ func TestListBlanksPasskeysAndPasskeyCountReadsTheLiveData(t *testing.T) {
 func TestUserPasskeyCountReadsTrueOnAListCopy(t *testing.T) {
 	s := openTestStore(t)
 
-	none, err := s.Register("admin", "password123", time.Now())
+	none, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,7 +782,7 @@ func TestPasskeyWritesLeaveStateWhenPersistFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	u, err := s.Register("admin", "password123", now)
+	u, err := s.Register("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +852,7 @@ func TestAnyPasskeysExist(t *testing.T) {
 		t.Error("a fresh store reports a passkey that doesn't exist")
 	}
 
-	admin, err := s.Register("admin", "password123", time.Now())
+	admin, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,7 +861,7 @@ func TestAnyPasskeysExist(t *testing.T) {
 		t.Error("an account with a TOTP factor but no passkey reports one existing")
 	}
 
-	other, err := s.CreateUser("bilbo", "password123", RoleUser, time.Now())
+	other, err := s.CreateUser("bilbo", "password-placeholder-1", RoleUser, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -889,7 +889,7 @@ func TestAnyPasskeysExistReadsAnotherProcessesWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := server.Register("admin", "password123", time.Now())
+	u, err := server.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

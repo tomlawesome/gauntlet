@@ -137,7 +137,7 @@ func TestFindOrCreateOIDCUserNeverAutoLinksByUsernameHint(t *testing.T) {
 	now := time.Now()
 
 	// A local password account already owns the username "alice".
-	if _, err := s.Register("alice", "password12345", now); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-345", now); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestFindOrCreateOIDCUserSyntheticUsernameIsStableAcrossRetries(t *testing.T
 	s := openTestStore(t)
 	now := time.Now()
 
-	if _, err := s.Register("bob", "password12345", now); err != nil {
+	if _, err := s.Register("bob", "password-placeholder-345", now); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -204,12 +204,12 @@ func TestFindOrCreateOIDCUserNotGatedByClosedLocalRegistration(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
 
-	if _, err := s.Register("first-admin", "password12345", now); err != nil {
+	if _, err := s.Register("first-admin", "password-placeholder-345", now); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// Local self-registration is now closed (Count() > 0) -- JIT OIDC
 	// provisioning must be unaffected, unlike Register.
-	if _, err := s.Register("second-local", "password12345", now); err != ErrRegistrationClosed {
+	if _, err := s.Register("second-local", "password-placeholder-345", now); err != ErrRegistrationClosed {
 		t.Fatalf("expected local Register to be closed, got %v", err)
 	}
 
@@ -286,7 +286,7 @@ func TestByOIDCIdentityFindsProvisionedUser(t *testing.T) {
 func TestLinkOIDCIdentityAttachesToExistingLocalUser(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	u, err := s.Register("alice", "password12345", now)
+	u, err := s.Register("alice", "password-placeholder-345", now)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestLinkOIDCIdentityAttachesToExistingLocalUser(t *testing.T) {
 func TestLinkOIDCIdentityIsIdempotentForSameUser(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	u, err := s.Register("alice", "password12345", now)
+	u, err := s.Register("alice", "password-placeholder-345", now)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -330,11 +330,11 @@ func TestLinkOIDCIdentityIsIdempotentForSameUser(t *testing.T) {
 func TestLinkOIDCIdentityRefusesWhenTakenByDifferentUser(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	a, err := s.Register("alice", "password12345", now)
+	a, err := s.Register("alice", "password-placeholder-345", now)
 	if err != nil {
 		t.Fatalf("Register alice: %v", err)
 	}
-	b, err := s.CreateUser("bob", "password12345", RoleUser, now)
+	b, err := s.CreateUser("bob", "password-placeholder-345", RoleUser, now)
 	if err != nil {
 		t.Fatalf("CreateUser bob: %v", err)
 	}

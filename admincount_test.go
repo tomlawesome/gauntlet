@@ -87,7 +87,7 @@ func TestReloadIfStaleIgnoresADocumentWithNoAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,7 +125,7 @@ func TestReloadIfStaleIgnoresADocumentWithTwoAdmins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -164,7 +164,7 @@ func TestRegisterStaysClosedWhileATwoAdminDocumentIsRefused(t *testing.T) {
 	}
 	primeMemory(t, m, twoAdminsDocument)
 
-	if _, err := s.Register("carol", "password123", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
+	if _, err := s.Register("carol", "password-placeholder-1", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
 		t.Fatalf("expected ErrRegistrationClosed, got %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestRegisterReopensOnceTheRefusedDocumentIsReplaced(t *testing.T) {
 	}
 	primeMemory(t, m, twoAdminsDocument)
 
-	if _, err := s.Register("carol", "password123", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
+	if _, err := s.Register("carol", "password-placeholder-1", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
 		t.Fatalf("expected ErrRegistrationClosed, got %v", err)
 	}
 
@@ -206,7 +206,7 @@ func TestRegisterReopensOnceTheRefusedDocumentIsReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.Register("carol", "password123", time.Now()); err != nil {
+	if _, err := s.Register("carol", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("expected Register to succeed once the refused document was replaced, got %v", err)
 	}
 }

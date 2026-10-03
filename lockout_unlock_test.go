@@ -413,7 +413,7 @@ func TestUnlockCodeLiftsOnlyTheDisableAndIsSingleUse(t *testing.T) {
 		!after.SessionCutoff().Equal(before.SessionCutoff()) || after.Role != RoleAdmin {
 		t.Error("the unlock code changed more than the disable: password, forced change, second factor, sessions or role")
 	}
-	if _, err := s.Authenticate("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Authenticate("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Errorf("the admin's existing password after the unlock: %v", err)
 	}
 	if _, err := s.CheckUnlockCode("alice", code); !errors.Is(err, ErrUnlockCodeInvalid) {

@@ -22,7 +22,7 @@ import (
 func TestLocalCreationRefusesAnEmailShapedUsername(t *testing.T) {
 	s := openTestStore(t)
 
-	if _, err := s.Register("tom@example.com", "password123", time.Now()); err != ErrUsernameIsEmail {
+	if _, err := s.Register("tom@example.com", "password-placeholder-1", time.Now()); err != ErrUsernameIsEmail {
 		t.Fatalf("Register(email) = %v, want ErrUsernameIsEmail", err)
 	}
 	if s.Count() != 0 {
@@ -32,11 +32,11 @@ func TestLocalCreationRefusesAnEmailShapedUsername(t *testing.T) {
 	// Half an address is refused too: the point is a namespace that
 	// cannot overlap with what providers send, not a validator of
 	// well-formed addresses.
-	if _, err := s.Register("tom@", "password123", time.Now()); err != ErrUsernameIsEmail {
+	if _, err := s.Register("tom@", "password-placeholder-1", time.Now()); err != ErrUsernameIsEmail {
 		t.Errorf("Register(\"tom@\") = %v, want ErrUsernameIsEmail", err)
 	}
 
-	admin, err := s.Register("tom", "password123", time.Now())
+	admin, err := s.Register("tom", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatalf("Register(plain name) = %v, want a created account", err)
 	}
@@ -79,7 +79,7 @@ func TestSSOProvisioningKeepsAnEmailClaimAsTheUsername(t *testing.T) {
 // cannot be made to comply by its owner, so refusing it at the door
 // would lock out somebody who did nothing wrong.
 func TestAnExistingEmailNamedLocalAccountStillSignsIn(t *testing.T) {
-	hash, err := HashPassword("password123")
+	hash, err := HashPassword("password-placeholder-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestAnExistingEmailNamedLocalAccountStillSignsIn(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 
-	u, err := s.Authenticate("tom@example.com", "password123", time.Now())
+	u, err := s.Authenticate("tom@example.com", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatalf("Authenticate: %v -- an account created before the rule was locked out by it", err)
 	}

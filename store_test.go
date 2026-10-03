@@ -41,7 +41,7 @@ func TestOpenEmptyBackendIsUsableButNotPersisted(t *testing.T) {
 
 func TestRegisterRefusesWhenNotPersisted(t *testing.T) {
 	s, _ := OpenStore(nil, Options{})
-	if _, err := s.Register("admin", "password123", time.Now()); err != ErrNotPersisted {
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != ErrNotPersisted {
 		t.Errorf("expected ErrNotPersisted, got %v", err)
 	}
 }
@@ -49,7 +49,7 @@ func TestRegisterRefusesWhenNotPersisted(t *testing.T) {
 func TestRegisterCreatesAdminAndClosesAfterFirstUser(t *testing.T) {
 	s := openTestStore(t)
 
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestPasswordTooShortRejectedOnRegisterCreateAndReset(t *testing.T) {
 		t.Fatalf("expected no account to have been created, got %d", s.Count())
 	}
 
-	if _, err := s.Register("admin", "password123", time.Now()); err != nil {
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register with a long-enough password should succeed, got %v", err)
 	}
 	if _, err := s.CreateUser("second", "tiny", RoleUser, time.Now()); err != ErrPasswordTooShort {
@@ -88,7 +88,7 @@ func TestPasswordTooShortRejectedOnRegisterCreateAndReset(t *testing.T) {
 
 func TestCreateUserAddsAdditionalAccounts(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("admin", "password123", time.Now())
+	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
 
 	u, err := s.CreateUser("viewer", "password789", RoleUser, time.Now())
 	if err != nil {
@@ -106,7 +106,7 @@ func TestCreateUserAddsAdditionalAccounts(t *testing.T) {
 // CreateUser, same as RoleUser.
 func TestCreateUserAcceptsViewer(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("admin", "password123", time.Now())
+	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
 
 	u, err := s.CreateUser("watcher", "password789", RoleViewer, time.Now())
 	if err != nil {
@@ -123,7 +123,7 @@ func TestCreateUserAcceptsViewer(t *testing.T) {
 // actually grants.
 func TestCreateUserRejectsUnknownRole(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("admin", "password123", time.Now())
+	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
 
 	if _, err := s.CreateUser("someone", "password789", Role("owner"), time.Now()); !errors.Is(err, ErrInvalidRole) {
 		t.Errorf("expected ErrInvalidRole for an unrecognized role, got %v", err)
@@ -132,7 +132,7 @@ func TestCreateUserRejectsUnknownRole(t *testing.T) {
 
 func TestCreateUserRejectsDuplicateUsernameCaseInsensitive(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("Admin", "password123", time.Now())
+	_, _ = s.Register("Admin", "password-placeholder-1", time.Now())
 
 	if _, err := s.CreateUser("admin", "different", RoleUser, time.Now()); err != ErrUsernameTaken {
 		t.Errorf("expected ErrUsernameTaken for a case-insensitive duplicate, got %v", err)
@@ -156,10 +156,10 @@ func TestAuthenticateSucceedsAndFails(t *testing.T) {
 
 func TestAuthenticateUpdatesLastLogin(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("admin", "password123", time.Now())
+	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
 
 	now := time.Now().Add(time.Hour).UTC().Truncate(time.Millisecond)
-	u, err := s.Authenticate("admin", "password123", now)
+	u, err := s.Authenticate("admin", "password-placeholder-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestAuthenticateSavesLastLoginAtMostHourly(t *testing.T) {
 
 	login := func(at time.Time) {
 		t.Helper()
-		if _, err := s.Authenticate("alice", "password123", at); err != nil {
+		if _, err := s.Authenticate("alice", "password-placeholder-1", at); err != nil {
 			t.Fatalf("Authenticate at %v: %v", at, err)
 		}
 	}
@@ -342,7 +342,7 @@ func TestSetPasswordUnknownUserReturnsNotFound(t *testing.T) {
 
 func TestListNeverIncludesPasswordHashes(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("admin", "password123", time.Now())
+	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
 	_, _ = s.CreateUser("viewer", "password456", RoleUser, time.Now())
 
 	list := s.List()
@@ -367,9 +367,9 @@ func TestListNeverIncludesPasswordHashes(t *testing.T) {
 func TestListAnswersHasActiveTOTPWithoutTheSecret(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	active, _ := s.Register("active", "password123", now)
-	pending, _ := s.CreateUser("pending", "password123", RoleUser, now)
-	none, _ := s.CreateUser("none", "password123", RoleUser, now)
+	active, _ := s.Register("active", "password-placeholder-1", now)
+	pending, _ := s.CreateUser("pending", "password-placeholder-1", RoleUser, now)
+	none, _ := s.CreateUser("none", "password-placeholder-1", RoleUser, now)
 	setTOTPForTest(t, s, active.ID, testTOTPSecret, now, 0)
 	setTOTPForTest(t, s, pending.ID, testTOTPSecret, time.Time{}, 0)
 
@@ -411,8 +411,8 @@ func TestListAnswersHasActiveTOTPWithoutTheSecret(t *testing.T) {
 func TestListAnswersHasSecondFactorForPasskeyOnlyAccounts(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	passkey, _ := s.Register("passkey", "password123", now)
-	none, _ := s.CreateUser("none", "password123", RoleUser, now)
+	passkey, _ := s.Register("passkey", "password-placeholder-1", now)
+	none, _ := s.CreateUser("none", "password-placeholder-1", RoleUser, now)
 	if _, err := s.AddPasskey(passkey.ID, testPasskey(1, "")); err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	_, _ = s1.Register("admin", "password123", now)
+	_, _ = s1.Register("admin", "password-placeholder-1", now)
 	_, _ = s1.CreateUser("viewer", "password456", RoleUser, now)
 
 	s2, err := OpenStore(m, Options{})
@@ -450,14 +450,14 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if s2.Count() != 2 {
 		t.Fatalf("expected 2 persisted users, got %d", s2.Count())
 	}
-	if _, err := s2.Authenticate("admin", "password123", time.Now()); err != nil {
+	if _, err := s2.Authenticate("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Errorf("expected the persisted admin's password to still verify, got %v", err)
 	}
 }
 
 func TestGetReturnsCopyNotSharedPointer(t *testing.T) {
 	s := openTestStore(t)
-	registered, _ := s.Register("admin", "password123", time.Now())
+	registered, _ := s.Register("admin", "password-placeholder-1", time.Now())
 
 	got, ok := s.Get(registered.ID)
 	if !ok {
@@ -571,7 +571,7 @@ func TestOpenReadsNewObjectFormat(t *testing.T) {
 	// Round-trip through the store's own writer -- the true contract is
 	// "whatever Store.mutate writes, OpenStore can read back."
 	s1, _ := OpenStore(m, Options{})
-	if _, err := s1.Register("admin", "password123", time.Now()); err != nil {
+	if _, err := s1.Register("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -671,7 +671,7 @@ func TestAStoreLeftByTheRemovedNoAuthModeRequiresSetup(t *testing.T) {
 	}
 	// Registration has to be open, or the deployment is stranded: there
 	// is no account to sign in with and no way to make one.
-	if _, err := s.Register("admin", "password123", time.Now()); err != nil {
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("expected setup to be available on a previously-disabled store, got %v", err)
 	}
 
@@ -736,7 +736,7 @@ func TestConcurrentRegisterCreatesExactlyOneAdmin(t *testing.T) {
 
 func TestDeleteUserRefusesTheAdmin(t *testing.T) {
 	s := openTestStore(t)
-	admin, _ := s.Register("alice", "password123", time.Now())
+	admin, _ := s.Register("alice", "password-placeholder-1", time.Now())
 
 	if _, err := s.DeleteUser(admin.ID); err != ErrCannotDeleteAdmin {
 		t.Fatalf("expected ErrCannotDeleteAdmin, got %v", err)
@@ -748,7 +748,7 @@ func TestDeleteUserRefusesTheAdmin(t *testing.T) {
 
 func TestDeleteUserRemovesTheAccountAndFreesItsIdentifiers(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("alice", "password123", time.Now())
+	_, _ = s.Register("alice", "password-placeholder-1", time.Now())
 	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -784,7 +784,7 @@ func TestDeleteUserRemovesTheAccountAndFreesItsIdentifiers(t *testing.T) {
 
 func TestDeleteUserUnknownIDReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.Register("alice", "password123", time.Now())
+	_, _ = s.Register("alice", "password-placeholder-1", time.Now())
 
 	if _, err := s.DeleteUser("no-such-id"); err != ErrUserNotFound {
 		t.Errorf("expected ErrUserNotFound, got %v", err)
@@ -835,7 +835,7 @@ func requireNoCredentials(t *testing.T, what string, u *User) {
 func TestDeleteUserReturnsNoCredentials(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	_, _ = s.Register("alice", "password123", now)
+	_, _ = s.Register("alice", "password-placeholder-1", now)
 	bob, err := s.CreateUser("bob", "password456", RoleUser, now)
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -855,7 +855,7 @@ func TestDeleteUserReturnsNoCredentials(t *testing.T) {
 func TestTransferAdminReturnsNoCredentials(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
-	alice, _ := s.Register("alice", "password123", now)
+	alice, _ := s.Register("alice", "password-placeholder-1", now)
 	bob, err := s.CreateUser("bob", "password456", RoleUser, now)
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -884,7 +884,7 @@ func TestDeleteUserLeavesTheAccountInPlaceWhenPersistFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	bob, err := s.CreateUser("bob", "password456", RoleUser, time.Now())
@@ -912,7 +912,7 @@ func TestRegisterAndCreateUserReportPersistFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("OpenStore: %v", err)
 		}
-		if _, err := s.Register("alice", "password123", time.Now()); err == nil {
+		if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err == nil {
 			t.Fatal("Register against a backend that cannot save = nil error, want one")
 		}
 		if s.Count() != 0 {
@@ -930,7 +930,7 @@ func TestRegisterAndCreateUserReportPersistFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("OpenStore: %v", err)
 		}
-		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+		if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
 		if _, err := s.CreateUser("bob", "password456", RoleUser, time.Now()); err == nil {
@@ -1003,7 +1003,7 @@ func setTOTPForTest(t *testing.T, s *Store, userID, secret string, confirmedAt t
 // factor.
 func TestUnconfirmedTOTPSecretIsNotAnActiveFactor(t *testing.T) {
 	s := openTestStore(t)
-	u, err := s.Register("admin", "password123", time.Now())
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1122,7 +1122,7 @@ func TestWritesPickUpAnotherProcessesAccountFirst(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, _ = server.Register("admin", "password123", time.Now())
+			_, _ = server.Register("admin", "password-placeholder-1", time.Now())
 			if _, err := server.CreateUser("bob", "password456", RoleUser, time.Now()); err != nil {
 				t.Fatal(err)
 			}

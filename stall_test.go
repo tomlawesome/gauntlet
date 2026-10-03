@@ -106,7 +106,7 @@ func TestStalledBackendDoesNotPileUpPerRequestWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := s.Register("admin", "password123", time.Now()); err != nil {
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	b.arm()
@@ -166,7 +166,7 @@ func TestStalledBackendStillServesFromMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := s.Register("admin", "password123", time.Now()); err != nil {
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	b.arm()
@@ -174,7 +174,7 @@ func TestStalledBackendStillServesFromMemory(t *testing.T) {
 	if u, ok := s.ByUsername("admin"); !ok || u.Username != "admin" {
 		t.Error("the store stopped serving its in-memory accounts while the backend was stalled")
 	}
-	if _, err := s.Authenticate("admin", "password123", time.Now()); err != nil {
+	if _, err := s.Authenticate("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Errorf("login failed against a stalled backend: %v -- the operator cannot sign in to diagnose the outage", err)
 	}
 }

@@ -67,14 +67,14 @@ func TestValidateUsernameAcceptsRealNames(t *testing.T) {
 func TestRegisterAndCreateUserRejectAHostileUsername(t *testing.T) {
 	s := openTestStore(t)
 
-	if _, err := s.Register("admin\x1b[2K\rroot", "password123", time.Now()); err == nil {
+	if _, err := s.Register("admin\x1b[2K\rroot", "password-placeholder-1", time.Now()); err == nil {
 		t.Error("Register accepted a username containing an ANSI escape")
 	}
 	if s.Count() != 0 {
 		t.Fatalf("a refused Register created an account anyway (count=%d)", s.Count())
 	}
 
-	if _, err := s.Register("admin", "password123", time.Now()); err != nil {
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, err := s.CreateUser("bob\nadmin", "password456", RoleUser, time.Now()); err == nil {

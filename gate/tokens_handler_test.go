@@ -16,7 +16,7 @@ import (
 func TestTokensCreateRequiresAdmin(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
 
 	userClient := &http.Client{Jar: mustCookieJar(t)}
@@ -32,7 +32,7 @@ func TestTokensCreateRequiresAdmin(t *testing.T) {
 func TestCreateTokenRejectsEmptyName(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: ""})
 	defer func() { _ = resp.Body.Close() }()
@@ -46,7 +46,7 @@ func TestCreateTokenRejectsEmptyName(t *testing.T) {
 func TestCreateTokenRejectsABlankName(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "   "})
 	defer func() { _ = resp.Body.Close() }()
@@ -61,7 +61,7 @@ func TestCreateTokenRejectsABlankName(t *testing.T) {
 func TestCreateTokenRejectsInvalidKind(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Kind: "not-a-real-kind"})
 	defer func() { _ = resp.Body.Close() }()
@@ -73,7 +73,7 @@ func TestCreateTokenRejectsInvalidKind(t *testing.T) {
 func TestTokensListAdminOnly(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
 
 	userClient := &http.Client{Jar: mustCookieJar(t)}
@@ -92,7 +92,7 @@ func TestTokensListAdminOnly(t *testing.T) {
 func TestAdminCanCreateListAndRevokeTokens(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	createResp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: "integration"})
 	defer func() { _ = createResp.Body.Close() }()
@@ -146,7 +146,7 @@ func TestAdminCanCreateListAndRevokeTokens(t *testing.T) {
 func TestCreateTokenRejectsAnUnscopedIngestToken(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: "router", Kind: string(gauntlet.TokenKindIngest)})
 	defer func() { _ = resp.Body.Close() }()
@@ -160,7 +160,7 @@ func TestCreateTokenRejectsAnUnscopedIngestToken(t *testing.T) {
 func TestCreateTokenRejectsATooLongName(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	adminClient := registerAdmin(t, ts, "admin", "password123")
+	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	name := strings.Repeat("n", gauntlet.MaxTokenNameLen+1)
 	resp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: name})
@@ -191,7 +191,7 @@ func TestCreateTokenWithoutStorageSaysWhatToDo(t *testing.T) {
 	}
 	g.deps.Tokens = tokens
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine"})
 	defer func() { _ = resp.Body.Close() }()
@@ -220,15 +220,15 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.deps.Tokens = tokens
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, tok, err := tokens.Create("leaked", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	g.Handle(gauntlet.TokenKindAPI, kindEchoHandler("/api/readonly"))
 	ts := newTestServer(t, g)
-	admin := loggedInClient(t, ts, "admin", "password123")
-	enrolTOTPFactor(t, admin, ts, "password123") // DELETE /api/tokens/{id} is not an enrolment route
+	admin := loggedInClient(t, ts, "admin", "password-placeholder-1")
+	enrolTOTPFactor(t, admin, ts, "password-placeholder-1") // DELETE /api/tokens/{id} is not an enrolment route
 
 	backend.left = 0
 	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/tokens/"+tok.ID, nil)
@@ -266,7 +266,7 @@ func TestTokenRegisteredKinds(t *testing.T) {
 	}
 	g.deps.Tokens = tokens
 	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password123")
+	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	expect := func(resp *http.Response, want int, out any) {
 		t.Helper()
 		defer func() { _ = resp.Body.Close() }()

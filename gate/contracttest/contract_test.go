@@ -786,7 +786,7 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newTestGateWith(t, persist.NewMemory(), tokens)
-	if _, err := f.users.Register("admin", "password123", time.Now()); err != nil {
+	if _, err := f.users.Register("admin", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	raw, tok, err := tokens.Create("leaked", gauntlet.TokenKindAPI, "", nil, time.Now())
@@ -796,8 +796,8 @@ func TestRevokeTokenStorageFailureIsNotReportedAsGone(t *testing.T) {
 	f.g.Handle(gauntlet.TokenKindAPI, testProtectedHandler())
 	ts := newTestServer(t, f.g)
 	admin := c.client()
-	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{Username: "admin", Password: "password123"}}, 200, nil)
-	enrolTOTPFactor(t, c, ts.URL, admin, "password123") // DELETE /api/tokens/{id} is not an enrolment route
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{Username: "admin", Password: "password-placeholder-1"}}, 200, nil)
+	enrolTOTPFactor(t, c, ts.URL, admin, "password-placeholder-1") // DELETE /api/tokens/{id} is not an enrolment route
 
 	backend.left = 0
 	c.do(admin, ts.URL, call{method: "DELETE", path: "/api/tokens/" + tok.ID}, http.StatusInternalServerError, nil)
@@ -853,8 +853,8 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 	f := newTestGateWith(t, backend, nil)
 	ts := newTestServer(t, f.g)
 	admin := c.client()
-	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "password123", f.setupCode}}, 201, nil)
-	enrolTOTPFactor(t, c, ts.URL, admin, "password123") // POST /api/auth/users is not an enrolment route
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "password-placeholder-1", f.setupCode}}, 201, nil)
+	enrolTOTPFactor(t, c, ts.URL, admin, "password-placeholder-1") // POST /api/auth/users is not an enrolment route
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: bobName, Password: bobPass, Role: "user"}}, 201, nil)
 
 	bob := c.client()

@@ -86,7 +86,7 @@ func bearerRequestMethod(t *testing.T, method, ts, path, raw string) *http.Respo
 
 func TestBearerTokenDispatchesToItsRegisteredKind(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)
@@ -111,7 +111,7 @@ func TestBearerTokenDispatchesToItsRegisteredKind(t *testing.T) {
 // own mux has no route for the path asked for.
 func TestBearerTokenNeverReachesNext(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)
@@ -132,7 +132,7 @@ func TestBearerTokenNeverReachesNext(t *testing.T) {
 // are registered on next's mux (via Routes()), not on the kind's mux.
 func TestBearerTokenCannotReachAdminRoutes(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)
@@ -153,7 +153,7 @@ func TestBearerTokenCannotReachAdminRoutes(t *testing.T) {
 // passed through to the session-cookie path.
 func TestWrongKindTokenNeverAuthenticates(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	// Only TokenKindAPI is registered with Handle -- an ingest-kind
 	// token exists in the store (opened with the default Kinds, which
 	// include ingest) but has nowhere to dispatch to.
@@ -173,7 +173,7 @@ func TestWrongKindTokenNeverAuthenticates(t *testing.T) {
 
 func TestBearerTokenInvalidValueRejected(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	g.Handle(gauntlet.TokenKindAPI, kindEchoHandler("/api/readonly"))
 	ts := newTestServer(t, g)
 
@@ -186,7 +186,7 @@ func TestBearerTokenInvalidValueRejected(t *testing.T) {
 
 func TestBearerTokenRevokedRejected(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, tok, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)
@@ -210,7 +210,7 @@ func TestBearerTokenRevokedRejected(t *testing.T) {
 // session-cookie path.
 func TestBearerSchemeMatchedCaseInsensitively(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)
@@ -238,7 +238,7 @@ func TestBearerSchemeMatchedCaseInsensitively(t *testing.T) {
 // -- Protect tries every registered kind, not just the first.
 func TestBearerTokenKindOrderMatchesHandleRegistration(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("router", gauntlet.TokenKindIngest, "device-1", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)
@@ -277,7 +277,7 @@ func TestBearerTokenKindOrderMatchesHandleRegistration(t *testing.T) {
 // same POST with no Bearer token must be refused by the CSRF check.
 func TestBearerTokenPOSTBypassesCSRF(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)
@@ -317,7 +317,7 @@ func TestBearerTokenPOSTBypassesCSRF(t *testing.T) {
 // TestBearerTokenPOSTBypassesCSRF's.
 func TestBearerTokenPOSTBodyReachesKindHandler(t *testing.T) {
 	g := newTestGate(t)
-	registerUserDirect(t, g, "admin", "password123")
+	registerUserDirect(t, g, "admin", "password-placeholder-1")
 	raw, _, err := g.deps.Tokens.Create("router", gauntlet.TokenKindIngest, "device-1", nil, nowUTC())
 	if err != nil {
 		t.Fatalf("Tokens.Create: %v", err)

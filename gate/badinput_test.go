@@ -43,7 +43,7 @@ func TestRegisterRejectsInvalidJSON(t *testing.T) {
 func TestLoginRejectsInvalidJSON(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 	resp := postRawBody(t, &http.Client{}, ts.URL+"/api/auth/login", "not json")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -54,7 +54,7 @@ func TestLoginRejectsInvalidJSON(t *testing.T) {
 func TestCreateUserRejectsInvalidJSON(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	resp := postRawBody(t, client, ts.URL+"/api/auth/users", "not json")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -65,7 +65,7 @@ func TestCreateUserRejectsInvalidJSON(t *testing.T) {
 func TestCreateTokenRejectsInvalidJSON(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	resp := postRawBody(t, client, ts.URL+"/api/tokens", "not json")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -76,7 +76,7 @@ func TestCreateTokenRejectsInvalidJSON(t *testing.T) {
 func TestChangePasswordRejectsInvalidJSON(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	resp := postRawBody(t, client, ts.URL+"/api/auth/password", "not json")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -87,7 +87,7 @@ func TestChangePasswordRejectsInvalidJSON(t *testing.T) {
 func TestLoginFactorRejectsInvalidJSON(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 	resp := postRawBody(t, &http.Client{}, ts.URL+"/api/auth/login/factor", "not json")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -139,7 +139,7 @@ func TestRecoveryCodesRegenerateRejectsInvalidJSON(t *testing.T) {
 func TestTokensRevokeUnknownIDNotFound(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/tokens/does-not-exist", nil)
 	req.Header.Set(csrfHeaderName, testCSRFValue)
@@ -195,7 +195,7 @@ func (errBoomType) Error() string { return "boom: backend unavailable" }
 func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
 
 	operator, ok := g.deps.Users.ByUsername("operator")
@@ -253,7 +253,7 @@ func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 func TestJSONBodyRejectsUnknownField(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	client := registerAdmin(t, ts, "admin", "password123")
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postRawBody(t, client, ts.URL+"/api/auth/users",
 		`{"username":"operator","password":"password456","role":"user","admin":true}`)
@@ -271,10 +271,10 @@ func TestJSONBodyRejectsUnknownField(t *testing.T) {
 func TestJSONBodyRejectsTrailingData(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password123")
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	resp := postRawBody(t, &http.Client{}, ts.URL+"/api/auth/login",
-		`{"username":"admin","password":"password123"}{"trailing":true}`)
+		`{"username":"admin","password":"password-placeholder-1"}{"trailing":true}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for trailing data after the JSON value", resp.StatusCode)

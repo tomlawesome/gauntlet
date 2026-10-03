@@ -20,7 +20,7 @@ func TestHasLocalAdminFollowsTheAdminsPassword(t *testing.T) {
 		t.Error("an empty store claims a local admin")
 	}
 
-	admin, err := s.Register("alice", "password123", time.Now())
+	admin, err := s.Register("alice", "password-placeholder-1", time.Now())
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
