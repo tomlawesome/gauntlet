@@ -18,8 +18,10 @@ import (
 //
 // Save also maintains a sidecar lock file alongside path, named path
 // with ".lock" appended -- worth knowing if the store is ever backed up
-// or moved by hand, though it holds no data of its own and is fine to
-// leave behind.
+// or moved by hand. It holds no data of its own, but deleting it while a
+// writer holds it is not harmless: a second writer can then take its own
+// lock on a fresh inode at the same name and overlap with the first,
+// defeating the compare-and-swap below.
 type fileBackend struct {
 	path string
 }
@@ -135,7 +137,7 @@ func (b *fileBackend) Save(ctx context.Context, payload []byte, expect int64) (i
 	// anyone. A sidecar lock file, not a lock on b.path itself, because
 	// b.path is replaced wholesale by rename below, so a lock tied to its
 	// inode would not be seen by the next writer that opens the new one.
-	lock, err := lockFile(b.path + ".lock")
+	lock, err := lockFile(ctx, b.path+".lock")
 	if err != nil {
 		return 0, err
 	}
