@@ -92,6 +92,34 @@ func TestSessionRevokeAllForUser(t *testing.T) {
 	}
 }
 
+// TestSessionRevokeAllForUserCountMatchesWhatItRevokes pins gauntlet#58
+// R5: a caller that counts live sessions separately and then calls
+// RevokeAllForUser can report one short when a login lands in between
+// -- the new session is revoked (RevokeAllForUser touches everything in
+// s.byUser at the moment its lock is taken) but was never in the
+// earlier count. RevokeAllForUserCount counts under that same lock, so
+// its return value always matches exactly what it ends, including a
+// session created an instant before the call -- there is no separate
+// count for a concurrent login to land after.
+func TestSessionRevokeAllForUserCountMatchesWhatItRevokes(t *testing.T) {
+	s := NewSessionStore(time.Hour, 0)
+	now := time.Now()
+	a1 := s.Create("user-1", now)
+	a2 := s.Create("user-1", now) // e.g. a login that lands just before the sign-out's own lock
+
+	n := s.RevokeAllForUserCount("user-1")
+
+	if n != 2 {
+		t.Errorf("RevokeAllForUserCount = %d, want 2", n)
+	}
+	if _, ok := s.Validate(a1.ID, now); ok {
+		t.Error("expected user-1's first session to be revoked")
+	}
+	if _, ok := s.Validate(a2.ID, now); ok {
+		t.Error("expected user-1's second session to be revoked too, and counted")
+	}
+}
+
 // The ceiling SessionTTL does not have (#294 item 3). Without it a
 // session used even once per ttl never expires, so a browser left signed
 // in on a shared machine stays valid indefinitely.
