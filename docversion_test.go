@@ -284,3 +284,38 @@ func assertPayload(t *testing.T, m *persist.Memory, want string) {
 		t.Errorf("the newer document was overwritten:\n%s", snap.Payload)
 	}
 }
+
+// A stored document that is the JSON literal null is refused at open,
+// for all three stores, rather than read as a fresh install: an empty
+// accounts store issues a setup code and the next registration would
+// save over every account.
+func TestOpenRefusesANullDocument(t *testing.T) {
+	refused := func(what, doc string, err error) {
+		t.Helper()
+		var startup *persist.StartupError
+		if err == nil {
+			t.Errorf("%s %q: opened as a fresh install", what, doc)
+		} else if !errors.As(err, &startup) || !strings.Contains(err.Error(), "null") {
+			t.Errorf("%s %q: err = %v, want a *persist.StartupError naming null", what, doc, err)
+		}
+	}
+	for _, doc := range []string{"null", " null\n"} {
+		m := persist.NewMemory()
+		primeMemory(t, m, doc)
+		_, err := OpenStore(m, Options{OnSetupCode: SetupCodeFunc(func(string) {})})
+		refused("accounts", doc, err)
+
+		m = persist.NewMemory()
+		primeMemory(t, m, doc)
+		_, err = OpenTokenStore(m, TokenOptions{})
+		refused("tokens", doc, err)
+
+		m = persist.NewMemory()
+		primeMemory(t, m, doc)
+		h, err := OpenSignInHistory(m, SignInHistoryOptions{})
+		if err == nil {
+			_ = h.Close()
+		}
+		refused("sign-in history", doc, err)
+	}
+}
