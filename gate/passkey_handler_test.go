@@ -284,8 +284,8 @@ func TestPasskeyRegisterLoginRoundTrip(t *testing.T) {
 	if sess := sessionOf(t, bilbo, ts); !sess.Authenticated {
 		t.Fatal("registering a passkey should not have signed this browser out")
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey"+fixtureFromSuffix {
-		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, "name=YubiKey"+fixtureFromSuffix)
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="YubiKey"`+fixtureFromSuffix {
+		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, `name="YubiKey"`+fixtureFromSuffix)
 	}
 
 	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
@@ -708,6 +708,33 @@ func TestPasskeyDeleteWrongPassword(t *testing.T) {
 	}
 }
 
+// TestPasskeyNameIsQuotedInTheAuditLog: a passkey's name is the user's
+// own text, so a newline or terminal escape in it reaches the audit
+// detail quoted, on adding and removing alike, never raw. The stored
+// name is left as the user gave it.
+func TestPasskeyNameIsQuotedInTheAuditLog(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	name := "key\nforged=1 \x1b[31mred"
+	_, out := registerPasskey(t, bilbo, ts, g, name)
+	if out.Passkey.Name != name {
+		t.Errorf("stored passkey name = %q, want %q unchanged", out.Passkey.Name, name)
+	}
+	want := `name="key\nforged=1 \x1b[31mred"` + fixtureFromSuffix
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != want || strings.ContainsAny(entry.Detail, "\n\x1b") {
+		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, want)
+	}
+
+	resp := deleteJSON(t, bilbo, ts.URL+"/api/auth/passkeys/"+out.Passkey.ID, passkeyDeleteRequest{Password: passkeyBilboPassword})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete returned %d", resp.StatusCode)
+	}
+	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != want || strings.ContainsAny(entry.Detail, "\n\x1b") {
+		t.Errorf("account.passkey_removed detail = %q, want %q", entry.Detail, want)
+	}
+}
+
 // TestPasskeyDeleteLeavingNoFactorSignsOutEverySession: removing the
 // only second factor signs out every session, the caller's included.
 func TestPasskeyDeleteLeavingNoFactorSignsOutEverySession(t *testing.T) {
@@ -743,7 +770,7 @@ func TestPasskeyDeleteLeavingNoFactorSignsOutEverySession(t *testing.T) {
 	if u, ok := g.deps.Users.Get(passkeyBilboID(t, g)); !ok || len(u.RecoveryCodes) != 0 {
 		t.Error("recovery codes outlived the account's last factor")
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != "name=only key"+fixtureFromSuffix {
+	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != `name="only key"`+fixtureFromSuffix {
 		t.Errorf("account.passkey_removed detail = %q", entry.Detail)
 	}
 }
@@ -993,7 +1020,7 @@ func TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits(t *testing.T
 	if got := protectedStatus(t, browser, ts); got != http.StatusOK {
 		t.Errorf("the registering browser got %d, want its reissued session to work", got)
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey; recovery codes could not be saved"+fixtureFromSuffix {
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="YubiKey"; recovery codes could not be saved`+fixtureFromSuffix {
 		t.Errorf("account.passkey_added detail = %q", entry.Detail)
 	}
 }
@@ -2215,7 +2242,7 @@ func TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual(t *tes
 	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
 		t.Errorf("the account holds %d passkeys, want exactly 1", n)
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=thief"+fixtureFromSuffix {
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="thief"`+fixtureFromSuffix {
 		t.Errorf("account.passkey_added detail = %q, want the thief's passkey named", entry.Detail)
 	}
 	again := passkeyRegisterFinishRaw(t, thief, ts, newFake(g), creation, "thief again")
