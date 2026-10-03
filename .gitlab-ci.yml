@@ -264,9 +264,11 @@ test:contract:
 #
 # Three jobs on three runners, so no one job or runner holds two of:
 # the network path to HIBP, the signing key, the publishing
-# credentials. build talks to HIBP and holds nothing; sign holds the key
-# and talks to nobody; publish holds the job token and the GitHub token
-# and checks the signature against the committed keys before uploading.
+# credentials. build talks to HIBP and holds nothing; sign holds the
+# key and reaches only its Go module proxy and container registry, to
+# build pwlist from this commit's source -- never HIBP or GitHub;
+# publish holds the job token and the GitHub token and checks the
+# signature against the committed keys before uploading.
 #
 # The sample path: a pipeline run by hand from any branch with
 # BLOCKLIST_SAMPLE=true runs blocklist:build alone over the first 2,048
