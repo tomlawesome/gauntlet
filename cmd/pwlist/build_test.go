@@ -556,6 +556,10 @@ func TestBuildIgnoresAnUnusableCheckpoint(t *testing.T) {
 			later := testNow.Add(25 * time.Hour)
 			b.now = func() time.Time { return later }
 		},
+		"saved in the future": func(b *builder) {
+			earlier := testNow.Add(-time.Hour)
+			b.now = func() time.Time { return earlier }
+		},
 		"different prefixes": func(b *builder) { b.prefixes, b.fullRange = 12, 12 },
 		"corrupt": func(b *builder) {
 			if err := os.WriteFile(b.checkpoint, []byte("{not json"), 0o600); err != nil {

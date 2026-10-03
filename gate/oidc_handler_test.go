@@ -846,3 +846,179 @@ func TestAllowIssuerRefusesKnownMultiTenantProviders(t *testing.T) {
 		t.Error("expected a known multi-tenant issuer to be refused")
 	}
 }
+
+// warnRecorder keeps the message of each Warn record and nothing else.
+type warnRecorder struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (w *warnRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (w *warnRecorder) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.msgs = append(w.msgs, r.Message)
+	}
+	return nil
+}
+func (w *warnRecorder) WithAttrs([]slog.Attr) slog.Handler { return w }
+func (w *warnRecorder) WithGroup(string) slog.Handler      { return w }
+
+// TestOIDCCallbackFailuresAreLogged: the changelog promises a failed SSO
+// login or link is logged. Every failed callback writes exactly one Warn
+// line naming the ssoError it sent and where the request came from; a
+// successful login or link writes none.
+func TestOIDCCallbackFailuresAreLogged(t *testing.T) {
+	// linkCallback starts a link as admin and returns the callback
+	// request carrying the flow cookie, with admin's session cookie only
+	// when withSession is set.
+	linkCallback := func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client, withSession bool) *http.Request {
+		t.Helper()
+		startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
+		_ = startResp.Body.Close()
+		var flowCookie *http.Cookie
+		for _, c := range startResp.Cookies() {
+			if c.Name == oidcFlowCookieName {
+				flowCookie = c
+			}
+		}
+		if flowCookie == nil {
+			t.Fatal("expected the OIDC flow cookie to be set by link start")
+		}
+		fs, err := g.deps.OIDCState.Decode(flowCookie.Value, oidcFlowCookieMaxAge, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/oidc/callback?state="+fs.State+"&code=test-code", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(flowCookie)
+		if withSession {
+			for _, c := range admin.Jar.Cookies(req.URL) {
+				req.AddCookie(c)
+			}
+		}
+		return req
+	}
+	newFlow := func(t *testing.T) oidc.FlowState {
+		t.Helper()
+		fs, err := oidc.NewFlowState(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fs
+	}
+
+	cases := []struct {
+		name string
+		// code is the ssoError the callback must send; "" for success.
+		code string
+		// request sets the scene and returns the callback request; it
+		// runs after the first admin is registered (SSO never creates
+		// the first account) and before the log is captured.
+		request func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request
+	}{
+		{"missing flow cookie", "state_mismatch", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/oidc/callback?state=x&code=y", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return req
+		}},
+		{"state mismatch", "state_mismatch", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			return oidcCallbackRequest(t, g, ts, newFlow(t), "state=not-the-right-state&code=test-code")
+		}},
+		{"provider error", "provider_error", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			fs := newFlow(t)
+			return oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&error=access_denied")
+		}},
+		{"verification failed", "verification_failed", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			fs := newFlow(t)
+			fp.NextIDToken = fp.SignNoneAlgorithm(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+			return oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code")
+		}},
+		{"nonce mismatch", "state_mismatch", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			fs := newFlow(t)
+			fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, "a-different-nonce-entirely"))
+			return oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code")
+		}},
+		{"link session changed", "link_session_changed", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			return linkCallback(t, g, ts, fp, admin, false)
+		}},
+		{"link identity taken", "link_identity_taken", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			if _, _, err := g.deps.Users.FindOrCreateOIDCUser(fp.Issuer(), "test-subject-123", "someoneelse", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			return linkCallback(t, g, ts, fp, admin, true)
+		}},
+		{"login succeeds", "", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			fs := newFlow(t)
+			fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+			return oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code")
+		}},
+		{"link succeeds", "", func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client) *http.Request {
+			return linkCallback(t, g, ts, fp, admin, true)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
+			admin := registerAdmin(t, ts, "admin", "password123")
+			req := tc.request(t, g, ts, fp, admin)
+			logs := &warnRecorder{}
+			g.cfg.Log = slog.New(logs)
+
+			resp, err := noRedirectClient().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			loc := resp.Header.Get("Location")
+
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			if tc.code == "" {
+				if strings.Contains(loc, "ssoError") {
+					t.Fatalf("callback redirected to %q, want success", loc)
+				}
+				if len(logs.msgs) != 0 {
+					t.Errorf("a successful callback logged warnings: %q", logs.msgs)
+				}
+				return
+			}
+			if want := testLoginPath + "?ssoError=" + tc.code; loc != want {
+				t.Fatalf("redirect location = %q, want %q", loc, want)
+			}
+			if len(logs.msgs) != 1 {
+				t.Fatalf("got %d warnings, want exactly one: %q", len(logs.msgs), logs.msgs)
+			}
+			if !strings.Contains(logs.msgs[0], "ssoError="+tc.code) || !strings.Contains(logs.msgs[0], "from=") {
+				t.Errorf("warning %q does not name ssoError=%s and the client address", logs.msgs[0], tc.code)
+			}
+		})
+	}
+}
+
+// TestOIDCCallbackFailureLogIsRated: a stranger can hit the callback as
+// fast as they like, so repeats of one failure from one address share a
+// line, like the other refusals (warnRated).
+func TestOIDCCallbackFailureLogIsRated(t *testing.T) {
+	g, ts, _ := newOIDCTestGate(t, oidc.Policy{})
+	logs := &warnRecorder{}
+	g.cfg.Log = slog.New(logs)
+	for range 3 {
+		resp, err := noRedirectClient().Get(ts.URL + "/api/auth/oidc/callback?state=x&code=y")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	if len(logs.msgs) != 1 {
+		t.Errorf("got %d warnings for three identical failures, want one: %q", len(logs.msgs), logs.msgs)
+	}
+}

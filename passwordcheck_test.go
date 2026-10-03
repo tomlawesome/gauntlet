@@ -16,7 +16,7 @@ import (
 
 // fakeList is an injected common-password list (#43). The real embedded
 // list is a placeholder that blocks nothing until the first signed CI
-// run (ADR-0005), so every test of the check brings its own.
+// run (ADR-0007), so every test of the check brings its own.
 type fakeList map[string]bool
 
 func (l fakeList) Contains(password string) bool { return l[password] }

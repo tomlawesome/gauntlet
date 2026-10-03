@@ -1003,8 +1003,10 @@ paths:
       description: |
         A browser navigation, not a fetch. Sets the flow cookie
         (`gate_oidc_flow`, path `/api/auth/oidc`, five minutes) and
-        redirects to the identity provider. Reachable with no session and
-        while no account exists.
+        redirects to the identity provider. Reachable with no session,
+        but not before the first account exists: SSO never creates it,
+        so this route answers 503 until the local setup code has been
+        used.
       security:
         - {}
       responses:
@@ -1014,6 +1016,8 @@ paths:
           $ref: "#/components/responses/SSOOff"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
 
   /api/auth/oidc/callback:
     get:
@@ -1027,8 +1031,9 @@ paths:
         `?ssoError=` and one of `state_mismatch`, `provider_error`,
         `verification_failed`, `not_permitted`, `login_failed`,
         `link_session_changed`, `link_identity_taken`, `link_failed`. The
-        flow cookie is cleared on every path. The first account created
-        through SSO while none exists becomes the admin.
+        flow cookie is cleared on every path. While no account exists
+        yet this route answers 503 like every other route except
+        session and register: the first account is never an SSO one.
       security:
         - oidcFlowCookie: []
       parameters:
@@ -1050,6 +1055,8 @@ paths:
           $ref: "#/components/responses/Redirect"
         "404":
           $ref: "#/components/responses/SSOOff"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
 
   /api/auth/oidc/link:
     post:
@@ -1347,7 +1354,7 @@ paths:
         account's sessions or none: there is no admin route to end one
         session, or to list another account's sessions (#53).
 
-        The body is optional. `reason` is at most 200 bytes of plain text
+        The body is optional. `reason` is at most 200 characters of plain text
         (no control or format characters); it goes into the audit record
         and to the application's `Config.Notify`, which may mail the
         account's owner. `notified` is true when the application was
@@ -2286,7 +2293,7 @@ components:
         reason:
           type: string
           maxLength: 200
-          description: Why, for the audit and the account owner's notice. At most 200 bytes (the length shown here counts characters); control and format characters are refused with `400`.
+          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters are refused with `400`.
     AdminLogoutAllResponse:
       type: object
       additionalProperties: false

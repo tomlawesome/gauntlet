@@ -145,13 +145,13 @@ func FormatResetCode(code string) string {
 // at once. So are the browsers it remembers (KnownBrowsers, #44): a
 // browser the old credentials reached keeps no allowance past the
 // reset. A running LoginLimiter drops its own count of the guesses
-// before it by PasswordChangedAt. The one thing it can still hold is a
-// disable it decided but has not managed to save (only while saves are
-// failing): that survives the code, failing closed, until
-// LoginLimiter.UnlockLogin -- the admin unlock route -- or a restart.
-// The reset route does not call that itself: it would also drop the
-// limiter's count of the guesses before the reset, which is what lets
-// the reset account past its address's limit (AllowAfterReset, #32).
+// before it by PasswordChangedAt, and, seeing the code on the record,
+// any disable it decided but has not managed to save (only while saves
+// are failing) too, so no retry writes it back over the reset. The
+// reset route must not call LoginLimiter.UnlockLogin for that: it would
+// also drop the limiter's count of the guesses before the reset, which
+// is what lets the reset account past its address's limit
+// (AllowAfterReset, #32).
 //
 // Refused with ErrNoLocalPassword for an SSO-only account. Refusing an
 // admin's *own* account is the caller's job, not this method's: the

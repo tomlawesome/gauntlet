@@ -284,8 +284,8 @@ func TestPasskeyRegisterLoginRoundTrip(t *testing.T) {
 	if sess := sessionOf(t, bilbo, ts); !sess.Authenticated {
 		t.Fatal("registering a passkey should not have signed this browser out")
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey"+fixtureFromSuffix {
-		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, "name=YubiKey"+fixtureFromSuffix)
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="YubiKey"`+fixtureFromSuffix {
+		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, `name="YubiKey"`+fixtureFromSuffix)
 	}
 
 	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
@@ -708,6 +708,33 @@ func TestPasskeyDeleteWrongPassword(t *testing.T) {
 	}
 }
 
+// TestPasskeyNameIsQuotedInTheAuditLog: a passkey's name is the user's
+// own text, so a newline or terminal escape in it reaches the audit
+// detail quoted, on adding and removing alike, never raw. The stored
+// name is left as the user gave it.
+func TestPasskeyNameIsQuotedInTheAuditLog(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	name := "key\nforged=1 \x1b[31mred"
+	_, out := registerPasskey(t, bilbo, ts, g, name)
+	if out.Passkey.Name != name {
+		t.Errorf("stored passkey name = %q, want %q unchanged", out.Passkey.Name, name)
+	}
+	want := `name="key\nforged=1 \x1b[31mred"` + fixtureFromSuffix
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != want || strings.ContainsAny(entry.Detail, "\n\x1b") {
+		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, want)
+	}
+
+	resp := deleteJSON(t, bilbo, ts.URL+"/api/auth/passkeys/"+out.Passkey.ID, passkeyDeleteRequest{Password: passkeyBilboPassword})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete returned %d", resp.StatusCode)
+	}
+	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != want || strings.ContainsAny(entry.Detail, "\n\x1b") {
+		t.Errorf("account.passkey_removed detail = %q, want %q", entry.Detail, want)
+	}
+}
+
 // TestPasskeyDeleteLeavingNoFactorSignsOutEverySession: removing the
 // only second factor signs out every session, the caller's included.
 func TestPasskeyDeleteLeavingNoFactorSignsOutEverySession(t *testing.T) {
@@ -743,7 +770,7 @@ func TestPasskeyDeleteLeavingNoFactorSignsOutEverySession(t *testing.T) {
 	if u, ok := g.deps.Users.Get(passkeyBilboID(t, g)); !ok || len(u.RecoveryCodes) != 0 {
 		t.Error("recovery codes outlived the account's last factor")
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != "name=only key"+fixtureFromSuffix {
+	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != `name="only key"`+fixtureFromSuffix {
 		t.Errorf("account.passkey_removed detail = %q", entry.Detail)
 	}
 }
@@ -993,7 +1020,7 @@ func TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits(t *testing.T
 	if got := protectedStatus(t, browser, ts); got != http.StatusOK {
 		t.Errorf("the registering browser got %d, want its reissued session to work", got)
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=YubiKey; recovery codes could not be saved"+fixtureFromSuffix {
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="YubiKey"; recovery codes could not be saved`+fixtureFromSuffix {
 		t.Errorf("account.passkey_added detail = %q", entry.Detail)
 	}
 }
@@ -1357,11 +1384,13 @@ func TestPasskeyRegisterCeremonyEndsAtAStoreRefusal(t *testing.T) {
 	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
 		t.Errorf("the account holds %d passkeys, want 1", n)
 	}
-	// A spent cookie is refused before the body is read.
+	// The body is judged before the cookie, so a spent cookie with a
+	// malformed body is a 400 that leaves the cookie for the next
+	// request to clear.
 	resp, raw = postWithCookie(t, bilbo, ts.URL+"/api/auth/passkeys/register/finish",
 		map[string]any{"unknown": 1}, &http.Cookie{Name: sealed.Name, Value: sealed.Value})
-	if resp.StatusCode != http.StatusUnauthorized || !cookieCleared(resp, passkeyRegisterCookieName) {
-		t.Errorf("a spent ceremony cookie with a malformed body got %d %q, want 401 and cleared before the body is read", resp.StatusCode, raw)
+	if resp.StatusCode != http.StatusBadRequest || cookieCleared(resp, passkeyRegisterCookieName) {
+		t.Errorf("a spent ceremony cookie with a malformed body got %d %q, want 400 with the cookie left alone", resp.StatusCode, raw)
 	}
 }
 
@@ -1863,6 +1892,32 @@ func TestPasskeyRegisterFinishJudgesTheBodyBeforeTheCookie(t *testing.T) {
 	}
 }
 
+// TestPasskeyRegisterFinishBadBodyIsA400WithOrWithoutACeremony: the
+// body is judged before the ceremony cookie is even looked for, so a
+// malformed body is 400 whether the cookie is absent or live, and a
+// live cookie survives it for a corrected finish.
+func TestPasskeyRegisterFinishBadBodyIsA400WithOrWithoutACeremony(t *testing.T) {
+	_, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	bad := map[string]any{"credential": map[string]any{}, "name": "x", "extra": 1}
+
+	resp := postJSON(t, bilbo, ts.URL+passkeyRegisterFinishPath, bad)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad body with no ceremony cookie got %d, want 400", resp.StatusCode)
+	}
+
+	passkeyRegisterBegin(t, bilbo, ts)
+	resp = postJSON(t, bilbo, ts.URL+passkeyRegisterFinishPath, bad)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad body with a live ceremony cookie got %d, want 400", resp.StatusCode)
+	}
+	if cookieCleared(resp, passkeyRegisterCookieName) || !jarHolds(t, bilbo, ts, passkeyRegisterFinishPath, passkeyRegisterCookieName) {
+		t.Error("a bad body cleared the live ceremony cookie")
+	}
+}
+
 // pendingCookieOf is the pending-login cookie client holds now -- taken
 // before a completion clears it, as a client keeping a copy would.
 func pendingCookieOf(t *testing.T, client *http.Client, ts *httptest.Server) *http.Cookie {
@@ -2187,7 +2242,7 @@ func TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual(t *tes
 	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
 		t.Errorf("the account holds %d passkeys, want exactly 1", n)
 	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != "name=thief"+fixtureFromSuffix {
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="thief"`+fixtureFromSuffix {
 		t.Errorf("account.passkey_added detail = %q, want the thief's passkey named", entry.Detail)
 	}
 	again := passkeyRegisterFinishRaw(t, thief, ts, newFake(g), creation, "thief again")

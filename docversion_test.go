@@ -284,3 +284,106 @@ func assertPayload(t *testing.T, m *persist.Memory, want string) {
 		t.Errorf("the newer document was overwritten:\n%s", snap.Payload)
 	}
 }
+
+// A stored document that is the JSON literal null is refused at open,
+// for all three stores, rather than read as a fresh install: an empty
+// accounts store issues a setup code and the next registration would
+// save over every account.
+func TestOpenRefusesANullDocument(t *testing.T) {
+	refused := func(what, doc string, err error) {
+		t.Helper()
+		var startup *persist.StartupError
+		if err == nil {
+			t.Errorf("%s %q: opened as a fresh install", what, doc)
+		} else if !errors.As(err, &startup) || !strings.Contains(err.Error(), "null") {
+			t.Errorf("%s %q: err = %v, want a *persist.StartupError naming null", what, doc, err)
+		}
+	}
+	for _, doc := range []string{"null", " null\n"} {
+		m := persist.NewMemory()
+		primeMemory(t, m, doc)
+		_, err := OpenStore(m, Options{OnSetupCode: SetupCodeFunc(func(string) {})})
+		refused("accounts", doc, err)
+
+		m = persist.NewMemory()
+		primeMemory(t, m, doc)
+		_, err = OpenTokenStore(m, TokenOptions{})
+		refused("tokens", doc, err)
+
+		m = persist.NewMemory()
+		primeMemory(t, m, doc)
+		h, err := OpenSignInHistory(m, SignInHistoryOptions{})
+		if err == nil {
+			_ = h.Close()
+		}
+		refused("sign-in history", doc, err)
+	}
+}
+
+// TestReloadRefusesANullDocument: a document that turns into the JSON
+// literal null while the store is running is refused the loud way a
+// newer one is -- the store keeps serving what it holds, logs why once,
+// and refuses to write over it -- rather than being skipped silently as
+// a transient read failure.
+func TestReloadRefusesANullDocument(t *testing.T) {
+	t.Run("accounts", func(t *testing.T) {
+		var logs bytes.Buffer
+		m := persist.NewMemory()
+		s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Register("alice", "password123", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := m.Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Save(context.Background(), []byte("null"), snap.Version); err != nil {
+			t.Fatal(err)
+		}
+		for range 3 { // each read runs reloadIfStale
+			if _, ok := s.ByUsername("alice"); !ok {
+				t.Fatal("the in-memory accounts were dropped")
+			}
+		}
+		if n := strings.Count(logs.String(), "null"); n != 1 {
+			t.Errorf("expected exactly one log line about the null document, got %d:\n%s", n, logs.String())
+		}
+		if _, err := s.CreateUser("carol", "password456", RoleUser, time.Now()); err == nil {
+			t.Error("a write over the null document was accepted")
+		}
+		assertPayload(t, m, "null")
+	})
+	t.Run("tokens", func(t *testing.T) {
+		var logs bytes.Buffer
+		m := persist.NewMemory()
+		s, err := OpenTokenStore(m, TokenOptions{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.Create("first", TokenKindAPI, "", nil, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := m.Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Save(context.Background(), []byte("null"), snap.Version); err != nil {
+			t.Fatal(err)
+		}
+		for range 3 {
+			if len(s.List()) != 1 {
+				t.Fatal("the in-memory tokens were dropped")
+			}
+		}
+		if n := strings.Count(logs.String(), "null"); n != 1 {
+			t.Errorf("expected exactly one log line about the null document, got %d:\n%s", n, logs.String())
+		}
+		if _, _, err := s.Create("second", TokenKindAPI, "", nil, time.Now()); err == nil {
+			t.Error("a write over the null document was accepted")
+		}
+		assertPayload(t, m, "null")
+	})
+}

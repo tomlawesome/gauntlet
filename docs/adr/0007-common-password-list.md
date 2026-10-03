@@ -1,4 +1,4 @@
-# ADR-0005: The common-password list is built in CI, signed, and refreshed at run time
+# ADR-0007: The common-password list is built in CI, signed, and refreshed at run time
 
 **Status:** Accepted (the design on #52 and the owner's decisions of
 2026-10-02); built without the owner's infrastructure, which is still

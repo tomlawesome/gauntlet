@@ -26,9 +26,11 @@ description or a commit message.
   observable behavior over internal implementation details.
 - A bug fix should include a regression test reproducing the bug where
   practical.
-- Where gauntlet's code is copied from mikroview's, the port carries
-  mikroview's own tests across with it rather than being re-tested from
-  scratch. See [docs/testing.md](docs/testing.md).
+- Where gauntlet's code is copied from mikroview (the application
+  gauntlet's auth code was factored out of; see [the
+  README](README.md)), the port carries mikroview's own tests across
+  with it. It is not re-tested from scratch. See
+  [docs/testing.md](docs/testing.md).
 
 ## Secrets
 

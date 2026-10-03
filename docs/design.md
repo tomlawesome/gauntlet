@@ -25,7 +25,7 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 4 (#28, #44) and
+  version 1 unchanged, gauntlet writes accounts as version 5 (#28, #44, #43) and
   tokens as version 1, and a document newer than the running build is
   refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
@@ -60,10 +60,14 @@ github.com/tomlawesome/gauntlet
 ├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrNoUsablePasskey
 │                               (G8, ADR-0004; the one importer of go-webauthn)
 ├── blocklist/                  List, Parse, Embedded, Refresher, RefreshConfig, NewRefresher,
-│                               DefaultURL (#52, ADR-0005; the common-password list)
+│                               DefaultURL (#52, ADR-0007; the common-password list)
 ├── cmd/pwlist/                 builds, signs, verifies and publishes that list (CI only)
 ├── internal/listsig/           the list's Ed25519 signature format
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
+├── internal/hashcost/          Use, Cheap -- cheap Argon2id hashes for this
+│                               module's own tests
+├── internal/spent/             Set, New, Claim, Spent -- one-time-key tracking
+│                               shared by gate and passkey
 ├── internal/testutil/          fake OIDC provider (mikroview's fake_provider_test.go)
 └── internal/passkeytest/       fake WebAuthn authenticator (mikroview's webauthnfake_test.go)
 ```
@@ -309,6 +313,12 @@ type AccountLockouts interface {                                    // *Store im
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
 }
+type AccountLockoutRecords interface {                              // new: a host store keeps the disable and count too
+    AccountLockouts
+    LoginLockoutRecord(accountID string) LoginLockoutRecord
+    SetLoginLockoutRecord(accountID string, rec LoginLockoutRecord) error // all three fields in one write
+}
+type LoginLockoutRecord struct { LockedUntil time.Time; Lockouts int; DisabledAt time.Time }
 
 type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
 type SignInMethod string  // password, code, passkey, sso
@@ -421,6 +431,13 @@ on the account (`SessionsEndedAt`), in one save: the change-password
 door asks for no current password, so only a fresh sign-in with both
 factors may reach it. That run is kept in memory only.
 
+A host's own store need implement only `AccountLockouts`, the lockout's
+end; the limiter then keeps the disable and the count of lockouts in its
+memory, so a restart re-enables a disabled account and starts the
+lockouts short again. A store that also implements
+`AccountLockoutRecords` keeps all three on its own record, written
+together in one save, and they survive a restart as on the `*Store`.
+
 Unlocking (#44). An admin lifts another account's disable, lockout and
 count with `POST /api/auth/users/{id}/unlock`, through
 `LoginLimiter.UnlockLogin`, which also drops the limiter's own count of
@@ -500,7 +517,7 @@ the same.
 Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
 
-**Common passwords** (#43, #52, [ADR-0005](adr/0005-common-password-list.md)).
+**Common passwords** (#43, #52, [ADR-0007](adr/0007-common-password-list.md)).
 `gauntlet/blocklist` holds the SHA-1 hashes of the 10,000 most
 prevalent Pwned Passwords. `blocklist.Embedded()` is the copy compiled
 into the release and makes no network request; it is an empty list
@@ -601,7 +618,7 @@ func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below
 // new (#53): the application mails the owner; gauntlet sends nothing.
 type Notifier interface { SessionsEnded(ctx context.Context, n SessionsEndedNotice) error }
 type SessionsEndedNotice struct { UserID, Username, EndedBy, Reason string; Ended int; At time.Time }
-const MaxSessionEndReason = 200 // bytes
+const MaxSessionEndReason = 200 // characters
 ```
 
 **Sign-in records (#45).** Every sign-in attempt -- the password step,
@@ -645,7 +662,7 @@ a session. Bounds and write cadence are in §4 and ADR-0006.
 every gauntlet session the account holds and forgets its remembered
 browsers -- all or nothing, no per-session admin route and no admin list
 of another account's sessions (owner, 2026-10-02). 409 for the caller's
-own account, 404 for none, 400 for a reason over 200 bytes or holding a
+own account, 404 for none, 400 for a reason over 200 characters or holding a
 control or format character. Audited as `user.sessions_ended`. Once the
 response is written, `Config.Notify` is called in its own goroutine with
 a 10-second deadline and `recover()`; an error or panic is one log line,
@@ -731,7 +748,7 @@ it. The data for all of this lives on `User`.
   and birdcage's alike, must hold a second factor before it can reach
   anything but the enrolment routes. This closes the gap ASVS 5.0 6.2.1
   and NIST SP 800-63B-4 §3.1.1.2 flagged against the 8-character minimum
-  (`store.go:39`, docs/security-by-design.md): with the door
+  (`store.go:46`, docs/security-by-design.md): with the door
   configurable and off by default, an application that forgot to turn
   it on got 8-character single-factor passwords. Cost: the TOTP enrol
   screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
@@ -981,7 +998,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Pitfall | Mikroview today | Module keeps |
 |---|---|---|
 | Session fixation / predictable ids | 128-bit `crypto/rand` id, new id per login, never reused | same; `newID` panics rather than degrades if the CSPRNG fails |
-| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt` |
+| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51) |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
@@ -1042,7 +1059,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | Addresses and browsers readable in a backup | sealed under its own `persist.Encrypt` label, `signins`; a plaintext backend is refused unless allowed |
 | Two writers, or a removed document | a conflicting save reloads and re-appends its unsaved rows renumbered; a removed document keeps memory and is logged once until a save succeeds |
 
-### Common-password list (#52, ADR-0005)
+### Common-password list (#52, ADR-0007)
 
 | Pitfall | Module does |
 |---|---|

@@ -1,6 +1,6 @@
 // Package blocklist is gauntlet's common-password list: the SHA-1
 // hashes of the 10,000 most prevalent passwords in Have I Been Pwned's
-// Pwned Passwords corpus (#43, #52, ADR-0005).
+// Pwned Passwords corpus (#43, #52, ADR-0007).
 //
 // It is a fallback for applications that cannot reach the live HIBP
 // check, and a floor under those that can. The hashes are only ever
@@ -17,7 +17,7 @@
 // The list itself is built by cmd/pwlist in a monthly CI pipeline,
 // signed, and published to the GitLab package registry and then to
 // releases on the public GitHub mirror, which is where a Refresher
-// fetches it (DefaultURL); ADR-0005 has the whole path. The data is from haveibeenpwned.com, which places no
+// fetches it (DefaultURL); ADR-0007 has the whole path. The data is from haveibeenpwned.com, which places no
 // licence terms on the Pwned Passwords API; the attribution is voluntary
 // and carried in every copy's header.
 package blocklist

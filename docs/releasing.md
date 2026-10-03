@@ -9,11 +9,13 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    anything else below.
 
 2. Once the audit is closed, open an ordinary merge request to `dev`
-   that bumps `VERSION` to the next version -- a plain three-part
-   version like `0.2.0`, three numbers separated by dots, no leading
-   zeros -- sets `info.version` in `docs/api/auth.yaml` to the same
-   value (the contract tests fail if the two differ), and moves the
-   CHANGELOG's `[Unreleased]` entries under `[<version>] - <date>`.
+   that does three things:
+   - Bumps `VERSION` to the next version -- a plain three-part version
+     like `0.2.0`, three numbers separated by dots, no leading zeros.
+   - Sets `info.version` in `docs/api/auth.yaml` to the same value (the
+     contract tests fail if the two differ).
+   - Moves the CHANGELOG's `[Unreleased]` entries under
+     `[<version>] - <date>`.
 
    The same merge request carries the newest common-password list
    (#52): run
@@ -22,8 +24,8 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    ```
    and commit what it changes under `blocklist/embedded/`. It fetches
    the list the last scheduled run published (from the GitHub mirror's
-   releases, which need no login), checks its checksum, format and
-   signature the way an application does, and refuses one built more
+   releases, which need no login) and checks its checksum, format and
+   signature the way an application does. It refuses a list built more
    than 90 days ago. "Nothing to commit" just means the embedded list
    is already the newest.
 
@@ -76,16 +78,19 @@ Apps then take it with `go get github.com/tomlawesome/gauntlet@v<VERSION>`.
 ## The common-password list
 
 `blocklist.Embedded()` and `blocklist.Refresher` serve the SHA-1
-hashes of the 10,000 most prevalent passwords in Have I Been Pwned's
-Pwned Passwords (#52, [ADR-0005](adr/0005-common-password-list.md)).
-The monthly `blocklist` pipeline schedule rebuilds the list from HIBP,
-signs it, and publishes it to this project's package registry and then
-to releases on the public GitHub mirror, where applications fetch it;
-step 2 above copies the published list into each release.
+hashes of the 10,000 most prevalent passwords in the Pwned Passwords
+list from Have I Been Pwned (HIBP) (#52,
+[ADR-0007](adr/0007-common-password-list.md); an ADR is an
+architecture decision record, kept in docs/adr/). The monthly
+`blocklist` pipeline schedule rebuilds the list from HIBP, signs it,
+and publishes it to this project's package
+registry and then to releases on the public GitHub mirror, where
+applications fetch it. Step 2 above copies the published list into
+each release.
 
 Until the setup below is done there is no real list:
-`blocklist/embedded/` holds a placeholder, `Embedded()` blocks nothing,
-every fetched list is refused for want of a trusted key, and
+`blocklist/embedded/` holds a placeholder, and `Embedded()` blocks
+nothing. Every fetched list is refused for want of a trusted key, and
 release:version refuses to tag (v0.2.0 excepted, step 3 above).
 
 ### Setup the owner does once
@@ -107,7 +112,9 @@ The `.key` never enters the repository or chat.
 [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
 with *Repository access: Only select repositories* →
 `tomlawesome/gauntlet`, and *Repository permissions → Contents: Read
-and write* (releases need it; nothing else is needed). Give it an
+and write* (releases need it; nothing else is needed).
+
+Give it an
 expiry and a calendar reminder: when it expires, the GitHub copy stops
 updating and applications keep the last list. Do not turn on GitHub's
 *immutable releases* for this repository: the
@@ -125,10 +132,17 @@ chown gitlab-runner:gitlab-runner /etc/gauntlet-github/token
 `read -s` keeps the token off the command line and out of shell
 history. These are birdcage's steps
 ([its docs/releasing.md](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/releasing.md),
-setup §2-3) with gauntlet's names, and its two traps apply. The
-runner's Docker is rootless and only sees directories under `/etc`
-that existed when it started, so restart that user's Docker once after
-creating them (this stops any job running on the host):
+setup §2-3) with gauntlet's names, and its two traps apply here too.
+First: rootless Docker runs the job container's root as the runner's
+own host user, not real root, so a file left owned by root would be
+unreadable inside the job -- the commands above already chown each
+secret to `gitlab-runner` for that reason. Second: rootless Docker
+only sees directories under `/etc` that existed when its daemon
+started, so a directory created afterwards is invisible to it until a
+restart, even though the file is plainly there.
+
+Restart that user's Docker once after creating the directories above
+(this stops any job running on the host):
 ```
 sudo -u gitlab-runner XDG_RUNTIME_DIR=/run/user/$(id -u gitlab-runner) \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u gitlab-runner)/bus \
@@ -139,9 +153,9 @@ present. What protects each secret is that only one runner mounts it.
 
 **4. Two runners: `gauntlet-signing` and `gauntlet-publish`.**
 Register two project runners on that host for this project, each with
-the docker executor, **protected** (so it refuses jobs from unprotected
-branches), **locked to this project**, and "run untagged jobs" off. In
-their `config.toml` entries:
+the docker executor. Set each **protected** (so it refuses jobs from
+unprotected branches) and **locked to this project**, with "run
+untagged jobs" off. In their `config.toml` entries:
 ```toml
 # in the gauntlet-signing runner's [[runners]] entry (blocklist:sign only)
 [runners.docker]
@@ -163,7 +177,9 @@ path, never the token. Each job fails at once if its file is not there.
 [Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules),
 create a schedule: description `blocklist`, target branch `dev`, a
 monthly interval (for example `17 3 2 * *`, 03:17 UTC on the 2nd), and
-a variable `BLOCKLIST_BUILD` = `true`. Each run downloads 20-40 GB
+a variable `BLOCKLIST_BUILD` = `true`.
+
+Each run downloads 20-40 GB
 from HIBP over about four hours. Optionally, under
 [Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries),
 refuse duplicate generic packages, so a dated GitLab version can never

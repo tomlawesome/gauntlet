@@ -127,8 +127,11 @@ func (c *PwnedChecker) Breached(ctx context.Context, password string) (bool, err
 // suffix is in it with a count above zero. A malformed line fails the
 // whole response rather than being skipped: a response that is not a
 // range (a maintenance page, a proxy's error) must not read as clean.
+// Neither may one with no entries at all: every real prefix has
+// hundreds, and padding adds more, so an empty 200 is a broken server
+// or proxy, not a clean password.
 func findSuffix(body []byte, suffix string) (bool, error) {
-	found := false
+	found, entries := false, 0
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	for n := 1; sc.Scan(); n++ {
 		line := strings.TrimSuffix(sc.Text(), "\r")
@@ -143,12 +146,16 @@ func findSuffix(body []byte, suffix string) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("blocklist: Pwned Passwords: line %d has no count", n)
 		}
+		entries++
 		if c > 0 && strings.EqualFold(s, suffix) {
 			found = true
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return false, fmt.Errorf("blocklist: Pwned Passwords: %w", err)
+	}
+	if entries == 0 {
+		return false, errors.New("blocklist: Pwned Passwords: the response has no range entries")
 	}
 	return found, nil
 }

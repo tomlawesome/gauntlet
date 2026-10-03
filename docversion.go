@@ -1,6 +1,7 @@
 package gauntlet
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +61,13 @@ var errNewerDocument = errors.New("it was written by a newer gauntlet, and this 
 // write a plaintext document of no accounts over the ciphertext.
 var errSealedDocument = errors.New("it is sealed (persist.Encrypt), and this backend was opened without the wrapper or its key")
 
+// errNullDocument is the decode error for a stored document that is
+// the JSON literal null. It parses, as an empty object would, so without
+// this check it read as a fresh install: an accounts store with no
+// accounts issues a setup code, and the next registration saves over
+// every account that was there. Only a missing document is a fresh one.
+var errNullDocument = errors.New("it is the JSON literal null, not a document")
+
 // documentVersion reads the version field of a stored document's
 // top-level object, without parsing the rest: a newer document must be
 // reported as newer even when the rest no longer parses as this build's
@@ -67,6 +75,9 @@ var errSealedDocument = errors.New("it is sealed (persist.Encrypt), and this bac
 // A sealed envelope is refused here, before any shape is read, for every
 // store at once -- see errSealedDocument.
 func documentVersion(data []byte) (int, error) {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return 0, errNullDocument
+	}
 	var head struct {
 		Version int             `json:"version"`
 		Sealed  json.RawMessage `json:"sealed"`

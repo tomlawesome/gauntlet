@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `gauntlet.AccountLockoutRecords`, an optional extension of
+  `AccountLockouts`: a host application's own lockout store that
+  implements it keeps the disabled flag and the count of lockouts
+  across a restart, not only the lockout's end. `AccountLockouts` alone
+  still works and loses those two on restart, as before (#57).
 - Failed sign-ins, lockouts and refused requests are recorded, with the
   client address (#45). Through `gate.Config.Audit`: `user.login_failed`
   for each failed password, code, passkey assertion or refused SSO
@@ -57,7 +62,7 @@ All notable changes to this project are documented in this file.
 - `POST /api/auth/users/{id}/logout-all` lets an admin sign another
   account out everywhere (#53): every gauntlet session it holds ends and
   every browser it remembers is forgotten; its password and factors are
-  untouched. An optional `reason` (at most 200 bytes, no control or
+  untouched. An optional `reason` (at most 200 characters, no control or
   format characters) goes into the `user.sessions_ended` audit record.
   409 for the caller's own account, 404 for none. gauntlet sends no
   mail: an application that sets the new `gate.Config.Notify` (a
@@ -108,7 +113,7 @@ All notable changes to this project are documented in this file.
   works once, and stops working if the admin is unlocked any other
   way. The accounts document is unchanged.
 - `gauntlet/blocklist`, the common-password list (#52,
-  [ADR-0005](docs/adr/0005-common-password-list.md)): the SHA-1 hashes
+  [ADR-0007](docs/adr/0007-common-password-list.md)): the SHA-1 hashes
   of the 10,000 most prevalent passwords in Have I Been Pwned's Pwned
   Passwords. `Embedded()` is the copy built into the release and never
   touches the network; `List.Contains` checks a password against it.
@@ -313,7 +318,7 @@ All notable changes to this project are documented in this file.
   every local-password account, including ones created before this
   change, is stopped at the door until it enrols a factor, reaching
   only the enrolment routes until then. This closes the gap behind the
-  8-character password minimum (`store.go:39`): NIST SP 800-63B-4
+  8-character password minimum (`store.go:46`): NIST SP 800-63B-4
   §3.1.1.2 allows 8 characters only behind a mandatory second factor,
   and the minimum stays 8 rather than rising to 15 because the door can
   no longer be left off (#49, `docs/security-by-design.md`).
@@ -560,6 +565,59 @@ All notable changes to this project are documented in this file.
   logged, as the API document already said (#26).
 
 ### Fixed
+
+- Fixes from the v0.2.0 release audit (#57):
+  - An admin unlock that fails to save now keeps the account disabled in
+    this process, so guessing cannot resume while the admin is told the
+    unlock failed.
+  - A stored accounts, tokens or sign-in history document that is the
+    JSON literal `null` is refused as corrupt instead of opening as a
+    fresh install, which would have let the next registration overwrite
+    every account.
+  - An accounts document holding two usernames that differ only in case
+    is refused at load, with the reason, instead of silently locking the
+    earlier account out.
+  - An admin password reset now also drops a disable the login limiter
+    decided but had not yet saved, so the owner's first attempt with the
+    reset code is admitted and the stale disable is not written back.
+  - `POST /api/auth/passkeys/register/finish` validates the body before
+    reading the ceremony cookie, as the API document says: a bad body is
+    400 and leaves the cookie in place.
+  - Every failed SSO login or link callback outcome is logged with its
+    `ssoError` code and the client address, not only a refused identity
+    and a failed link.
+  - The admin sign-out `reason` limit is 200 characters, as the API
+    schema says, not 200 bytes.
+  - A Pwned Passwords range answer of 200 with an empty body is an error,
+    so the password is checked again later instead of being reported
+    clean.
+  - The stored password list is kept when the clock is behind at start;
+    only a freshly downloaded list is checked for a build time in the
+    future.
+  - The stored password list and its signature are written as one file
+    (`top10k.signed`) in a single rename, so a crash mid-write can no
+    longer discard the good list; the old two-file layout is still read.
+  - `pwlist publish-github` verifies the list's signature before
+    uploading (new `--keys` flag, default `blocklist/keys`), and, when
+    GitHub reports no digest for an existing file, compares content
+    rather than size.
+  - `pwlist build` discards a checkpoint saved in the future instead of
+    resuming from a stale snapshot.
+  - `scripts/update-blocklist.sh` refuses a list older than the embedded
+    one unless `--force` is given.
+  - CI base images are pinned by digest, as the release job's already
+    was, so the jobs that hold the signing key and the GitHub token run
+    exactly the image that was reviewed.
+  - The API document no longer says SSO can create the first account;
+    the first account has always come from the local setup code.
+  - Passkey names are quoted in the `account.passkey_added` and
+    `account.passkey_removed` audit details (`name="..."`), so a name
+    holding a newline or an escape code cannot forge audit lines. Readers
+    that parsed the bare `name=` form must expect the quotes.
+  - Five second-factor failures in a row force a password change on an
+    account whose record carries a lockout and an older-style
+    password-change date too; before, the run of failures reset on every
+    attempt for such an account.
 
 - `POST /api/tokens` with a name the token store refuses answers 400
   with the reason, instead of 500 "unable to create token" (#25).

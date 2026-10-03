@@ -230,7 +230,7 @@ type passkeyRegisterFinishResponse struct {
 // finishes racing on one cookie only one can store; a stored passkey
 // (200), a store refusal (409 duplicate or limit, 500 on a failed save)
 // and a lost race all end it, and the cookie is cleared with the answer.
-// A cookie already spent is refused before the body is read.
+// A cookie already spent is refused once the body has been read.
 //
 // Refusals that do not end the ceremony are the library's, told apart
 // from a dead ceremony by gauntlet.ErrPasskeyCeremonyInvalid: a dead
@@ -258,6 +258,15 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 		g.writePasskeysNotReady(w)
 		return
 	}
+	// The body first, as handleLoginFactor does: a malformed one is the
+	// caller's mistake whatever the cookie holds, so it answers 400 and
+	// leaves a live ceremony alone instead of reporting it dead.
+	var req passkeyRegisterFinishRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
 	cookie, err := r.Cookie(passkeyRegisterCookieName)
 	if err != nil {
 		g.clearPasskeyRegisterCookie(w)
@@ -269,12 +278,6 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	if spentRegistrations.Spent(key, now) {
 		g.clearPasskeyRegisterCookie(w)
 		writeUnauthorized(w, "start registration again")
-		return
-	}
-
-	var req passkeyRegisterFinishRequest
-	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
@@ -334,7 +337,10 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 		g.issueSession(w, r, current.ID, now)
 	}
 	g.clearPasskeyRegisterCookie(w)
-	detail := "name=" + stored.Name
+	// Quoted, as from= and the other user-supplied fields are: the name
+	// is the user's own text, and a newline or terminal escape in it
+	// must not forge or hide a line in the audit log.
+	detail := fmt.Sprintf("name=%q", stored.Name)
 	if mintErr != nil {
 		detail += "; recovery codes could not be saved"
 	}
@@ -447,7 +453,7 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		signedOut = true
 	}
 
-	g.audit(r, user.Username, "account.passkey_removed", user.Username, "name="+removed.Name)
+	g.audit(r, user.Username, "account.passkey_removed", user.Username, fmt.Sprintf("name=%q", removed.Name))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "signedOut": signedOut})
 }
 
