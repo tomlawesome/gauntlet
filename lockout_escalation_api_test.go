@@ -319,3 +319,30 @@ func TestSecondFactorFailuresRequireAPasswordChange(t *testing.T) {
 		}
 	})
 }
+
+// A record that carries a lockout has a PasswordChangedAt that was not a
+// password change since it (readRecord): an older build wrote an SSO
+// link's time there. Dated inside a run of second-factor failures, it
+// must not start the run again, or the fifth never comes.
+func TestSecondFactorRunIgnoresAChangeDateUnderALockout(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+	l.SecondFactorFailed(s, id, escalationStart)
+	// The record a migrated SSO link leaves: a change date after the run
+	// began, and a lockout still on it.
+	if err := s.SetPassword("alice", "a-brand-new-password", escalationStart.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLoginLockedUntil(id, escalationStart.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i <= 5; i++ {
+		l.SecondFactorFailed(s, id, escalationStart.Add(time.Duration(i)*time.Minute))
+	}
+	fifth := escalationStart.Add(5 * time.Minute)
+	u := mustGet(t, s, id)
+	if !u.MustChangePassword || !u.SessionsEndedAt.Equal(fifth) {
+		t.Errorf("five second-factor failures under a lockout: MustChangePassword %v, SessionsEndedAt %v; want true, %v",
+			u.MustChangePassword, u.SessionsEndedAt, fifth)
+	}
+}

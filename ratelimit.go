@@ -899,14 +899,18 @@ func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID s
 // The run lives in this process's memory only (see
 // LoginLimiter.secondFactor).
 func (l *LoginLimiter) SecondFactorFailed(lockouts AccountLockouts, accountID string, now time.Time) {
+	// Read through readRecord, as every other consumer does: it drops a
+	// future-dated change and, when the record carries a lockout, a
+	// PasswordChangedAt an older build wrote for an SSO link. Taken raw,
+	// that date would restart the run and the forced change never fire.
 	var changed time.Time
 	if r, ok := lockouts.(lockoutRecorder); ok {
-		_, changed, _ = r.lockoutRecord(accountID)
+		_, _, changed, _ = l.readRecord(r, accountID, now)
 	}
 
 	l.mu.Lock()
 	run := l.secondFactor[accountID]
-	if run.n > 0 && !changed.After(now) && run.since.Before(changed) {
+	if run.n > 0 && run.since.Before(changed) {
 		run = secondFactorRun{}
 	}
 	if run.n == 0 {
