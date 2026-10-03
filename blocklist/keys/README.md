@@ -7,11 +7,12 @@ It's a PEM `PUBLIC KEY` block (the standard public-key file format
 compiled into gauntlet, and a list -- fetched by a `Refresher` or
 embedded -- is accepted only when one of these keys signed it.
 
-**This directory has no key yet, so every list is refused.** The owner
-generates the first pair (`go run ./cmd/pwlist keygen --out DIR --name
-NAME`) somewhere private. They put the private half on the signing
-runner's host under `/etc/gauntlet-signing/`, and commit only
-`NAME.pub` here. A private key never enters this repository.
+The first key is `pwlist-2026.pub` (owner, 2026-10-03). The owner
+generates a pair somewhere private (`go run ./cmd/pwlist keygen --out
+DIR --name NAME`, or `openssl genpkey -algorithm ed25519` and `openssl
+pkey -pubout`), puts the private half on the signing runner's host under
+`/etc/gauntlet-signing/`, and commits only `NAME.pub` here. A private
+key never enters this repository.
 
 Rotation: commit the new `.pub` beside the old one and release. Put the
 new private key next to the old one on the runner, so the list is

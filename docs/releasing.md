@@ -104,7 +104,14 @@ checked out:
 go run ./cmd/pwlist keygen --out ~/gauntlet-signing --name pwlist-2026
 ```
 This writes `pwlist-2026.key` (the private half, mode 0600) and
-`pwlist-2026.pub`, and prints the key's id. Commit only the `.pub`, as
+`pwlist-2026.pub`, and prints the key's id. OpenSSL makes the same two
+files if you would rather not run Go there:
+```
+openssl genpkey -algorithm ed25519 -out pwlist-2026.key
+openssl pkey -in pwlist-2026.key -pubout -out pwlist-2026.pub
+chmod 600 pwlist-2026.key
+```
+Commit only the `.pub`, as
 `blocklist/keys/pwlist-2026.pub`, through an ordinary merge request.
 The `.key` never enters the repository or chat.
 
