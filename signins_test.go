@@ -232,6 +232,35 @@ func TestSignInHistoryCapDropsTheOldest(t *testing.T) {
 	}
 }
 
+// TestOpenSignInHistoryLoweredMaxRowsLogsTheDrop pins gauntlet#58 S3:
+// opening over a document that already holds more rows than a newly
+// lowered MaxRows drops the oldest ones in memory (saved so at the
+// next save) with nothing logged, so an operator who tightens MaxRows
+// gets no record that history was actually lost.
+func TestOpenSignInHistoryLoweredMaxRowsLogsTheDrop(t *testing.T) {
+	b := persist.NewMemory()
+	h := openTestHistory(t, b, SignInHistoryOptions{MaxRows: 10})
+	for i := range 8 {
+		h.Record(successFrom("u1", "bob", fmt.Sprintf("192.0.2.%d", i)), signInBase.Add(time.Duration(i)*time.Minute))
+	}
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &signInLogRecorder{}
+	h2 := openTestHistory(t, b, SignInHistoryOptions{MaxRows: 5, Log: slog.New(logs)})
+	total, _ := h2.Summary()
+	if total != 5 {
+		t.Fatalf("Summary total = %d, want 5", total)
+	}
+	if n := logs.count("MaxRows"); n != 1 {
+		t.Errorf("messages mentioning MaxRows = %d, want exactly 1 logging the drop: %v", n, logs.all())
+	}
+}
+
 // MaxRows: zero is the default, above the ceiling or negative refused.
 func TestOpenSignInHistoryMaxRows(t *testing.T) {
 	h := openTestHistory(t, nil, SignInHistoryOptions{})

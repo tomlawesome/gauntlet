@@ -341,6 +341,9 @@ func OpenSignInHistory(b persist.Backend, opts SignInHistoryOptions) (*SignInHis
 	}
 	if over := len(h.st.rows) - maxRows; over > 0 {
 		h.st.rows = h.st.rows[over:]
+		if opts.Log != nil {
+			opts.Log.Warn(fmt.Sprintf("sign-in history: MaxRows (%d) is below the %d rows on disk; the oldest %d are dropped, saved so at the next save", maxRows, len(h.st.rows)+over, over))
+		}
 	}
 	h.savedNext = h.st.nextSeq
 	if b != nil {
