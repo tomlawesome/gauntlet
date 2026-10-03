@@ -108,15 +108,21 @@ func (a lockoutState) disabled() bool { return !a.disabledAt.IsZero() }
 // its own memory instead (memoryLockouts), and keeps counting guesses
 // made before a password change until they age out of the window, as
 // before.
+//
+// reset reports that the password change was an admin's reset code, the
+// account still holding it unspent: that change also lifted a disable
+// (IssueResetCode), so a disable the limiter has yet to save goes too.
 type lockoutRecorder interface {
-	lockoutRecord(accountID string) (st lockoutState, passwordChangedAt time.Time)
+	lockoutRecord(accountID string) (st lockoutState, passwordChangedAt time.Time, reset bool)
 	// setLockoutRecord writes st to accountID's record in one write, or
 	// nothing if the record already says st.
 	setLockoutRecord(accountID string, st lockoutState) error
 }
 
 // lockoutRecord implements lockoutRecorder.
-func (s *Store) lockoutRecord(accountID string) (lockoutState, time.Time) {
+// An unspent code is taken as a reset whether or not it has expired:
+// it still dates the last password change, which was the admin's.
+func (s *Store) lockoutRecord(accountID string) (lockoutState, time.Time, bool) {
 	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -125,9 +131,9 @@ func (s *Store) lockoutRecord(accountID string) (lockoutState, time.Time) {
 			until:      u.LoginLockedUntil,
 			episodes:   max(u.LoginLockoutCount, 0), // a hand-edited negative count is none
 			disabledAt: u.LoginDisabledAt,
-		}, u.PasswordChangedAt
+		}, u.PasswordChangedAt, u.MustChangePassword && u.ResetCodeHash != ""
 	}
-	return lockoutState{}, time.Time{}
+	return lockoutState{}, time.Time{}, false
 }
 
 // setLockoutRecord implements lockoutRecorder. Like SetLoginLockedUntil,
@@ -196,7 +202,7 @@ func (s *Store) requirePasswordChange(accountID string, now time.Time) error {
 // password last changed if lockouts can say (see lockoutRecorder).
 func readLockout(lockouts AccountLockouts, accountID string) (lockedUntil, passwordChangedAt time.Time) {
 	if r, ok := lockouts.(lockoutRecorder); ok {
-		st, changed := r.lockoutRecord(accountID)
+		st, changed, _ := r.lockoutRecord(accountID)
 		return st.until, changed
 	}
 	return lockouts.LoginLockedUntil(accountID), time.Time{}
@@ -224,14 +230,14 @@ type boundLockouts struct {
 	base AccountLockouts // nil: the lockout's end is kept in mem too
 }
 
-func (b boundLockouts) lockoutRecord(accountID string) (lockoutState, time.Time) {
+func (b boundLockouts) lockoutRecord(accountID string) (lockoutState, time.Time, bool) {
 	b.mem.mu.Lock()
 	st := b.mem.states[accountID]
 	b.mem.mu.Unlock()
 	if b.base != nil {
 		st.until = b.base.LoginLockedUntil(accountID)
 	}
-	return st, time.Time{}
+	return st, time.Time{}, false
 }
 
 func (b boundLockouts) setLockoutRecord(accountID string, st lockoutState) error {

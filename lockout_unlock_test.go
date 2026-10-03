@@ -183,6 +183,57 @@ func TestLimiterUnlockLoginThatFailsToSaveKeepsTheDisable(t *testing.T) {
 	}
 }
 
+// A disable the limiter decided but could not save, then a password
+// change once saves work again. A reset code is the admin lifting the
+// disable (owner, 2026-10-02), so the code is let in and no retry writes
+// the stale disable back over the reset. A password set through
+// SetPassword lifts nothing: the disable is still enforced, and saved.
+func TestAResetCodeLiftsAnUnsavedDisable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, s *Store, id string, at time.Time)
+		lifts  bool
+	}{
+		{"IssueResetCode", func(t *testing.T, s *Store, id string, at time.Time) {
+			if _, _, err := s.IssueResetCode(id, at); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"SetPassword", func(t *testing.T, s *Store, _ string, at time.Time) {
+			if err := s.SetPassword("alice", "a-brand-new-password", at); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &flakySaveBackend{Memory: persist.NewMemory()}
+			s, id := openLockoutStore(t, b)
+			l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+			at := failConsecutively(t, l, s, id, MaxConsecutiveLoginFailures-1, escalationStart)
+			b.fail.Store(true)
+			if !l.ReserveAccount(s, id, at) {
+				t.Fatal("the fiftieth attempt was refused")
+			}
+			if !mustGet(t, s, id).LoginDisabledAt.IsZero() {
+				t.Fatal("precondition: the disable was expected to fail to save")
+			}
+			b.fail.Store(false)
+			tc.change(t, s, id, at.Add(time.Second))
+
+			// Past the retry interval, so a pending disable is saved.
+			later := at.Add(time.Second + lockoutRetryInterval)
+			if got := l.ReserveAccountDecision(s, id, later).Allowed; got != tc.lifts {
+				t.Errorf("first attempt after %s admitted = %v, want %v", tc.name, got, tc.lifts)
+			}
+			l.ReserveAccount(s, id, later.Add(lockoutRetryInterval))
+			disabled := !mustGet(t, s, id).LoginDisabledAt.IsZero()
+			if disabled == tc.lifts {
+				t.Errorf("after %s and a retry the record's disable is %v, want %v", tc.name, disabled, !tc.lifts)
+			}
+		})
+	}
+}
+
 // disabledAdminBackend returns a backend holding one admin, "alice",
 // whose sign-in fifty failures have disabled, with a second factor and
 // a non-admin "bob"; and alice's ID.
