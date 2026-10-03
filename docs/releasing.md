@@ -176,7 +176,10 @@ environment = ["GAUNTLET_GITHUB_RELEASE_TOKEN_FILE=/etc/gauntlet-github/token"]
   host = "unix:///run/user/988/docker.sock"
   volumes = ["/etc/gauntlet-github:/etc/gauntlet-github:ro", "/cache"]
 ```
-Use the runner user's real uid in place of `988`. The
+Use the runner user's real uid in place of `988`. The `environment`
+line must sit above the first `[runners.…]` heading in that entry
+(`[runners.cache]` or `[runners.docker]`): below one, TOML files it
+under that section and the job never sees it. The
 `environment` line tells the job where the token file is; it holds a
 path, never the token. Each job fails at once if its file is not there.
 
