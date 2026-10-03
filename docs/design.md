@@ -1087,6 +1087,15 @@ process loaded it; writes are refused until it is restored or the
 process restarts`). The operator restores the file, or restarts to
 start afresh (#39).
 
+Restore or replace a store file only with the service stopped. A
+running store reloads any file that changed on disk and judges
+"changed", not "newer": an older but valid copy put back while it runs
+is adopted at the next request, undoing later changes and reviving
+revoked tokens, with nothing logged. #59 (v0.3.0) adds a sequence
+counter inside the sealed document so a running store refuses an older
+copy; a copy put back while the service is stopped is accepted on start
+either way.
+
 ## 5. Build plan
 
 Issue-sized slices in order. G = gauntlet repository, B = birdcage.
