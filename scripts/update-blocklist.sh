@@ -13,8 +13,13 @@ set -euo pipefail
 #   scripts/update-blocklist.sh --gitlab         # from the GitLab registry instead
 #   scripts/update-blocklist.sh --from DIR       # files already downloaded,
 #                                                # e.g. blocklist:sign's artifact
+#   scripts/update-blocklist.sh --force ...      # allow a list built before
+#                                                # the one embedded now
 #
 # What it checks before copying anything:
+#   - it was not built before the list embedded now, unless --force:
+#     fetching an older dated release by mistake would otherwise quietly
+#     roll the embedded list back;
 #   - the SHA-256 beside the list matches, the list parses, and its
 #     signature verifies against blocklist/keys/*.pub (`pwlist verify`);
 #   - it was built within the last 90 days (scripts/blocklist-age-check.sh,
@@ -40,6 +45,7 @@ FILES=(top10k.txt top10k.txt.sha256 top10k.txt.sig)
 version="current"
 from=""
 gitlab=""
+force=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version)
@@ -50,8 +56,10 @@ while [ $# -gt 0 ]; do
       from="$2"; shift 2 ;;
     --gitlab)
       gitlab=1; shift ;;
+    --force)
+      force=1; shift ;;
     *)
-      echo "usage: $0 [--version YYYY.MM.DD] [--gitlab] | --from DIR" >&2; exit 2 ;;
+      echo "usage: $0 [--force] [--version YYYY.MM.DD] [--gitlab] | [--force] --from DIR" >&2; exit 2 ;;
   esac
 done
 case "$version" in
@@ -84,6 +92,23 @@ else
     curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
       --max-filesize 2097152 "${headers[@]}" --output "$work/list/$f" "$base/$f"
   done
+fi
+
+# The build time is fixed-width UTC (YYYY-MM-DDThh:mm:ssZ), so a string
+# comparison orders it. Checked before verifying: refusing changes
+# nothing, and an accepted list is still verified below.
+built_of() { sed -n 's/^# built: //p' "$1" | head -n 1; }
+if [ -f blocklist/embedded/top10k.txt ]; then
+  have="$(built_of blocklist/embedded/top10k.txt)"
+  incoming="$(built_of "$work/list/top10k.txt")"
+  if [[ "$incoming" < "$have" ]]; then
+    if [ -z "$force" ]; then
+      echo "update-blocklist: refusing: the list fetched was built $incoming, before the one embedded now ($have)." >&2
+      echo "update-blocklist: nothing changed. Rerun with --force if rolling back is what you mean." >&2
+      exit 1
+    fi
+    echo "update-blocklist: --force: replacing the list built $have with an older one built $incoming" >&2
+  fi
 fi
 
 go run ./cmd/pwlist verify --keys blocklist/keys --in "$work/list/top10k.txt"
