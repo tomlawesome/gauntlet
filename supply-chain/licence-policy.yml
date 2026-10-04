@@ -1,8 +1,9 @@
 # Licence policy for gauntlet's dependencies -- the Go modules linked
 # into the built library, not build/test tooling. Read by
 # scripts/licence-check.sh, which runs `go-licenses check` against this
-# list, in the `lint:licences` job in .gitlab-ci.yml, on every merge
-# request and on push to dev. Shape copied from birdcage's
+# list and then scripts/licence-check-bundled.py against
+# go-bundled-assets: below, in the `lint:licences` job in .gitlab-ci.yml,
+# on every merge request and on push to dev. Shape copied from birdcage's
 # supply-chain/licence-policy.yml; gauntlet has no npm or pip tree, so
 # only the Go key exists here.
 #
@@ -33,3 +34,21 @@ allow-licenses:
   - ISC
 
 allow-dependencies-licenses: []
+
+# Reviewed files that ship from a dependency but carry no licence of
+# their own (#64), read by scripts/licence-check-bundled.py: files a
+# linked package embeds with //go:embed, and vendored code (under a
+# vendor/ or third_party/ directory) with no licence file of its own. A
+# module's declared licence covers its own code; these are how someone
+# else's work passes unread -- birdcage's OpenCanary declared "BSD" while
+# shipping Synology's images and GPLv3 stylesheets (birdcage #179).
+#
+# Format: "<module>@<version> <path-prefix> <licence or finding>", the
+# prefix relative to the module's root. Exact module@version: a version
+# bump stops the entry matching, so the files are read again. An entry
+# matching no shipped file is stale and fails. Only the owner records an
+# entry: it is a licence decision.
+#
+# Empty since #64: none of the 16 modules gauntlet links embeds a file
+# or carries vendored code without its own licence (2026-10-04).
+go-bundled-assets: []

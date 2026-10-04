@@ -126,6 +126,10 @@ lint:go:
     - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
     - golangci-lint run ./...
 
+# Two checks in one script: go-licenses holds every linked package's
+# licence to the allow-list, then licence-check-bundled.py looks inside
+# the same modules for vendored code with no licence of its own and for
+# embedded files, each of which needs a recorded review (#64).
 lint:licences:
   stage: lint
   image: $GOLANG_IMAGE

@@ -80,6 +80,8 @@ contract module. For #54 (owner 2026-10-04):
 to read MaxMind and IPinfo country files, and `github.com/maxmind/mmdbwriter`
 v1.2.0 (Apache-2.0 or MIT) in `geoip/` tests only, to build their fixture
 files (it brings `go4.org/netipx`). Anything else goes to the owner first.
+A linked module's embedded files and vendored code without its own
+licence need an owner-recorded `go-bundled-assets:` review (#64).
 
 ## Checks
 

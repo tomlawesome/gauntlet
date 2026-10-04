@@ -9,7 +9,7 @@ has to meet.
 | --- | --- | --- |
 | Go unit and package tests | `go test ./... -race` | `test:go` |
 | Static checks | `go vet`, `gofmt`, `golangci-lint` | `lint:go` |
-| Licence gate | `go-licenses` against `supply-chain/licence-policy.yml` | `lint:licences` |
+| Licence gate | `go-licenses` against `supply-chain/licence-policy.yml`, then `scripts/licence-check-bundled.py` for vendored code and embedded files in the same modules (its own cases: `scripts/licence-check_test.sh`, run by hand) | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
 | HTTP contract | `gate/contracttest` (its own Go module) against `docs/api/auth.yaml` | `test:contract` |
