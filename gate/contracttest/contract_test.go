@@ -196,22 +196,20 @@ func (tr contractTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return resp, nil
 }
 
-// checkJSONResponseHeaders is gauntlet #46's guard: every JSON response
-// gate writes must carry Content-Type: application/json; charset=utf-8,
-// Cache-Control: no-store and X-Content-Type-Options: nosniff (see
-// gate/httpjson.go's writeJSON). It only looks at responses already
-// carrying an application/json Content-Type -- this document's own
-// "Errors" section (above) says every error body is text/plain except
-// the two writeJSON uses for a half-succeeded request, and text/plain
-// responses are not this issue's concern.
+// checkJSONResponseHeaders is gauntlet #46's guard, widened for #23:
+// every JSON response gate writes -- a success body (Content-Type:
+// application/json; charset=utf-8, gate/httpjson.go's writeJSON) or an
+// RFC 9457 problem body (application/problem+json, no charset,
+// writeProblem) -- must carry Cache-Control: no-store and
+// X-Content-Type-Options: nosniff. A response of neither Content-Type
+// is not this issue's concern.
 func checkJSONResponseHeaders(t *testing.T, what string, resp *http.Response) {
 	t.Helper()
 	ct := resp.Header.Get("Content-Type")
-	if !strings.HasPrefix(ct, "application/json") {
+	switch ct {
+	case "application/json; charset=utf-8", "application/problem+json":
+	default:
 		return
-	}
-	if ct != "application/json; charset=utf-8" {
-		t.Errorf("%s -> %d: Content-Type = %q, want \"application/json; charset=utf-8\"", what, resp.StatusCode, ct)
 	}
 	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("%s -> %d: Cache-Control = %q, want \"no-store\"", what, resp.StatusCode, got)
@@ -874,14 +872,14 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500: %s", resp.StatusCode, raw)
 	}
 	var body struct {
-		Error      string `json:"error"`
+		Detail     string `json:"detail"`
 		TOTPActive bool   `json:"totpActive"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("the 500 body is not JSON: %v: %s", err, raw)
 	}
-	if !body.TOTPActive || body.Error == "" {
-		t.Errorf("the 500 body = %+v, want totpActive true and an error message", body)
+	if !body.TOTPActive || body.Detail == "" {
+		t.Errorf("the 500 body = %+v, want totpActive true and a detail message", body)
 	}
 }
 
