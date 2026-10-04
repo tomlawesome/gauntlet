@@ -753,6 +753,29 @@ it. The data for all of this lives on `User`.
   it on got 8-character single-factor passwords. Cost: the TOTP enrol
   screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
   way "recommend on" would have allowed.
+- **The first factor is held until its recovery codes are confirmed
+  (#58, owner 2026-10-04).** An account's first second factor -- its
+  first passkey (`register/finish`) or its first authenticator app
+  (`totp/confirm`) -- is saved with ten new recovery codes in one write,
+  on hold (`User.HeldEnrolment`; `Store.HoldFirstPasskey`,
+  `Store.HoldFirstTOTP`), and the codes are shown once. Neither is live:
+  a held passkey is not listed, counted or offered at sign-in, a held
+  app verifies no code, held codes redeem nothing, `HasSecondFactor`
+  stays false and the door stays shut. `POST
+  /api/auth/recovery-codes/confirm` ("I've saved these";
+  `Store.ConfirmHeldEnrolment`) makes both live in one more write; only
+  then are the account's other sessions ended, this one renewed and
+  `account.passkey_added` or `account.totp_enabled` audited. Unconfirmed
+  after ten minutes (`HeldEnrolmentLifetime`), both are deleted --
+  lazily, by the next enrolment write on the account, and refused at
+  confirmation -- and a scanned but unconfirmed TOTP secret also
+  expires ten minutes after it was set (`TOTPPendingLifetime`). One
+  enrolment at a time: while one is held, starting another is refused
+  (409). A later factor is added live at once without codes: an account
+  keeps one set across all its factors. This replaces "the factor goes
+  live, then the codes are minted in a second write", where a crash or
+  failed save between the two left a live factor with no codes
+  (answered `partially-completed`).
 
 ### 1.7 Deliberately not in the module
 
@@ -903,7 +926,8 @@ Svelte screens copied from mikroview's, in this order: login (password,
 then TOTP/recovery code), first-run register (which also asks for the
 setup code from the server log and shows no SSO button, #37), forced
 change-password,
-forced second-factor enrolment (QR + confirm, recovery codes shown once),
+forced second-factor enrolment (QR + confirm, recovery codes shown once
+and confirmed as saved, #58),
 users admin, tokens admin, SSO button and `?ssoError=` handling. `api.ts`
 gains the `X-Requested-With: birdcage` header on every request and a 401
 → login redirect.

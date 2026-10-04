@@ -1457,8 +1457,8 @@ func unmatchablePasswordHash() (string, error) {
 // defeats the point of linking.
 //
 // The same call also clears every local second factor -- TOTPSecret,
-// TOTPConfirmedAt, TOTPLastCounter, RecoveryCodes and Passkeys, for the
-// non-admin case -- unconditionally, not the factor-remaining check a
+// TOTPConfirmedAt, TOTPLastCounter, RecoveryCodes, Passkeys and any
+// enrolment on hold, for the non-admin case -- unconditionally, not the factor-remaining check a
 // caller removing one factor at a time would make: linking removes both
 // local credentials at once, so there is nothing left standing for
 // either to guard.
@@ -1530,11 +1530,10 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 			u.HasLocalPassword = false
 			// See the doc comment above: every non-admin loses both
 			// local credentials on linking, not just the password.
-			u.TOTPSecret = ""
-			u.TOTPConfirmedAt = time.Time{}
-			u.TOTPLastCounter = 0
+			clearTOTPFields(u)
 			u.RecoveryCodes = nil
 			u.Passkeys = nil
+			u.HeldEnrolment = nil
 			// An outstanding admin reset dies with the password it was
 			// a stand-in for: Authenticate treats a live code as the
 			// password, so left here it would keep a local way in open

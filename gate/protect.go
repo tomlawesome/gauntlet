@@ -37,6 +37,10 @@ const (
 	sessionsPath     = "/api/auth/sessions"
 	unlockPath       = "/api/auth/unlock"
 
+	// enrolmentConfirmPath is where a held first factor and its
+	// recovery codes are confirmed (#58; recoverycodes_handler.go).
+	enrolmentConfirmPath = "/api/auth/recovery-codes/confirm"
+
 	passkeysPath              = "/api/auth/passkeys"
 	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"
 	passkeyRegisterFinishPath = "/api/auth/passkeys/register/finish"
@@ -102,8 +106,10 @@ var bootstrapExemptPaths = map[string]bool{
 // secondFactorEnrolPaths are the routes a session may still reach while
 // stuck at the forced-enrolment door (always shut for a local-password
 // account with no second factor, since #49) -- enrolling a TOTP factor
-// or registering a passkey, and nothing else, as
-// mikroview's requireAuth has it. Named once here, the same reasoning
+// or registering a passkey, and confirming the held first factor's
+// recovery codes (#58: the factor is not live, so the door holds, until
+// that confirmation), and nothing else, as mikroview's requireAuth has
+// it. Named once here, the same reasoning
 // changePasswordPath is, so Protect's gate and this list cannot drift
 // apart silently. With Deps.Passkeys nil the passkey pair answers 404,
 // so admitting it opens nothing.
@@ -117,6 +123,7 @@ var secondFactorEnrolPaths = map[string]bool{
 	totpConfirmPath:           true,
 	passkeyRegisterBeginPath:  true,
 	passkeyRegisterFinishPath: true,
+	enrolmentConfirmPath:      true,
 }
 
 func isSafeMethod(method string) bool {
@@ -394,9 +401,10 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// for exactly this, gitlab/dev 683704c4).
 		//
 		// secondFactorEnrolPaths (TOTP enrol/confirm, passkey register
-		// begin/finish) stays reachable while this door holds -- without
-		// it, a newly created local account with no factor yet would have
-		// no route left to enrol one on.
+		// begin/finish, the held factor's confirmation) stays reachable
+		// while this door holds -- without it, a newly created local
+		// account with no factor yet would have no route left to enrol
+		// one on.
 		if !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
 			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustEnrolFactor))
 			writeForcedAuthGate(w, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")

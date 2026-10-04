@@ -286,22 +286,34 @@ func VerifyTOTP(encodedSecret, code string, now time.Time, lastUsedCounter uint6
 	return 0, false
 }
 
-// SetPendingTOTPSecret stores a freshly generated, not-yet-confirmed
-// secret for userID, replacing any earlier enrolment that was started
-// and abandoned. The factor is not active afterwards: ConfirmTOTP is
-// what activates it, so an enrolment interrupted at the QR code leaves
-// the account signing in exactly as it did before.
+// SetPendingTOTPSecret is SetPendingTOTPSecretAt at time.Now(), for
+// callers written before the pending secret had a lifetime (#58).
+func (s *Store) SetPendingTOTPSecret(userID, encodedSecret string) error {
+	return s.SetPendingTOTPSecretAt(userID, encodedSecret, time.Now())
+}
+
+// SetPendingTOTPSecretAt stores a freshly generated, not-yet-confirmed
+// secret for userID, set at now, replacing any earlier enrolment that
+// was started and abandoned. The factor is not active afterwards:
+// confirming it (ConfirmTOTP, or HoldFirstTOTP then
+// ConfirmHeldEnrolment for an account's first factor) is what activates
+// it, so an enrolment interrupted at the QR code leaves the account
+// signing in exactly as it did before. It can be confirmed for
+// TOTPPendingLifetime after now (#58), and is treated as absent after
+// that.
 //
 // Refuses with ErrTOTPAlreadyActive when a confirmed factor is already
 // in place -- see that error for why replacing one silently is a
-// lockout waiting to happen.
+// lockout waiting to happen -- and with ErrEnrolmentHeld while another
+// enrolment is on hold (one at a time). An expired hold is deleted
+// first.
 //
 // The replay counter is reset alongside the secret. A counter is only
 // meaningful against the secret it was accepted for: carried over to a
 // new secret it would refuse that secret's early codes for as long as
 // the old factor had been in use, which reads to the person enrolling
 // as an authenticator app that simply does not work.
-func (s *Store) SetPendingTOTPSecret(userID, encodedSecret string) error {
+func (s *Store) SetPendingTOTPSecretAt(userID, encodedSecret string, now time.Time) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
 	}
@@ -317,11 +329,16 @@ func (s *Store) SetPendingTOTPSecret(userID, encodedSecret string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
+		dropExpiredHold(u, now)
 		if u.HasActiveTOTP() {
 			return ErrTOTPAlreadyActive
 		}
+		if u.HeldEnrolment != nil {
+			return ErrEnrolmentHeld
+		}
 		u.TOTPSecret = encodedSecret
 		u.TOTPLastCounter = 0
+		u.TOTPPendingSince = now
 		return nil
 	})
 }
@@ -333,14 +350,17 @@ func (s *Store) SetPendingTOTPSecret(userID, encodedSecret string) error {
 // used to enrol must not also work as the first sign-in.
 //
 // Returns ErrNoPendingTOTP when there is nothing unconfirmed to
-// activate, which covers both "enrolment never started" and "already
-// confirmed" -- neither is a state where accepting a code should change
-// anything.
+// activate, which covers "enrolment never started", "already confirmed"
+// and "set more than TOTPPendingLifetime before confirmedAt" -- none is
+// a state where accepting a code should change anything -- and
+// ErrEnrolmentHeld while an enrolment is on hold.
 //
-// Verifying the code is the caller's job (VerifyTOTP above); this only
-// records the outcome. The recovery codes that accompany a confirmed
-// factor are minted separately, by GenerateRecoveryCodes/
-// GenerateRecoveryCodesIfAbsent (recoverycodes.go).
+// This makes the app live at once, with no recovery codes: what gate
+// does for an account that already has a second factor (a passkey),
+// whose codes stand. An account's first factor is held instead, with
+// its codes, until confirmed (HoldFirstTOTP, ConfirmHeldEnrolment;
+// #58). Verifying the code is the caller's job (VerifyTOTP above); this
+// only records the outcome.
 func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter uint64) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -357,11 +377,16 @@ func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter
 		if !ok {
 			return ErrUserNotFound
 		}
-		if u.TOTPSecret == "" || !u.TOTPConfirmedAt.IsZero() {
+		dropExpiredHold(u, confirmedAt)
+		if u.HeldEnrolment != nil {
+			return ErrEnrolmentHeld
+		}
+		if !u.TOTPPending(confirmedAt) {
 			return ErrNoPendingTOTP
 		}
 		u.TOTPConfirmedAt = confirmedAt
 		u.TOTPLastCounter = matchedCounter
+		u.TOTPPendingSince = time.Time{}
 		return nil
 	})
 }
@@ -440,7 +465,9 @@ func (s *Store) VerifyAndRecordTOTP(userID, code string, now time.Time) (ok bool
 // authenticator app and passkeys (docs/design.md §1.6), so stripping
 // them here while a passkey remains would silently orphan that
 // passkey's fallback. See DeletePasskey/ClearPasskeys (passkeys.go) for
-// the same rule applied from the passkey side.
+// the same rule applied from the passkey side. An authenticator app on
+// hold (#58) goes too, with the codes held for it; a held passkey is
+// left alone.
 func (s *Store) ClearTOTP(userID string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -457,9 +484,10 @@ func (s *Store) ClearTOTP(userID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		u.TOTPSecret = ""
-		u.TOTPConfirmedAt = time.Time{}
-		u.TOTPLastCounter = 0
+		if u.HeldEnrolment != nil && u.HeldEnrolment.Kind == HeldFactorTOTP {
+			u.HeldEnrolment = nil
+		}
+		clearTOTPFields(u)
 		if len(u.Passkeys) == 0 {
 			u.RecoveryCodes = nil
 		}

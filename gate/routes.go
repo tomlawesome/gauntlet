@@ -9,7 +9,8 @@ import "net/http"
 // the lone-admin unlock-code route (#44),
 // users list/create/delete/reset-password/unlock/logout-all, the
 // sign-in history (#53; 404 while Deps.SignIns is nil), TOTP enrol/confirm/delete
-// plus the admin clear route, recovery-codes regenerate, the passkey
+// plus the admin clear route, recovery-codes regenerate and the
+// confirmation of a held first factor's codes (#58), the passkey
 // list/register/rename/delete routes, the passkey login begin and the
 // admin clear route (G8, ADR-0004; all 404 while Deps.Passkeys is nil),
 // the OIDC login/callback/link trio, and tokens list/create/revoke.
@@ -36,6 +37,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("POST "+totpConfirmPath, g.handleTOTPConfirm)
 	mux.HandleFunc("DELETE /api/auth/totp", g.handleTOTPDelete)
 	mux.HandleFunc("POST /api/auth/recovery-codes", g.handleRecoveryCodesRegenerate)
+	mux.HandleFunc("POST "+enrolmentConfirmPath, g.handleEnrolmentConfirm)
 
 	mux.HandleFunc("GET "+passkeysPath, g.handlePasskeysList)
 	mux.HandleFunc("POST "+passkeyRegisterBeginPath, g.handlePasskeyRegisterBegin)

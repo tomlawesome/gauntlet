@@ -72,9 +72,10 @@ info:
     (`application/problem+json`, gauntlet #23): `type`, a permanent link
     into [`docs/api/errors.md`](../errors.md) naming a fixed `title` and
     `status`; `detail`, free text that may change wording and is never
-    parsed; and, on exactly three responses (marked below), extension
-    members (`totpActive`, `username`) that are part of the contract and
-    do not change. A frontend branches on `type` (or the status code and
+    parsed; and, on the one response marked below, an extension member
+    (`username`) that is part of the contract and does not change.
+    (`totpActive`, the other extension member, was last sent by 0.2.0's
+    `totp/confirm`; see `PartiallyCompletedProblem`.) A frontend branches on `type` (or the status code and
     the `X-Auth-Gate` header, for the two forced-auth-gate classes),
     never on `detail`'s text. An unmatched path or method (a typo, or a
     method the route does not take) answers the same shape with `type:
@@ -101,6 +102,21 @@ info:
     While the application's relying party is not ready (no usable public
     URL), the two begin routes, `register/finish` and the assertion step
     answer `409` naming the reason; list, rename and delete keep working.
+
+    **First second factor: hold until confirmed** (#58). An account's
+    first second factor -- its first passkey (`register/finish`) or its
+    first authenticator app (`totp/confirm`) -- is saved together with
+    ten new recovery codes, in one write, on hold. The response carries
+    the codes once and `pendingConfirmation: true`. Nothing is live yet:
+    the factor signs nothing in, is not listed or counted, the codes
+    redeem nothing, the must-enrol-factor door still holds, and no
+    session is ended. `POST /api/auth/recovery-codes/confirm` ("I've
+    saved these") makes both live, ends the account's other sessions,
+    sets a fresh session cookie and audits the factor. Unconfirmed after
+    ten minutes, the factor and its codes are deleted. While one is on
+    hold, starting another enrolment answers `409`. A later factor, on
+    an account that already has one, is added live at once without codes
+    (`alreadyIssued: true`): an account keeps one set of recovery codes.
 
 security:
   - sessionCookie: []
@@ -562,9 +578,12 @@ paths:
       summary: Start authenticator-app enrolment
       description: |
         Password-gated (rate-limited re-check). Stores a fresh secret as
-        pending; it is active only once `POST /api/auth/totp/confirm`
-        proves a code. Enrolling again before confirming replaces the
-        pending secret. Reachable at the must-enrol-factor door.
+        pending; it can be confirmed by `POST /api/auth/totp/confirm` for
+        ten minutes. Enrolling again before confirming replaces the
+        pending secret. `409` while the account already has an
+        authenticator app, or a first factor is on hold waiting for its
+        recovery codes to be confirmed. Reachable at the
+        must-enrol-factor door.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -607,12 +626,16 @@ paths:
   /api/auth/totp/confirm:
     post:
       operationId: totpConfirm
-      summary: Activate the pending authenticator app
+      summary: Prove a code from the pending authenticator app
       description: |
-        Checks one code against the pending secret and activates it. Ends
-        every other session and sets a fresh session cookie. Returns the
-        ten recovery codes the first time the account gets any; they are
-        never shown again. Reachable at the must-enrol-factor door.
+        Checks one code against the pending secret. On the account's
+        first second factor the app and ten new recovery codes are saved
+        on hold and the codes returned once, with `pendingConfirmation`
+        true: nothing is live and no session changes until `POST
+        /api/auth/recovery-codes/confirm`. On an account that already has
+        a second factor (a passkey) the app is active at once, every other
+        session ends and a fresh session cookie is set; no codes are
+        returned. Reachable at the must-enrol-factor door.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -623,7 +646,7 @@ paths:
               $ref: "#/components/schemas/CodeRequest"
       responses:
         "200":
-          description: Active.
+          description: Held for confirmation (the first factor), or active (a later one).
           content:
             application/json:
               schema:
@@ -632,19 +655,23 @@ paths:
                 required: [enabled, recoveryCodes]
                 properties:
                   enabled:
-                    const: true
+                    type: boolean
+                    description: True when the app is active now; false while `pendingConfirmation` is true.
                   recoveryCodes:
-                    description: Ten codes in clear, exactly once; `null` when the account already held recovery codes (then `alreadyIssued` is true).
+                    description: Ten codes in clear, exactly once, when this app is the account's first second factor (then `pendingConfirmation` is true); `null` when the account already had a second factor (then `alreadyIssued` is true).
                     type: [array, "null"]
                     items:
                       type: string
+                  pendingConfirmation:
+                    description: Present, and true, when the app and `recoveryCodes` are on hold until `POST /api/auth/recovery-codes/confirm`, and deleted if that does not come within ten minutes.
+                    const: true
                   alreadyIssued:
-                    description: Present, and true, only when the account already held recovery codes.
+                    description: Present, and true, only when the app went live on an account that already had a second factor, whose recovery codes stand.
                     const: true
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrStepExpired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
@@ -652,22 +679,7 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
-          description: |
-            `server-error` when the app could not be activated; details are
-            in the server log, never in the body. `partially-completed`
-            when the app WAS activated (other sessions ended, a fresh
-            session cookie set) but recovery codes could not be generated
-            -- `totpActive` is true; remove the app and enrol again.
-          content:
-            application/problem+json:
-              schema:
-                oneOf:
-                  - allOf:
-                      - $ref: "#/components/schemas/Problem"
-                      - properties:
-                          type:
-                            const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#server-error
-                  - $ref: "#/components/schemas/PartiallyCompletedProblem"
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -756,11 +768,54 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/recovery-codes/confirm:
+    post:
+      operationId: confirmHeldFactor
+      summary: Confirm the first second factor's recovery codes were saved
+      description: |
+        The caller says "I've saved these" for the recovery codes their
+        account's first second factor was held with (#58; see "First
+        second factor" above). One write makes the held factor and its
+        codes live; then every other session on the account ends, this
+        browser gets a fresh session (sets the session cookie), and the
+        factor is audited. Takes no body. `409` when nothing is on hold;
+        `401` `step-expired` when the hold ran out (ten minutes) -- the
+        factor and codes are deleted, and the caller sets the factor up
+        again. Reachable at the must-enrol-factor door.
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: The factor and its recovery codes are live.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [confirmed, factor]
+                properties:
+                  confirmed:
+                    const: true
+                  factor:
+                    type: string
+                    enum: [passkey, totp]
+                    description: Which factor went live.
+        "401":
+          $ref: "#/components/responses/SignInRequiredOrStepExpired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/passkeys:
     get:
       operationId: listPasskeys
       summary: List the caller's own passkeys
-      description: Every passkey on the account, stale ones included (registered under an earlier public URL; still removable, never offered at sign-in).
+      description: Every live passkey on the account, stale ones included (registered under an earlier public URL; still removable, never offered at sign-in). A first passkey held for its recovery codes to be confirmed is not listed until it is.
       responses:
         "200":
           description: The caller's passkeys.
@@ -789,8 +844,10 @@ paths:
         relying party, and sets the registration ceremony cookie (sealed,
         path `/api/auth/passkeys`, five minutes). Password-gated
         (rate-limited re-check), as authenticator-app enrolment is; refused
-        for an account with no local password before the body is read.
-        Reachable at the must-enrol-factor door.
+        for an account with no local password before the body is read, and
+        (`409`, after the password) while a first factor is on hold
+        waiting for its recovery codes to be confirmed. Reachable at the
+        must-enrol-factor door.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -830,10 +887,14 @@ paths:
       description: |
         Verifies the browser's credential against the ceremony
         `register/begin` started and stores it. On the account's first
-        second factor of either kind it ends every session, sets a fresh
-        session cookie for this one, and returns the ten recovery codes,
-        never shown again. Clears the ceremony cookie on success only, so
-        a refused finish can be corrected within the five minutes.
+        second factor of either kind the passkey and ten new recovery
+        codes are saved on hold and the codes returned once, with
+        `pendingConfirmation` true: the passkey is not live, listed or
+        offered at sign-in, and no session changes, until `POST
+        /api/auth/recovery-codes/confirm`. On an account that already has
+        a second factor the passkey is live at once, with no codes. A
+        refused credential keeps the ceremony cookie, so it can be
+        corrected within the five minutes; every other answer clears it.
         Reachable at the must-enrol-factor door.
       security:
         - sessionCookie: []
@@ -888,23 +949,7 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
         "500":
-          description: |
-            `server-error` when the passkey could not be stored; or
-            `partially-completed` when it WAS stored and is active
-            (sessions rotated as on success) but recovery codes could not
-            be saved -- the detail says which. No extension members on
-            this one (unlike `totpConfirm`'s): nothing here distinguishes
-            which account hit it beyond the session already in use.
-          content:
-            application/problem+json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties:
-                      type:
-                        enum:
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#server-error
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#partially-completed
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1733,6 +1778,24 @@ components:
               - properties:
                   type:
                     const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+    SignInRequiredOrStepExpired:
+      description: No valid session (class `sign-in-required`); or the step this route finishes has expired -- a pending authenticator-app secret older than ten minutes, or a first factor held longer than ten minutes without its recovery codes being confirmed (class `step-expired`; start that enrolment again).
+      headers:
+        WWW-Authenticate:
+          required: true
+          schema:
+            type: string
+            const: Bearer realm="gate"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
     CSRFRequired:
       description: The `X-Requested-With` header is missing or wrong. Class `csrf-required`.
       content:
@@ -1765,10 +1828,11 @@ components:
             else knows the password, or a sign-in found the password in a
             known breach; only `POST /api/auth/password` is
             reachable) or
-            `must-enrol-factor` (the account has no second factor yet --
-            every local-password account must hold one; only the TOTP
-            enrol and confirm routes and the passkey register begin and
-            finish routes are reachable).
+            `must-enrol-factor` (the account has no live second factor yet
+            -- every local-password account must hold one; only the TOTP
+            enrol and confirm routes, the passkey register begin and
+            finish routes and `POST /api/auth/recovery-codes/confirm` are
+            reachable).
           schema:
             type: string
             enum: [must-change-password, must-enrol-factor]
@@ -1919,10 +1983,11 @@ components:
       description: |
         The `partially-completed` class (status 500, docs/api/errors.md):
         a request that changed something but failed before finishing
-        everything it meant to. Closed, unlike `Problem`, since its two
+        everything it meant to. Closed, unlike `Problem`, since its
         extension members are part of the contract, not a per-call-site
         afterthought -- a given response carries whichever one names
-        what still needs doing (never both).
+        what still needs doing (never both; only `username` is still
+        sent).
       type: object
       additionalProperties: false
       required: [type, title, status]
@@ -1937,7 +2002,7 @@ components:
           type: string
         totpActive:
           const: true
-          description: Present (and true) only from `POST /api/auth/totp/confirm` -- the authenticator app is active, but its recovery codes could not be generated.
+          description: No longer sent. 0.2.0's `POST /api/auth/totp/confirm` sent it (true) when the authenticator app went active but its recovery codes could not be generated; since #58 the app and its codes are saved in one write, so that half-done state cannot happen. Kept so the schema stays additive.
         username:
           type: string
           description: Present only from `DELETE /api/auth/users/{id}` -- the account named was deleted, but its API tokens could not be revoked.
@@ -2125,12 +2190,15 @@ components:
         passkey:
           $ref: "#/components/schemas/PasskeyRow"
         recoveryCodes:
-          description: Ten codes in clear, exactly once, when this was the account's first second factor; `null` otherwise.
+          description: Ten codes in clear, exactly once, when this was the account's first second factor (then `pendingConfirmation` is true); `null` otherwise (then `alreadyIssued` is true).
           type: [array, "null"]
           items:
             type: string
+        pendingConfirmation:
+          description: Present, and true, when the passkey and `recoveryCodes` are on hold until `POST /api/auth/recovery-codes/confirm`, and deleted if that does not come within ten minutes.
+          const: true
         alreadyIssued:
-          description: Present, and true, only when the account already held recovery codes.
+          description: Present, and true, only when the passkey went live on an account that already had a second factor, whose recovery codes stand.
           const: true
     PasskeyRenameRequest:
       type: object
@@ -2207,7 +2275,7 @@ components:
           description: The session is stopped at the change-password door -- an administrator reset the account, five second-factor steps in a row failed, or a sign-in found the password in a known breach. The account does not record which, so a frontend should not say.
         mustEnrolSecondFactor:
           type: boolean
-          description: True only when the account has no second factor yet -- every local-password account must hold one.
+          description: True only when the account has no live second factor yet -- every local-password account must hold one. Still true while a first factor is held for its recovery codes to be confirmed.
         hasTOTP:
           type: boolean
           description: A confirmed authenticator app, not a pending enrolment.
@@ -2219,7 +2287,7 @@ components:
           properties:
             count:
               type: integer
-              description: How many passkeys the account holds, stale ones included.
+              description: How many live passkeys the account holds, stale ones included; a first passkey held for its recovery codes to be confirmed is not counted until it is.
             status:
               type: string
               enum: [ready, unset, ip, insecure]

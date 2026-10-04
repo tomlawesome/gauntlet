@@ -272,10 +272,11 @@ func registerAdminNoFactor(t *testing.T, ts *httptest.Server, username, password
 }
 
 // enrolTOTPFactor drives TOTP enrol+confirm end to end for client,
-// already signed in with password and holding no second factor yet --
-// the same two-step ceremony totpEnrolAndConfirm (totp_handler_test.go)
-// drives for "bob", used here to clear the forced-enrolment door for an
-// account whose fixture is not about that door.
+// already signed in with password and holding no second factor yet,
+// then confirms the held app's recovery codes (#58) -- the same
+// ceremony totpEnrolAndConfirm (totp_handler_test.go) drives for "bob",
+// used here to clear the forced-enrolment door for an account whose
+// fixture is not about that door.
 func enrolTOTPFactor(t *testing.T, client *http.Client, ts *httptest.Server, password string) {
 	t.Helper()
 	resp := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: password})
@@ -299,4 +300,5 @@ func enrolTOTPFactor(t *testing.T, client *http.Client, ts *httptest.Server, pas
 		body, _ := io.ReadAll(confirmResp.Body)
 		t.Fatalf("confirming a TOTP factor: confirm returned %d: %s", confirmResp.StatusCode, body)
 	}
+	confirmEnrolmentOK(t, client, ts)
 }

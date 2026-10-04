@@ -498,6 +498,8 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	}
 
 	// Authenticator app, recovery codes and the second-factor login.
+	c.do(bob, u, call{method: "POST", path: enrolmentConfirmPath}, 409, nil) // nothing held yet
+	c.do(anon, u, call{method: "POST", path: enrolmentConfirmPath}, 401, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: "wrong"}}, 401, nil)
 	var enrolled totpEnrolResponse
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 200, &enrolled)
@@ -509,25 +511,36 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: "000000x"}}, 400, nil)
 	var confirmed totpConfirmResponse
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, counter)}}, 200, &confirmed)
+	if !confirmed.PendingConfirmation || confirmed.Enabled || len(confirmed.RecoveryCodes) != 10 {
+		t.Fatalf("the first app = %+v, want ten codes held for confirmation", confirmed)
+	}
+	// One enrolment at a time while the app is held (#58).
+	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 409, nil)
+	var done enrolmentConfirmResponse
+	c.do(bob, u, call{method: "POST", path: enrolmentConfirmPath}, 200, &done)
+	if !done.Confirmed || done.Factor != "totp" {
+		t.Fatalf("confirming the held app = %+v", done)
+	}
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 409, nil)
 
-	// Confirming on an account that already holds recovery codes (as one
-	// with a passkey does) is the only answer carrying alreadyIssued. The
-	// document's closed bodies only catch a renamed optional field when
-	// the test makes the handler send it.
-	if _, err := f.users.GenerateRecoveryCodes(vicID, time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	// Confirming on an account that already has a second factor (a
+	// passkey, written to the store directly: this gate has no relying
+	// party) is the only answer carrying alreadyIssued. The document's
+	// closed bodies only catch a renamed optional field when the test
+	// makes the handler send it.
 	vic := c.client()
 	c.do(vic, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"vic", bobPass}}, 200, nil)
+	if _, err := f.users.AddPasskey(vicID, gauntlet.Passkey{ID: []byte("vic-credential"), RPID: "vic.example.org"}); err != nil {
+		t.Fatal(err)
+	}
 	c.do(vic, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 200, &enrolled)
 	if secret, err = gauntlet.DecodeTOTPSecret(enrolled.Secret); err != nil {
 		t.Fatal(err)
 	}
 	confirmed = totpConfirmResponse{}
 	c.do(vic, u, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, counter)}}, 200, &confirmed)
-	if !confirmed.AlreadyIssued {
-		t.Fatalf("confirming with recovery codes already held = %+v, want alreadyIssued", confirmed)
+	if !confirmed.AlreadyIssued || !confirmed.Enabled || confirmed.RecoveryCodes != nil {
+		t.Fatalf("confirming beside a live passkey = %+v, want enabled, alreadyIssued, no codes", confirmed)
 	}
 
 	var codes recoveryCodesRegenerateResponse
@@ -840,11 +853,11 @@ func TestContractTokenRegisteredKinds(t *testing.T) {
 	}
 }
 
-// TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn: when the factor
-// is committed but the recovery codes are not, the 500 has to say so in
-// a field a frontend can branch on (auth.yaml forbids reading the
-// message), and that body has to be the one the document describes.
-func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
+// TestTOTPConfirmWhoseHoldCannotBeSavedIsAPlainServerError: the first
+// app and its recovery codes are one write (#58), so a failed save is a
+// plain server-error with nothing done -- the body the document's
+// InternalError describes, not 0.2.0's partially-completed one.
+func TestTOTPConfirmWhoseHoldCannotBeSavedIsAPlainServerError(t *testing.T) {
 	const bobName, bobPass = "bob", "bob-password-123"
 	c := newContractChecker(t)
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
@@ -865,21 +878,21 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 	}
 	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
 
-	// One save left: ConfirmTOTP lands, the recovery-code save does not.
-	backend.left = 1
+	backend.left = 0 // the hold's one save fails
 	resp, raw := c.send(bob, ts.URL, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}})
+	backend.left = -1
 	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500: %s", resp.StatusCode, raw)
+		t.Fatalf("confirm with the hold's save failing returned %d, want 500: %s", resp.StatusCode, raw)
 	}
 	var body struct {
-		Detail     string `json:"detail"`
-		TOTPActive bool   `json:"totpActive"`
+		Type       string `json:"type"`
+		TOTPActive *bool  `json:"totpActive"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("the 500 body is not JSON: %v: %s", err, raw)
 	}
-	if !body.TOTPActive || body.Detail == "" {
-		t.Errorf("the 500 body = %+v, want totpActive true and a detail message", body)
+	if !strings.HasSuffix(body.Type, "#server-error") || body.TOTPActive != nil {
+		t.Errorf("the 500 body = %s, want a plain server-error", raw)
 	}
 }
 
@@ -949,8 +962,9 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	// Registration is password-gated at begin.
 	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{"wrong"}}, 401, nil)
 
-	// Refused registrations, then the first factor (codes minted), a
-	// second (alreadyIssued) and a duplicate.
+	// Refused registrations, then the first factor (held with ten codes
+	// until confirmed, #58), a second (live, alreadyIssued) and a
+	// duplicate.
 	wrongOrigin := passkeytest.New("passkeys.example.org", "https://not-the-relying-party.example")
 	register(bob, wrongOrigin, "wrong origin", 400, nil)
 	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: "{", bad: true}, 400, nil)
@@ -969,8 +983,15 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	key := passkeytest.New("passkeys.example.org", publicURL)
 	var first passkeyRegisterFinishResponse
 	register(bob, key, "first", 200, &first)
-	if len(first.RecoveryCodes) != 10 {
-		t.Fatalf("first passkey = %+v, want ten recovery codes", first)
+	if len(first.RecoveryCodes) != 10 || !first.PendingConfirmation {
+		t.Fatalf("first passkey = %+v, want ten recovery codes held for confirmation", first)
+	}
+	// One enrolment at a time while it is held.
+	c.do(bob, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{bobPass}}, 409, nil)
+	var done enrolmentConfirmResponse
+	c.do(bob, u, call{method: "POST", path: enrolmentConfirmPath}, 200, &done)
+	if done.Factor != "passkey" {
+		t.Fatalf("confirming the held passkey = %+v", done)
 	}
 	spare := passkeytest.New("passkeys.example.org", publicURL)
 	var second passkeyRegisterFinishResponse

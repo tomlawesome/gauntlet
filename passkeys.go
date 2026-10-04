@@ -262,7 +262,10 @@ func findPasskeyIndex(u *User, credID []byte) int {
 // AddPasskey registers a new WebAuthn credential on userID's account --
 // the store-layer half of the registration ceremony gauntlet/passkey
 // runs (PasskeyCeremony.FinishRegistration). pk arrives fully populated
-// by the caller.
+// by the caller. The passkey is live at once and no recovery codes are
+// minted: what gate does for an account that already has a second
+// factor. An account's first factor is held with its codes instead,
+// until confirmed (HoldFirstPasskey, ConfirmHeldEnrolment; #58).
 //
 // The credential ID is checked against every passkey already on the
 // account before the account's capacity is: ErrPasskeyDuplicate takes
@@ -279,11 +282,9 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 	s.reloadIfStale()
 
 	// A registration that only exists in memory must not be reported as
-	// done: the caller is about to tell its user the passkey was added
-	// -- and, on a first factor, mint recovery codes and revoke other
-	// sessions around that claim -- and a restart before the next good
-	// write would drop the credential while nothing else remembers it
-	// ever existed. mutate installs it only once it is saved, and the
+	// done: the caller is about to tell its user the passkey was added,
+	// and a restart before the next good write would drop the credential
+	// while nothing else remembers it ever existed. mutate installs it only once it is saved, and the
 	// duplicate and capacity checks run against the document being
 	// saved, so a replay sees a passkey another process added first.
 	var added Passkey
@@ -495,7 +496,8 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 // ClearPasskeys removes every passkey on userID's account in one write.
 // Same conditional recovery-code clear as DeletePasskey: codes survive
 // if the account still has an active authenticator-app factor, and are
-// cleared only if this was the account's last second factor.
+// cleared only if this was the account's last second factor. A passkey
+// on hold (#58) goes too, with the codes held for it.
 func (s *Store) ClearPasskeys(userID string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -508,6 +510,9 @@ func (s *Store) ClearPasskeys(userID string) error {
 			return ErrUserNotFound
 		}
 		u.Passkeys = nil
+		if u.HeldEnrolment != nil && u.HeldEnrolment.Kind == HeldFactorPasskey {
+			u.HeldEnrolment = nil
+		}
 		if !u.HasSecondFactor() {
 			u.RecoveryCodes = nil
 		}
@@ -516,8 +521,9 @@ func (s *Store) ClearPasskeys(userID string) error {
 }
 
 // ClearAllSecondFactors removes every second factor on userID's
-// account -- the authenticator app and every passkey -- and the
-// recovery codes that backed them, all in the one write. Meant for an
+// account -- the authenticator app and every passkey, an enrolment on
+// hold (#58) included -- and the recovery codes that backed them, all in
+// the one write. Meant for an
 // "I've lost everything" recovery path: unlike DeletePasskey,
 // ClearPasskeys and ClearTOTP there is no factor-remaining check to make
 // here -- there is nothing left standing after this call, by
@@ -538,11 +544,10 @@ func (s *Store) ClearAllSecondFactors(userID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		u.TOTPSecret = ""
-		u.TOTPConfirmedAt = time.Time{}
-		u.TOTPLastCounter = 0
+		clearTOTPFields(u)
 		u.Passkeys = nil
 		u.RecoveryCodes = nil
+		u.HeldEnrolment = nil
 		return nil
 	})
 }

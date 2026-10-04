@@ -1,6 +1,12 @@
 package gate
 
-import "net/http"
+import (
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/tomlawesome/gauntlet"
+)
 
 type recoveryCodesRegenerateRequest struct {
 	Password string `json:"password"`
@@ -8,7 +14,8 @@ type recoveryCodesRegenerateRequest struct {
 
 type recoveryCodesRegenerateResponse struct {
 	// RecoveryCodes is the fresh ten, in clear, exactly once -- the same
-	// one-shot contract totpConfirmResponse.RecoveryCodes documents.
+	// one-shot contract the first factor's codes have
+	// (totpConfirmResponse.RecoveryCodes).
 	// Nothing on this account can show them again once this response is
 	// gone.
 	RecoveryCodes []string `json:"recoveryCodes"`
@@ -66,4 +73,63 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 	g.audit(r, user.Username, "account.recovery_codes_regenerated", user.Username, "")
 
 	writeJSON(w, http.StatusOK, recoveryCodesRegenerateResponse{RecoveryCodes: codes})
+}
+
+// -- POST /api/auth/recovery-codes/confirm (#58) -------------------------
+
+type enrolmentConfirmResponse struct {
+	Confirmed bool `json:"confirmed"`
+	// Factor is which kind of factor went live: "passkey" or "totp".
+	Factor string `json:"factor"`
+}
+
+// handleEnrolmentConfirm is the signed-in caller saying "I've saved
+// these": it takes the account's held first factor and its recovery
+// codes off hold in one write (gauntlet.Store.ConfirmHeldEnrolment), and
+// only then does what turning on a second factor does -- ends every
+// other session on the account, renews this one (as handleTOTPConfirm
+// does for a later app) and writes the audit line the factor's own
+// route used to write: account.passkey_added or account.totp_enabled.
+//
+// No body and no password: the session that saw the codes is the one
+// confirming them, and the factor and codes were already proved and
+// password-gated by the routes that held them. Reachable at the
+// must-enrol-factor door, since the account has no live factor until
+// this answers. 409 conflict when nothing is held; 401 step-expired
+// when the hold ran out (gauntlet.HeldEnrolmentLifetime) -- the held
+// factor and codes are deleted by that same call, and the caller sets
+// the factor up again.
+func (g *Gate) handleEnrolmentConfirm(w http.ResponseWriter, r *http.Request) {
+	user := UserFromContext(r)
+	if user == nil {
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
+	now := g.now()
+	held, err := g.deps.Users.ConfirmHeldEnrolment(user.ID, now)
+	switch {
+	case errors.Is(err, gauntlet.ErrHeldEnrolmentExpired):
+		writeUnauthorized(w, classStepExpired, gateErrorMessages[gauntlet.ErrHeldEnrolmentExpired])
+		return
+	case errors.Is(err, gauntlet.ErrNoHeldEnrolment), errors.Is(err, gauntlet.ErrPasskeyDuplicate), errors.Is(err, gauntlet.ErrPasskeyLimitReached):
+		g.writeAuthError(w, r, err, http.StatusConflict, classConflict)
+		return
+	case err != nil:
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
+		return
+	}
+
+	// The factor is live from here: no session from before it may ride
+	// along unchallenged.
+	g.deps.Sessions.RevokeAllForUser(user.ID)
+	g.issueSession(w, r, user.ID, now)
+
+	if held.Kind == gauntlet.HeldFactorPasskey && held.Passkey != nil {
+		// Quoted, as in handlePasskeyRegisterFinish: the name is the
+		// user's own text.
+		g.audit(r, user.Username, "account.passkey_added", user.Username, fmt.Sprintf("name=%q", held.Passkey.Name))
+	} else {
+		g.audit(r, user.Username, "account.totp_enabled", user.Username, "authenticator app confirmed; recovery codes issued")
+	}
+	writeJSON(w, http.StatusOK, enrolmentConfirmResponse{Confirmed: true, Factor: string(held.Kind)})
 }
