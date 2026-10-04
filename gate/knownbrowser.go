@@ -30,7 +30,7 @@ const (
 	// password change, sign out everywhere, TOTP confirm, passkey
 	// register/finish and the SSO callback -- as well as the three
 	// login routes the allowance applies to. Every session issue must
-	// see the browser's old token to replace it (rememberBrowser);
+	// see the browser's old token to replace it (rememberSignIn);
 	// scoped to the login routes alone, an issue anywhere else added a
 	// second entry for the same browser, and with only
 	// gauntlet.MaxKnownBrowsers to an account, one browser could evict
@@ -102,9 +102,10 @@ func (g *Gate) isKnownBrowser(r *http.Request, accountID string, now time.Time) 
 	return known
 }
 
-// rememberBrowser records that this browser has just completed a sign-in
+// rememberSignIn records that this browser has just completed a sign-in
 // on userID and hands it a fresh token, replacing the one it carried for
-// userID (gauntlet.Store.RememberBrowser): one write per issued session.
+// userID, and remembers the country and place the sign-in came from
+// (gauntlet.Store.RememberSignIn, #55): one write per issued session.
 // The token replaced is the first carried one userID knows; the new
 // cookie is the fresh token first, then the other carried tokens --
 // other accounts' -- cut to maxKnownBrowserTokens. A carried token for
@@ -123,8 +124,9 @@ func (g *Gate) isKnownBrowser(r *http.Request, accountID string, now time.Time) 
 //
 // A write that fails is logged and the sign-in goes on: the session is
 // what the caller asked for, and the browser keeps whatever token it
-// had. No cookie is set then, since its hash is on no record.
-func (g *Gate) rememberBrowser(w http.ResponseWriter, r *http.Request, userID string, now time.Time) {
+// had. No cookie is set then, since its hash is on no record, and it
+// reports false, so the sign-in is flagged as nothing (#55).
+func (g *Gate) rememberSignIn(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, now time.Time) bool {
 	carried := knownBrowserTokens(r)
 	replacing := ""
 	for _, t := range carried {
@@ -133,12 +135,13 @@ func (g *Gate) rememberBrowser(w http.ResponseWriter, r *http.Request, userID st
 			break
 		}
 	}
-	token, err := g.deps.Users.RememberBrowser(userID, replacing, now)
+	token, err := g.deps.Users.RememberSignIn(userID, replacing, place.client.Country, place.loc, now)
 	if err != nil {
 		g.logError("remembering the browser that signed in to account " + userID + ": " + err.Error())
-		return
+		return false
 	}
 	g.writeKnownBrowserCookie(w, token, carried, replacing)
+	return true
 }
 
 // writeKnownBrowserCookie sets the cookie to fresh followed by carried

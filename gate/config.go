@@ -100,6 +100,20 @@ type Config struct {
 	// that address (no data file loaded yet, a private address, or no
 	// match), and gate then records no country for it, never an error.
 	Country func(address string) (code string, ok bool)
+	// Locate resolves an address to a point and accuracy radius, so a
+	// sign-in can be judged for impossible travel (#55). Optional: nil
+	// means impossible travel is never raised. The application passes
+	// (*geoip.Manager).Locate, which answers only from a MaxMind City
+	// file (geoip.EditionCity). Coordinates are kept only as the
+	// account's last place; no route, notice or record shows them.
+	Locate func(address string) (gauntlet.Location, bool)
+	// UnusualSignIns is what a sign-in from a new browser, a new country
+	// or an impossible distance away does (#55; unusual.go). The zero
+	// value flags each one: the sign-in completes and is marked on the
+	// session, the history and the audit record. New refuses a value
+	// that is not one of the actions, and impossible travel turned on
+	// with no Locate.
+	UnusualSignIns UnusualSignInPolicy
 	// Now is the clock Protect and every handler read the current time
 	// from. nil means time.Now.
 	Now func() time.Time
@@ -238,6 +252,9 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	// codec there is a panic on that request, not here.
 	if deps.OIDC != nil && deps.OIDCState == nil {
 		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
+	}
+	if err := checkUnusualPolicy(cfg); err != nil {
+		return nil, err
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

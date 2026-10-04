@@ -307,6 +307,11 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every credential has passed: judge the sign-in (#55) before any
+	// session exists.
+	place := g.placeOf(r, res.address)
+	verdict := g.judgeSignIn(r, user.ID, place, now)
+
 	// A leftover pending-login cookie from an earlier, abandoned attempt
 	// (this account or another one on the same browser) has no bearing
 	// on a login that just completed through the ordinary one-step path.
@@ -316,8 +321,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// The session this browser already held for the account ends here:
 	// the cookie below replaces it, and nothing else would (ASVS 7.2.4;
 	// see revokeReplacedSession).
-	g.issueSession(w, r, user.ID, now)
-	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodPassword), res, now)
+	g.completeSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 }
 
@@ -461,14 +465,17 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		writeUnauthorized(w, classStepExpired, "sign in again")
 		return false
 	}
+	// Every credential has passed: judge the sign-in (#55) before any
+	// session exists.
+	place := g.placeOf(r, res.address)
+	verdict := g.judgeSignIn(r, user.ID, place, now)
 	g.completeLogin(res, now)
 	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
 	// As in handleLogin: the session this browser held for the account
 	// is replaced by the cookie below, so it ends here (ASVS 7.2.4). Only
 	// here, not at the password step, which issues no session.
-	g.issueSession(w, r, user.ID, now)
-	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, method), res, now)
+	g.completeSignIn(w, r, user, res, method, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 	return true
 }

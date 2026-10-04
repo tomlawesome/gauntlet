@@ -17,7 +17,9 @@ import (
 //
 //   - user.login on a completed sign-in, its detail carrying the client
 //     address (from=, quoted: Config.ClientIP may read a header the
-//     client set) and, for the second-factor and SSO paths, how.
+//     client set) and, for the second-factor and SSO paths, how. An
+//     unusual one (#55) starts with its signals and the action taken:
+//     "unusual=new-browser,new-country; action=flag; ".
 //   - user.login_failed on every failed attempt the limiter admitted:
 //     actor and target the account's username when the name matched one,
 //     else "unknown"; detail the outcome, the method, the address and,
@@ -82,7 +84,17 @@ func limiterRefusal(o gauntlet.SignInOutcome) bool {
 // history (Deps.SignIns) when there is one, then writes the audit
 // record or Warn line (see this file's header).
 func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginReservation, now time.Time) {
+	g.recordSignInNote(r, ev, res, "", now)
+}
+
+// recordSignInNote is recordSignIn with note -- the unusual-sign-in
+// part of a completed sign-in's detail ("unusual=...; action=...; ",
+// #55) -- put before the rest of the user.login detail. ev's signals
+// (Client.Unusual) are kept; the rest of its client is filled here.
+func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res loginReservation, note string, now time.Time) {
+	unusual := ev.Client.Unusual
 	ev.Client = g.signInClient(r, res.address)
+	ev.Client.Unusual = unusual
 	failed := signInFailed(ev.Outcome)
 	switch {
 	case ev.Outcome == gauntlet.SignInLocked:
@@ -119,7 +131,7 @@ func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginR
 		case gauntlet.SignInMethodSSO:
 			detail = "via sso; " + from
 		}
-		g.auditRecord(ev.Username, "user.login", ev.Username, detail)
+		g.auditRecord(ev.Username, "user.login", ev.Username, note+detail)
 	case limiterRefusal(ev.Outcome):
 		g.warnRated("login-refused "+ev.Client.Address, fmt.Sprintf(
 			"gate: sign-in refused by the login limiter: outcome=%s method=%s account=%q %s",

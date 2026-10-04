@@ -485,6 +485,43 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "GET", path: "/api/auth/sign-ins?outcome=bogus", bad: true}, 400, nil)
 	c.do(bob, u, call{method: "GET", path: "/api/auth/sign-ins"}, 403, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/sign-ins"}, 401, nil)
+
+	// Unusual sign-ins (#55): the admin signing in from a second browser
+	// is flagged (new-browser, the default policy), on that session's row
+	// and on the history's; ?unusual=true lists only such rows.
+	admin2 := c.client()
+	c.do(admin2, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+	c.do(admin2, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: adminRecovery[len(adminRecovery)-1]}}, 200, nil)
+	var adminSessions struct {
+		Sessions []struct {
+			Current bool     `json:"current"`
+			Unusual []string `json:"unusual"`
+		} `json:"sessions"`
+	}
+	c.do(admin2, u, call{method: "GET", path: "/api/auth/sessions"}, 200, &adminSessions)
+	flagged := 0
+	for _, s := range adminSessions.Sessions {
+		if len(s.Unusual) > 0 {
+			flagged++
+			if !s.Current || s.Unusual[0] != "new-browser" {
+				t.Fatalf("admin's sessions = %+v, want only the second browser's flagged new-browser", adminSessions)
+			}
+		}
+	}
+	if flagged != 1 {
+		t.Fatalf("admin's sessions = %+v, want one flagged", adminSessions)
+	}
+	var unusualHistory struct {
+		SignIns []struct {
+			Unusual []string `json:"unusual"`
+		} `json:"signIns"`
+	}
+	c.do(admin2, u, call{method: "GET", path: "/api/auth/sign-ins?unusual=true"}, 200, &unusualHistory)
+	if len(unusualHistory.SignIns) != 1 || len(unusualHistory.SignIns[0].Unusual) != 1 {
+		t.Fatalf("unusual sign-ins = %+v, want the second browser's", unusualHistory)
+	}
+	c.do(admin2, u, call{method: "GET", path: "/api/auth/sign-ins?unusual=maybe", bad: true}, 400, nil)
+	c.do(admin2, u, call{method: "POST", path: "/api/auth/logout"}, 200, nil)
 	bobID, adminID, vicID := "", "", ""
 	for _, s := range users {
 		switch s.Username {

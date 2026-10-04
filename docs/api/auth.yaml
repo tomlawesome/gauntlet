@@ -1517,6 +1517,13 @@ paths:
           description: Only rows with this outcome.
           schema:
             $ref: "#/components/schemas/SignInOutcome"
+        - name: unusual
+          in: query
+          required: false
+          description: Only rows that raised at least one unusual-sign-in signal -- flagged sign-ins, ones sent a confirmation code and ones refused. Only `true` is accepted.
+          schema:
+            type: string
+            enum: ["true"]
         - name: before
           in: query
           required: false
@@ -2124,6 +2131,8 @@ components:
           type: string
           pattern: "^[A-Z]{2}$"
           description: The country `address` resolved to at sign-in, if a country lookup is configured and the address matched. Absent otherwise.
+        unusual:
+          $ref: "#/components/schemas/UnusualSignals"
     SessionList:
       type: object
       additionalProperties: false
@@ -2360,14 +2369,31 @@ components:
           description: The raw bearer token; only in the response that creates it.
     SignInOutcome:
       type: string
-      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded]
+      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, refused, confirm_sent, confirm_refused, unrecorded]
       description: |
         How an attempt ended. `password_ok` is the right password with a
         second factor still owed; `factor_refused` a wrong or used code or a
         refused passkey; `locked`, `disabled` and `rate_limited` the login
-        limiter refusing it before any credential was checked; `unrecorded`
-        the failed attempts past a bucket's row budget. New values may be
-        added.
+        limiter refusing it before any credential was checked; `refused`
+        every credential right but the attempt refused by the unusual
+        sign-in policy; `confirm_sent` every credential right and a
+        confirmation code sent, no session yet; `confirm_refused` a wrong
+        confirmation code; `unrecorded` the failed attempts past a
+        bucket's row budget. New values may be added.
+    UnusualSignals:
+      type: array
+      minItems: 1
+      uniqueItems: true
+      items:
+        type: string
+        enum: [new-browser, new-country, impossible-travel]
+      description: |
+        The unusual-sign-in signals the sign-in raised (#55), in this
+        order: `new-browser` (a browser the account does not remember),
+        `new-country` (a country it has not signed in from in 90 days),
+        `impossible-travel` (too far from its last located sign-in for the
+        time between them). Absent for an ordinary sign-in. New values may
+        be added; ignore unknown ones.
     SignInRow:
       type: object
       additionalProperties: false
@@ -2420,6 +2446,11 @@ components:
         disabled:
           type: boolean
           description: True on the failure that disabled the account's sign-in, and on a `disabled` refusal.
+        unusual:
+          $ref: "#/components/schemas/UnusualSignals"
+        confirmed:
+          type: boolean
+          description: True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`). Absent when false.
     SignInList:
       type: object
       additionalProperties: false

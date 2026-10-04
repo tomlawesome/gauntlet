@@ -1,0 +1,233 @@
+package gate
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/tomlawesome/gauntlet"
+)
+
+// Unusual sign-ins (#55). A sign-in is judged when it would issue a
+// session -- the one-step password path (handleLogin), the second-factor
+// step (completeLoginFactor) and the SSO callback's sign-in branch --
+// after every credential has passed and before any session exists.
+// gauntlet.Store.JudgeSignIn raises the signals; the application's
+// policy (Config.UnusualSignIns) says what each one does. Every other
+// session issue -- register, a password change, TOTP or recovery-code
+// confirm, sign out everywhere, an SSO link -- never judges, since its
+// caller already holds a session or is the first account, but every
+// session issue remembers the browser, country and place
+// (gauntlet.Store.RememberSignIn), whatever the policy.
+
+// UnusualSignInAction is what an unusual sign-in leads to.
+type UnusualSignInAction string
+
+const (
+	// UnusualSignInOff drops the signal: nothing is shown, told or
+	// refused. What the account remembers still accumulates, so turning
+	// the signal on later starts from a baseline.
+	UnusualSignInOff UnusualSignInAction = "off"
+	// UnusualSignInFlag, the default, lets the sign-in complete and marks
+	// it: on the session in the person's own session list, on the
+	// sign-in history row and in the audit record.
+	UnusualSignInFlag UnusualSignInAction = "flag"
+	// UnusualSignInConfirm holds the sign-in until a code the
+	// application delivers is typed into the same sign-in.
+	UnusualSignInConfirm UnusualSignInAction = "confirm"
+	// UnusualSignInBlock refuses this one attempt, never the account.
+	UnusualSignInBlock UnusualSignInAction = "block"
+)
+
+// rank orders the actions by strictness; an unknown one ranks nowhere.
+func (a UnusualSignInAction) rank() int {
+	switch a {
+	case UnusualSignInFlag:
+		return 1
+	case UnusualSignInConfirm:
+		return 2
+	case UnusualSignInBlock:
+		return 3
+	}
+	return 0
+}
+
+// UnusualSignInPolicy is what each unusual-sign-in signal does
+// (Config.UnusualSignIns). The zero value flags every signal.
+type UnusualSignInPolicy struct {
+	// Action is the base for every signal. "" means UnusualSignInFlag.
+	Action UnusualSignInAction
+	// NewBrowser, NewCountry and ImpossibleTravel override Action for
+	// their own signal; "" means Action. Of the signals one sign-in
+	// raises, any that resolve to off are dropped and the strictest of
+	// the rest decides (block over confirm over flag).
+	NewBrowser, NewCountry, ImpossibleTravel UnusualSignInAction
+}
+
+// UnusualSignInCase is one unusual sign-in as the policy sees it. It
+// carries no request, header, password, code or session: nothing a
+// function handed it could complete a sign-in with or leak.
+type UnusualSignInCase struct {
+	UserID, Username string
+	Role             gauntlet.Role
+	Signals          gauntlet.SignInSignals
+	// Country is what Config.Country answered; "" if unknown.
+	Country string
+	// PreviousCountry is the account's last place's country when
+	// impossible-travel is raised; "" otherwise.
+	PreviousCountry string
+	Method          gauntlet.SignInMethod
+	// Client is the resolved address and agent, never the headers.
+	Client gauntlet.SessionClient
+	// Default is what the settings decided.
+	Default UnusualSignInAction
+}
+
+// checkUnusualPolicy is New's check of Config.UnusualSignIns: every
+// field one of the four actions or empty; confirm only where something
+// can deliver the code; impossible travel turned on only where it can
+// be judged.
+func checkUnusualPolicy(cfg Config) error {
+	p := cfg.UnusualSignIns
+	for _, f := range []struct {
+		name string
+		a    UnusualSignInAction
+	}{
+		{"Action", p.Action}, {"NewBrowser", p.NewBrowser}, {"NewCountry", p.NewCountry}, {"ImpossibleTravel", p.ImpossibleTravel},
+	} {
+		switch f.a {
+		case "", UnusualSignInOff, UnusualSignInFlag:
+		case UnusualSignInConfirm:
+			// Nothing can deliver the code yet.
+			return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which needs Config.NotifyUnusualSignIn to deliver the code", f.name)
+		case UnusualSignInBlock:
+			return fmt.Errorf("gate: Config.UnusualSignIns.%s is block, which this build does not support yet", f.name)
+		default:
+			return fmt.Errorf("gate: Config.UnusualSignIns.%s is %q; want %q, %q, %q or %q",
+				f.name, f.a, UnusualSignInOff, UnusualSignInFlag, UnusualSignInConfirm, UnusualSignInBlock)
+		}
+	}
+	if p.ImpossibleTravel != "" && p.ImpossibleTravel != UnusualSignInOff && cfg.Locate == nil {
+		return fmt.Errorf("%w: Config.Locate (Config.UnusualSignIns.ImpossibleTravel is %s, and without it the signal can never be raised)", errMissingDep, p.ImpossibleTravel)
+	}
+	return nil
+}
+
+// signalAction is the action the policy gives one signal.
+func (p UnusualSignInPolicy) signalAction(s gauntlet.SignInSignals) UnusualSignInAction {
+	var own UnusualSignInAction
+	switch s {
+	case gauntlet.SignalNewBrowser:
+		own = p.NewBrowser
+	case gauntlet.SignalNewCountry:
+		own = p.NewCountry
+	case gauntlet.SignalImpossibleTravel:
+		own = p.ImpossibleTravel
+	}
+	switch {
+	case own != "":
+		return own
+	case p.Action != "":
+		return p.Action
+	}
+	return UnusualSignInFlag
+}
+
+// allSignals is every signal, for walking them one at a time.
+var allSignals = []gauntlet.SignInSignals{gauntlet.SignalNewBrowser, gauntlet.SignalNewCountry, gauntlet.SignalImpossibleTravel}
+
+// resolveUnusual applies the policy to the raised signals: each takes
+// its own field, else Action, else flag; one that resolves to off is
+// dropped; among those kept the strictest action wins. No kept signal
+// is an ordinary sign-in: "" and none.
+func (g *Gate) resolveUnusual(signals gauntlet.SignInSignals) (UnusualSignInAction, gauntlet.SignInSignals) {
+	var action UnusualSignInAction
+	var kept gauntlet.SignInSignals
+	for _, s := range allSignals {
+		if !signals.Has(s) {
+			continue
+		}
+		a := g.cfg.UnusualSignIns.signalAction(s)
+		if a == UnusualSignInOff {
+			continue
+		}
+		kept |= s
+		if a.rank() > action.rank() {
+			action = a
+		}
+	}
+	return action, kept
+}
+
+// judgesNothing reports whether every signal resolves to off, so no
+// sign-in needs judging at all.
+func (g *Gate) judgesNothing() bool {
+	for _, s := range allSignals {
+		if g.cfg.UnusualSignIns.signalAction(s) != UnusualSignInOff {
+			return false
+		}
+	}
+	return true
+}
+
+// signInPlace is where a request came from, looked up once for the
+// judgement, the session and what the account remembers.
+type signInPlace struct {
+	client gauntlet.SessionClient
+	loc    *gauntlet.Location
+}
+
+// placeOf is r's client (signInClient) and, when Config.Locate is set
+// and answers for the address, its location.
+func (g *Gate) placeOf(r *http.Request, address string) signInPlace {
+	p := signInPlace{client: g.signInClient(r, address)}
+	if g.cfg.Locate != nil {
+		if loc, ok := g.cfg.Locate(p.client.Address); ok {
+			p.loc = &loc
+		}
+	}
+	return p
+}
+
+// unusualVerdict is what the policy made of one completed sign-in.
+type unusualVerdict struct {
+	// action is "" for an ordinary sign-in.
+	action  UnusualSignInAction
+	signals gauntlet.SignInSignals
+	// previousCountry is the last place's country when impossible
+	// travel is kept.
+	previousCountry string
+}
+
+// judgeSignIn judges userID's completed sign-in from place: read-only,
+// and skipped altogether when the policy turns every signal off.
+func (g *Gate) judgeSignIn(r *http.Request, userID string, place signInPlace, now time.Time) unusualVerdict {
+	if g.judgesNothing() {
+		return unusualVerdict{}
+	}
+	j := g.deps.Users.JudgeSignIn(userID, knownBrowserTokens(r), place.client.Country, place.loc, now)
+	action, kept := g.resolveUnusual(j.Signals)
+	v := unusualVerdict{action: action, signals: kept}
+	if kept.Has(gauntlet.SignalImpossibleTravel) {
+		v.previousCountry = j.PreviousCountry
+	}
+	return v
+}
+
+// completeSignIn issues the session a judged sign-in has earned and
+// records it: the session carries the verdict's signals, as do the
+// history row and the audit record (unusual=...; action=...; before
+// the existing detail). When remembering the sign-in fails, nothing is
+// flagged: the signals are dropped (issueSignInSession). It returns the
+// session.
+func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) gauntlet.Session {
+	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, now)
+	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
+	ev.Client.Unusual = signals
+	note := ""
+	if signals != 0 {
+		note = fmt.Sprintf("unusual=%s; action=%s; ", signals, v.action)
+	}
+	g.recordSignInNote(r, ev, res, note, now)
+	return sess
+}

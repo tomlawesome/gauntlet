@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // hostCookiePrefix is the name prefix that makes a browser refuse the
@@ -118,7 +120,7 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 // session in their own list (gauntlet.SessionStore.CreateFrom, #48),
 // set the cookie under sessionCookieName with the ceiling's Max-Age
 // (#47), and remember the browser, rotating its known-browser token
-// (rememberBrowser, #44).
+// (#44), with the country and place it came from (rememberSignIn, #55).
 //
 // The address is Config.ClientIP's, the same resolution the login
 // limiter is keyed on, so the list shows what the application's own
@@ -129,9 +131,23 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 // Address and UserAgent are the client's word, cleaned and capped by
 // CreateFrom.
 func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, now time.Time) {
+	g.issueSignInSession(w, r, userID, g.placeOf(r, ""), 0, now)
+}
+
+// issueSignInSession is issueSession for a sign-in already judged: place
+// is where it came from, looked up once, and signals the unusual-sign-in
+// signals the session carries (#55). The browser, country and place are
+// remembered first (rememberSignIn); if that write fails, nothing is
+// flagged and the session carries no signals. It returns the session
+// and the signals it carries.
+func (g *Gate) issueSignInSession(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, signals gauntlet.SignInSignals, now time.Time) (gauntlet.Session, gauntlet.SignInSignals) {
 	g.revokeReplacedSession(r, userID, now)
-	client := g.signInClient(r, "")
+	if !g.rememberSignIn(w, r, userID, place, now) {
+		signals = 0
+	}
+	client := place.client
+	client.Unusual = signals
 	sess := g.deps.Sessions.CreateFrom(userID, client, now)
 	g.setSessionCookie(w, sess.ID)
-	g.rememberBrowser(w, r, userID, now)
+	return sess, signals
 }

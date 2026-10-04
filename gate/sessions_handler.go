@@ -45,6 +45,9 @@ type sessionRow struct {
 	Address   string `json:"address,omitempty"`
 	UserAgent string `json:"userAgent,omitempty"`
 	Country   string `json:"country,omitempty"`
+	// Unusual is the unusual-sign-in signals the session arrived with
+	// (#55), as an array of names; absent for an ordinary sign-in.
+	Unusual gauntlet.SignInSignals `json:"unusual,omitzero"`
 }
 
 // sessionListResponse is GET /api/auth/sessions's body: an object
@@ -118,6 +121,7 @@ func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 			Address:    sess.Client.Address,
 			UserAgent:  sess.Client.UserAgent,
 			Country:    sess.Client.Country,
+			Unusual:    sess.Client.Unusual,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
