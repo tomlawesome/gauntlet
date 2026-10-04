@@ -21,6 +21,22 @@ All notable changes to this project are documented in this file.
   stamped on their next save. A file rolled back while the service is
   stopped is still accepted on start (docs/design.md §4) (#59).
 
+### Changed
+
+- **Breaking for HTTP clients.** Every error `gate.Routes` and
+  `gate.Protect` return is now an RFC 9457 Problem Details body
+  (`application/problem+json`, with `type`, `title`, `status` and
+  `detail`) instead of `text/plain` or `{"error": ...}` (#23). Each
+  `type` links to its permanent entry in
+  [docs/api/errors.md](docs/api/errors.md); `detail` carries the same
+  message as before. An unknown path or wrong method under `Routes`
+  answers `about:blank`, keeping `Allow` on 405. The two JSON error
+  bodies that existed (user deleted with tokens not revoked; TOTP on
+  with recovery codes not saved) keep `username` and `totpActive`;
+  their `error` field is now `detail`. `WWW-Authenticate` on 401s is
+  unchanged. Switched before mikroview moves onto gauntlet, so it
+  migrates once (ADR-0002, owner 2026-10-03).
+
 ### Fixed
 
 Low-severity findings from the v0.2.0 audit (#58):
