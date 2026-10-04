@@ -358,6 +358,66 @@ func contractUnusualSignIns(t *testing.T, c *contractChecker) {
 	stranger = c.client()
 	c.do(stranger, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
 	refused(c.do(stranger, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery[0]}}, 403, nil))
+
+	// The same under confirm: a new browser is sent a code, through the
+	// application, and finishes with POST /api/auth/login/confirm.
+	users, code = openStore(t, persist.NewMemory())
+	codes := &codeCatcher{}
+	g = newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInConfirm}
+		cfg.NotifyUnusualSignIn = codes
+	})
+	ts = newTestServer(t, g)
+	u = ts.URL
+	admin = c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+	var challenge map[string]any
+	newcomer := c.client()
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, &challenge)
+	if challenge["confirm"] != true {
+		t.Fatalf("login under confirm = %v", challenge)
+	}
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: "not json", bad: true}, 400, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: "0000-000x"}}, 401, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}, noCSRF: true}, 403, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 200, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 401, nil)
+
+	recovery = enrolTOTPFactor(t, c, u, admin, adminPass)
+	newcomer = c.client()
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery[0]}}, 200, &challenge)
+	if challenge["confirm"] != true {
+		t.Fatalf("login/factor under confirm = %v", challenge)
+	}
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 200, nil)
+}
+
+// confirmCodeRequest is POST /api/auth/login/confirm's body.
+type confirmCodeRequest struct {
+	Code string `json:"code"`
+}
+
+// codeCatcher is a gate.UnusualSignInNotifier keeping the last
+// confirmation code it was given.
+type codeCatcher struct {
+	mu   sync.Mutex
+	code string
+}
+
+func (c *codeCatcher) UnusualSignIn(_ context.Context, n gate.UnusualSignInNotice) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n.Code != "" {
+		c.code = n.Code
+	}
+	return nil
+}
+
+func (c *codeCatcher) last() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.code
 }
 
 // contractNoStorage covers the 503 an admin gets creating an account

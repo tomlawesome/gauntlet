@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -125,6 +126,73 @@ type UnusualSignInNotice struct {
 	Reason string
 }
 
+// DecideTimeout bounds the synchronous calls an unusual sign-in makes
+// before it is answered: the notice carrying a confirmation code. Fixed,
+// not configurable: the application should hand the message to its
+// mailer and return.
+const DecideTimeout = 3 * time.Second
+
+// decideTimeout is DecideTimeout, a variable so tests can shorten it.
+var decideTimeout = DecideTimeout
+
+// errCallTimedOut is callBounded's error for a function still running
+// at the deadline.
+var errCallTimedOut = errors.New("did not return within the deadline")
+
+// callBounded runs fn in its own goroutine under a context that ends
+// after decideTimeout, and waits for it or the deadline, whichever comes
+// first. A panic is an error carrying the panic text, so a failing
+// function fails closed. A function that ignores its context is
+// abandoned at the deadline and left to finish on its own (counted in
+// notifying, so a test can wait for it).
+func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), decideTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	g.notifying.Add(1)
+	go func() {
+		defer g.notifying.Done()
+		defer func() {
+			if p := recover(); p != nil {
+				done <- fmt.Errorf("panicked: %q", fmt.Sprint(p))
+			}
+		}()
+		done <- fn(ctx)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return errCallTimedOut
+	}
+}
+
+// stopSignIn is confirm and block for a judged sign-in, after the
+// caller has handed the limiter back and dropped the pending login. It
+// reports whether a confirmation code went out (answer "confirm"); if
+// not, the attempt was refused (answer sign-in-refused) and notice is
+// the block notice to send once the response is written, nil for none.
+// A confirm whose code could not be delivered is refused as
+// notify-failed: no code reached anyone.
+func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (confirmSent bool, notice *UnusualSignInNotice) {
+	reason := v.reason
+	if v.action == UnusualSignInConfirm {
+		if g.startConfirm(w, r, user, res, method, place, v.signals, now) {
+			return true, nil
+		}
+		reason = "notify-failed"
+	}
+	return false, g.refuseSignIn(r, user, res, method, place, v.signals, reason, now)
+}
+
+// stopsSignIn reports whether v is confirm or block.
+func (v unusualVerdict) stopsSignIn() bool {
+	return v.action == UnusualSignInConfirm || v.action == UnusualSignInBlock
+}
+
+// confirmChallenge is the 200 a sign-in owing a confirmation code gets.
+var confirmChallenge = map[string]bool{"confirm": true}
+
 // unusualNoticeInterval is how long an account's flag and block notices
 // stay quiet after one is sent. A variable so tests can shorten it.
 var unusualNoticeInterval = time.Hour
@@ -183,8 +251,7 @@ func checkUnusualPolicy(cfg Config) error {
 		case "", UnusualSignInOff, UnusualSignInFlag:
 		case UnusualSignInConfirm:
 			if cfg.NotifyUnusualSignIn != nil {
-				// Confirm itself is not built yet.
-				return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which this build does not support yet", f.name)
+				continue
 			}
 			return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which needs Config.NotifyUnusualSignIn to deliver the code", f.name)
 		case UnusualSignInBlock:
@@ -280,6 +347,8 @@ type unusualVerdict struct {
 	// action is "" for an ordinary sign-in.
 	action  UnusualSignInAction
 	signals gauntlet.SignInSignals
+	// reason is why a block is a block: policy unless something failed.
+	reason string
 	// previousCountry is the last place's country when impossible
 	// travel is kept.
 	previousCountry string
@@ -293,7 +362,7 @@ func (g *Gate) judgeSignIn(r *http.Request, userID string, place signInPlace, no
 	}
 	j := g.deps.Users.JudgeSignIn(userID, knownBrowserTokens(r), place.client.Country, place.loc, now)
 	action, kept := g.resolveUnusual(j.Signals)
-	v := unusualVerdict{action: action, signals: kept}
+	v := unusualVerdict{action: action, signals: kept, reason: "policy"}
 	if kept.Has(gauntlet.SignalImpossibleTravel) {
 		v.previousCountry = j.PreviousCountry
 	}

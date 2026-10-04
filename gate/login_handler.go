@@ -311,11 +311,18 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// session exists.
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user.ID, place, now)
-	if verdict.action == UnusualSignInBlock {
+	if verdict.stopsSignIn() {
+		// Confirm or block: the credential was right, so the attempt is
+		// handed back rather than completed; nothing completed, so the
+		// account's count is not reset.
 		g.releaseLogin(res, now)
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
-		notice := g.refuseSignIn(r, user, res, gauntlet.SignInMethodPassword, place, verdict.signals, "policy", now)
+		sent, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
+		if sent {
+			writeJSON(w, http.StatusOK, confirmChallenge)
+			return
+		}
 		writeSignInRefused(w)
 		g.notifyUnusualSignIn(r.Context(), notice)
 		return
@@ -471,8 +478,9 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // construction, on the same wall clock.
 //
 // It also reports true when the unusual-sign-in policy refused the
-// sign-in (#55): every credential was right, so the passkey begin
-// step's reservation is handed back as for a success.
+// sign-in or held it for a confirmation code (#55): every credential
+// was right, so the passkey begin step's reservation is handed back as
+// for a success.
 func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) bool {
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
@@ -484,13 +492,18 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// session exists.
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user.ID, place, now)
-	if verdict.action == UnusualSignInBlock {
+	if verdict.stopsSignIn() {
 		// The pending login is already spent above, so one correct code
-		// yields one refusal, never a refusal and then a session.
+		// yields one refusal or one confirmation code, never that and
+		// then a session.
 		g.releaseLogin(res, now)
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
-		notice := g.refuseSignIn(r, user, res, method, place, verdict.signals, "policy", now)
+		sent, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)
+		if sent {
+			writeJSON(w, http.StatusOK, confirmChallenge)
+			return true
+		}
 		writeSignInRefused(w)
 		g.notifyUnusualSignIn(r.Context(), notice)
 		return true

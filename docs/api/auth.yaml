@@ -214,8 +214,11 @@ paths:
 
         A sign-in that completes here (no second factor) is first judged
         for unusual-sign-in signals (#55); under the application's policy
-        it may be refused (`403` `sign-in-refused`). The response never
-        says which signal was raised.
+        it may be refused (`403` `sign-in-refused`), or held for a
+        confirmation code the application delivers (`200`
+        `{"confirm": true}`, the confirm cookie set and no session
+        cookie; `POST /api/auth/login/confirm` finishes it). The response
+        never says which signal was raised or where a code went.
       security:
         - {}
       parameters:
@@ -228,13 +231,14 @@ paths:
               $ref: "#/components/schemas/Credentials"
       responses:
         "200":
-          description: Signed in, or a second factor is needed.
+          description: Signed in, a second factor is needed, or a confirmation code was sent (#55; sets the confirm cookie, no session cookie).
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/Account"
                   - $ref: "#/components/schemas/SecondFactorChallenge"
+                  - $ref: "#/components/schemas/ConfirmationChallenge"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -262,7 +266,8 @@ paths:
         also hands back the attempt that begin counted. Shares the login
         rate limit. Sets the session cookie on success. Like `login`, the
         completed sign-in is first judged for unusual-sign-in signals and
-        may be refused (`403` `sign-in-refused`, #55).
+        may be refused (`403` `sign-in-refused`) or held for a
+        confirmation code (`200` `{"confirm": true}`, #55).
       security:
         - pendingLoginCookie: []
         - pendingLoginCookie: []
@@ -277,11 +282,13 @@ paths:
               $ref: "#/components/schemas/LoginFactorRequest"
       responses:
         "200":
-          description: Signed in; sets the session cookie.
+          description: Signed in (sets the session cookie), or a confirmation code was sent (#55; sets the confirm cookie, no session cookie).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Account"
+                oneOf:
+                  - $ref: "#/components/schemas/Account"
+                  - $ref: "#/components/schemas/ConfirmationChallenge"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -308,6 +315,65 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/login/confirm:
+    post:
+      operationId: loginConfirm
+      summary: Finish a sign-in with a confirmation code
+      description: |
+        Completes a sign-in the unusual-sign-in policy held for a
+        confirmation code (#55): `login`, `login/factor` or the SSO
+        callback set the confirm cookie and the application delivered the
+        code to the person. `code` is the eight digits, with or without
+        the dash, surrounding whitespace ignored. Shares the login rate
+        limit; a wrong code counts as a failed second factor. The ticket
+        is used by exactly one sign-in and lives 15 minutes. Sets the
+        session cookie on success and clears the confirm cookie.
+      security:
+        - confirmLoginCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmCodeRequest"
+      responses:
+        "200":
+          description: Signed in; sets the session cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: The code was wrong (`invalid-credentials`), or the confirm cookie is missing, invalid, expired or already used, or its account is gone (`step-expired`; the cookie is cleared) -- sign in again from the start.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+        "403":
+          $ref: "#/components/responses/CSRFRequired"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1070,7 +1136,11 @@ paths:
         `verification_failed`, `not_permitted`, `login_failed`,
         `link_session_changed`, `link_identity_taken`, `link_failed`,
         `refused` (every credential right, refused by the unusual
-        sign-in policy, #55). The
+        sign-in policy, #55). A sign-in held for a confirmation code
+        (#55) instead redirects to `Config.LoginPath` with `?confirm=1`
+        and sets the confirm cookie, no session cookie; the frontend
+        asks for the code and posts it to `POST /api/auth/login/confirm`.
+        The
         flow cookie is cleared on every path. While no account exists
         yet this route answers 503 like every other route except
         session and register: the first account is never an SSO one.
@@ -1682,6 +1752,11 @@ components:
       in: cookie
       name: gate_pending_login
       description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived, used by exactly one sign-in -- once a code, recovery code or passkey completes it, it is refused with 401 at login/factor and login/factor/begin.
+    confirmLoginCookie:
+      type: apiKey
+      in: cookie
+      name: gate_confirm_login
+      description: Set by `POST /api/auth/login`, `POST /api/auth/login/factor` or the SSO callback when an unusual sign-in owes a confirmation code (#55); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in.
     passkeyRegisterCookie:
       type: apiKey
       in: cookie
@@ -2101,6 +2176,14 @@ components:
         code:
           type: string
           description: An authenticator-app code, or (at login) a recovery code.
+    ConfirmCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: The confirmation code the application delivered, `1234-5678`; the dash and surrounding whitespace are optional.
     LoginFactorRequest:
       type: object
       additionalProperties: false
@@ -2267,6 +2350,15 @@ components:
           type: string
         role:
           $ref: "#/components/schemas/Role"
+    ConfirmationChallenge:
+      type: object
+      additionalProperties: false
+      required: [confirm]
+      properties:
+        confirm:
+          type: boolean
+          const: true
+          description: A confirmation code was sent through the application; post it to `POST /api/auth/login/confirm`. Says nothing about where it went.
     SecondFactorChallenge:
       type: object
       additionalProperties: false

@@ -137,10 +137,12 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 			return // password_ok, confirm_sent: no sign-in yet
 		}
 		detail := from
-		switch ev.Method {
-		case gauntlet.SignInMethodCode, gauntlet.SignInMethodPasskey:
+		switch {
+		case ev.Confirmed:
+			detail = "via confirmation code; " + from
+		case ev.Method == gauntlet.SignInMethodCode, ev.Method == gauntlet.SignInMethodPasskey:
 			detail = "via second factor; " + from
-		case gauntlet.SignInMethodSSO:
+		case ev.Method == gauntlet.SignInMethodSSO:
 			detail = "via sso; " + from
 		}
 		g.auditRecord(ev.Username, "user.login", ev.Username, note+detail)

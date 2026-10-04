@@ -995,3 +995,332 @@ func TestUnusualBlockSharesTheRate(t *testing.T) {
 		t.Errorf("the held block notice = %q", entry.Detail)
 	}
 }
+
+// confirmEnv is newNotifiedEnv under a policy that confirms a new
+// country, with bob signed in once from London in browser b.
+func confirmEnv(t *testing.T) (*unusualEnv, *noticeRecorder, *browser) {
+	t.Helper()
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{NewCountry: UnusualSignInConfirm})
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	e.advance(time.Hour)
+	return e, rec, b
+}
+
+// confirmCode is the code in the newest confirm notice.
+func confirmCode(t *testing.T, rec *noticeRecorder) string {
+	t.Helper()
+	all := rec.all()
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].Action == UnusualSignInConfirm {
+			return all[i].Code
+		}
+	}
+	t.Fatal("no confirm notice")
+	return ""
+}
+
+// postConfirm posts code to login/confirm from b at address.
+func (e *unusualEnv) postConfirm(t *testing.T, b *browser, address, code string) (*http.Response, int, string) {
+	t.Helper()
+	resp := postJSON(t, b.at(address), e.ts.URL+loginConfirmPath, loginConfirmRequest{Code: code})
+	status, body := readAll(t, resp)
+	return resp, status, body
+}
+
+func problemType(t *testing.T, body string) string {
+	t.Helper()
+	return strings.TrimPrefix(decodeProblem(t, []byte(body)).Type, problemTypeBase)
+}
+
+func TestUnusualConfirmSendsACode(t *testing.T) {
+	e, rec, b := confirmEnv(t)
+	sessionsBefore := len(e.g.deps.Sessions.ListForUser(e.bobID, e.clock.now()))
+	auditBefore := len(e.audit.entries)
+	resp := postJSON(t, b.at(addrParis), e.ts.URL+"/api/auth/login", credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
+	status, body := readAll(t, resp)
+	if status != http.StatusOK || strings.TrimSpace(body) != `{"confirm":true}` {
+		t.Fatalf("= %d %s, want 200 {\"confirm\":true}", status, body)
+	}
+	c := cookieNamed(resp, confirmLoginCookieName)
+	if c == nil || c.MaxAge != 900 || c.Path != "/api/auth/login" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("confirm cookie = %+v", c)
+	}
+	if cookieNamed(resp, e.g.sessionCookieName()) != nil || cookieNamed(resp, knownBrowserCookieName) != nil {
+		t.Error("a session or known-browser cookie was set before the code")
+	}
+	if n := len(e.g.deps.Sessions.ListForUser(e.bobID, e.clock.now())); n != sessionsBefore {
+		t.Error("a session was issued before the code")
+	}
+	if row := e.newestRow(t); row.Outcome != gauntlet.SignInConfirmSent || row.Client.Unusual != gauntlet.SignalNewCountry {
+		t.Errorf("row = %+v", row)
+	}
+	if len(e.audit.entries) != auditBefore {
+		t.Errorf("confirm_sent wrote audit records: %+v", e.audit.entries[auditBefore:])
+	}
+	if u, _ := e.g.deps.Users.Get(e.bobID); len(u.SeenCountries) != 1 {
+		t.Errorf("the country was remembered before the code: %+v", u.SeenCountries)
+	}
+	got := e.notices(rec)
+	if len(got) != 1 {
+		t.Fatalf("notices = %+v", got)
+	}
+	n := got[0]
+	if n.Action != UnusualSignInConfirm || n.Signals != gauntlet.SignalNewCountry || n.SessionRef != "" || n.Reason != "" ||
+		!n.ExpiresAt.Equal(e.clock.now().Add(ConfirmCodeLifetime)) || len(n.Code) != 9 || n.Code[4] != '-' {
+		t.Errorf("notice = %+v", n)
+	}
+	for i, r := range n.Code {
+		if i != 4 && (r < '0' || r > '9') {
+			t.Errorf("code %q is not eight digits", n.Code)
+		}
+	}
+	if strings.Contains(e.logText(), n.Code) || strings.Contains(e.logText(), strings.ReplaceAll(n.Code, "-", "")) {
+		t.Error("the code reached the log")
+	}
+}
+
+// The code completes the same sign-in, in any of its spellings, once.
+func TestUnusualConfirmCompletes(t *testing.T) {
+	for name, spell := range map[string]func(string) string{
+		"dashed":   func(c string) string { return c },
+		"undashed": func(c string) string { return strings.ReplaceAll(c, "-", "") },
+		"padded":   func(c string) string { return "  " + c + "\t" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, rec, b := confirmEnv(t)
+			if status, _ := e.signIn(t, b, addrParis); status != http.StatusOK {
+				t.Fatal("no challenge")
+			}
+			code := confirmCode(t, rec)
+			u, _ := url.Parse(e.ts.URL + loginConfirmPath)
+			ticket := b.jar.Cookies(u)
+			resp, status, body := e.postConfirm(t, b, addrParis, spell(code))
+			if status != http.StatusOK || !strings.Contains(body, `"username":"bob"`) {
+				t.Fatalf("confirm = %d %s", status, body)
+			}
+			if c := cookieNamed(resp, confirmLoginCookieName); c == nil || c.MaxAge >= 0 {
+				t.Error("the confirm cookie was not cleared")
+			}
+			if got := e.newestSession(t).Client.Unusual; got != gauntlet.SignalNewCountry {
+				t.Errorf("session signals = %q", got)
+			}
+			row := e.newestRow(t)
+			if row.Outcome != gauntlet.SignInSuccess || !row.Confirmed || row.Client.Unusual != gauntlet.SignalNewCountry || row.Method != gauntlet.SignInMethodPassword {
+				t.Errorf("row = %+v", row)
+			}
+			if entry, _ := e.lastAudit("user.login"); entry.Detail != `unusual=new-country; action=confirm; via confirmation code; from="`+addrParis+`"` {
+				t.Errorf("audit = %q", entry.Detail)
+			}
+			// Remembered: the next sign-in from Paris is quiet.
+			e.advance(time.Minute)
+			e.mustSignIn(t, b, addrParis)
+			e.expectSignals(t, 0)
+			// The same code again, with the old ticket put back.
+			b.jar.SetCookies(u, ticket)
+			if _, status, body := e.postConfirm(t, b, addrParis, code); status != http.StatusUnauthorized || problemType(t, body) != "step-expired" {
+				t.Errorf("the same code again = %d %s", status, body)
+			}
+		})
+	}
+}
+
+// A browser the account does not know (so with no known-browser
+// allowance to fall back on) guessing at the code.
+func TestUnusualConfirmWrongCodes(t *testing.T) {
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm})
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	e.advance(time.Hour)
+	b := newTestBrowser(t)
+	if status, _ := e.signIn(t, b, addrParis); status != http.StatusOK {
+		t.Fatal("no challenge")
+	}
+	code := strings.ReplaceAll(confirmCode(t, rec), "-", "")
+	wrong := "00000000"
+	if wrong == code {
+		wrong = "11111111"
+	}
+	for i := range 5 {
+		_, status, body := e.postConfirm(t, b, addrParis, wrong)
+		if status != http.StatusUnauthorized || problemType(t, body) != "invalid-credentials" || decodeProblem(t, []byte(body)).Detail != "invalid confirmation code" {
+			t.Fatalf("wrong code %d = %d %s", i+1, status, body)
+		}
+		if i == 0 {
+			row := e.newestRow(t)
+			if row.Outcome != gauntlet.SignInConfirmRefused || row.Method != gauntlet.SignInMethodCode {
+				t.Errorf("row = %+v", row)
+			}
+			if entry, _ := e.lastAudit("user.login_failed"); entry.Detail != `outcome=confirm_refused method=code from="`+addrParis+`"` {
+				t.Errorf("audit = %q", entry.Detail)
+			}
+		}
+	}
+	if u, _ := e.g.deps.Users.Get(e.bobID); !u.MustChangePassword {
+		t.Error("five wrong codes in a row did not force a password change")
+	}
+	if _, status, _ := e.postConfirm(t, b, addrParis, code); status != http.StatusTooManyRequests {
+		t.Errorf("the sixth attempt = %d, want 429", status)
+	}
+}
+
+func TestUnusualConfirmTicketChecks(t *testing.T) {
+	e, rec, b := confirmEnv(t)
+	if status, _ := e.signIn(t, b, addrParis); status != http.StatusOK {
+		t.Fatal("no challenge")
+	}
+	code := confirmCode(t, rec)
+	// Another browser holds no ticket.
+	if _, status, body := e.postConfirm(t, newTestBrowser(t), addrParis, code); status != http.StatusUnauthorized || problemType(t, body) != "step-expired" {
+		t.Errorf("from another browser = %d %s", status, body)
+	}
+	// login/factor with only the confirm cookie.
+	status, body := readAll(t, submitLoginFactor(t, b.at(addrParis), e.ts, "123456"))
+	if status != http.StatusUnauthorized || problemType(t, body) != "step-expired" {
+		t.Errorf("login/factor with a confirm cookie = %d %s", status, body)
+	}
+	// Malformed body.
+	resp := postJSON(t, b.at(addrParis), e.ts.URL+loginConfirmPath, map[string]any{"code": 5})
+	if status, _ := readAll(t, resp); status != http.StatusBadRequest {
+		t.Errorf("a bad body = %d", status)
+	}
+	// At fifteen minutes the ticket is dead.
+	e.advance(ConfirmCodeLifetime)
+	resp, status, body = e.postConfirm(t, b, addrParis, code)
+	if status != http.StatusUnauthorized || problemType(t, body) != "step-expired" {
+		t.Errorf("at 15 minutes = %d %s", status, body)
+	}
+	if c := cookieNamed(resp, confirmLoginCookieName); c == nil || c.MaxAge >= 0 {
+		t.Error("an expired ticket's cookie was not cleared")
+	}
+}
+
+// The notice is sent before the response: the response waits on it.
+func TestUnusualConfirmNoticeIsSynchronous(t *testing.T) {
+	e, rec, b := confirmEnv(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	rec.fail = func(context.Context) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	done := make(chan int, 1)
+	go func() {
+		resp, err := b.at(addrParis).Do(mustLoginRequest(t, e.ts.URL))
+		if err != nil {
+			done <- 0
+			return
+		}
+		_ = resp.Body.Close()
+		done <- resp.StatusCode
+	}()
+	<-entered
+	select {
+	case <-done:
+		t.Fatal("the response came back before the notifier returned")
+	default:
+	}
+	close(release)
+	if status := <-done; status != http.StatusOK {
+		t.Errorf("= %d", status)
+	}
+}
+
+func mustLoginRequest(t *testing.T, base string) *http.Request {
+	t.Helper()
+	body, _ := json.Marshal(credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
+	req, err := http.NewRequest(http.MethodPost, base+"/api/auth/login", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	return req
+}
+
+// A notifier that cannot take the code makes the attempt a block.
+func TestUnusualConfirmNotifyFailedBlocks(t *testing.T) {
+	for name, fail := range map[string]func(context.Context) error{
+		"error": func(context.Context) error { return errors.New("mailer down") },
+		"panic": func(context.Context) error { panic("mailer exploded") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, rec, b := confirmEnv(t)
+			rec.fail = fail
+			resp := postJSON(t, b.at(addrParis), e.ts.URL+"/api/auth/login", credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
+			if c := cookieNamed(resp, confirmLoginCookieName); c != nil {
+				t.Error("a ticket was set though no code was delivered")
+			}
+			checkRefused(t, e.g, resp)
+			if entry, _ := e.lastAudit("user.login_refused"); !strings.Contains(entry.Detail, "reason=notify-failed") {
+				t.Errorf("audit = %q", entry.Detail)
+			}
+			if !strings.Contains(e.logText(), "level=ERROR") {
+				t.Error("no error line")
+			}
+		})
+	}
+}
+
+// The factor step and the SSO callback confirm too.
+func TestUnusualConfirmFactorStep(t *testing.T) {
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm})
+	first := newTestBrowser(t)
+	e.mustSignIn(t, first, addrLondon)
+	_, codes, _ := totpEnrolAndConfirm(t, first.at(addrLondon), e.ts)
+	e.advance(time.Hour)
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	resp := submitLoginFactor(t, b.at(addrLondon), e.ts, codes[0])
+	if c := cookieNamed(resp, pendingLoginCookieName); c == nil || c.MaxAge >= 0 {
+		t.Error("the pending cookie was not cleared")
+	}
+	if status, body := readAll(t, resp); status != http.StatusOK || strings.TrimSpace(body) != `{"confirm":true}` {
+		t.Fatalf("= %d %s", status, body)
+	}
+	if _, status, body := e.postConfirm(t, b, addrLondon, confirmCode(t, rec)); status != http.StatusOK {
+		t.Fatalf("confirm = %d %s", status, body)
+	}
+	if row := e.newestRow(t); !row.Confirmed || row.Method != gauntlet.SignInMethodCode {
+		t.Errorf("row = %+v", row)
+	}
+}
+
+func TestUnusualConfirmSSO(t *testing.T) {
+	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	rec := &noticeRecorder{}
+	g.cfg.NotifyUnusualSignIn = rec
+	g.cfg.UnusualSignIns = UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm}
+	callback := func(jar http.CookieJar) *http.Response {
+		t.Helper()
+		fs, err := oidc.NewFlowState(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+		client := noRedirectClient()
+		client.Jar = jar
+		resp, err := client.Do(oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp
+	}
+	callback(mustCookieJar(t))
+	jar := mustCookieJar(t)
+	resp := callback(jar)
+	if resp.Header.Get("Location") != testLoginPath+"?confirm=1" {
+		t.Fatalf("redirect = %q", resp.Header.Get("Location"))
+	}
+	if cookieNamed(resp, confirmLoginCookieName) == nil || cookieNamed(resp, testCookieName) != nil {
+		t.Fatal("want the confirm cookie and no session cookie")
+	}
+	client := &http.Client{Jar: jar}
+	status, body := readAll(t, postJSON(t, client, ts.URL+loginConfirmPath, loginConfirmRequest{Code: confirmCode(t, rec)}))
+	if status != http.StatusOK {
+		t.Fatalf("confirm = %d %s", status, body)
+	}
+	if !sessionAuthenticated(t, client, ts) {
+		t.Error("no session after the code")
+	}
+}

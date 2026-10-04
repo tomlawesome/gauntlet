@@ -62,7 +62,9 @@ named under the class it shares, below.
 - Returned by: `POST /api/auth/register` (wrong or missing setup code),
   `POST /api/auth/login` (wrong username or password), `POST
   /api/auth/login/factor` (wrong authenticator code or recovery code, or
-  a refused passkey assertion), `POST /api/auth/unlock` (wrong admin
+  a refused passkey assertion), `POST /api/auth/login/confirm` (wrong
+  confirmation code, #55: "invalid confirmation code", one cause, no
+  pair), `POST /api/auth/unlock` (wrong admin
   username or unlock code), every route that re-checks the caller's own
   password or second factor before acting (`POST /api/auth/password`,
   `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST
@@ -122,7 +124,9 @@ named under the class it shares, below.
   secret was set more than ten minutes ago) and `POST
   /api/auth/recovery-codes/confirm` (the first factor was held for more
   than ten minutes without its recovery codes being confirmed, and has
-  been deleted) (#58).
+  been deleted) (#58), and `POST /api/auth/login/confirm` (the confirm
+  cookie: missing, expired, tampered with, already spent, or the account
+  was deleted since; #55).
 - A frontend restarts the flow from its first step -- there is nothing
   left for a retry at this step to complete.
 
@@ -237,7 +241,7 @@ named under the class it shares, below.
   in the current window. `detail` is always "too many attempts, try
   again later".
 - Returned by every rate-limited route: login, the second-factor step,
-  registration, the admin and lone-admin unlock routes, and every
+  the confirmation-code step (#55), registration, the admin and lone-admin unlock routes, and every
   password or second-factor re-check.
 
 ## setup-required

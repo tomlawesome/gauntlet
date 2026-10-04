@@ -312,8 +312,14 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// above, whose caller already holds a session.
 	place := g.placeOf(r, "")
 	verdict := g.judgeSignIn(r, user.ID, place, now)
-	if verdict.action == UnusualSignInBlock {
-		notice := g.refuseSignIn(r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict.signals, "policy", now)
+	if verdict.stopsSignIn() {
+		sent, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
+		if sent {
+			// The frontend asks for the code and posts it to
+			// login/confirm, which holds the ticket this set.
+			http.Redirect(w, r, g.cfg.LoginPath+"?confirm=1", http.StatusFound)
+			return
+		}
 		g.redirectWithSSOError(w, r, "refused")
 		g.notifyUnusualSignIn(r.Context(), notice)
 		return
