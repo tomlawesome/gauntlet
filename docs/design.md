@@ -1186,9 +1186,17 @@ once G4 is tagged.
   birdcage can `go get` the tag through the GitHub mirror (#17; owner,
   2026-09-29).
 - **B1 Storage backend and migration.** `0025_auth_store`,
-  `store.NewAuthBackend`, `VersionReader`. *Done when:* the persist
-  contract test (ported from mikroview `persist/contract_test.go`)
-  passes on SQLite and Postgres.
+  `store.NewAuthBackend`, `VersionReader`. *Done when:* gauntlet's
+  backend suite, `persist/persisttest` (#61), passes on SQLite and
+  Postgres -- no hand port of mikroview's `persist/contract_test.go`.
+  From birdcage's own test, with a fresh table per call:
+
+  ```go
+  persisttest.Run(t, func(t testing.TB) func() persist.Backend {
+  	table := newEmptyAuthTable(t)
+  	return func() persist.Backend { return store.NewAuthBackend(table.db, table.name) }
+  })
+  ```
 - **B2 Wire the gate.** `requireAuth` → `gate.Protect`; API tokens to
   `dashboardRoutes`; `g.Routes()`; env config; startup issuer check;
   `mailConfigured`-style plumbing for `Gate`. *Done when:* every
