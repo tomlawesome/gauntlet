@@ -178,7 +178,7 @@ var spentPendingLogins = spent.New(pendingLoginCookieMaxAge)
 func (g *Gate) pendingLogin(w http.ResponseWriter, r *http.Request, now time.Time) (pendingLoginState, bool) {
 	refuse := func() (pendingLoginState, bool) {
 		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+		writeUnauthorized(w, classStepExpired, "sign in again")
 		return pendingLoginState{}, false
 	}
 	cookie, err := r.Cookie(pendingLoginCookieName)

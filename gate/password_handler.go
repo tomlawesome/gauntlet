@@ -19,13 +19,13 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	var req changePasswordRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -33,7 +33,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// one here would quietly create a second way into an account whose
 	// owner believes it is federated.
 	if !user.LocalPassword() {
-		http.Error(w, "this account signs in through your identity provider and has no local password to change", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account signs in through your identity provider and has no local password to change", nil)
 		return
 	}
 
@@ -53,7 +53,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.NewPassword == req.CurrentPassword {
-			http.Error(w, "the new password is the same as the current one", http.StatusBadRequest)
+			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "the new password is the same as the current one", nil)
 			return
 		}
 	}
@@ -63,16 +63,16 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if err := g.deps.Users.SetPassword(user.Username, req.NewPassword, now); err != nil {
 		switch err {
 		case gauntlet.ErrPasswordTooShort:
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeProblem(w, http.StatusBadRequest, classInvalidRequest, err.Error(), nil)
 			return
 		case gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext:
-			g.writeAuthError(w, r, err, http.StatusBadRequest)
+			g.writeAuthError(w, r, err, http.StatusBadRequest, classInvalidRequest)
 			return
 		}
 		// The 500 tells the caller nothing by design; the log is the
 		// only place an operator can find out why.
 		g.logError("changing the password for " + user.Username + ": " + err.Error())
-		http.Error(w, "could not change the password", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "could not change the password", nil)
 		return
 	}
 
@@ -109,13 +109,13 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) recheckPassword(w http.ResponseWriter, r *http.Request, user *gauntlet.User, password, wrongMsg string, now time.Time) (*gauntlet.User, bool) {
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
 		g.recheckRefused(r, user)
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return nil, false
 	}
 	current, err := g.deps.Users.Authenticate(user.Username, password, now)
 	if err != nil {
 		g.recheckFailed(r, user, gauntlet.SignInWrongPassword, gauntlet.SignInMethodPassword)
-		writeUnauthorized(w, wrongMsg)
+		writeUnauthorized(w, classInvalidCredentials, wrongMsg)
 		return nil, false
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
@@ -142,7 +142,7 @@ func (g *Gate) recheckPassword(w http.ResponseWriter, r *http.Request, user *gau
 func (g *Gate) recheckSecondFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, code, wrongMsg string, now time.Time) bool {
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
 		g.recheckRefused(r, user)
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return false
 	}
 	matched, err := g.deps.Users.VerifyAndRecordTOTP(user.ID, code, now)
@@ -152,12 +152,12 @@ func (g *Gate) recheckSecondFactor(w http.ResponseWriter, r *http.Request, user 
 	if err != nil {
 		g.deps.Limiter.ReleaseRecheck(user.ID, now)
 		g.logError("re-checking the second factor of " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to check the code", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to check the code", nil)
 		return false
 	}
 	if !matched {
 		g.recheckFailed(r, user, gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode)
-		writeUnauthorized(w, wrongMsg)
+		writeUnauthorized(w, classInvalidCredentials, wrongMsg)
 		return false
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
@@ -189,6 +189,6 @@ func (g *Gate) refuseProductName(w http.ResponseWriter, r *http.Request, passwor
 	if !gauntlet.PasswordMatchesContext(password, g.cfg.ProductName) {
 		return false
 	}
-	g.writeAuthError(w, r, gauntlet.ErrPasswordContext, http.StatusBadRequest)
+	g.writeAuthError(w, r, gauntlet.ErrPasswordContext, http.StatusBadRequest, classInvalidRequest)
 	return true
 }

@@ -1008,8 +1008,8 @@ func TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits(t *testing.T
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("register/finish with a failing mint returned %d, want 500: %s", resp.StatusCode, body)
 	}
-	if want := "the passkey is now active, but recovery codes could not be saved"; !strings.HasPrefix(string(body), want) {
-		t.Errorf("body = %q, want it to start %q", body, want)
+	if want := "the passkey is now active, but recovery codes could not be saved"; !strings.Contains(string(body), want) {
+		t.Errorf("body = %q, want it to carry %q as detail", body, want)
 	}
 	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
 		t.Fatal("the passkey was not added -- the save budget failed AddPasskey itself, so this test proves nothing")

@@ -623,13 +623,13 @@ func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
 		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500: %s", resp.StatusCode, raw)
 	}
 	var body struct {
-		Error      string `json:"error"`
+		Detail     string `json:"detail"`
 		TOTPActive bool   `json:"totpActive"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("the 500 body is not JSON: %v: %s", err, raw)
 	}
-	if !body.TOTPActive || body.Error == "" {
-		t.Errorf("the 500 body = %+v, want totpActive true and an error message", body)
+	if !body.TOTPActive || body.Detail == "" {
+		t.Errorf("the 500 body = %+v, want totpActive true and a detail message", body)
 	}
 }

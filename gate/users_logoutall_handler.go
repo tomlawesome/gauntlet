@@ -70,21 +70,21 @@ func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req adminLogoutAllRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	if !validSessionEndReason(req.Reason) {
-		http.Error(w, fmt.Sprintf("the reason must be at most %d characters of plain text", MaxSessionEndReason), http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, fmt.Sprintf("the reason must be at most %d characters of plain text", MaxSessionEndReason), nil)
 		return
 	}
 	caller := UserFromContext(r)
 	if caller != nil && caller.ID == id {
-		http.Error(w, "use sign out everywhere for your own sessions", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "use sign out everywhere for your own sessions", nil)
 		return
 	}
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
-		http.Error(w, "no such user", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
 		return
 	}
 

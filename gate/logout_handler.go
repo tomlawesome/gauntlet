@@ -30,7 +30,7 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
 	user, ok := g.sessionUser(r, now)
 	if !ok {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
