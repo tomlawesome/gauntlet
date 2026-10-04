@@ -214,3 +214,74 @@ Generate a new pair (step 1) and commit the new `.pub` beside the old
 one; release. Put the new `.key` beside the old one in
 `/etc/gauntlet-signing/`, so each run signs with both. A release later,
 remove the old `.pub` and the old `.key`.
+
+## Dependency updates (Renovate)
+
+Once a week Renovate compares everything gauntlet pins with its newest
+release and opens a merge request to `dev` for whatever is behind
+(#63): the Go modules in `go.mod` and `gate/contracttest/go.mod`, the
+Go and Alpine images and Renovate's own image in `.gitlab-ci.yml`, and
+the tools CI installs at fixed versions (golangci-lint, govulncheck,
+gitleaks, go-licenses). Every non-major update arrives together in one
+merge request; a major one arrives on its own. A security fix from the
+OSV advisory database opens a merge request straight away rather than
+waiting for Monday. What it watches and why is in `renovate.json`; the
+`renovate` job in `.gitlab-ci.yml` runs it; both are copied from
+orbit's.
+
+Renovate only opens merge requests. Each one runs the normal pipeline
+and is merged by hand like any other. The apidiff tool is the one pin
+it does not watch: `renovate.json` says why.
+
+### Setup the owner does once
+
+Nothing runs until these four steps are done, and an assistant cannot
+do any of them: they create credentials and change project settings.
+
+**1. A GitLab token for Renovate.** In
+[Settings > Access tokens](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/access_tokens),
+add a project access token: name `renovate`, role **Developer**, scope
+**api**, and an expiry with a calendar reminder. Renovate acts on the
+project with this token: `api` is what lets it push its branches and
+open merge requests (a `read_api` token could look but never write),
+and Developer is the lowest role that can push a branch. A project
+token is limited to this one project.
+
+**2. A GitHub token for reading release notes.** Create a
+[fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
+with *Repository access: Public repositories* and no permissions at
+all. Most of gauntlet's modules and tools live on github.com, and
+Renovate reads their tags and release notes there. GitHub allows only
+60 unauthenticated requests an hour, so without a token a run stops
+partway through; with no permissions the token can read only what
+anyone can.
+
+**3. The two tokens as CI/CD variables.** In
+[Settings > CI/CD > Variables](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/ci_cd),
+add `RENOVATE_TOKEN` (the GitLab token) and `GITHUB_COM_TOKEN` (the
+GitHub token), each with **Masked** and **Protected** ticked. Masked
+keeps the value out of job logs. Protected hands it only to pipelines
+on protected branches: the schedule below runs on `dev`, which is
+protected, and no merge request pipeline ever sees either token.
+
+**4. The schedule.** In
+[Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules),
+create a schedule: description `renovate`, target branch `dev`, cron
+`7 5 * * 1` with cron timezone **London** (05:07 every Monday), and a
+variable `RENOVATE` = `true`. The time matters: `renovate.json` lets
+Renovate open merge requests only between 05:00 and 06:15 London time
+on a Monday, so a run at any other time finds nothing it may do. The
+variable is what picks the `renovate` job: every other job stays out of
+scheduled pipelines.
+
+For the first run, give the schedule a second variable
+`RENOVATE_DRY_RUN` = `full`. That Monday's `renovate` job then reports
+what it would do and creates nothing: its log should end without
+errors, with a `DRY-RUN: Would create branch` line for each merge
+request it would open, and no warning about a dependency it could not
+look up. Then delete `RENOVATE_DRY_RUN`; the next Monday's run opens
+merge requests.
+
+If a run fails at start-up after Renovate bumped its own image, revert
+that bump and add the version to the `renovate/renovate` rule in
+`renovate.json`.

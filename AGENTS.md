@@ -52,6 +52,12 @@ list's two (#52, ADR-0007): `blocklist:sign` on `gauntlet-signing`
 Both are protected, locked to this project, and set up by the owner
 (docs/releasing.md); no other job may use those tags.
 
+## Dependency updates
+
+Renovate (#63): `renovate.json`, the `renovate` job and a weekly schedule
+on `dev` with `RENOVATE=true` (owner setup: docs/releasing.md). Go
+versions are looked up from Git hosts (`GOPROXY=direct`), never the proxy.
+
 ## Closing issues from commits
 
 Same trap as birdcage: GitLab treats `Implements`/`Closes`/`Fixes` next to
@@ -74,6 +80,8 @@ contract module. For #54 (owner 2026-10-04):
 to read MaxMind and IPinfo country files, and `github.com/maxmind/mmdbwriter`
 v1.2.0 (Apache-2.0 or MIT) in `geoip/` tests only, to build their fixture
 files (it brings `go4.org/netipx`). Anything else goes to the owner first.
+A linked module's embedded files and vendored code without its own
+licence need an owner-recorded `go-bundled-assets:` review (#64).
 
 ## Checks
 

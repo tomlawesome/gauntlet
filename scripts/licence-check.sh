@@ -4,8 +4,16 @@ set -euo pipefail
 # Gates the licences of the Go modules gauntlet imports -- what
 # `go build ./...` actually ships, not build- or test-only tooling.
 # Copied from birdcage's scripts/licence-check.sh, unchanged apart from
-# the module path below; kept host independent for the same reason
-# birdcage's is.
+# the module path below and the second check at the end; kept host
+# independent for the same reason birdcage's is.
+#
+# Two checks. go-licenses gives every linked package the licence of the
+# nearest licence file above it and holds that to allow-licenses -- which
+# covers vendored code that carries its own licence file. Then
+# scripts/licence-check-bundled.py looks inside the same modules for what
+# go-licenses cannot see (#64): vendored code with no licence file of its
+# own, and files embedded with //go:embed. Each needs a recorded review
+# under go-bundled-assets: in the policy file.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 POLICY_FILE="${POLICY_FILE:-$SCRIPT_DIR/../supply-chain/licence-policy.yml}"
@@ -52,3 +60,5 @@ GOTOOLCHAIN="$(go env GOVERSION)" go install "github.com/google/go-licenses/v2@$
 go-licenses check ./... \
   --ignore github.com/tomlawesome/gauntlet \
   --allowed_licenses="$ALLOWED_LICENSES"
+
+python3 "$SCRIPT_DIR/licence-check-bundled.py" "$POLICY_FILE" ./...

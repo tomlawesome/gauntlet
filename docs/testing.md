@@ -9,11 +9,11 @@ has to meet.
 | --- | --- | --- |
 | Go unit and package tests | `go test ./... -race` | `test:go` |
 | Static checks | `go vet`, `gofmt`, `golangci-lint` | `lint:go` |
-| Licence gate | `go-licenses` against `supply-chain/licence-policy.yml` | `lint:licences` |
+| Licence gate | `go-licenses` against `supply-chain/licence-policy.yml`, then `scripts/licence-check-bundled.py` for vendored code and embedded files in the same modules (its own cases: `scripts/licence-check_test.sh`, run by hand) | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
 | HTTP contract | `gate/contracttest` (its own Go module) against `docs/api/auth.yaml` | `test:contract` |
-| Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag | `lint:apidiff` |
+| Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag (its own cases: `scripts/apidiff_test.sh`, run by hand) | `lint:apidiff` |
 | Common-password list age | `scripts/blocklist-age-check.sh` (its own cases: `scripts/blocklist-age-check_test.sh`, run by hand) | `release:version` |
 
 There is no frontend, no shipped image and no live-stack e2e stage here
@@ -86,9 +86,10 @@ itself, which ADR-0002 allows only in a new major version.
   number in `VERSION` (0.x.y to 1.0.0). A minor bump such as 0.1 to 0.2
   is not enough. `scripts/apidiff.sh [BASE_REF]` compares the module's
   exported API with the newest `v*` tag reachable from `HEAD` (or
-  `BASE_REF`), using `golang.org/x/exp/cmd/apidiff` via `go run` at a
-  pinned pseudo-version, never in `go.mod`. Internal packages are
-  skipped.
+  `BASE_REF`), using `golang.org/x/exp/cmd/apidiff` at a pinned
+  pseudo-version, installed into a temporary directory and never in
+  `go.mod`. Internal packages are skipped. The script fails if `go.mod`
+  or `go.sum` changed while it ran (#62).
 
 What each check fails on:
 
