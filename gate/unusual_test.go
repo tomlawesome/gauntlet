@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -432,6 +433,7 @@ func TestUnusualPolicyChecks(t *testing.T) {
 		{"ok: impossible travel off with no Locate", UnusualSignInPolicy{ImpossibleTravel: UnusualSignInOff}, false, ""},
 		{"ok: nothing set, no Locate", UnusualSignInPolicy{}, false, ""},
 		{"ok: off", UnusualSignInPolicy{Action: UnusualSignInOff, NewCountry: UnusualSignInFlag}, true, ""},
+		{"ok: block", UnusualSignInPolicy{Action: UnusualSignInBlock, ImpossibleTravel: UnusualSignInBlock}, true, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := Config{
@@ -787,5 +789,209 @@ func TestUnusualFailedRememberTellsNobody(t *testing.T) {
 	backend.left = -1
 	if got := e.notices(rec); len(got) != 0 {
 		t.Errorf("a sign-in whose memory write failed told the application: %+v", got)
+	}
+}
+
+// wantRefusedDetail is the sign-in-refused class's one detail, as the
+// design words it.
+const wantRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+
+// cookieNamed is the cookie resp sets under name, or nil.
+func cookieNamed(resp *http.Response, name string) *http.Cookie {
+	for _, c := range resp.Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// checkRefused checks resp is the sign-in-refused 403 with no session or
+// known-browser cookie and no X-Auth-Gate.
+func checkRefused(t *testing.T, g *Gate, resp *http.Response) {
+	t.Helper()
+	status, body := readAll(t, resp)
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d %s, want 403", status, body)
+	}
+	p := decodeProblem(t, []byte(body))
+	if p.Type != problemTypeBase+"sign-in-refused" || p.Title != "Sign-in refused" || p.Detail != wantRefusedDetail {
+		t.Errorf("problem = %+v", p)
+	}
+	if strings.Contains(body, "new-") || strings.Contains(body, "impossible") {
+		t.Errorf("the refusal says which signal: %s", body)
+	}
+	if resp.Header.Get(authGateHeader) != "" {
+		t.Errorf("X-Auth-Gate = %q on a refusal", resp.Header.Get(authGateHeader))
+	}
+	if c := cookieNamed(resp, g.sessionCookieName()); c != nil && c.MaxAge >= 0 {
+		t.Errorf("a session cookie was set: %+v", c)
+	}
+	if c := cookieNamed(resp, knownBrowserCookieName); c != nil {
+		t.Errorf("a known-browser cookie was set: %+v", c)
+	}
+}
+
+func TestUnusualBlockOneStep(t *testing.T) {
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{NewCountry: UnusualSignInBlock})
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	// A lockout, so there is a count of lockouts a sign-in would reset.
+	for range 5 {
+		_ = postJSON(t, newTestBrowser(t).at(addrPrivate), e.ts.URL+"/api/auth/login",
+			credentialsRequest{Username: totpBobUsername, Password: "wrong-password-placeholder"}).Body.Close()
+	}
+	e.advance(time.Hour)
+	u, _ := e.g.deps.Users.Get(e.bobID)
+	if u.LoginLockoutCount == 0 {
+		t.Fatal("precondition: no lockout counted")
+	}
+	before, _ := e.g.deps.Users.Get(e.bobID)
+	sessionsBefore := len(e.g.deps.Sessions.ListForUser(e.bobID, e.clock.now()))
+
+	// Six refusals in a row from one address: each attempt is handed
+	// back, so none is ever 429.
+	for i := range 6 {
+		resp := postJSON(t, b.at(addrParis), e.ts.URL+"/api/auth/login",
+			credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
+		if i == 0 {
+			checkRefused(t, e.g, resp)
+		} else if status, body := readAll(t, resp); status != http.StatusForbidden {
+			t.Fatalf("refusal %d = %d %s", i+1, status, body)
+		}
+	}
+	if n := len(e.g.deps.Sessions.ListForUser(e.bobID, e.clock.now())); n != sessionsBefore {
+		t.Errorf("a refusal issued a session: %d, was %d", n, sessionsBefore)
+	}
+	after, _ := e.g.deps.Users.Get(e.bobID)
+	if after.LoginLockoutCount != before.LoginLockoutCount {
+		t.Errorf("lockout count %d after refusals, was %d: a refusal reset it", after.LoginLockoutCount, before.LoginLockoutCount)
+	}
+	if len(after.SeenCountries) != 1 || after.SeenCountries[0].Code != "GB" || len(after.KnownBrowsers) != 1 {
+		t.Errorf("a refusal was remembered: %+v %+v", after.SeenCountries, after.KnownBrowsers)
+	}
+	row := e.newestRow(t)
+	if row.Outcome != gauntlet.SignInRefused || row.Client.Unusual != gauntlet.SignalNewCountry || row.Method != gauntlet.SignInMethodPassword {
+		t.Errorf("history row = %+v", row)
+	}
+	entry, ok := e.lastAudit("user.login_refused")
+	if !ok || entry.Actor != totpBobUsername || entry.Target != totpBobUsername ||
+		entry.Detail != `unusual=new-country; reason=policy; method=password; notify=quiet; from="`+addrParis+`"` {
+		t.Errorf("user.login_refused = %+v", entry)
+	}
+	got := e.notices(rec)
+	if len(got) != 1 || got[0].Action != UnusualSignInBlock || got[0].Reason != "policy" || got[0].SessionRef != "" ||
+		got[0].Signals != gauntlet.SignalNewCountry || got[0].Client.Country != "FR" {
+		t.Errorf("notices = %+v, want one block notice (the hourly rate holds the rest)", got)
+	}
+
+	// The real owner, from a place the account trusts, gets in.
+	e.mustSignIn(t, b, addrLondon)
+	if u, _ := e.g.deps.Users.Get(e.bobID); u.LoginLockoutCount != 0 {
+		t.Errorf("a completed sign-in left the lockout count at %d", u.LoginLockoutCount)
+	}
+
+	// After an admin's reset code, the refused place sets the baseline.
+	admin := e.adminNow(t)
+	resp := postJSON(t, admin, e.ts.URL+"/api/auth/users/"+e.bobID+"/reset-password", nil)
+	status, body := readAll(t, resp)
+	if status != http.StatusOK {
+		t.Fatalf("reset = %d %s", status, body)
+	}
+	var reset resetPasswordResponse
+	if err := json.Unmarshal([]byte(body), &reset); err != nil {
+		t.Fatal(err)
+	}
+	status, body = readAll(t, postJSON(t, newTestBrowser(t).at(addrParis), e.ts.URL+"/api/auth/login",
+		credentialsRequest{Username: totpBobUsername, Password: reset.Code}))
+	if status != http.StatusOK {
+		t.Fatalf("sign-in with the reset code from Paris = %d %s", status, body)
+	}
+	e.expectSignals(t, 0)
+}
+
+// The pending cookie is cleared, and the pending login is spent: one
+// correct code yields one refusal, never a refusal and a session.
+func TestUnusualBlockFactorStep(t *testing.T) {
+	e, _ := newNotifiedEnv(t, UnusualSignInPolicy{NewBrowser: UnusualSignInBlock})
+	first := newTestBrowser(t)
+	e.mustSignIn(t, first, addrLondon)
+	_, codes, _ := totpEnrolAndConfirm(t, first.at(addrLondon), e.ts)
+	e.advance(time.Hour)
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon) // password step
+	resp := submitLoginFactor(t, b.at(addrLondon), e.ts, codes[0])
+	if c := cookieNamed(resp, pendingLoginCookieName); c == nil || c.MaxAge >= 0 {
+		t.Errorf("the pending cookie was not cleared: %+v", c)
+	}
+	checkRefused(t, e.g, resp)
+	if row := e.newestRow(t); row.Outcome != gauntlet.SignInRefused || row.Method != gauntlet.SignInMethodCode || row.Client.Unusual != gauntlet.SignalNewBrowser {
+		t.Errorf("row = %+v", row)
+	}
+	// Replaying the pending cookie the browser had is step-expired.
+	replay := newTestBrowser(t)
+	e.mustSignIn(t, replay, addrLondon)
+	u, _ := url.Parse(e.ts.URL + loginFactorPath)
+	pending := replay.jar.Cookies(u)
+	resp = submitLoginFactor(t, replay.at(addrLondon), e.ts, codes[1])
+	checkRefused(t, e.g, resp)
+	replay.jar.SetCookies(u, pending)
+	status, body := readAll(t, submitLoginFactor(t, replay.at(addrLondon), e.ts, codes[2]))
+	if status != http.StatusUnauthorized || decodeProblem(t, []byte(body)).Type != problemTypeBase+"step-expired" {
+		t.Errorf("a replayed pending login after a refusal = %d %s, want step-expired", status, body)
+	}
+}
+
+func TestUnusualBlockSSO(t *testing.T) {
+	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	g.cfg.Audit = &auditRecorder{}
+	g.cfg.UnusualSignIns = UnusualSignInPolicy{NewBrowser: UnusualSignInBlock}
+	callback := func() *http.Response {
+		t.Helper()
+		fs, err := oidc.NewFlowState(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+		client := noRedirectClient()
+		client.Jar = mustCookieJar(t)
+		resp, err := client.Do(oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp
+	}
+	if resp := callback(); resp.Header.Get("Location") != "/" {
+		t.Fatalf("the first SSO sign-in went to %q", resp.Header.Get("Location"))
+	}
+	resp := callback()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != testLoginPath+"?ssoError=refused" {
+		t.Errorf("a refused SSO sign-in = %d to %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if c := cookieNamed(resp, testCookieName); c != nil && c.MaxAge >= 0 {
+		t.Errorf("a refused SSO sign-in set a session cookie")
+	}
+	if entry := findAuditEntry(t, g, "user.login_refused"); !strings.HasPrefix(entry.Detail, "unusual=new-browser; reason=policy; method=sso; from=") {
+		t.Errorf("user.login_refused = %q", entry.Detail)
+	}
+}
+
+// block and flag share one hourly rate per account.
+func TestUnusualBlockSharesTheRate(t *testing.T) {
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{NewCountry: UnusualSignInBlock})
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	e.advance(time.Hour)
+	e.mustSignIn(t, newTestBrowser(t), addrLondon) // new-browser: flag, notice sent
+	status, _ := e.signIn(t, b, addrParis)         // new-country: block, held
+	if status != http.StatusForbidden {
+		t.Fatalf("= %d", status)
+	}
+	if got := e.notices(rec); len(got) != 1 || got[0].Action != UnusualSignInFlag {
+		t.Errorf("notices = %+v, want the flag one only", got)
+	}
+	if entry, _ := e.lastAudit("user.login_refused"); !strings.Contains(entry.Detail, "notify=quiet") {
+		t.Errorf("the held block notice = %q", entry.Detail)
 	}
 }

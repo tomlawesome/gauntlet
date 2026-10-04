@@ -326,7 +326,38 @@ func TestContractEveryRoute(t *testing.T) {
 	contractNoStorage(t, c)
 	contractPasskeys(t, c)
 	contractUnlockCode(t, c)
+	contractUnusualSignIns(t, c)
 	c.requireEveryOperationDriven()
+}
+
+// contractUnusualSignIns covers the unusual-sign-in answers (#55) on a
+// gate whose policy blocks a new browser: the password step and the
+// second-factor step each answer 403 sign-in-refused, with no
+// X-Auth-Gate header.
+func contractUnusualSignIns(t *testing.T, c *contractChecker) {
+	users, code := openStore(t, persist.NewMemory())
+	g := newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInBlock}
+	})
+	ts := newTestServer(t, g)
+	u := ts.URL
+	const adminPass = "contract-admin-password"
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+
+	refused := func(resp *http.Response) {
+		t.Helper()
+		if resp.Header.Get("X-Auth-Gate") != "" {
+			t.Errorf("a refused sign-in carries X-Auth-Gate %q", resp.Header.Get("X-Auth-Gate"))
+		}
+	}
+	stranger := c.client()
+	refused(c.do(stranger, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 403, nil))
+
+	recovery := enrolTOTPFactor(t, c, u, admin, adminPass)
+	stranger = c.client()
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+	refused(c.do(stranger, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery[0]}}, 403, nil))
 }
 
 // contractNoStorage covers the 503 an admin gets creating an account

@@ -311,6 +311,15 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// session exists.
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user.ID, place, now)
+	if verdict.action == UnusualSignInBlock {
+		g.releaseLogin(res, now)
+		g.endAfterReset(res)
+		g.clearPendingLoginCookie(w)
+		notice := g.refuseSignIn(r, user, res, gauntlet.SignInMethodPassword, place, verdict.signals, "policy", now)
+		writeSignInRefused(w)
+		g.notifyUnusualSignIn(r.Context(), notice)
+		return
+	}
 
 	// A leftover pending-login cookie from an earlier, abandoned attempt
 	// (this account or another one on the same browser) has no bearing
@@ -450,7 +459,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // pending login, release the reservations a wrong guess would have kept
 // and reset the account's count (completeLogin), drop the pending
 // cookie, and issue the real session handleLogin withheld. It reports
-// whether it did. method is how the second factor was presented.
+// whether every credential was accepted. method is how the second
+// factor was presented.
 //
 // The pending login is claimed first, under spentPendingLogins' lock, so
 // of two completions racing on one cookie exactly one wins (ruling R2 on
@@ -459,6 +469,10 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // pendingLoginCookieMaxAge -- the same expiry pendingLoginCodec.decode
 // refuses the cookie at, so the claim and the decode share one expiry by
 // construction, on the same wall clock.
+//
+// It also reports true when the unusual-sign-in policy refused the
+// sign-in (#55): every credential was right, so the passkey begin
+// step's reservation is handed back as for a success.
 func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) bool {
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
@@ -470,6 +484,17 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// session exists.
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user.ID, place, now)
+	if verdict.action == UnusualSignInBlock {
+		// The pending login is already spent above, so one correct code
+		// yields one refusal, never a refusal and then a session.
+		g.releaseLogin(res, now)
+		g.endAfterReset(res)
+		g.clearPendingLoginCookie(w)
+		notice := g.refuseSignIn(r, user, res, method, place, verdict.signals, "policy", now)
+		writeSignInRefused(w)
+		g.notifyUnusualSignIn(r.Context(), notice)
+		return true
+	}
 	g.completeLogin(res, now)
 	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)

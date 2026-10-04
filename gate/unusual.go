@@ -188,7 +188,6 @@ func checkUnusualPolicy(cfg Config) error {
 			}
 			return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which needs Config.NotifyUnusualSignIn to deliver the code", f.name)
 		case UnusualSignInBlock:
-			return fmt.Errorf("gate: Config.UnusualSignIns.%s is block, which this build does not support yet", f.name)
 		default:
 			return fmt.Errorf("gate: Config.UnusualSignIns.%s is %q; want %q, %q, %q or %q",
 				f.name, f.a, UnusualSignInOff, UnusualSignInFlag, UnusualSignInConfirm, UnusualSignInBlock)
@@ -329,5 +328,46 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 		UserID: user.ID, Username: user.Username, Role: user.Role,
 		Action: v.action, Signals: signals, Method: method, Client: sess.Client, At: now,
 		SessionRef: sess.Ref(),
+	}
+}
+
+// signInRefusedDetail is the sign-in-refused class's one detail. It
+// never says which signal was raised or whether a code would have been
+// sent.
+const signInRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+
+// writeSignInRefused answers a refused sign-in: 403 sign-in-refused,
+// with no X-Auth-Gate header, which marks a session stopped at a door,
+// and no session exists here.
+func writeSignInRefused(w http.ResponseWriter) {
+	writeProblem(w, http.StatusForbidden, classSignInRefused, signInRefusedDetail, nil)
+}
+
+// refuseSignIn is block: one attempt refused, never the account. The
+// caller has handed the limiter back (releaseLogin: the credential was
+// right, so it is no failure to count, and nothing completed, so the
+// account's count is not reset) and cleared the pending cookie; nothing
+// is written to the account and no cookie is set. This records the
+// refused row with the signals and user.login_refused, and returns the
+// notice to send once the response is written, nil for none. reason is
+// policy, or why a Decide or the confirm notice failed.
+func (g *Gate) refuseSignIn(r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, reason string, now time.Time) *UnusualSignInNotice {
+	ev := loginEvent(user, "", gauntlet.SignInRefused, method)
+	ev.Client.Unusual = signals
+	note := fmt.Sprintf("unusual=%s; reason=%s; method=%s; ", signals, reason, method)
+	notify := g.noticeAllowed(user.ID, now)
+	if notify != "" {
+		note += "notify=" + notify + "; "
+	}
+	g.recordSignInNote(r, ev, res, note, now)
+	if notify != "asked" {
+		return nil
+	}
+	client := place.client
+	client.Unusual = signals
+	return &UnusualSignInNotice{
+		UserID: user.ID, Username: user.Username, Role: user.Role,
+		Action: UnusualSignInBlock, Signals: signals, Method: method, Client: client, At: now,
+		Reason: reason,
 	}
 }

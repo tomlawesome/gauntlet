@@ -175,7 +175,7 @@ type problemClass struct {
 // "type" member.
 const problemTypeBase = "https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#"
 
-// The fifteen classes docs/api/errors.md documents, one var each --
+// The sixteen classes docs/api/errors.md documents, one var each --
 // Go has no constant struct literal, so these stand in for the
 // constants the design calls for: built once at package load and never
 // written to again.
@@ -195,6 +195,9 @@ var (
 	classNotPersisted       = problemClass{"not-persisted", "No persistent storage"}
 	classServerError        = problemClass{"server-error", "Server error"}
 	classPartiallyCompleted = problemClass{"partially-completed", "Partly completed"}
+	// classSignInRefused (#55) is every credential right and the
+	// attempt refused by the account's unusual-sign-in policy (block).
+	classSignInRefused = problemClass{"sign-in-refused", "Sign-in refused"}
 )
 
 // writeProblem writes an RFC 9457 application/problem+json body: type

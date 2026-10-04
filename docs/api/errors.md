@@ -144,6 +144,23 @@ named under the class it shares, below.
 - Returned by `gate.Protect` and `gate.RequireRole` (and so every
   admin-only route under `Routes`).
 
+## sign-in-refused
+
+- **Status:** 403. **Title:** Sign-in refused.
+- Every credential was right, and the account's sign-in policy refused
+  the attempt from this browser or place (#55: the application set an
+  unusual sign-in to `block`, or its own check could not be run).
+  Retrying from the same browser and place changes nothing; the account
+  itself is not locked.
+- Returned by `POST /api/auth/login` and `POST /api/auth/login/factor`.
+  The SSO callback redirects with `ssoError=refused` instead.
+- `detail` is always "this sign-in was refused by the account's sign-in
+  policy -- use a browser or place this account has signed in from
+  before, or ask an administrator to reset the account". It never says
+  which signal was raised, or whether a code would have been sent.
+- No `X-Auth-Gate` header: that header marks a session stopped at a
+  door, and no session exists here.
+
 ## must-change-password
 
 - **Status:** 403. **Title:** Password change required.
