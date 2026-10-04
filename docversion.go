@@ -44,6 +44,12 @@ import (
 // that wrote it recorded when the secret was set. Enrolling again is
 // all that costs. A build that reads up to version 6 refuses a
 // version-7 document rather than drop an enrolment on hold.
+// Version 8 (#55) added User.SeenCountries and User.LastPlace, what
+// unusual sign-ins are judged against; an older document reads them as
+// nothing remembered, which is what it meant, and since each signal is
+// raised only against something remembered, the first sign-in after
+// the upgrade sets the baseline and raises nothing. A build that reads
+// up to version 7 refuses a version-8 document rather than drop them.
 //
 // The sign-in history (#53, signins.go) is the third document, version 1
 // from its first release: {"version":1,"nextSeq":n,"rows":[...]}, and
@@ -57,7 +63,7 @@ import (
 // version 6, numbered on its own track since the two documents'
 // versions have never moved together.
 const (
-	accountsDocumentVersion = 7
+	accountsDocumentVersion = 8
 	tokensDocumentVersion   = 2
 	signInsDocumentVersion  = 2
 )
