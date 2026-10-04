@@ -28,6 +28,9 @@ const (
 	// drops the Authorization header on that hop to another host, as
 	// it should. The body is a .tar.gz holding one .mmdb.
 	maxmindURL = "https://download.maxmind.com/geoip/databases/GeoLite2-Country/download?suffix=tar.gz"
+	// maxmindCityURL is GeoLite2-City (EditionCity): the same account,
+	// key, basic auth, redirect and archive shape.
+	maxmindCityURL = "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
 	// ipinfoURL takes ?token=. The token rides in the URL, so every
 	// string made from a request to it goes through cleanErr and
 	// redact. The body is a bare .mmdb, possibly gzip-wrapped.

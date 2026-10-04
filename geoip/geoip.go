@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/oschwald/maxminddb-golang/v2"
+	"github.com/tomlawesome/gauntlet"
 )
 
 // Source names the provider a Manager downloads from. The operator
@@ -25,6 +26,22 @@ const (
 	// SourceIPinfo is IPinfo Lite. It needs an IPinfo token
 	// (Config.IPinfo).
 	SourceIPinfo Source = "ipinfo"
+)
+
+// Edition names which of a source's files a Manager keeps: the country
+// file every source has, or MaxMind's larger city file, which also
+// carries a location for each address (#55).
+type Edition string
+
+const (
+	// EditionCountry is the default: GeoLite2-Country, or IPinfo Lite.
+	// Country answers; Locate never does.
+	EditionCountry Edition = "country"
+	// EditionCity is GeoLite2-City: MaxMind only, since IPinfo Lite has
+	// no coordinates. Country answers from it exactly as from the
+	// Country file, and Locate answers too, which impossible travel
+	// needs (gate.Config.Locate).
+	EditionCity Edition = "city"
 )
 
 // MaxMindKey is what MaxMind's download needs: the account ID and a
@@ -64,7 +81,14 @@ type Config struct {
 	// file, its own sealed settings); gauntlet never stores them.
 	MaxMind MaxMindKey
 	IPinfo  IPinfoKey
-	// Dir is where the last good file is kept, as <Source>.mmdb beside
+	// Edition is which file to keep. "" means EditionCountry;
+	// EditionCity needs SourceMaxMind. The City file is kept as
+	// maxmind-city.mmdb, beside rather than over a Country file, and
+	// only the configured edition's file is ever loaded: delete the
+	// other edition's file when switching.
+	Edition Edition
+	// Dir is where the last good file is kept, as <Source>.mmdb (the
+	// City file as maxmind-city.mmdb) beside
 	// a small state.json, so a restart answers from it before any
 	// download. Required. It is created (0700) if missing; files are
 	// written 0600 to a temporary file and renamed into place. The file
@@ -94,8 +118,13 @@ type Config struct {
 // page. It never carries a key.
 type Status struct {
 	Source Source `json:"source"`
+	// Edition is the configured edition, EditionCountry when none was.
+	Edition Edition `json:"edition"`
 	// Loaded is whether a file is in use, so Country can answer.
 	Loaded bool `json:"loaded"`
+	// Locates is whether the file in use carries locations, so Locate
+	// can answer: a City file is loaded.
+	Locates bool `json:"locates"`
 	// FetchedAt is when the file in use was downloaded or last
 	// confirmed current by the provider; zero when none is loaded.
 	FetchedAt time.Time `json:"fetchedAt,omitzero"`
@@ -112,6 +141,7 @@ type Status struct {
 // answers every lookup with "not known".
 type Manager struct {
 	source   Source
+	edition  Edition
 	endpoint string // the download URL, without credentials
 	user     string // MaxMind basic auth
 	pass     string
@@ -143,7 +173,14 @@ type Manager struct {
 // file as soon as New returns. Call Run, usually in its own goroutine,
 // to keep the file current, and Close once Run has returned.
 func New(cfg Config) (*Manager, error) {
-	m := &Manager{source: cfg.Source}
+	m := &Manager{source: cfg.Source, edition: cfg.Edition}
+	switch m.edition {
+	case "":
+		m.edition = EditionCountry
+	case EditionCountry, EditionCity:
+	default:
+		return nil, fmt.Errorf("geoip: Config.Edition must be %q or %q", EditionCountry, EditionCity)
+	}
 	switch cfg.Source {
 	case SourceMaxMind:
 		if err := validateKey("MaxMind.AccountID", cfg.MaxMind.AccountID); err != nil {
@@ -157,8 +194,14 @@ func New(cfg Config) (*Manager, error) {
 			return nil, err
 		}
 		m.endpoint = maxmindURL
+		if m.edition == EditionCity {
+			m.endpoint = maxmindCityURL
+		}
 		m.user, m.pass = cfg.MaxMind.AccountID, cfg.MaxMind.LicenceKey
 	case SourceIPinfo:
+		if m.edition == EditionCity {
+			return nil, errors.New("geoip: Config.Edition city needs SourceMaxMind: IPinfo Lite has no coordinates")
+		}
 		if err := validateKey("IPinfo.Token", cfg.IPinfo.Token); err != nil {
 			return nil, err
 		}
@@ -238,6 +281,25 @@ func (m *Manager) Country(address string) (code string, ok bool) {
 	return code, code != ""
 }
 
+// Locate returns the point an address is likely near and the radius
+// around it, and whether one is known. It is not known for the same
+// addresses Country is not known for, for any address when the file in
+// use carries no locations (EditionCountry, or a record without all
+// three of latitude, longitude and accuracy radius), and always under
+// SourceIPinfo. Its signature is gate.Config.Locate's.
+func (m *Manager) Locate(address string) (gauntlet.Location, bool) {
+	ip, ok := lookupAddr(address)
+	if !ok || m == nil || m.edition != EditionCity {
+		return gauntlet.Location{}, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.reader == nil {
+		return gauntlet.Location{}, false
+	}
+	return locationFrom(m.reader.Lookup(ip))
+}
+
 // lookupAddr parses address and reports whether it is worth looking up:
 // only a public unicast address has a country. An IPv4-mapped IPv6
 // address is the IPv4 host it carries, and a zone is dropped.
@@ -261,12 +323,16 @@ func (m *Manager) Status() Status {
 	defer m.mu.RUnlock()
 	st := Status{
 		Source:      m.source,
+		Edition:     m.edition,
 		Loaded:      m.reader != nil,
 		NextRefresh: m.nextRefresh,
 		LastError:   m.lastError,
 	}
 	if st.Loaded {
 		st.FetchedAt = m.fetchedAt
+		// adopt and loadCache accept only a City-typed file for
+		// EditionCity, so a loaded City manager's file carries them.
+		st.Locates = m.edition == EditionCity
 		st.Stale = now.Sub(m.fetchedAt) > StaleAfter
 	}
 	return st
