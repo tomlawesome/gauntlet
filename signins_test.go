@@ -688,7 +688,7 @@ func (r *signInLogRecorder) count(substr string) int {
 // unwrapped backend, and one that does not hold together are refused.
 func TestOpenSignInHistoryRefusesWhatItCannotRead(t *testing.T) {
 	cases := map[string]string{
-		"newer version":     `{"version":2,"nextSeq":1,"rows":[]}`,
+		"newer version":     `{"version":3,"nextSeq":1,"rows":[]}`,
 		"sealed":            `{"sealed":"AAAA"}`,
 		"rows out of order": `{"version":1,"nextSeq":3,"rows":[{"seq":2,"at":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z","count":1,"outcome":"success"},{"seq":1,"at":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z","count":1,"outcome":"success"}]}`,
 		"seq past nextSeq":  `{"version":1,"nextSeq":1,"rows":[{"seq":1,"at":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z","count":1,"outcome":"success"}]}`,
@@ -705,7 +705,7 @@ func TestOpenSignInHistoryRefusesWhatItCannotRead(t *testing.T) {
 		})
 	}
 	m := persist.NewMemory()
-	primeMemory(t, m, `{"version":2,"nextSeq":1,"rows":[]}`)
+	primeMemory(t, m, `{"version":3,"nextSeq":1,"rows":[]}`)
 	if _, err := OpenSignInHistory(m, SignInHistoryOptions{}); !errors.Is(err, errNewerDocument) {
 		t.Errorf("newer document: %v, want errNewerDocument", err)
 	}
@@ -760,8 +760,12 @@ func TestSignInHistoryOverEncryptKeepsRowsOutOfStorage(t *testing.T) {
 	}
 }
 
-// testdata/signins-v1.json is a version-1 document as this build writes
-// it: it loads, lists as written, and saves back to the same JSON.
+// testdata/signins-v1.json is a version-1 document as this build wrote
+// it before #54: it loads with every row's country blank (ADR-0002
+// decision 1), lists as written, and the next save stamps it at the
+// current version (signInsDocumentVersion), as an older accounts or
+// tokens document is stamped at its own current version on save
+// (TestAV010AccountsDocumentLoadsAndGainsAVersion).
 func TestSignInHistoryVersion1FixtureRoundTrips(t *testing.T) {
 	raw, err := os.ReadFile("testdata/signins-v1.json")
 	if err != nil {
@@ -784,22 +788,81 @@ func TestSignInHistoryVersion1FixtureRoundTrips(t *testing.T) {
 	if fmt.Sprintf("%+v", rows) != fmt.Sprintf("%+v", want) {
 		t.Errorf("rows =\n%+v\nwant\n%+v", rows, want)
 	}
+	for _, r := range rows {
+		if r.Client.Country != "" {
+			t.Errorf("row %d has country %q, want blank from a version-1 document", r.Seq, r.Client.Country)
+		}
+	}
 
-	// Saved back unchanged in meaning.
+	// Saved back unchanged in meaning, but stamped at the current
+	// version: a version-1 document loaded by this build and saved
+	// becomes version 2, the same as an older accounts or tokens
+	// document gains its build's current version on save.
 	h.Record(successFrom("u1", "bob", "192.0.2.1"), signInBase)
 	if err := h.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	f := storedSignIns(t, m)
-	if f.Version != 1 || f.NextSeq != 9 || len(f.Rows) != 5 || f.Rows[4].Seq != 8 {
+	if f.Version != signInsDocumentVersion || f.NextSeq != 9 || len(f.Rows) != 5 || f.Rows[4].Seq != 8 {
 		t.Errorf("saved document: version %d, nextSeq %d, %d rows", f.Version, f.NextSeq, len(f.Rows))
 	}
 	var before, after map[string]any
 	_ = json.Unmarshal(raw, &before)
-	reencoded, _ := json.Marshal(signInFile{Version: f.Version, NextSeq: 8, Rows: f.Rows[:4]})
+	reencoded, _ := json.Marshal(signInFile{Version: 1, NextSeq: 8, Rows: f.Rows[:4]})
 	_ = json.Unmarshal(reencoded, &after)
 	if fmt.Sprint(before) != fmt.Sprint(after) {
 		t.Errorf("the fixture's rows did not save back as they were:\n%v\n%v", before, after)
+	}
+}
+
+// testdata/signins-v2.json is a version-2 document (#54): some rows
+// carry a country, one has none (not known), and it round-trips
+// byte-identical on save, nothing added or dropped.
+func TestSignInHistoryVersion2FixtureRoundTrips(t *testing.T) {
+	raw, err := os.ReadFile("testdata/signins-v2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := persist.NewMemory()
+	primeMemory(t, m, string(raw))
+	h := openTestHistory(t, m, SignInHistoryOptions{})
+	rows, _ := h.List(SignInQuery{})
+	want := []SignInRow{
+		{Seq: 2, At: time.Date(2026, 10, 2, 9, 20, 0, 0, time.UTC), Until: time.Date(2026, 10, 2, 9, 20, 0, 0, time.UTC), Count: 1, Username: "Hu••••••••", Outcome: SignInNoSuchUser, Method: SignInMethodPassword, Client: SessionClient{Address: "203.0.113.9"}},
+		{Seq: 1, At: time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC), Until: time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC), Count: 1, UserID: "7d2e9b10", Username: "admin", Outcome: SignInSuccess, Method: SignInMethodCode, Client: SessionClient{Address: "2001:db8::1", UserAgent: "Mozilla/5.0", Country: "GB"}},
+	}
+	if fmt.Sprintf("%+v", rows) != fmt.Sprintf("%+v", want) {
+		t.Errorf("rows =\n%+v\nwant\n%+v", rows, want)
+	}
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after map[string]any
+	_ = json.Unmarshal(raw, &before)
+	_ = json.Unmarshal(snap.Payload, &after)
+	if fmt.Sprint(before) != fmt.Sprint(after) {
+		t.Errorf("an unchanged version-2 document did not save back as it was:\n%v\n%v", before, after)
+	}
+}
+
+// Record keeps Country as recordSignIn built it: not cleaned (it is not
+// client-supplied text), and -- per this file's fold rule -- never
+// overwritten by a later attempt folded into the same row.
+func TestSignInHistoryRecordKeepsCountryAndNeverFoldsIt(t *testing.T) {
+	h := openTestHistory(t, nil, SignInHistoryOptions{})
+	first := failedFrom("u1", "bob", "203.0.113.5")
+	first.Client.Country = "GB"
+	h.Record(first, signInBase)
+	again := failedFrom("u1", "bob", "203.0.113.5")
+	again.Client.Country = "FR" // a later attempt folds in; its country is dropped
+	h.Record(again, signInBase.Add(time.Minute))
+	rows, _ := h.List(SignInQuery{})
+	if len(rows) != 1 || rows[0].Count != 2 || rows[0].Client.Country != "GB" {
+		t.Errorf("rows = %+v, want one row, count 2, country GB (the first attempt's)", rows)
 	}
 }
 

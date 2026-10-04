@@ -39,9 +39,12 @@ type sessionRow struct {
 	SignedInAt time.Time `json:"signedInAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
 	// Address and UserAgent are as the browser presented them at sign-in
-	// (gauntlet.SessionClient), absent when none was recorded.
+	// (gauntlet.SessionClient), absent when none was recorded. Country
+	// is the one looked up for Address at sign-in (#54), absent when no
+	// lookup was configured or nothing was known for it.
 	Address   string `json:"address,omitempty"`
 	UserAgent string `json:"userAgent,omitempty"`
+	Country   string `json:"country,omitempty"`
 }
 
 // sessionListResponse is GET /api/auth/sessions's body: an object
@@ -114,6 +117,7 @@ func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 			LastUsedAt: sess.LastUsedAt,
 			Address:    sess.Client.Address,
 			UserAgent:  sess.Client.UserAgent,
+			Country:    sess.Client.Country,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

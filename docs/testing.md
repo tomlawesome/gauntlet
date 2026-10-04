@@ -38,6 +38,15 @@ placeholder. The range response's shape in those fakes is from HIBP's
 API documentation, not a recorded response. A test against the real API
 would be the only proof that shape still holds.
 
+The sign-in country's `geoip` package (#54) is tested against an
+`httptest` fake of both providers. Its country files are built in each
+test with MaxMind's writer, `mmdbwriter` (test scope only), mapping a
+couple of public networks to made-up countries; no provider's data is
+in this repository. The download client's address guard is tested on
+its own and on a redirect between two local test servers. Whether the
+real providers still serve the archive shapes and headers the fake does
+is something only a real download shows.
+
 ## Compatibility checks
 
 ADR-0002 promises that from v0.1.0 nothing callers rely on is removed

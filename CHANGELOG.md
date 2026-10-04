@@ -21,6 +21,22 @@ All notable changes to this project are documented in this file.
   themselves. `Store.SetPendingTOTPSecretAt` records when a pending
   authenticator-app secret was set; `User.TOTPPending` and
   `TOTPPendingLifetime` say whether it can still be confirmed (#58).
+- `gate.Config.Country`: an optional lookup from a client address to its
+  ISO 3166-1 alpha-2 country code, recorded on a sign-in and the session
+  it issues. `SessionClient` and `SignInRow` gain `Country`; the
+  sign-in history document is now version 2 for the added field, and an
+  older document loads with it blank. The admin sign-in history
+  (`GET /api/auth/sign-ins`) and a person's own session list
+  (`GET /api/auth/sessions`) both gain an optional `country` field.
+  Nothing is recorded with `Config.Country` left nil (#54).
+- `geoip`, a new package that downloads the operator's chosen country
+  file -- MaxMind GeoLite2-Country or IPinfo Lite, each with the
+  operator's own key -- keeps it current in a directory the application
+  names, and looks addresses up in it locally. Its `Manager.Country` is
+  what an application passes as `gate.Config.Country`. Gauntlet never
+  stores the key and keeps it out of every log and error; the
+  application credits the provider (docs/geoip.md, ADR-0008). Neither
+  `gate` nor the root package imports it (#54).
 
 ### Security
 

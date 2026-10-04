@@ -26,10 +26,13 @@ type signInRow struct {
 	UserID   string                 `json:"userId,omitempty"`
 	Username string                 `json:"username,omitempty"`
 	Method   gauntlet.SignInMethod  `json:"method,omitempty"`
-	// Address and UserAgent are the first attempt's, as
-	// gauntlet.SessionClient holds a session's.
+	// Address, UserAgent and Country are the first attempt's, as
+	// gauntlet.SessionClient holds a session's. Country is absent when
+	// no country was recorded for it (#54) -- no lookup configured, or
+	// nothing known for the address.
 	Address     string    `json:"address,omitempty"`
 	UserAgent   string    `json:"userAgent,omitempty"`
+	Country     string    `json:"country,omitempty"`
 	LockedUntil time.Time `json:"lockedUntil,omitzero"`
 	Disabled    bool      `json:"disabled,omitempty"`
 }
@@ -109,7 +112,7 @@ func (g *Gate) handleSignInsList(w http.ResponseWriter, r *http.Request) {
 		resp.SignIns = append(resp.SignIns, signInRow{
 			Seq: row.Seq, At: row.At, Until: row.Until, Count: row.Count, Outcome: row.Outcome,
 			UserID: row.UserID, Username: row.Username, Method: row.Method,
-			Address: row.Client.Address, UserAgent: row.Client.UserAgent,
+			Address: row.Client.Address, UserAgent: row.Client.UserAgent, Country: row.Client.Country,
 			LockedUntil: row.LockedUntil, Disabled: row.Disabled,
 		})
 	}

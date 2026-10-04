@@ -80,6 +80,21 @@ func TestSessionCreateFromCleansAndCutsTheClient(t *testing.T) {
 	}
 }
 
+// Country (#54) is not client-supplied text, so CreateFrom passes it
+// through unchanged: no cleaning, no cap.
+func TestSessionCreateFromKeepsCountryUnmodified(t *testing.T) {
+	s := NewSessionStore(time.Hour, 0)
+	now := time.Now()
+	sess := s.CreateFrom("user-1", SessionClient{Address: "198.51.100.7", Country: "GB"}, now)
+	if sess.Client.Country != "GB" {
+		t.Errorf("Country = %q, want GB", sess.Client.Country)
+	}
+	none := s.CreateFrom("user-1", SessionClient{Address: "198.51.100.8"}, now)
+	if none.Client.Country != "" {
+		t.Errorf("Country = %q, want empty when none is given", none.Client.Country)
+	}
+}
+
 // A multi-byte character that would straddle the cap is left out
 // whole, never split into invalid UTF-8.
 func TestSessionCreateFromNeverSplitsACharacter(t *testing.T) {

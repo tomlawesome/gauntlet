@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/tomlawesome/gauntlet"
 )
 
 // hostCookiePrefix is the name prefix that makes a browser refuse the
@@ -124,11 +122,15 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 //
 // The address is Config.ClientIP's, the same resolution the login
 // limiter is keyed on, so the list shows what the application's own
-// proxy policy believes; the agent is the request's User-Agent header.
-// Both are the client's word, cleaned and capped by CreateFrom.
+// proxy policy believes; the agent is the request's User-Agent header;
+// the country, if any, is Config.Country's for that address (#54) --
+// signInClient builds all three, the same client a sign-in record for
+// this request carries, so the session list and the history agree.
+// Address and UserAgent are the client's word, cleaned and capped by
+// CreateFrom.
 func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, now time.Time) {
 	g.revokeReplacedSession(r, userID, now)
-	client := gauntlet.SessionClient{Address: g.cfg.ClientIP(r), UserAgent: r.UserAgent()}
+	client := g.signInClient(r, "")
 	sess := g.deps.Sessions.CreateFrom(userID, client, now)
 	g.setSessionCookie(w, sess.ID)
 	g.rememberBrowser(w, r, userID, now)
