@@ -49,7 +49,9 @@ import (
 // from its first release: {"version":1,"nextSeq":n,"rows":[...]}, and
 // carries no "seq" counter of its own: it saves but never re-reads a
 // document another process may have written, so there is nothing for it
-// to refuse (docs/design.md §4).
+// to refuse (docs/design.md §4). Version 2 (#54) added each row's
+// Country; an older document reads it as empty, which is what it
+// meant -- no build that wrote it had a country to record.
 //
 // Tokens' version 2 (#59) is the same "seq" addition as accounts'
 // version 6, numbered on its own track since the two documents'
@@ -57,7 +59,7 @@ import (
 const (
 	accountsDocumentVersion = 7
 	tokensDocumentVersion   = 2
-	signInsDocumentVersion  = 1
+	signInsDocumentVersion  = 2
 )
 
 // errNewerDocument is the decode error for a stored document whose

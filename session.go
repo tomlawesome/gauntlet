@@ -66,14 +66,23 @@ const (
 // memory with the session and is never written to the accounts
 // document.
 //
-// Both fields are as the client presented them, not verified: Address
-// is whatever the application's own client-address policy resolved
-// (gate.Config.ClientIP, which may read a proxy header), and UserAgent
-// is the header the browser chose to send. They help a person recognise
-// their own devices; they prove nothing about who holds a session.
+// Address and UserAgent are as the client presented them, not verified:
+// Address is whatever the application's own client-address policy
+// resolved (gate.Config.ClientIP, which may read a proxy header), and
+// UserAgent is the header the browser chose to send. They help a person
+// recognise their own devices; they prove nothing about who holds a
+// session.
+//
+// Country is an ISO 3166-1 alpha-2 code looked up from Address when the
+// attempt was made (#54), or empty when it is not known: no lookup was
+// configured, the address was private, or the lookup had nothing for it.
+// Unlike Address and UserAgent it is not the client's own word -- it
+// comes from gate.Config.Country, not a header -- so CreateFrom passes
+// it through unchanged rather than cleaning or cutting it.
 type SessionClient struct {
 	Address   string
 	UserAgent string
+	Country   string
 }
 
 // Session is deliberately an opaque random ID (see newID), not a JWT --
@@ -210,6 +219,7 @@ func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.
 	client = SessionClient{
 		Address:   cleanClientText(client.Address, MaxSessionAddress),
 		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
+		Country:   client.Country,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

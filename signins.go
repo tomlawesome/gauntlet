@@ -112,8 +112,8 @@ type SignInRow struct {
 	UserID, Username string
 	Outcome          SignInOutcome
 	Method           SignInMethod
-	// Client is the first attempt's address and browser, cleaned as a
-	// session's is.
+	// Client is the first attempt's address, browser and country (#54),
+	// cleaned as a session's is.
 	Client SessionClient
 	// LockedUntil and Disabled are SignInEvent's.
 	LockedUntil time.Time
@@ -133,8 +133,9 @@ type SignInQuery struct {
 	Limit int
 }
 
-// signInFile is the stored document, version 1:
-// {"version":1,"nextSeq":n,"rows":[...]}, rows ascending by seq.
+// signInFile is the stored document, version 2 (#54 added Country; see
+// docversion.go): {"version":2,"nextSeq":n,"rows":[...]}, rows ascending
+// by seq.
 type signInFile struct {
 	Version int             `json:"version"`
 	NextSeq uint64          `json:"nextSeq"`
@@ -143,18 +144,22 @@ type signInFile struct {
 
 // signInFileRow is a row as stored, with gate's API row's names.
 type signInFileRow struct {
-	Seq         uint64        `json:"seq"`
-	At          time.Time     `json:"at"`
-	Until       time.Time     `json:"until"`
-	Count       int           `json:"count"`
-	UserID      string        `json:"userId,omitempty"`
-	Username    string        `json:"username,omitempty"`
-	Outcome     SignInOutcome `json:"outcome"`
-	Method      SignInMethod  `json:"method,omitempty"`
-	Address     string        `json:"address,omitempty"`
-	UserAgent   string        `json:"userAgent,omitempty"`
-	LockedUntil time.Time     `json:"lockedUntil,omitzero"`
-	Disabled    bool          `json:"disabled,omitempty"`
+	Seq       uint64        `json:"seq"`
+	At        time.Time     `json:"at"`
+	Until     time.Time     `json:"until"`
+	Count     int           `json:"count"`
+	UserID    string        `json:"userId,omitempty"`
+	Username  string        `json:"username,omitempty"`
+	Outcome   SignInOutcome `json:"outcome"`
+	Method    SignInMethod  `json:"method,omitempty"`
+	Address   string        `json:"address,omitempty"`
+	UserAgent string        `json:"userAgent,omitempty"`
+	// Country is the first attempt's country (#54), added at version 2.
+	// A version-1 document has none, which reads as "not known", what
+	// every row recorded before a country lookup existed in fact was.
+	Country     string    `json:"country,omitempty"`
+	LockedUntil time.Time `json:"lockedUntil,omitzero"`
+	Disabled    bool      `json:"disabled,omitempty"`
 }
 
 // signInState is what the document holds.
@@ -193,7 +198,7 @@ func encodeSignIns(st *signInState) ([]byte, error) {
 		f.Rows[i] = signInFileRow{
 			Seq: r.Seq, At: r.At, Until: r.Until, Count: r.Count,
 			UserID: r.UserID, Username: r.Username, Outcome: r.Outcome, Method: r.Method,
-			Address: r.Client.Address, UserAgent: r.Client.UserAgent,
+			Address: r.Client.Address, UserAgent: r.Client.UserAgent, Country: r.Client.Country,
 			LockedUntil: r.LockedUntil, Disabled: r.Disabled,
 		}
 	}
@@ -227,7 +232,7 @@ func decodeSignIns(data []byte) (*signInState, error) {
 		st.rows[i] = SignInRow{
 			Seq: r.Seq, At: r.At, Until: r.Until, Count: r.Count,
 			UserID: r.UserID, Username: r.Username, Outcome: r.Outcome, Method: r.Method,
-			Client:      SessionClient{Address: r.Address, UserAgent: r.UserAgent},
+			Client:      SessionClient{Address: r.Address, UserAgent: r.UserAgent, Country: r.Country},
 			LockedUntil: r.LockedUntil, Disabled: r.Disabled,
 		}
 	}
@@ -403,6 +408,7 @@ func (h *SignInHistory) Record(ev SignInEvent, now time.Time) {
 	ev.Client = SessionClient{
 		Address:   cleanClientText(ev.Client.Address, MaxSessionAddress),
 		UserAgent: cleanClientText(ev.Client.UserAgent, MaxSessionUserAgent),
+		Country:   ev.Client.Country,
 	}
 	now = now.UTC()
 	h.mu.Lock()
