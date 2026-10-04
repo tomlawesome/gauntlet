@@ -29,6 +29,14 @@ All notable changes to this project are documented in this file.
   (`GET /api/auth/sign-ins`) and a person's own session list
   (`GET /api/auth/sessions`) both gain an optional `country` field.
   Nothing is recorded with `Config.Country` left nil (#54).
+- `geoip`, a new package that downloads the operator's chosen country
+  file -- MaxMind GeoLite2-Country or IPinfo Lite, each with the
+  operator's own key -- keeps it current in a directory the application
+  names, and looks addresses up in it locally. Its `Manager.Country` is
+  what an application passes as `gate.Config.Country`. Gauntlet never
+  stores the key and keeps it out of every log and error; the
+  application credits the provider (docs/geoip.md, ADR-0008). Neither
+  `gate` nor the root package imports it (#54).
 
 ### Security
 

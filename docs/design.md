@@ -61,6 +61,8 @@ github.com/tomlawesome/gauntlet
 │                               (G8, ADR-0004; the one importer of go-webauthn)
 ├── blocklist/                  List, Parse, Embedded, Refresher, RefreshConfig, NewRefresher,
 │                               DefaultURL (#52, ADR-0007; the common-password list)
+├── geoip/                      Config, New, Manager, Source, Status (#54, ADR-0008; the
+│                               sign-in country, and the one importer of maxminddb)
 ├── cmd/pwlist/                 builds, signs, verifies and publishes that list (CI only)
 ├── internal/listsig/           the list's Ed25519 signature format
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
@@ -795,6 +797,12 @@ it. The data for all of this lives on `User`.
   (§2.5) and mikroview keeps what it has.
 - Trusted-proxy client-IP logic. It is deployment policy; the app passes
   `Config.ClientIP`.
+- The sign-in country's provider key and its credit (#54, ADR-0008).
+  `geoip.Config` takes the MaxMind or IPinfo key as plain strings;
+  keeping it (a secret file, the app's own sealed settings) is the
+  application's job, like the encryption key. So is showing the credit
+  both providers ask for ([docs/geoip.md](geoip.md)): gauntlet has no
+  page to put it on.
 
 ## 2. Birdcage wiring
 
@@ -1095,6 +1103,17 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | The signing key leaking | a file on one protected, project-locked runner that talks to nobody, never a CI variable; publishing credentials sit on a different runner |
 | A sample or partial build published | `# sample:` header refused by `Parse`, `sign` and every refresher; a full build must see 500 M hashes with a 10,000th count of at least 1,000 |
 | An outbound call the application did not ask for | `Embedded()` never touches the network; refreshing is opt-in |
+
+### Country of origin (#54, ADR-0008)
+
+| Pitfall | Module does |
+|---|---|
+| A provider key in a log, an error or a status page | keys are never stored; IPinfo's token rides in the URL, so every message has the URL's query removed (`cleanErr`) and any key text replaced (`redact`); a provider's error body is never read; `Status` carries no key; `New`'s validation errors never repeat the value |
+| A download pointed at the operator's own network | the default client refuses to connect to a private, loopback, link-local, unspecified or reserved address, checked on the address actually dialled, redirects included; https redirects only; no proxy; fixed provider URLs |
+| A bad file replacing a good one | written to a temporary file, opened and probed with a documentation-address lookup before it is renamed into place and swapped in; 128 MiB cap, one `.mmdb` per MaxMind archive with no unsafe paths; any failure keeps the file in use |
+| A stale file answering quietly | still used, since a country rarely moves, but past 45 days every check logs a warning and `Status().Stale` is true |
+| A provider outage, or a refused key | a failed check retries in an hour, a refused key (401/403) in a day; the kept file is loaded at start, so lookups survive a restart offline; with no file, `Country` says "not known", never an error |
+| An address sent to a third party | lookups are in a local file; only public unicast addresses are looked up |
 
 ### Fail-closed list
 

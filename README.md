@@ -123,6 +123,18 @@ Leave `Deps.SignIns` nil and the route answers 404; the audit records
 are written either way. See
 [docs/adr/0006-sign-in-history.md](docs/adr/0006-sign-in-history.md).
 
+To record which country each sign-in came from, run a `geoip.Manager`
+on the operator's chosen provider and key, and pass its `Country`.
+Lookups happen in a file kept on the server; no address is sent
+anywhere. The application credits the provider and leaves `Dir` out of
+backups ([docs/geoip.md](docs/geoip.md)):
+
+```go
+countries, err := geoip.New(geoip.Config{Source: geoip.SourceIPinfo, IPinfo: geoip.IPinfoKey{Token: token}, Dir: dataDir + "/geoip", Log: logger})
+go countries.Run(ctx) // checks daily; Close it once Run has returned
+g, err := gate.New(gate.Config{ /* ... */ Country: countries.Country}, deps)
+```
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
@@ -130,3 +142,7 @@ Apache-2.0. See [LICENSE](LICENSE).
 The common-password list in `gauntlet/blocklist` is built from
 [Have I Been Pwned](https://haveibeenpwned.com)'s Pwned Passwords. HIBP
 places no licence terms on that data; the attribution is ours to give.
+
+The `geoip` package downloads MaxMind's or IPinfo's data at run time and
+ships none; both ask the application that shows it to credit them
+([docs/geoip.md](docs/geoip.md)).
