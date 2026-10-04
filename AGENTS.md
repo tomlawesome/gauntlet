@@ -52,6 +52,12 @@ list's two (#52, ADR-0007): `blocklist:sign` on `gauntlet-signing`
 Both are protected, locked to this project, and set up by the owner
 (docs/releasing.md); no other job may use those tags.
 
+## Dependency updates
+
+Renovate (#63): `renovate.json`, the `renovate` job and a weekly schedule
+on `dev` with `RENOVATE=true` (owner setup: docs/releasing.md). Go
+versions are looked up from Git hosts (`GOPROXY=direct`), never the proxy.
+
 ## Closing issues from commits
 
 Same trap as birdcage: GitLab treats `Implements`/`Closes`/`Fixes` next to
