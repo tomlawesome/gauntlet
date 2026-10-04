@@ -132,6 +132,9 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrPasskeyDuplicate:      "this passkey is already registered to this account",
 	gauntlet.ErrPasskeyLimitReached:   gauntlet.ErrPasskeyLimitReached.Error(), // already phrased for an end user
 	gauntlet.ErrPasskeyNotFound:       "no such passkey on this account",
+	gauntlet.ErrEnrolmentHeld:         "a second factor is waiting for you to confirm you have saved its recovery codes -- confirm it, or wait ten minutes for it to expire, before setting up another",
+	gauntlet.ErrNoHeldEnrolment:       "no second factor is waiting to be confirmed",
+	gauntlet.ErrHeldEnrolmentExpired:  "that second factor was not confirmed within ten minutes and has been removed -- set it up again",
 }
 
 // writeAuthError translates err into a safe, user-facing message via
@@ -198,8 +201,8 @@ var (
 // (problemTypeBase+class.anchor), title (class.title) and status always;
 // detail (the call site's own message text, unchanged -- gauntlet #23)
 // only when it is not empty. extra adds further top-level members --
-// only partially-completed's totpActive and username ever do; every
-// other call site passes nil.
+// only partially-completed's username does (its totpActive is no longer
+// sent, #58); every other call site passes nil.
 //
 // The same two of writeJSON's three headers (Cache-Control: no-store,
 // X-Content-Type-Options: nosniff; see that function's own doc comment)

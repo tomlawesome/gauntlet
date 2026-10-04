@@ -22,9 +22,10 @@ Problem Details body (`Content-Type: application/problem+json`,
 - **`detail`** is free text naming the call site's own reason. Absent
   when a class has nothing more specific to say than its `title` (the
   three `about:blank` cases below, and a handful of plain 404s).
-- Two classes carry extension members beyond the four above --
-  `partially-completed`'s `totpActive` and `username` -- named in that
-  class's own section. No other class has any, and none is planned.
+- One class carries extension members beyond the four above --
+  `partially-completed`'s `username` (and `totpActive`, no longer sent
+  since #58) -- named in that class's own section. No other class has
+  any, and none is planned.
 
 **`about:blank`.** A request whose path matches no route, or matches
 one only under a different method, answers this generic shape instead:
@@ -105,11 +106,11 @@ named under the class it shares, below.
 
 - **Status:** 401. **Title:** Start again.
 - A multi-step process -- the pending login between `login` and
-  `login/factor`, or a passkey ceremony -- is invalid, expired, already
-  completed by another request, or its target account is gone or has
-  lost the factor it needed. Carries `WWW-Authenticate: Bearer
-  realm="gate"`. The cookie the step depended on is cleared with the
-  response.
+  `login/factor`, a passkey ceremony, or a second-factor enrolment
+  waiting to be confirmed -- is invalid, expired, already completed by
+  another request, or its target account is gone or has lost the factor
+  it needed. Carries `WWW-Authenticate: Bearer realm="gate"`. The cookie
+  the step depended on, if it had one, is cleared with the response.
 - Returned by `POST /api/auth/login/factor` and `POST
   /api/auth/login/factor/begin` (the pending-login cookie: missing,
   expired, tampered with, already spent by another request, or the
@@ -117,7 +118,11 @@ named under the class it shares, below.
   step), and `POST /api/auth/passkeys/register/finish` and the passkey
   branch of `POST /api/auth/login/factor` (the ceremony cookie: missing,
   expired, tampered with, already spent, or sealed for the other
-  ceremony).
+  ceremony), `POST /api/auth/totp/confirm` (the scanned authenticator-app
+  secret was set more than ten minutes ago) and `POST
+  /api/auth/recovery-codes/confirm` (the first factor was held for more
+  than ten minutes without its recovery codes being confirmed, and has
+  been deleted) (#58).
 - A frontend restarts the flow from its first step -- there is nothing
   left for a retry at this step to complete.
 
@@ -159,8 +164,10 @@ named under the class it shares, below.
   must-enrol-factor`; a frontend matches this header, never `detail`, to
   route the session to TOTP enrolment or passkey registration.
 - Returned by `gate.Protect` for every route except the TOTP enrol and
-  confirm routes and the passkey register begin and finish routes,
-  while the door holds.
+  confirm routes, the passkey register begin and finish routes and
+  `POST /api/auth/recovery-codes/confirm`, while the door holds. A first
+  factor held for its recovery codes to be confirmed (#58) is not yet a
+  factor: the door holds until the confirmation.
 
 ## invalid-request
 
@@ -196,7 +203,9 @@ named under the class it shares, below.
   current state, not because of anything wrong with the request itself:
   an account already in the shape the route would put it in (already
   registered, already linked to SSO, already has an active factor,
-  already holds ten passkeys), an account the route refuses to act on
+  already holds ten passkeys, already has a first factor held for its
+  recovery codes to be confirmed, or has nothing held to confirm), an
+  account the route refuses to act on
   (the admin account, the caller's own), or a relying party or SSO
   identity that is not ready or not usable. `detail` names which.
 - Returned across most routes with a notion of "already done" or "not
@@ -246,18 +255,15 @@ named under the class it shares, below.
 
 - **Status:** 500. **Title:** Partly completed.
 - A request that changed something but failed before finishing
-  everything it meant to. Exactly three sites:
+  everything it meant to. One site:
   - `DELETE /api/auth/users/{id}`: the account was deleted, but its API
     tokens could not be revoked. Extension member **`username`** (the
     deleted account's).
-  - `POST /api/auth/totp/confirm`: the authenticator app is now active
-    (other sessions ended, a fresh session cookie issued) but its
-    recovery codes could not be generated. Extension member
-    **`totpActive`** (always `true`).
-  - `POST /api/auth/passkeys/register/finish`: the passkey is now active
-    (sessions rotated the same way) but its account's recovery codes
-    could not be generated. No extension member -- the passkey is
-    already named in the request path, unlike the other two.
 - `detail` says what a person should do next (revoke the tokens by
-  hand; remove the factor and enrol again); there is no automatic retry
-  for either half-finished state.
+  hand); there is no automatic retry for the half-finished state.
+- No longer returned, since #58, by `POST /api/auth/totp/confirm` (with
+  extension member **`totpActive`**, always `true`) or `POST
+  /api/auth/passkeys/register/finish`, where a first factor went live
+  but its recovery codes could not be saved. The factor and its codes
+  are now saved in one write, held until confirmed, so that state
+  cannot happen; a failed save there is `server-error`.

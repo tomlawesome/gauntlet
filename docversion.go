@@ -38,6 +38,12 @@ import (
 // errStaleDocument below); an older document reads it as zero and is
 // stamped with this process's own count on its next save, like any
 // other added field.
+// Version 7 (#58) added User.TOTPPendingSince and User.HeldEnrolment;
+// an older document reads them as zero and nil -- nothing on hold, and
+// any pending authenticator-app secret already expired, since no build
+// that wrote it recorded when the secret was set. Enrolling again is
+// all that costs. A build that reads up to version 6 refuses a
+// version-7 document rather than drop an enrolment on hold.
 //
 // The sign-in history (#53, signins.go) is the third document, version 1
 // from its first release: {"version":1,"nextSeq":n,"rows":[...]}, and
@@ -49,7 +55,7 @@ import (
 // version 6, numbered on its own track since the two documents'
 // versions have never moved together.
 const (
-	accountsDocumentVersion = 6
+	accountsDocumentVersion = 7
 	tokensDocumentVersion   = 2
 	signInsDocumentVersion  = 1
 )

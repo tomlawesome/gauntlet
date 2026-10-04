@@ -66,7 +66,8 @@ func totpEnrol(t *testing.T, client *http.Client, ts *httptest.Server) totpEnrol
 }
 
 // totpEnrolAndConfirm drives enrol+confirm end to end for client (already
-// signed in, holding no active factor yet). Returns the decoded secret,
+// signed in, holding no active factor yet), then confirms the held app
+// and its codes (#58), so the app is live. Returns the decoded secret,
 // the ten recovery codes confirm hands back, and the counter the
 // confirming code was generated at -- a further code has to be generated
 // at counter+1 or later, never by reading the wall clock a second time.
@@ -90,9 +91,10 @@ func totpEnrolAndConfirm(t *testing.T, client *http.Client, ts *httptest.Server)
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.Enabled || len(out.RecoveryCodes) != 10 {
-		t.Fatalf("confirm response = %+v, want enabled with 10 recovery codes", out)
+	if out.Enabled || !out.PendingConfirmation || len(out.RecoveryCodes) != 10 {
+		t.Fatalf("confirm response = %+v, want held with 10 recovery codes", out)
 	}
+	confirmEnrolmentOK(t, client, ts)
 	return secret, out.RecoveryCodes, counter
 }
 
@@ -543,93 +545,92 @@ func (b *budgetBackend) Describe() string { return "budget test backend" }
 // to copy (persist.AtRest), so OpenStore accepts it as it does Memory.
 func (b *budgetBackend) ProtectedAtRest() bool { return true }
 
-// TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail: the
-// factor is committed by ConfirmTOTP's own save, so a session from
-// before it must end even when the recovery-code save that follows
-// fails -- otherwise a session stolen before 2FA was on keeps working
-// against an account that now claims to require it.
-func TestTOTPConfirmSignsOutOtherSessionsEvenWhenRecoveryCodesFail(t *testing.T) {
-	g := newTestGate(t)
-	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
-	users := openTrackedStore(t, backend)
-	g.deps.Users = users
-	ts := newTestServer(t, g)
+// budgetTOTPFixture is a gate over a store whose saves can be made to
+// fail, with "bob" signed in on two devices and an authenticator app
+// enrolled (scanned, not confirmed) on the first, and the code that
+// confirms it.
+func budgetTOTPFixture(t *testing.T) (g *Gate, ts *httptest.Server, backend *budgetBackend, deviceA, deviceB *http.Client, code string) {
+	t.Helper()
+	g = newTestGate(t)
+	backend = &budgetBackend{inner: persist.NewMemory(), left: -1}
+	g.deps.Users = openTrackedStore(t, backend)
+	ts = newTestServer(t, g)
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 
-	deviceA := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
-	deviceB := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	deviceA = loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	deviceB = loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	enrolled := totpEnrol(t, deviceA, ts)
 	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+	return g, ts, backend, deviceA, deviceB, gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+}
 
-	// One save left: ConfirmTOTP lands, the recovery-code save does not.
-	backend.left = 1
+// TestTheFirstAppWhoseHoldCannotBeSavedHoldsNothing: the first app and
+// its recovery codes are one write (#58), so a failed save leaves
+// neither live nor held, ends no session, and the same code can simply
+// be sent again -- where the old two-write order left an active app
+// with no codes behind it (the partially-completed answer this
+// replaces).
+func TestTheFirstAppWhoseHoldCannotBeSavedHoldsNothing(t *testing.T) {
+	g, ts, backend, deviceA, deviceB, code := budgetTOTPFixture(t)
+
+	backend.left = 0
 	resp := postJSON(t, deviceA, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500", resp.StatusCode)
+	backend.left = -1
+	wantProblem(t, resp, http.StatusInternalServerError, classServerError)
+
+	u, _ := g.deps.Users.Get(totpBobID(t, g))
+	if u.HasActiveTOTP() || u.HeldEnrolment != nil || len(u.RecoveryCodes) != 0 {
+		t.Fatalf("after a failed hold: active=%v held=%+v codes=%d, want nothing", u.HasActiveTOTP(), u.HeldEnrolment, len(u.RecoveryCodes))
 	}
-	if u, ok := g.deps.Users.Get(totpBobID(t, g)); !ok || !u.HasActiveTOTP() {
-		t.Fatal("the fixture did not leave the factor active; the test proves nothing")
+	if !sessionAuthenticated(t, deviceB, ts) || !sessionAuthenticated(t, deviceA, ts) {
+		t.Error("a failed hold ended a session")
 	}
 
-	r, err := deviceB.Get(ts.URL + "/api/protected")
-	if err != nil {
+	retry := postJSON(t, deviceA, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
+	defer func() { _ = retry.Body.Close() }()
+	var out totpConfirmResponse
+	if err := json.NewDecoder(retry.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	_ = r.Body.Close()
-	if r.StatusCode != http.StatusUnauthorized {
-		t.Errorf("deviceB's pre-factor session got %d after the factor was confirmed, want 401", r.StatusCode)
+	if retry.StatusCode != http.StatusOK || !out.PendingConfirmation || len(out.RecoveryCodes) != 10 {
+		t.Errorf("sending the code again = %d %+v, want the app held with ten codes", retry.StatusCode, out)
 	}
 }
 
-// TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn: when the factor
-// is committed but the recovery codes are not, the 500 has to say so in
-// a field a frontend can branch on (auth.yaml forbids reading the
-// message). gate/contracttest's copy of this test checks that body is
-// the one the document describes.
-func TestTOTPConfirmRecoveryCodeFailureSaysTheFactorIsOn(t *testing.T) {
-	g := newTestGate(t)
-	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
-	users := openTrackedStore(t, backend)
-	g.deps.Users = users
-	ts := newTestServer(t, g)
-	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
-	_ = postJSON(t, admin, ts.URL+"/api/auth/users",
-		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
+// TestAConfirmationThatCannotBeSavedChangesNothing: taking the held app
+// off hold is one write, and the other sessions end only once it is
+// saved, so a failed save is a plain 500 with the app still held,
+// nothing ended, and a retry that works.
+func TestAConfirmationThatCannotBeSavedChangesNothing(t *testing.T) {
+	g, ts, backend, deviceA, deviceB, code := budgetTOTPFixture(t)
+	resp := postJSON(t, deviceA, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("holding the app returned %d", resp.StatusCode)
+	}
 
-	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
-	enrolled := totpEnrol(t, bob, ts)
-	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
-	if err != nil {
-		t.Fatal(err)
+	backend.left = 0
+	failed := confirmEnrolment(t, deviceA, ts)
+	backend.left = -1
+	wantProblem(t, failed, http.StatusInternalServerError, classServerError)
+	u, _ := g.deps.Users.Get(totpBobID(t, g))
+	if u.HasActiveTOTP() || u.HeldEnrolment == nil {
+		t.Fatalf("after a failed confirmation: active=%v held=%+v, want still held", u.HasActiveTOTP(), u.HeldEnrolment)
 	}
-	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
+	if !sessionAuthenticated(t, deviceB, ts) {
+		t.Error("a failed confirmation ended another session")
+	}
 
-	// One save left: ConfirmTOTP lands, the recovery-code save does not.
-	backend.left = 1
-	resp := postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: code})
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
+	confirmEnrolmentOK(t, deviceA, ts)
+	if sessionAuthenticated(t, deviceB, ts) {
+		t.Error("the confirmation that worked did not end the other session")
 	}
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("confirm with the recovery-code save failing returned %d, want 500: %s", resp.StatusCode, raw)
-	}
-	var body struct {
-		Detail     string `json:"detail"`
-		TOTPActive bool   `json:"totpActive"`
-	}
-	if err := json.Unmarshal(raw, &body); err != nil {
-		t.Fatalf("the 500 body is not JSON: %v: %s", err, raw)
-	}
-	if !body.TOTPActive || body.Detail == "" {
-		t.Errorf("the 500 body = %+v, want totpActive true and a detail message", body)
+	if u, _ := g.deps.Users.Get(totpBobID(t, g)); !u.HasActiveTOTP() || len(u.RecoveryCodes) != 10 {
+		t.Error("the app and its codes are not live after the confirmation")
 	}
 }

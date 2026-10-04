@@ -245,7 +245,8 @@ func totpCounterNow(now time.Time) uint64 {
 }
 
 // enrolTOTPFactor drives TOTP enrol+confirm end to end for client,
-// already signed in with password and holding no second factor yet --
+// already signed in with password and holding no second factor yet,
+// then confirms the held app's recovery codes (#58) --
 // the minimal way to clear the forced-enrolment door gate/protect.go
 // holds shut for every local-password account (#49), for a fixture
 // whose point is not that door.
@@ -262,8 +263,13 @@ func enrolTOTPFactor(t *testing.T, c *contractChecker, base string, client *http
 	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
 	var confirmed totpConfirmResponse
 	c.do(client, base, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}}, 200, &confirmed)
+	c.do(client, base, call{method: "POST", path: enrolmentConfirmPath}, 200, nil)
 	return confirmed.RecoveryCodes
 }
+
+// enrolmentConfirmPath is where a held first factor's recovery codes
+// are confirmed (#58).
+const enrolmentConfirmPath = "/api/auth/recovery-codes/confirm"
 
 func mustCookieJar(t *testing.T) http.CookieJar {
 	t.Helper()
@@ -319,9 +325,10 @@ type passkeyRow struct {
 }
 
 type passkeyRegisterFinishResponse struct {
-	Passkey       passkeyRow `json:"passkey"`
-	RecoveryCodes []string   `json:"recoveryCodes"`
-	AlreadyIssued bool       `json:"alreadyIssued"`
+	Passkey             passkeyRow `json:"passkey"`
+	RecoveryCodes       []string   `json:"recoveryCodes"`
+	PendingConfirmation bool       `json:"pendingConfirmation"`
+	AlreadyIssued       bool       `json:"alreadyIssued"`
 }
 
 type changePasswordRequest struct {
@@ -380,8 +387,15 @@ type totpEnrolResponse struct {
 }
 
 type totpConfirmResponse struct {
-	AlreadyIssued bool     `json:"alreadyIssued"`
-	RecoveryCodes []string `json:"recoveryCodes"`
+	Enabled             bool     `json:"enabled"`
+	AlreadyIssued       bool     `json:"alreadyIssued"`
+	PendingConfirmation bool     `json:"pendingConfirmation"`
+	RecoveryCodes       []string `json:"recoveryCodes"`
+}
+
+type enrolmentConfirmResponse struct {
+	Confirmed bool   `json:"confirmed"`
+	Factor    string `json:"factor"`
 }
 
 type recoveryCodesRegenerateResponse struct {

@@ -8,6 +8,19 @@ All notable changes to this project are documented in this file.
 
 - `SessionStore.RevokeAllForUserCount`: signs a user out everywhere and
   returns how many sessions it ended, counted under the same lock (#58).
+- `POST /api/auth/recovery-codes/confirm`: the signed-in user confirms
+  they have saved the recovery codes their first second factor was held
+  with, which makes the factor and the codes live (see Changed). Open at
+  the must-enrol-factor door. `409` when nothing is held, `401`
+  `step-expired` when the hold ran out (#58).
+- `Store.HoldFirstPasskey`, `Store.HoldFirstTOTP` and
+  `Store.ConfirmHeldEnrolment`, with `User.HeldEnrolment`,
+  `User.EnrolmentHeld`, `HeldEnrolmentLifetime` and the errors
+  `ErrEnrolmentHeld`, `ErrSecondFactorExists`, `ErrNoHeldEnrolment` and
+  `ErrHeldEnrolmentExpired`, for applications driving enrolment
+  themselves. `Store.SetPendingTOTPSecretAt` records when a pending
+  authenticator-app secret was set; `User.TOTPPending` and
+  `TOTPPendingLifetime` say whether it can still be confirmed (#58).
 
 ### Security
 
@@ -23,6 +36,29 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Breaking for HTTP clients: an account's first second factor is held
+  until its recovery codes are confirmed** (#58). The first passkey
+  (`register/finish`) or first authenticator app (`totp/confirm`) is
+  saved together with its ten recovery codes in one write, on hold; the
+  response shows the codes once with `pendingConfirmation: true`
+  (`totp/confirm` answers `enabled: false`). Until the user calls `POST
+  /api/auth/recovery-codes/confirm` the factor signs nothing in, is not
+  listed or counted, the codes redeem nothing, the must-enrol-factor
+  door stays shut, no other session ends and no audit line is written;
+  the confirmation does all of that. Unconfirmed after ten minutes, the
+  factor and codes are deleted. While one is held, starting another
+  enrolment is refused with `409`. A scanned but unconfirmed
+  authenticator-app secret now expires ten minutes after it was set
+  (`401` `step-expired` at `totp/confirm`). A later factor is still added
+  live, without codes (`alreadyIssued: true`). This replaces minting the
+  codes in a second write after the factor went live, where a failure
+  between the two left a live factor with no codes; the
+  `partially-completed` answers from those two routes (and
+  `totpActive`) are gone, and a failed save there is `server-error`.
+  `GenerateRecoveryCodesIfAbsent` is no longer used by `gate` and stays
+  for direct callers. The accounts document is now version 7
+  (`totpPendingSince`, `heldEnrolment`); older ones open unchanged, and
+  a version-6 build refuses a version-7 document.
 - **Breaking for HTTP clients.** Every error `gate.Routes` and
   `gate.Protect` return is now an RFC 9457 Problem Details body
   (`application/problem+json`, with `type`, `title`, `status` and

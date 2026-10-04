@@ -15,9 +15,9 @@
 // PasskeyCount. The stored fields are
 // mikroview's, byte for byte, plus gauntlet's own that mikroview's
 // documents lack and read as zero: loginLockedUntil (#19),
-// sessionsEndedAt (#28), and loginLockoutCount, loginDisabledAt and
-// knownBrowsers (#44). User carries every field mikroview's own
-// User carries -- including TOTP, recovery codes, reset codes and
+// sessionsEndedAt (#28), loginLockoutCount, loginDisabledAt and
+// knownBrowsers (#44), and totpPendingSince and heldEnrolment (#58).
+// User carries every field mikroview's own User carries -- including TOTP, recovery codes, reset codes and
 // passkeys -- because Store persists the whole document on every save
 // (docs/design.md Summary): a field this package didn't know about would
 // be silently dropped on the first write. The methods that generate, verify or
@@ -201,6 +201,13 @@ type User struct {
 	// most recently accepted code, so that code (or an earlier one still
 	// inside the verification window) cannot be replayed.
 	TOTPLastCounter uint64 `json:"totpLastCounter,omitzero"`
+	// TOTPPendingSince is when the pending (scanned, not yet confirmed)
+	// TOTPSecret was set: it stops being confirmable TOTPPendingLifetime
+	// later (#58; see TOTPPending). Zero once the secret is confirmed or
+	// cleared. A pending secret from a document written before this
+	// field existed reads it as zero, and so as expired: enrolling again
+	// is all it costs. Gauntlet's own field.
+	TOTPPendingSince time.Time `json:"totpPendingSince,omitzero"`
 	// RecoveryCodes are the single-use fallback codes for signing in
 	// without the authenticator app -- hashed with HashPassword, the same
 	// Argon2id treatment a password gets, never stored in clear.
@@ -211,6 +218,14 @@ type User struct {
 	// (passkey/, G8) is not part of this module in v0.1.0; this package
 	// only stores what it would produce.
 	Passkeys []Passkey `json:"passkeys,omitempty"`
+	// HeldEnrolment is the account's first second factor and its
+	// recovery codes, saved together but not live until the account's
+	// owner confirms they have saved the codes (#58; enrolhold.go). Nil
+	// when nothing is on hold. Nothing that reads Passkeys,
+	// RecoveryCodes or the TOTP fields sees what is held here, so a held
+	// factor signs nobody in and HasSecondFactor stays false until
+	// Store.ConfirmHeldEnrolment moves it across. Gauntlet's own field.
+	HeldEnrolment *HeldEnrolment `json:"heldEnrolment,omitempty"`
 
 	// totpSecretBlanked is set only on a copy blankCredentials has
 	// blanked, and only when it blanked a TOTPSecret that was there, so
@@ -258,6 +273,10 @@ func (u *User) blankCredentials() {
 	// still answer truly on the copy (see blankedPasskeyCount).
 	u.blankedPasskeyCount += len(u.Passkeys)
 	u.Passkeys = nil
+	// A held enrolment carries a passkey's public key or the pending
+	// TOTP enrolment's code hashes: the same material as the fields
+	// above, not yet live.
+	u.HeldEnrolment = nil
 	// A known browser's hash is a verifier for the token that browser
 	// carries, so it goes too; when each was remembered stays, which is
 	// what an account list would show. A new slice, never the stored
@@ -283,6 +302,9 @@ func (u *User) clone() *User {
 		for i := range u.Passkeys {
 			cp.Passkeys[i] = u.Passkeys[i].clone()
 		}
+	}
+	if u.HeldEnrolment != nil {
+		cp.HeldEnrolment = u.HeldEnrolment.clone()
 	}
 	return &cp
 }
@@ -324,7 +346,8 @@ func (u *User) HasActiveTOTP() bool {
 //
 // Every passkey counts here regardless of whether it's stale: staleness
 // only affects whether a passkey can complete a *login*, not whether the
-// account is considered to have a second factor at all.
+// account is considered to have a second factor at all. A factor on
+// hold (HeldEnrolment) does not count: it is not live until confirmed.
 func (u *User) HasSecondFactor() bool {
 	return u.HasActiveTOTP() || u.PasskeyCount() > 0
 }
