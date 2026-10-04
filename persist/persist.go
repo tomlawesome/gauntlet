@@ -21,7 +21,9 @@
 // encrypted file backend built on it (encrypted_file.go, #18). A
 // database backend is each application's own code, deliberately kept
 // out of the module (birdcage ADR-0005 decision 2: "the module never
-// owns a database"), and the application wraps it in Encrypt.
+// owns a database"), and the application wraps it in Encrypt. The
+// application proves its backend keeps this package's contract by
+// running persisttest's suite against it from its own tests (#61).
 package persist
 
 import (

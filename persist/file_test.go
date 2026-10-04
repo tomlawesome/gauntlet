@@ -19,61 +19,14 @@ import (
 // EncryptedFileBackend elsewhere in this package's public tests, but its
 // own conflict, error and atomic-write paths need covering in their own
 // right (issue #18 ported this from mikroview's internal/persist.FileBackend
-// verbatim; these pin the behaviour that porting must not change).
-
-func TestFileBackendRoundTripAndClose(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	if err := b.Close(); err != nil {
-		t.Errorf("Close on an unused backend: %v", err)
-	}
-
-	v, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	snap, err := b.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if string(snap.Payload) != `{"n":1}` || snap.Version != v || !snap.Exists {
-		t.Errorf("Load = %+v, want payload {\"n\":1}, version %d, exists true", snap, v)
-	}
-	if err := b.Close(); err != nil {
-		t.Errorf("Close after use: %v", err)
-	}
-}
+// verbatim; these pin the behaviour that porting must not change). The
+// backend contract itself -- round trip, conflicts, a second backend,
+// concurrent writers -- runs through persisttest in suite_test.go (#61).
 
 func TestFileBackendSaveWithoutPathErrors(t *testing.T) {
 	b := newFileBackend("")
 	if _, err := b.Save(context.Background(), []byte(`{}`), 0); err == nil {
 		t.Fatal("Save with no path configured succeeded, want an error")
-	}
-}
-
-func TestFileBackendDoubleCreateIsConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 0); err != nil {
-		t.Fatalf("first create: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":2}`), 0); err != ErrConflict {
-		t.Errorf("second create: got %v, want ErrConflict", err)
-	}
-}
-
-func TestFileBackendStaleWriteIsConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	v1, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":2}`), v1); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":3}`), v1); err != ErrConflict {
-		t.Errorf("stale write: got %v, want ErrConflict", err)
 	}
 }
 
@@ -208,14 +161,6 @@ func TestFileBackendConcurrentSavesNeverBothWinTheSameVersion(t *testing.T) {
 		if wins > 1 {
 			t.Fatalf("expect version %d won %d saves, want at most 1 -- a later rename silently discarded an earlier write", expect, wins)
 		}
-	}
-}
-
-func TestFileBackendExpectNonzeroButFileMissingIsConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 12345); err != ErrConflict {
-		t.Errorf("write against a nonexistent file expecting version 12345: got %v, want ErrConflict", err)
 	}
 }
 

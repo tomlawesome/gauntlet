@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `persist/persisttest`, a test suite an application runs against its
+  own `persist.Backend` from its own tests: `persisttest.Run`. It checks
+  that a save reads back as the same bytes and version, that a wrong
+  expected version and a second create are refused with
+  `persist.ErrConflict`, that a second backend over the same storage
+  sees the first's writes, that `VersionReader` (where implemented)
+  agrees, and that of two concurrent writers from one version exactly
+  one wins. Each check is its own subtest. Gauntlet's memory, file and
+  encrypted file backends run it too (#61).
 - `SessionStore.RevokeAllForUserCount`: signs a user out everywhere and
   returns how many sessions it ended, counted under the same lock (#58).
 - `POST /api/auth/recovery-codes/confirm`: the signed-in user confirms

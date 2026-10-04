@@ -181,22 +181,6 @@ func TestEncryptedFileBackendDocumentCopiedToAnotherPathFailsToOpen(t *testing.T
 	}
 }
 
-func TestEncryptedFileBackendMissingFileIsNotExistsNotError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "never-written.json")
-	b, err := NewEncryptedFileBackend(path, testKey(0x01))
-	if err != nil {
-		t.Fatalf("NewEncryptedFileBackend: %v", err)
-	}
-
-	snap, err := b.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load of a missing file returned an error, want nil: %v", err)
-	}
-	if snap.Exists {
-		t.Error("Exists is true for a file that was never written")
-	}
-}
-
 // TestEncryptedFileBackendPersistOpenFailsClosedOnTamper pins the
 // end-to-end contract from the caller's point of view: a store that
 // funnels its backend through persist.Open (as every real store does)
@@ -252,37 +236,6 @@ func TestEncryptedFileBackendDescribeNeverLeaksAKey(t *testing.T) {
 	}
 	if bytes.Contains([]byte(got), key) {
 		t.Error("Describe() leaked the raw key bytes")
-	}
-}
-
-func TestEncryptedFileBackendCloseIsSafe(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b, err := NewEncryptedFileBackend(path, testKey(0x01))
-	if err != nil {
-		t.Fatalf("NewEncryptedFileBackend: %v", err)
-	}
-	if err := b.Close(); err != nil {
-		t.Errorf("Close on an unused backend: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 0); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := b.Close(); err != nil {
-		t.Errorf("Close after use: %v", err)
-	}
-}
-
-func TestEncryptedFileBackendSaveConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b, err := NewEncryptedFileBackend(path, testKey(0x01))
-	if err != nil {
-		t.Fatalf("NewEncryptedFileBackend: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 0); err != nil {
-		t.Fatalf("first create: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":2}`), 0); err != ErrConflict {
-		t.Errorf("second create: got %v, want ErrConflict", err)
 	}
 }
 

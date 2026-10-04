@@ -171,7 +171,8 @@ func (b *fileBackend) Save(ctx context.Context, payload []byte, expect int64) (i
 	// shared temp name can otherwise both land in the same file and
 	// whichever renames second publishes a byte mixture of both
 	// payloads, which is settled corruption rather than a transient
-	// (see TestContractConcurrentWritersNeverPublishAMixedDocument).
+	// (mikroview's TestContractConcurrentWritersNeverPublishAMixedDocument;
+	// here, persisttest's concurrent-writers check).
 	if err := writeFileAtomic(b.path, payload, 0o600); err != nil {
 		return 0, err
 	}
