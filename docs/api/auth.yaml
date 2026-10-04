@@ -19,24 +19,27 @@ info:
     the responses below include the ones `Protect` itself writes before a
     handler runs:
 
-    - `503` "setup required" on every route except `GET /api/auth/session`
-      and `POST /api/auth/register` while no account exists yet. The SSO
-      routes are not exempt: the first account is never an SSO one.
-    - `403` "missing required header" on every `POST`, `PATCH` and `DELETE` without
-      the `X-Requested-With` header carrying the application's configured
-      value.
-    - `401` "unauthorized" on every route that needs a session and has
-      none. Exempt from that: session, register, login, login/factor,
-      login/factor/begin, logout, unlock and the two `GET /api/auth/oidc/*`
-      routes.
-    - `403` on a session-gated route when the account's role is not one
-      gauntlet knows, when it is stopped at one of two doors (see the
-      `X-Auth-Gate` header), or, on the admin routes, when the caller is
-      not an admin.
+    - `503` class `setup-required` on every route except `GET
+      /api/auth/session` and `POST /api/auth/register` while no account
+      exists yet. The SSO routes are not exempt: the first account is
+      never an SSO one.
+    - `403` class `csrf-required` on every `POST`, `PATCH` and `DELETE`
+      without the `X-Requested-With` header carrying the application's
+      configured value.
+    - `401` class `sign-in-required` on every route that needs a session
+      and has none. Exempt from that: session, register, login,
+      login/factor, login/factor/begin, logout, unlock and the two `GET
+      /api/auth/oidc/*` routes.
+    - `403` class `forbidden` on a session-gated route when the account's
+      role is not one gauntlet knows, or, on the admin routes, when the
+      caller is not an admin; class `must-change-password` or
+      `must-enrol-factor` when the session is stopped at one of the two
+      doors (see the `X-Auth-Gate` header).
 
     A request carrying `Authorization: Bearer ...` never reaches these
     routes: `Protect` sends it to the application's own handler for that
-    token kind, or answers `401` "invalid or revoked token".
+    token kind, or answers `401` class `invalid-credentials` "invalid or
+    revoked token".
 
     **Session cookie.** Its name is the application's `Config.CookieName`,
     prefixed `__Host-` while `Config.SecureCookie` is true; it is
@@ -65,14 +68,19 @@ info:
     admin's password reset or sign-out forget them all. A frontend does nothing with
     it: the browser keeps and sends it.
 
-    **Errors.** Every error body is `text/plain` holding one human-readable
-    line, except two `application/json` bodies for a step that half
-    succeeded: `DELETE /api/auth/users/{id}` when the account was deleted
-    but its tokens could not be revoked, and `POST /api/auth/totp/confirm`
-    when the authenticator is now active but recovery codes could not be
-    generated. A frontend must branch on the status code
-    and the `X-Auth-Gate` header, never on the message text. The switch to
-    RFC 9457 Problem Details is #23 and is not in this version.
+    **Errors.** Every error body is RFC 9457 Problem Details
+    (`application/problem+json`, gauntlet #23): `type`, a permanent link
+    into [`docs/api/errors.md`](../errors.md) naming a fixed `title` and
+    `status`; `detail`, free text that may change wording and is never
+    parsed; and, on exactly three responses (marked below), extension
+    members (`totpActive`, `username`) that are part of the contract and
+    do not change. A frontend branches on `type` (or the status code and
+    the `X-Auth-Gate` header, for the two forced-auth-gate classes),
+    never on `detail`'s text. An unmatched path or method (a typo, or a
+    method the route does not take) answers the same shape with `type:
+    about:blank` and no `detail` -- not a documented class, and the one
+    response this document cannot enumerate per-route; the `Allow` header
+    on a `405` lists the methods the path does take.
 
     **Compatibility.** Additive only within a major version: routes,
     response fields and status codes are added, never renamed or removed
@@ -153,35 +161,17 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          description: The setup code is wrong or missing; the current one is in the server's log.
-          headers:
-            WWW-Authenticate:
-              required: true
-              schema:
-                type: string
-                const: Bearer realm="gate"
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/InvalidCredentials"
         "403":
-          $ref: "#/components/responses/CSRFRefused"
+          $ref: "#/components/responses/CSRFRequired"
         "409":
-          description: Registration is closed -- an account already exists.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          description: The deployment has no persistent storage configured.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/NotPersisted"
 
   /api/auth/login:
     post:
@@ -225,9 +215,9 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/InvalidCredentials"
         "403":
-          $ref: "#/components/responses/CSRFRefused"
+          $ref: "#/components/responses/CSRFRequired"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -270,13 +260,29 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: The code or passkey assertion was wrong (`invalid-credentials`), or the pending login is invalid, expired, already completed, or its account is gone or has lost its second factor (`step-expired`) -- sign in again from the start.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
         "403":
-          $ref: "#/components/responses/CSRFRefused"
+          $ref: "#/components/responses/CSRFRequired"
         "404":
-          $ref: "#/components/responses/PasskeysOff"
+          $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/PasskeysNotReady"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -309,17 +315,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/CredentialAssertion"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/StepExpired"
         "403":
-          $ref: "#/components/responses/CSRFRefused"
+          $ref: "#/components/responses/CSRFRequired"
         "404":
-          $ref: "#/components/responses/PasskeysOff"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The relying party is not ready (the message names why), or the account has no passkey registered for it.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -350,7 +352,7 @@ paths:
                   loggedOut:
                     const: true
         "403":
-          $ref: "#/components/responses/CSRFRefused"
+          $ref: "#/components/responses/CSRFRequired"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -374,7 +376,7 @@ paths:
                   signedOutEverywhere:
                     const: true
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
@@ -400,7 +402,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SessionList"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
@@ -426,11 +428,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/SessionEnded"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/SessionNotFound"
+          $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -478,19 +480,9 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          description: The username or unlock code is wrong, or no code is outstanding.
-          headers:
-            WWW-Authenticate:
-              required: true
-              schema:
-                type: string
-                const: Bearer realm="gate"
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/InvalidCredentials"
         "403":
-          $ref: "#/components/responses/CSRFRefused"
+          $ref: "#/components/responses/CSRFRequired"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -552,15 +544,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The account signs in through the identity provider and has no local password.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -604,15 +592,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The account has no local password (SSO-only), or already has an active authenticator app.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -660,37 +644,30 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: No enrolment is pending.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
           description: |
-            `text/plain` when the app could not be activated; details are in
-            the server log. The JSON body when the app WAS activated (other
-            sessions ended, a fresh session cookie set) but recovery codes
-            could not be generated -- remove the app and enrol again.
+            `server-error` when the app could not be activated; details are
+            in the server log, never in the body. `partially-completed`
+            when the app WAS activated (other sessions ended, a fresh
+            session cookie set) but recovery codes could not be generated
+            -- `totpActive` is true; remove the app and enrol again.
           content:
-            text/plain:
+            application/problem+json:
               schema:
-                $ref: "#/components/schemas/TextError"
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [error, totpActive]
-                properties:
-                  error:
-                    type: string
-                  totpActive:
-                    const: true
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties:
+                          type:
+                            const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#server-error
+                  - $ref: "#/components/schemas/PartiallyCompletedProblem"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -727,7 +704,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "429":
@@ -767,15 +744,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The account has no second factor for recovery codes to stand in for.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -798,11 +771,11 @@ paths:
                 items:
                   $ref: "#/components/schemas/PasskeyRow"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/PasskeysOff"
+          $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -836,17 +809,13 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/PasskeysOff"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The relying party is not ready (the message names why), or the account has no local password (signs in through SSO).
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -885,13 +854,17 @@ paths:
               schema:
                 $ref: "#/components/schemas/PasskeyRegisterFinishResponse"
         "400":
-          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or the credential was refused (wrong origin, bad signature, malformed). The ceremony cookie is kept, so a corrected credential can finish it.
+          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or the credential was refused (wrong origin, bad signature, malformed; `invalid-request` either way). The ceremony cookie is kept, so a corrected credential can finish it.
           content:
-            text/plain:
+            application/problem+json:
               schema:
-                $ref: "#/components/schemas/TextError"
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-request
         "401":
-          description: No valid session, or the ceremony cookie is missing, expired, tampered with or already used, or this ceremony already stored a passkey or was ended by a refusal -- begin again. A dead or spent ceremony cookie is cleared.
+          description: No valid session (`sign-in-required`), or the ceremony cookie is missing, expired, tampered with or already used, or this ceremony already stored a passkey or was ended by a refusal (`step-expired`) -- begin again. A dead or spent ceremony cookie is cleared.
           headers:
             WWW-Authenticate:
               required: true
@@ -899,28 +872,39 @@ paths:
                 type: string
                 const: Bearer realm="gate"
           content:
-            text/plain:
+            application/problem+json:
               schema:
-                $ref: "#/components/schemas/TextError"
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/PasskeysOff"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The relying party is not ready (the message names why), the passkey is already registered to this account, or the account already holds ten. For a duplicate or a full account the ceremony is ended and its cookie cleared; begin again.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "500":
           description: |
-            The passkey could not be stored; or it WAS stored and is active
+            `server-error` when the passkey could not be stored; or
+            `partially-completed` when it WAS stored and is active
             (sessions rotated as on success) but recovery codes could not
-            be saved -- the message says which.
+            be saved -- the detail says which. No extension members on
+            this one (unlike `totpConfirm`'s): nothing here distinguishes
+            which account hit it beyond the session already in use.
           content:
-            text/plain:
+            application/problem+json:
               schema:
-                $ref: "#/components/schemas/TextError"
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#server-error
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#partially-completed
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -948,11 +932,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/PasskeyNotFound"
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -984,11 +968,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/PasskeyNotFound"
+          $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1013,7 +997,7 @@ paths:
         "302":
           $ref: "#/components/responses/Redirect"
         "404":
-          $ref: "#/components/responses/SSOOff"
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1054,7 +1038,7 @@ paths:
         "302":
           $ref: "#/components/responses/Redirect"
         "404":
-          $ref: "#/components/responses/SSOOff"
+          $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1082,17 +1066,13 @@ paths:
                   url:
                     type: string
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/SSOOff"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The account already signs in only through the provider, or is already linked.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1112,7 +1092,7 @@ paths:
                 items:
                   $ref: "#/components/schemas/UserSummary"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
@@ -1149,23 +1129,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The username is taken.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          description: Setup required (no account exists yet), or the deployment has no persistent storage configured.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/SetupOrNotPersisted"
 
   /api/auth/users/{id}:
     delete:
@@ -1193,36 +1165,29 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/NoSuchUser"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The account is the admin.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "500":
           description: |
-            `text/plain` when the account could not be deleted. The JSON
-            body when the account WAS deleted but its tokens could not be
-            revoked -- the admin has to revoke them by hand.
+            `server-error` when the account could not be deleted at all.
+            `partially-completed`, with `username`, when the account WAS
+            deleted but its tokens could not be revoked -- the admin has
+            to revoke them by hand.
           content:
-            text/plain:
+            application/problem+json:
               schema:
-                $ref: "#/components/schemas/TextError"
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [username, error]
-                properties:
-                  username:
-                    type: string
-                  error:
-                    type: string
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties:
+                          type:
+                            const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#server-error
+                  - $ref: "#/components/schemas/PartiallyCompletedProblem"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1259,25 +1224,17 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/NoSuchUser"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The account is the caller's own, or has no local password.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          description: Setup required (no account exists yet), or the deployment has no persistent storage configured.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/SetupOrNotPersisted"
 
   /api/auth/users/{id}/unlock:
     post:
@@ -1330,11 +1287,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/NoSuchUser"
+          $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1382,17 +1339,13 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/NoSuchUser"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The account is the caller's own; nothing ends.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1421,17 +1374,13 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/NoSuchUser"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The account is the caller's own.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1462,21 +1411,13 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: The application has no passkeys, or no account has this id.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/NotFound"
         "409":
-          description: The account is the caller's own.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1552,17 +1493,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/SignInList"
         "400":
-          description: A query value is out of range -- an unknown outcome, a `before` that is not a positive whole number, a `limit` outside 1 to 200, or an `address` over 64 bytes.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/SignInsOff"
+          $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1586,7 +1523,7 @@ paths:
                     items:
                       $ref: "#/components/schemas/Token"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
@@ -1627,17 +1564,13 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          description: Setup required (no account exists yet), or the deployment has no persistent storage configured.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/SetupOrNotPersisted"
 
   /api/tokens/{id}:
     delete:
@@ -1664,21 +1597,13 @@ paths:
                   revoked:
                     const: true
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/SignInRequired"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: No such token -- never existed or already revoked; the two are not told apart.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/NotFound"
         "500":
-          description: The revoke could not be saved, so the token still works; try again.
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/TextError"
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1743,14 +1668,25 @@ components:
         type: string
 
   responses:
+    # Each response below carries exactly one class (the `type` enum has
+    # one value) except where its description says otherwise -- those
+    # have as many values as classes it can answer with. See
+    # docs/api/errors.md for what each class means and which routes
+    # answer which classes under which conditions; this document's own
+    # job is only to pin the response shape, not to re-explain the
+    # class.
     BadRequest:
-      description: The body is not one JSON object of the documented fields (unknown fields and trailing data are refused), or a field's value is refused.
+      description: The body is not one JSON object of the documented fields (unknown fields and trailing data are refused), or a field's value is refused. Class `invalid-request`.
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
-    Unauthorized:
-      description: No valid session (or pending-login cookie), or the credential given was wrong. The body is the same for an unknown username and a wrong password.
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-request
+    SignInRequired:
+      description: No valid session. Class `sign-in-required`.
       headers:
         WWW-Authenticate:
           required: true
@@ -1758,20 +1694,68 @@ components:
             type: string
             const: Bearer realm="gate"
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
-    CSRFRefused:
-      description: The `X-Requested-With` header is missing or wrong.
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
+    InvalidCredentials:
+      description: The credential given was wrong -- the same body for an unknown username and a wrong password, or for any other pair this document's "Security" note names. Class `invalid-credentials`.
+      headers:
+        WWW-Authenticate:
+          required: true
+          schema:
+            type: string
+            const: Bearer realm="gate"
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+    StepExpired:
+      description: A multi-step ceremony (a pending login, a passkey ceremony) is invalid, expired, already completed, or its target is gone -- start it again. Class `step-expired`.
+      headers:
+        WWW-Authenticate:
+          required: true
+          schema:
+            type: string
+            const: Bearer realm="gate"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+    CSRFRequired:
+      description: The `X-Requested-With` header is missing or wrong. Class `csrf-required`.
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#csrf-required
     Forbidden:
       description: |
-        The `X-Requested-With` header is missing or wrong; the account's
-        role is not recognized; the route needs a higher role; or the
-        session is stopped at a door, named by `X-Auth-Gate`.
+        The `X-Requested-With` header is missing or wrong (class
+        `csrf-required`, checked first, before any of the rest, on every
+        `POST`, `PATCH` or `DELETE`); the account's role is not
+        recognized, or (on an admin route) the caller is not an admin
+        (class `forbidden`); or the session is stopped at one of two
+        doors, named by both `type` and `X-Auth-Gate`
+        (`must-change-password`, `must-enrol-factor`). Not every one of
+        the four is reachable at every route this is used on (a `GET`
+        never reaches the CSRF check; each door exempts the one route it
+        lets through), but none is route-specific enough to be worth its
+        own response here.
       headers:
         X-Auth-Gate:
           description: |
@@ -1789,69 +1773,114 @@ components:
             type: string
             enum: [must-change-password, must-enrol-factor]
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
-    NoSuchUser:
-      description: No account has this id.
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#csrf-required
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#forbidden
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-change-password
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-enrol-factor
+    SignInRequiredOrInvalidCredentials:
+      description: |
+        No valid session (class `sign-in-required`); or, re-entering the
+        caller's own password (or, where the route takes a second factor
+        too, that code) to re-prove a session is enough to act on, it was
+        wrong (class `invalid-credentials`; counted against the
+        account's password re-check budget, `429` once it is spent).
+      headers:
+        WWW-Authenticate:
+          required: true
+          schema:
+            type: string
+            const: Bearer realm="gate"
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+    NotFound:
+      description: No account, token, session or passkey has this id or ref; the application has no passkeys, no single sign-on, or no sign-in history configured; or the path matches no route at all (`type` is then `about:blank`, with no `detail`; see the "Errors" note above). Class `not-found` otherwise.
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#not-found
+                      - about:blank
+    Conflict:
+      description: The request is refused because of the account's or the deployment's current state (an account already in the shape asked for, a relationship the route must not touch, a relying party that is not ready); the detail says which. Class `conflict`.
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#conflict
     TooManyRequests:
-      description: Too many failed attempts from this address or on this account; try again later.
+      description: Too many failed attempts from this address or on this account; try again later. Class `rate-limited`.
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#rate-limited
     InternalError:
-      description: The server could not complete the request; details are in its log, never in the body.
+      description: The server could not complete the request; details are in its log, never in the body. Class `server-error`.
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#server-error
     SetupRequired:
-      description: No account exists yet; only the session and register routes are reachable.
+      description: No account exists yet; only the session and register routes are reachable. Class `setup-required`.
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
-    SSOOff:
-      description: Single sign-on is not configured.
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#setup-required
+    NotPersisted:
+      description: The deployment has no persistent storage configured. Class `not-persisted`.
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
-    PasskeysOff:
-      description: This application has no passkeys (`Deps.Passkeys` is nil).
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#not-persisted
+    SetupOrNotPersisted:
+      description: No account exists yet (class `setup-required`), or the deployment has no persistent storage configured (class `not-persisted`).
       content:
-        text/plain:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/TextError"
-    SignInsOff:
-      description: This application keeps no sign-in history (`Deps.SignIns` is nil).
-      content:
-        text/plain:
-          schema:
-            $ref: "#/components/schemas/TextError"
-    PasskeysNotReady:
-      description: The relying party is not ready -- the application has no usable public URL. The message names the reason (`unset`, `ip` or `insecure`), as `GET /api/auth/session`'s `passkeys.status` does.
-      content:
-        text/plain:
-          schema:
-            $ref: "#/components/schemas/TextError"
-    PasskeyNotFound:
-      description: The application has no passkeys, or no passkey on the caller's account has this id.
-      content:
-        text/plain:
-          schema:
-            $ref: "#/components/schemas/TextError"
-    SessionNotFound:
-      description: No live session on the caller's account has this ref. The same for a malformed ref and for another account's session, and nothing ends.
-      content:
-        text/plain:
-          schema:
-            $ref: "#/components/schemas/TextError"
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#setup-required
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#not-persisted
     Redirect:
       description: Browser redirect.
       headers:
@@ -1861,9 +1890,57 @@ components:
             type: string
 
   schemas:
-    TextError:
-      type: string
-      description: One human-readable line. Wording may change; do not match on it.
+    Problem:
+      description: |
+        RFC 9457 Problem Details (gauntlet #23). `type` is permanent and
+        is the only field a frontend branches on; `detail`'s wording may
+        change and is never parsed. See docs/api/errors.md for what each
+        `type` means, which routes answer it, and the SECURITY note on
+        which pairs of outcomes must (and do) share one `type` and one
+        `detail`.
+      type: object
+      additionalProperties: false
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: A permanent link into docs/api/errors.md naming the class, or `about:blank` for the one response this document cannot enumerate per-route (an unmatched path or method).
+        title:
+          type: string
+          description: Fixed per `type`; never read instead of it.
+        status:
+          type: integer
+          description: Repeats the HTTP status code. Fixed per `type`, except `about:blank`'s, which is the status of whichever unmatched-route answer it is.
+        detail:
+          type: string
+          description: Free text for a person, naming this call site's own refusal. Never parsed; absent on a response with nothing more specific to say than its `title`.
+    PartiallyCompletedProblem:
+      description: |
+        The `partially-completed` class (status 500, docs/api/errors.md):
+        a request that changed something but failed before finishing
+        everything it meant to. Closed, unlike `Problem`, since its two
+        extension members are part of the contract, not a per-call-site
+        afterthought -- a given response carries whichever one names
+        what still needs doing (never both).
+      type: object
+      additionalProperties: false
+      required: [type, title, status]
+      properties:
+        type:
+          const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#partially-completed
+        title:
+          const: Partly completed
+        status:
+          const: 500
+        detail:
+          type: string
+        totpActive:
+          const: true
+          description: Present (and true) only from `POST /api/auth/totp/confirm` -- the authenticator app is active, but its recovery codes could not be generated.
+        username:
+          type: string
+          description: Present only from `DELETE /api/auth/users/{id}` -- the account named was deleted, but its API tokens could not be revoked.
     Role:
       type: string
       description: "`admin`, `user` or `viewer`. Any other value is an account gauntlet refuses on every session-gated route."
