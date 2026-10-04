@@ -140,9 +140,10 @@ lint:vulncheck:
     - govulncheck ./...
 
 # The exported Go API against the last release tag (ADR-0002, #22):
-# fails on a removed or renamed identifier, passes on additions. apidiff
-# runs through `go run` at a pinned pseudo-version inside the script, so
-# it never enters go.mod; scripts/apidiff.sh runs the same check locally.
+# fails on a removed or renamed identifier, passes on additions. The
+# script installs apidiff at a pinned pseudo-version into a temporary
+# directory, so it never enters go.mod or go.sum, and fails if either
+# file changed during the run (#62); it runs the same check locally.
 # Full history and the tags are fetched so the base tag is there to diff.
 lint:apidiff:
   stage: lint
