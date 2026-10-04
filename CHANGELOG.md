@@ -21,6 +21,14 @@ All notable changes to this project are documented in this file.
   themselves. `Store.SetPendingTOTPSecretAt` records when a pending
   authenticator-app secret was set; `User.TOTPPending` and
   `TOTPPendingLifetime` say whether it can still be confirmed (#58).
+- `gate.Config.Country`: an optional lookup from a client address to its
+  ISO 3166-1 alpha-2 country code, recorded on a sign-in and the session
+  it issues. `SessionClient` and `SignInRow` gain `Country`; the
+  sign-in history document is now version 2 for the added field, and an
+  older document loads with it blank. The admin sign-in history
+  (`GET /api/auth/sign-ins`) and a person's own session list
+  (`GET /api/auth/sessions`) both gain an optional `country` field.
+  Nothing is recorded with `Config.Country` left nil (#54).
 
 ### Security
 

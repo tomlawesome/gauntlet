@@ -39,15 +39,24 @@ import (
 // matched no account.
 const unknownAccount = "unknown"
 
-// signInClient is the address and browser r came from, as the
-// application resolves the address (Config.ClientIP). address, when
-// set, is the one the attempt's reservation was keyed on, so the
-// record names the same address the limiter counted.
+// signInClient is the address, browser and country (#54) r came from,
+// as the application resolves the address (Config.ClientIP) and the
+// country (Config.Country). address, when set, is the one the
+// attempt's reservation was keyed on, so the record names the same
+// address the limiter counted. This is the one place that client is
+// built for a sign-in record and for the session issueSession starts,
+// so the two always agree.
 func (g *Gate) signInClient(r *http.Request, address string) gauntlet.SessionClient {
 	if address == "" {
 		address = g.cfg.ClientIP(r)
 	}
-	return gauntlet.SessionClient{Address: address, UserAgent: r.UserAgent()}
+	client := gauntlet.SessionClient{Address: address, UserAgent: r.UserAgent()}
+	if g.cfg.Country != nil {
+		if code, ok := g.cfg.Country(address); ok {
+			client.Country = code
+		}
+	}
+	return client
 }
 
 // signInFailed reports whether o is a refused credential or a refused

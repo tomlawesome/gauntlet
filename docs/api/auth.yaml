@@ -2118,6 +2118,10 @@ components:
           type: string
           maxLength: 256
           description: The browser's `User-Agent` at sign-in, with control and formatting characters removed. Absent when none was sent.
+        country:
+          type: string
+          pattern: "^[A-Z]{2}$"
+          description: The country `address` resolved to at sign-in, if a country lookup is configured and the address matched. Absent otherwise.
     SessionList:
       type: object
       additionalProperties: false
@@ -2403,6 +2407,10 @@ components:
           type: string
           maxLength: 256
           description: The first attempt's `User-Agent`, with control and formatting characters removed.
+        country:
+          type: string
+          pattern: "^[A-Z]{2}$"
+          description: The country `address` resolved to for the first attempt, if a country lookup is configured and the address matched. Absent otherwise.
         lockedUntil:
           type: string
           format: date-time

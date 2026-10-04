@@ -92,6 +92,14 @@ type Config struct {
 	// (mikroview's clientIP -- its own trusted-proxy policy is the
 	// application's, not gate's). Required.
 	ClientIP func(*http.Request) string
+	// Country resolves the ISO 3166-1 alpha-2 country code for an
+	// address, so a sign-in record and the session it issues can carry
+	// where the request came from (#54). Optional: nil means no country
+	// is ever recorded. The application passes
+	// (*geoip.Manager).Country; ok is false when nothing is known for
+	// that address (no data file loaded yet, a private address, or no
+	// match), and gate then records no country for it, never an error.
+	Country func(address string) (code string, ok bool)
 	// Now is the clock Protect and every handler read the current time
 	// from. nil means time.Now.
 	Now func() time.Time
