@@ -66,7 +66,9 @@ owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. For v0.2.0
 `github.com/getkin/kin-openapi` v0.149.0 (MIT) in tests only, both for
 #22 and ADR-0002; `github.com/go-webauthn/webauthn` v0.18.2 in `passkey/`
 for G8 (#20), and in its test fake (`internal/passkeytest`) and the
-contract module. Anything else goes to the owner first.
+contract module. For #54 (owner 2026-10-04):
+`github.com/oschwald/maxminddb-golang/v2` (ISC), to read MaxMind and
+IPinfo country files. Anything else goes to the owner first.
 
 ## Checks
 
