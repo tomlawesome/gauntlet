@@ -55,9 +55,11 @@ info:
     the browser's value instead of adding another; only `login`,
     `login/factor` and `login/factor/begin` use it for the allowance),
     no `__Host-` prefix (that needs path `/`),
-    `Max-Age` 45 days. Its value is 32 random bytes, base64url, and names
-    nothing; the account's record holds only its SHA-256, and a fresh
-    value replaces it at every sign-in. While the account is locked out,
+    `Max-Age` 45 days. Its value is up to four tokens joined by `.`,
+    one per account the browser has signed in to, most recent first
+    (#55); each is 32 random bytes, base64url, and names nothing. An
+    account's record holds only its own tokens' SHA-256, and a fresh
+    token replaces that account's one at every sign-in. While the account is locked out,
     or the client's address is at its limit, a browser carrying a value
     the named account remembers keeps a small allowance of its own (the
     limiter's attempts per window), where any other browser gets `429`.
