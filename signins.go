@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,16 +26,18 @@ import (
 // to a bounded number of rows:
 //
 //  1. Fold. An attempt with the same outcome, method, account (or masked
-//     name, when none matched) and address as a row that began within
+//     name, when none matched), address, unusual-sign-in signals and
+//     confirmation (#55) as a row that began within
 //     signInFoldSpan adds one to that row's count and moves its until;
 //     nothing else about the row changes. The index behind this lives in
 //     memory only, so folding starts afresh after a restart.
 //  2. Budget. Failed attempts may start at most maxNewFailureRowsPerSpan
 //     new rows per signInFoldSpan bucket (now.Truncate). Past it they
 //     fold into that bucket's one SignInUnrecorded row, which carries a
-//     count and times and nothing else. A success, or a password step
-//     that passed, is never budgeted: only someone holding the
-//     credential can make one.
+//     count and times and nothing else. A success, a password step that
+//     passed, a sign-in refused by policy or one sent a confirmation
+//     code is never budgeted: only someone holding the credential can
+//     make one.
 //  3. Cap. At MaxRows rows the oldest goes.
 //
 // An attempt that started a lockout or disabled sign-in is neither
@@ -115,9 +118,11 @@ type SignInRow struct {
 	// Client is the first attempt's address, browser and country (#54),
 	// cleaned as a session's is.
 	Client SessionClient
-	// LockedUntil and Disabled are SignInEvent's.
+	// LockedUntil, Disabled and Confirmed are SignInEvent's. The
+	// unusual-sign-in signals are Client.Unusual (#55).
 	LockedUntil time.Time
 	Disabled    bool
+	Confirmed   bool
 }
 
 // SignInQuery selects rows for List. Zero fields select everything.
@@ -125,6 +130,9 @@ type SignInQuery struct {
 	UserID  string
 	Address string
 	Outcome SignInOutcome
+	// Unusual, when set, returns only rows that raised at least one
+	// unusual-sign-in signal (#55).
+	Unusual bool
 	// Before, when not zero, returns only rows numbered below it: the
 	// last Seq of one page is the next page's Before.
 	Before uint64
@@ -133,9 +141,9 @@ type SignInQuery struct {
 	Limit int
 }
 
-// signInFile is the stored document, version 2 (#54 added Country; see
-// docversion.go): {"version":2,"nextSeq":n,"rows":[...]}, rows ascending
-// by seq.
+// signInFile is the stored document, version 3 (#54 added Country, #55
+// Unusual and Confirmed; see docversion.go):
+// {"version":3,"nextSeq":n,"rows":[...]}, rows ascending by seq.
 type signInFile struct {
 	Version int             `json:"version"`
 	NextSeq uint64          `json:"nextSeq"`
@@ -160,6 +168,13 @@ type signInFileRow struct {
 	Country     string    `json:"country,omitempty"`
 	LockedUntil time.Time `json:"lockedUntil,omitzero"`
 	Disabled    bool      `json:"disabled,omitempty"`
+	// Unusual and Confirmed (#55) were added at version 3: an array of
+	// signal names, and whether a confirmation code completed the
+	// sign-in. A version-2 row has neither, which reads as none and
+	// false, what every row recorded before them in fact was. An unknown
+	// signal name is refused rather than dropped.
+	Unusual   SignInSignals `json:"unusual,omitzero"`
+	Confirmed bool          `json:"confirmed,omitempty"`
 }
 
 // signInState is what the document holds.
@@ -200,6 +215,7 @@ func encodeSignIns(st *signInState) ([]byte, error) {
 			UserID: r.UserID, Username: r.Username, Outcome: r.Outcome, Method: r.Method,
 			Address: r.Client.Address, UserAgent: r.Client.UserAgent, Country: r.Client.Country,
 			LockedUntil: r.LockedUntil, Disabled: r.Disabled,
+			Unusual: r.Client.Unusual, Confirmed: r.Confirmed,
 		}
 	}
 	return json.Marshal(f)
@@ -232,8 +248,8 @@ func decodeSignIns(data []byte) (*signInState, error) {
 		st.rows[i] = SignInRow{
 			Seq: r.Seq, At: r.At, Until: r.Until, Count: r.Count,
 			UserID: r.UserID, Username: r.Username, Outcome: r.Outcome, Method: r.Method,
-			Client:      SessionClient{Address: r.Address, UserAgent: r.UserAgent, Country: r.Country},
-			LockedUntil: r.LockedUntil, Disabled: r.Disabled,
+			Client:      SessionClient{Address: r.Address, UserAgent: r.UserAgent, Country: r.Country, Unusual: r.Unusual},
+			LockedUntil: r.LockedUntil, Disabled: r.Disabled, Confirmed: r.Confirmed,
 		}
 	}
 	return st, nil
@@ -378,9 +394,15 @@ func (h *SignInHistory) Describe() string {
 }
 
 // signInFailedOutcome reports whether o counts against the failure
-// budget: anything but a sign-in or a password step that passed.
+// budget: anything but an outcome that cost the full credential -- a
+// sign-in, a password step that passed, a sign-in refused by policy or
+// one sent a confirmation code (#55).
 func signInFailedOutcome(o SignInOutcome) bool {
-	return o != SignInSuccess && o != SignInPasswordOK
+	switch o {
+	case SignInSuccess, SignInPasswordOK, SignInRefused, SignInConfirmSent:
+		return false
+	}
+	return true
 }
 
 // startedSomething reports whether ev is the failed attempt that started
@@ -391,13 +413,16 @@ func startedSomething(ev SignInEvent) bool {
 }
 
 // foldKey is what makes two attempts the same row: outcome, method,
-// account (or the masked name, for none) and address.
+// account (or the masked name, for none), address, and the signals and
+// confirmation (#55), so an unusual success never folds into an
+// ordinary one from the same address.
 func foldKey(ev SignInEvent) string {
 	who := "id:" + ev.UserID
 	if ev.UserID == "" {
 		who = "name:" + ev.Username
 	}
-	return string(ev.Outcome) + "\x00" + string(ev.Method) + "\x00" + who + "\x00" + ev.Client.Address
+	return string(ev.Outcome) + "\x00" + string(ev.Method) + "\x00" + who + "\x00" + ev.Client.Address +
+		"\x00" + ev.Client.Unusual.String() + "\x00" + strconv.FormatBool(ev.Confirmed)
 }
 
 // Record adds one attempt made at now, by the rules in this file's
@@ -409,6 +434,7 @@ func (h *SignInHistory) Record(ev SignInEvent, now time.Time) {
 		Address:   cleanClientText(ev.Client.Address, MaxSessionAddress),
 		UserAgent: cleanClientText(ev.Client.UserAgent, MaxSessionUserAgent),
 		Country:   ev.Client.Country,
+		Unusual:   ev.Client.Unusual,
 	}
 	now = now.UTC()
 	h.mu.Lock()
@@ -453,7 +479,7 @@ func (h *SignInHistory) recordLocked(ev SignInEvent, now time.Time) {
 	seq := h.st.add(SignInRow{
 		At: now, Until: now, Count: 1,
 		UserID: ev.UserID, Username: ev.Username, Outcome: ev.Outcome, Method: ev.Method,
-		Client: ev.Client, LockedUntil: lockedUntil, Disabled: ev.Disabled,
+		Client: ev.Client, LockedUntil: lockedUntil, Disabled: ev.Disabled, Confirmed: ev.Confirmed,
 	}, h.maxRows)
 	if !special {
 		h.foldLocked(key, foldEntry{seq: seq, at: now}, now)
@@ -520,7 +546,8 @@ func (h *SignInHistory) List(q SignInQuery) (rows []SignInRow, more bool) {
 		case q.Before != 0 && r.Seq >= q.Before,
 			q.UserID != "" && r.UserID != q.UserID,
 			q.Address != "" && r.Client.Address != q.Address,
-			q.Outcome != "" && r.Outcome != q.Outcome:
+			q.Outcome != "" && r.Outcome != q.Outcome,
+			q.Unusual && r.Client.Unusual == 0:
 			continue
 		}
 		if len(rows) == limit {

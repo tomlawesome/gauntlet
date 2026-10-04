@@ -522,7 +522,7 @@ func TestAVersion5AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // which a version-6 document does not carry and which read correctly as
 // zero and nil -- nothing on hold. The every-field fixture without them
 // opens with every other field intact and saves back as exactly the
-// fixture without them at version 7 -- after which a build reading only
+// fixture without them at version 8 -- after which a build reading only
 // up to version 6 refuses it (errNewerDocument), rather than drop an
 // enrolment on hold.
 func TestAVersion6AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {

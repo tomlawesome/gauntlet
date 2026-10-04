@@ -30,6 +30,16 @@ const (
 	// SignInSSORefused is an identity the provider vouched for that this
 	// deployment's SSO policy refused.
 	SignInSSORefused SignInOutcome = "sso_refused"
+	// SignInRefused is a sign-in whose every credential was right but
+	// which gate's unusual-sign-in policy refused (#55, the block
+	// action): no session.
+	SignInRefused SignInOutcome = "refused"
+	// SignInConfirmSent is a sign-in whose every credential was right
+	// and which owes a confirmation code (#55, the confirm action): a
+	// code was sent through the application, no session yet.
+	SignInConfirmSent SignInOutcome = "confirm_sent"
+	// SignInConfirmRefused is a wrong confirmation code.
+	SignInConfirmRefused SignInOutcome = "confirm_refused"
 	// SignInUnrecorded is a SignInHistory row standing for the failed
 	// attempts past a bucket's row budget (signins.go). gate never
 	// reports it as an event.
@@ -59,7 +69,9 @@ type SignInEvent struct {
 	Outcome  SignInOutcome
 	Method   SignInMethod
 	// Client is the address and browser the attempt came from, as the
-	// application's ClientIP and the User-Agent header gave them.
+	// application's ClientIP and the User-Agent header gave them, with
+	// the country looked up and the unusual-sign-in signals raised
+	// (Client.Unusual, #55).
 	Client SessionClient
 	// LockedUntil is the end of the lockout this attempt started, or
 	// for a SignInLocked refusal the one in force. Zero otherwise.
@@ -67,4 +79,7 @@ type SignInEvent struct {
 	// Disabled is set on the failed attempt that disabled the account's
 	// sign-in, and on a SignInDisabled refusal.
 	Disabled bool
+	// Confirmed is set on a SignInSuccess completed through a
+	// confirmation code (#55, gate's confirm step).
+	Confirmed bool
 }
