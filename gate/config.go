@@ -88,6 +88,10 @@ type Config struct {
 	// (POST /api/auth/users/{id}/logout-all), so the application can
 	// tell the account's owner. nil means nobody is told. See Notifier.
 	Notify Notifier
+	// NotifyUnusualSignIn is told about unusual sign-ins (#55), so the
+	// application can tell the account's owner. nil means nobody is told;
+	// the signals are still shown and audited. See UnusualSignInNotifier.
+	NotifyUnusualSignIn UnusualSignInNotifier
 	// ClientIP resolves the address the login limiter is keyed on
 	// (mikroview's clientIP -- its own trusted-proxy policy is the
 	// application's, not gate's). Required.
@@ -178,6 +182,9 @@ type Gate struct {
 	// notifying counts Notifier calls still running (notify.go), so a
 	// test can wait for them.
 	notifying sync.WaitGroup
+	// notices rates the unusual-sign-in notices for flag and block: one
+	// per account per unusualNoticeInterval (#55).
+	notices warnRater
 
 	// signInHook, when set, receives every sign-in attempt recordSignIn
 	// handles, after its client and lockout fields are filled, beside
@@ -264,6 +271,7 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 		deps:         deps,
 		exempt:       make(map[string]bool),
 		kindHandlers: make(map[gauntlet.TokenKind]http.Handler),
+		notices:      warnRater{interval: &unusualNoticeInterval},
 	}
 	// Not a refusal: plain HTTP is what development runs on, and the
 	// application, not gate, knows whether TLS terminates in front of

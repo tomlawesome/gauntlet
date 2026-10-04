@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -83,6 +84,89 @@ type UnusualSignInCase struct {
 	Default UnusualSignInAction
 }
 
+// UnusualSignInNotifier is how an application hears about unusual
+// sign-ins (Config.NotifyUnusualSignIn), so it can tell the account's
+// owner: gauntlet sends nothing itself. The application chooses the
+// wording, address and channel; it should treat Client.UserAgent as
+// text, never markup.
+//
+// Under flag it is asked after the response is written, in its own
+// goroutine, with a context that ends after notifyTimeout (10 seconds),
+// as Notifier is: an error or a panic is one error line in Config.Log
+// and changes nothing about the sign-in. At most one notice per account
+// per hour is sent; one held back is "notify=quiet" in the audit.
+type UnusualSignInNotifier interface {
+	UnusualSignIn(ctx context.Context, n UnusualSignInNotice) error
+}
+
+// UnusualSignInNotice is what an UnusualSignInNotifier is told. It never
+// carries the account's coordinates.
+type UnusualSignInNotice struct {
+	UserID, Username string
+	Role             gauntlet.Role
+	// Action is what happened: flag, confirm or block.
+	Action  UnusualSignInAction
+	Signals gauntlet.SignInSignals
+	Method  gauntlet.SignInMethod
+	// Client is the address, agent (text, never markup) and country the
+	// sign-in came from.
+	Client gauntlet.SessionClient
+	At     time.Time
+	// SessionRef, under flag, is the session's ref as the person's own
+	// session list shows it, so a message can say "end this session".
+	SessionRef string
+	// Code, under confirm, is the confirmation code, shown to the
+	// application exactly once: a secret for one person. ExpiresAt is
+	// when it dies.
+	Code      string
+	ExpiresAt time.Time
+	// Reason, under block, says why: policy, decide-failed,
+	// decide-timeout, decide-invalid or notify-failed.
+	Reason string
+}
+
+// unusualNoticeInterval is how long an account's flag and block notices
+// stay quiet after one is sent. A variable so tests can shorten it.
+var unusualNoticeInterval = time.Hour
+
+// noticeAllowed decides, before the audit record is written, whether a
+// flag or block notice for userID may be sent at now: "" when there is
+// no notifier (nothing about notices is recorded), else "asked" or
+// "quiet".
+func (g *Gate) noticeAllowed(userID string, now time.Time) string {
+	if g.cfg.NotifyUnusualSignIn == nil {
+		return ""
+	}
+	if ok, _, _ := g.notices.allow(userID, now); ok {
+		return "asked"
+	}
+	return "quiet"
+}
+
+// notifyUnusualSignIn asks Config.NotifyUnusualSignIn to tell n's
+// account, in the background (flag and block). Call it only once the
+// response is written. A nil n is nothing to send.
+func (g *Gate) notifyUnusualSignIn(ctx context.Context, n *UnusualSignInNotice) {
+	notify := g.cfg.NotifyUnusualSignIn
+	if notify == nil || n == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
+	g.notifying.Add(1)
+	go func() {
+		defer g.notifying.Done()
+		defer cancel()
+		defer func() {
+			if p := recover(); p != nil {
+				g.logError(fmt.Sprintf("gate: the unusual sign-in notifier panicked for account %q: %q", n.Username, fmt.Sprint(p)))
+			}
+		}()
+		if err := notify.UnusualSignIn(ctx, *n); err != nil {
+			g.logError(fmt.Sprintf("gate: the unusual sign-in notifier failed for account %q: %q", n.Username, err.Error()))
+		}
+	}()
+}
+
 // checkUnusualPolicy is New's check of Config.UnusualSignIns: every
 // field one of the four actions or empty; confirm only where something
 // can deliver the code; impossible travel turned on only where it can
@@ -98,7 +182,10 @@ func checkUnusualPolicy(cfg Config) error {
 		switch f.a {
 		case "", UnusualSignInOff, UnusualSignInFlag:
 		case UnusualSignInConfirm:
-			// Nothing can deliver the code yet.
+			if cfg.NotifyUnusualSignIn != nil {
+				// Confirm itself is not built yet.
+				return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which this build does not support yet", f.name)
+			}
 			return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which needs Config.NotifyUnusualSignIn to deliver the code", f.name)
 		case UnusualSignInBlock:
 			return fmt.Errorf("gate: Config.UnusualSignIns.%s is block, which this build does not support yet", f.name)
@@ -216,18 +303,31 @@ func (g *Gate) judgeSignIn(r *http.Request, userID string, place signInPlace, no
 
 // completeSignIn issues the session a judged sign-in has earned and
 // records it: the session carries the verdict's signals, as do the
-// history row and the audit record (unusual=...; action=...; before
-// the existing detail). When remembering the sign-in fails, nothing is
-// flagged: the signals are dropped (issueSignInSession). It returns the
-// session.
-func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) gauntlet.Session {
+// history row and the audit record (unusual=...; action=...;
+// notify=...; before the existing detail). When remembering the sign-in
+// fails, nothing is flagged and nobody is told: the signals are dropped
+// (issueSignInSession). It returns the notice to send once the response
+// is written (notifyUnusualSignIn), nil for none.
+func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *UnusualSignInNotice {
 	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
 	ev.Client.Unusual = signals
-	note := ""
-	if signals != 0 {
-		note = fmt.Sprintf("unusual=%s; action=%s; ", signals, v.action)
+	if signals == 0 {
+		g.recordSignIn(r, ev, res, now)
+		return nil
+	}
+	note := fmt.Sprintf("unusual=%s; action=%s; ", signals, v.action)
+	notify := g.noticeAllowed(user.ID, now)
+	if notify != "" {
+		note += "notify=" + notify + "; "
 	}
 	g.recordSignInNote(r, ev, res, note, now)
-	return sess
+	if notify != "asked" {
+		return nil
+	}
+	return &UnusualSignInNotice{
+		UserID: user.ID, Username: user.Username, Role: user.Role,
+		Action: v.action, Signals: signals, Method: method, Client: sess.Client, At: now,
+		SessionRef: sess.Ref(),
+	}
 }

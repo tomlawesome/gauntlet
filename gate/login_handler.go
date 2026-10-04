@@ -321,8 +321,9 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// The session this browser already held for the account ends here:
 	// the cookie below replaces it, and nothing else would (ASVS 7.2.4;
 	// see revokeReplacedSession).
-	g.completeSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
+	notice := g.completeSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
+	g.notifyUnusualSignIn(r.Context(), notice)
 }
 
 type loginFactorRequest struct {
@@ -475,7 +476,8 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// As in handleLogin: the session this browser held for the account
 	// is replaced by the cookie below, so it ends here (ASVS 7.2.4). Only
 	// here, not at the password step, which issues no session.
-	g.completeSignIn(w, r, user, res, method, place, verdict, now)
+	notice := g.completeSignIn(w, r, user, res, method, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
+	g.notifyUnusualSignIn(r.Context(), notice)
 	return true
 }

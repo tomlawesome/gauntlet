@@ -29,11 +29,25 @@ type warnRate struct {
 	suppressed int
 }
 
-// warnRater is the rating state behind Gate.warnRated.
+// warnRater is the rating state behind Gate.warnRated, and behind the
+// hourly unusual-sign-in notices (#55): at most one allowed per key per
+// interval.
 type warnRater struct {
+	// interval points at the variable holding how long a key stays
+	// quiet after it is allowed, so a test that shortens the variable
+	// shortens the rater; nil means warnRateInterval.
+	interval *time.Duration
 	mu       sync.Mutex
 	keys     map[string]*warnRate
 	overflow warnRate
+}
+
+// every is the rater's interval.
+func (w *warnRater) every() time.Duration {
+	if w.interval == nil {
+		return warnRateInterval
+	}
+	return *w.interval
 }
 
 // allow reports whether a line for key may be written at now, how many
@@ -56,7 +70,7 @@ func (w *warnRater) allow(key string, now time.Time) (ok bool, suppressed int, o
 			w.keys[key] = e
 		}
 	}
-	if !e.last.IsZero() && now.Sub(e.last) < warnRateInterval {
+	if !e.last.IsZero() && now.Sub(e.last) < w.every() {
 		e.suppressed++
 		return false, 0, overflow
 	}
@@ -68,7 +82,7 @@ func (w *warnRater) allow(key string, now time.Time) (ok bool, suppressed int, o
 // are carried to the overflow line's count rather than lost.
 func (w *warnRater) pruneLocked(now time.Time) {
 	for k, e := range w.keys {
-		if now.Sub(e.last) >= warnRateInterval {
+		if now.Sub(e.last) >= w.every() {
 			w.overflow.suppressed += e.suppressed
 			delete(w.keys, k)
 		}

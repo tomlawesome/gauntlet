@@ -1,12 +1,15 @@
 package gate
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -626,5 +629,163 @@ func TestUnusualSSOPathJudges(t *testing.T) {
 	signIn(mustCookieJar(t))
 	if entry := findAuditEntry(t, g, "user.login"); !strings.HasPrefix(entry.Detail, "unusual=new-browser; action=flag; via sso; ") {
 		t.Errorf("a second browser's SSO sign-in: %q", entry.Detail)
+	}
+}
+
+// noticeRecorder is a Config.NotifyUnusualSignIn that keeps every notice
+// and does what fail says.
+type noticeRecorder struct {
+	mu      sync.Mutex
+	notices []UnusualSignInNotice
+	fail    func(ctx context.Context) error
+}
+
+func (n *noticeRecorder) UnusualSignIn(ctx context.Context, notice UnusualSignInNotice) error {
+	n.mu.Lock()
+	n.notices = append(n.notices, notice)
+	fail := n.fail
+	n.mu.Unlock()
+	if fail != nil {
+		return fail(ctx)
+	}
+	return nil
+}
+
+func (n *noticeRecorder) all() []UnusualSignInNotice {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]UnusualSignInNotice(nil), n.notices...)
+}
+
+// newNotifiedEnv is newUnusualEnv with a notice recorder.
+func newNotifiedEnv(t *testing.T, policy UnusualSignInPolicy) (*unusualEnv, *noticeRecorder) {
+	t.Helper()
+	rec := &noticeRecorder{}
+	e := newUnusualEnvWith(t, persist.NewMemory(), func(c *Config) {
+		c.UnusualSignIns = policy
+		c.NotifyUnusualSignIn = rec
+	})
+	return e, rec
+}
+
+// notices waits for the background notices and returns them.
+func (e *unusualEnv) notices(rec *noticeRecorder) []UnusualSignInNotice {
+	e.g.notifying.Wait()
+	return rec.all()
+}
+
+func TestUnusualFlagNotice(t *testing.T) {
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{})
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	if got := e.notices(rec); len(got) != 0 {
+		t.Fatalf("the first sign-in told the application: %+v", got)
+	}
+	if entry, _ := e.lastAudit("user.login"); strings.Contains(entry.Detail, "notify=") {
+		t.Errorf("an ordinary sign-in's detail = %q", entry.Detail)
+	}
+	e.advance(time.Hour)
+	e.mustSignIn(t, b, addrParis)
+	got := e.notices(rec)
+	if len(got) != 1 {
+		t.Fatalf("%d notices, want 1", len(got))
+	}
+	n := got[0]
+	sess := e.newestSession(t)
+	if n.UserID != e.bobID || n.Username != totpBobUsername || n.Role != gauntlet.RoleUser || n.Action != UnusualSignInFlag ||
+		n.Signals != gauntlet.SignalNewCountry || n.Method != gauntlet.SignInMethodPassword ||
+		n.Client.Address != addrParis || n.Client.Country != "FR" || n.Client.UserAgent == "" ||
+		!n.At.Equal(e.clock.now()) || n.SessionRef != sess.Ref() || n.Code != "" || !n.ExpiresAt.IsZero() || n.Reason != "" {
+		t.Errorf("notice = %+v (session ref %s)", n, sess.Ref())
+	}
+	if entry, _ := e.lastAudit("user.login"); !strings.HasPrefix(entry.Detail, "unusual=new-country; action=flag; notify=asked; from=") {
+		t.Errorf("detail = %q", entry.Detail)
+	}
+}
+
+// At most one flag notice per account per hour; the held one is
+// notify=quiet in the audit.
+func TestUnusualNoticesAreHourly(t *testing.T) {
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{})
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	e.advance(time.Minute)
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	e.advance(time.Minute)
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	if got := e.notices(rec); len(got) != 1 {
+		t.Fatalf("%d notices in an hour, want 1", len(got))
+	}
+	if entry, _ := e.lastAudit("user.login"); !strings.HasPrefix(entry.Detail, "unusual=new-browser; action=flag; notify=quiet; ") {
+		t.Errorf("the held notice's detail = %q", entry.Detail)
+	}
+	e.advance(time.Hour)
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	if got := e.notices(rec); len(got) != 2 {
+		t.Errorf("%d notices after the hour, want 2", len(got))
+	}
+}
+
+// A notifier that errors, panics or outlasts notifyTimeout changes
+// nothing about the sign-in, and leaves one log line.
+func TestUnusualNoticeFailuresAreLogged(t *testing.T) {
+	was := notifyTimeout
+	notifyTimeout = time.Millisecond
+	t.Cleanup(func() { notifyTimeout = was })
+	for name, fail := range map[string]func(context.Context) error{
+		"error":   func(context.Context) error { return errors.New("mailer down") },
+		"panic":   func(context.Context) error { panic("mailer exploded") },
+		"timeout": func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, rec := newNotifiedEnv(t, UnusualSignInPolicy{})
+			rec.fail = fail
+			e.mustSignIn(t, newTestBrowser(t), addrLondon)
+			e.advance(time.Hour)
+			before := strings.Count(e.logText(), "level=ERROR")
+			e.mustSignIn(t, newTestBrowser(t), addrLondon)
+			if len(e.notices(rec)) != 1 {
+				t.Fatal("the notifier was not asked")
+			}
+			e.expectSignals(t, gauntlet.SignalNewBrowser)
+			if got := strings.Count(e.logText(), "level=ERROR") - before; got != 1 {
+				t.Errorf("%d error lines, want 1:\n%s", got, e.logText())
+			}
+		})
+	}
+}
+
+// With no notifier the signals are still shown, and the detail has no
+// notify=; under Action off nobody is told anything.
+func TestUnusualWithoutANotifierOrUnderOff(t *testing.T) {
+	e := newUnusualEnv(t, UnusualSignInPolicy{})
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	e.advance(time.Hour)
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	e.expectSignals(t, gauntlet.SignalNewBrowser)
+	if entry, _ := e.lastAudit("user.login"); strings.Contains(entry.Detail, "notify=") {
+		t.Errorf("detail = %q", entry.Detail)
+	}
+
+	off, rec := newNotifiedEnv(t, UnusualSignInPolicy{Action: UnusualSignInOff})
+	off.mustSignIn(t, newTestBrowser(t), addrLondon)
+	off.advance(time.Hour)
+	off.mustSignIn(t, newTestBrowser(t), addrParis)
+	if got := off.notices(rec); len(got) != 0 {
+		t.Errorf("under off the notifier was asked: %+v", got)
+	}
+}
+
+// A sign-in whose memory write fails tells nobody.
+func TestUnusualFailedRememberTellsNobody(t *testing.T) {
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	rec := &noticeRecorder{}
+	e := newUnusualEnvWith(t, backend, func(c *Config) { c.NotifyUnusualSignIn = rec })
+	e.mustSignIn(t, newTestBrowser(t), addrLondon)
+	e.advance(time.Hour)
+	backend.left = 0
+	e.mustSignIn(t, newTestBrowser(t), addrParis)
+	backend.left = -1
+	if got := e.notices(rec); len(got) != 0 {
+		t.Errorf("a sign-in whose memory write failed told the application: %+v", got)
 	}
 }
