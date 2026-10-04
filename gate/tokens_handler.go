@@ -40,13 +40,13 @@ type tokenResponse struct {
 func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	var req createTokenRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	// Trimmed first because the store trims it: a name of only spaces
 	// would pass an untrimmed check and be issued with no name at all.
 	if strings.TrimSpace(req.Name) == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "name is required", nil)
 		return
 	}
 
@@ -62,7 +62,7 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		case gauntlet.ErrTokenNotPersisted:
 			// The message gateErrorMessages carries for this says what
 			// to do about it; the generic one below does not.
-			g.writeAuthError(w, r, err, http.StatusServiceUnavailable)
+			g.writeAuthError(w, r, err, http.StatusServiceUnavailable, classNotPersisted)
 			return
 		case gauntlet.ErrTokenKindInvalid, gauntlet.ErrTokenDeviceRequired,
 			gauntlet.ErrTokenDeviceNotAllowed, gauntlet.ErrTokenDeviceInvalid,
@@ -70,11 +70,11 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 			// The caller's request is wrong, not the deployment's state,
 			// and the message is safe to hand back: it names a field,
 			// not anything about existing tokens.
-			g.writeAuthError(w, r, err, http.StatusBadRequest)
+			g.writeAuthError(w, r, err, http.StatusBadRequest, classInvalidRequest)
 			return
 		}
 		g.logWarn(err.Error())
-		http.Error(w, "unable to create token", status)
+		writeProblem(w, status, classServerError, "unable to create token", nil)
 		return
 	}
 
@@ -121,10 +121,10 @@ func (g *Gate) handleTokensRevoke(w http.ResponseWriter, r *http.Request) {
 		// working, so telling the admin it is gone would leave a leaked
 		// token live with nobody the wiser; writeAuthError logs it.
 		if errors.Is(err, gauntlet.ErrTokenNotFound) {
-			http.Error(w, "no such token", http.StatusNotFound)
+			writeProblem(w, http.StatusNotFound, classNotFound, "no such token", nil)
 			return
 		}
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 	g.audit(r, auditActor(r), "token.revoke", id, "")

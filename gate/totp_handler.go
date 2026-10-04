@@ -41,7 +41,7 @@ type totpEnrolResponse struct {
 func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	// SSO accounts are never offered a local factor: their identity
@@ -51,13 +51,13 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	// local password (provisioned or converted to SSO-only) that has
 	// nothing here to gate a factor behind.
 	if !user.LocalPassword() {
-		http.Error(w, "this account signs in through your identity provider -- an authenticator app is not offered", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account signs in through your identity provider -- an authenticator app is not offered", nil)
 		return
 	}
 
 	var req totpEnrolRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -71,16 +71,16 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	secret, err := gauntlet.GenerateTOTPSecret()
 	if err != nil {
 		g.logError("generating TOTP secret for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to start enrolment", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start enrolment", nil)
 		return
 	}
 	encoded := gauntlet.EncodeTOTPSecret(secret)
 	if err := g.deps.Users.SetPendingTOTPSecret(user.ID, encoded); err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if err == gauntlet.ErrTOTPAlreadyActive {
-			status = http.StatusConflict
+			status, class = http.StatusConflict, classConflict
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -124,13 +124,13 @@ type totpConfirmResponse struct {
 func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	var req totpConfirmRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -141,7 +141,7 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// has to see that write.
 	current, ok := g.deps.Users.Get(user.ID)
 	if !ok {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
@@ -149,7 +149,7 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// secret to check against, VerifyTOTP would fail every code and the
 	// caller would be told to check their clock instead of the 409.
 	if current.TOTPSecret == "" || !current.TOTPConfirmedAt.IsZero() {
-		g.writeAuthError(w, r, gauntlet.ErrNoPendingTOTP, http.StatusConflict)
+		g.writeAuthError(w, r, gauntlet.ErrNoPendingTOTP, http.StatusConflict, classConflict)
 		return
 	}
 
@@ -159,22 +159,22 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// without limit while the owner's enrolment is pending -- and a hit
 	// signs the owner out and hands over the recovery codes.
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
 	}
 	matched, ok := gauntlet.VerifyTOTP(current.TOTPSecret, req.Code, now, current.TOTPLastCounter)
 	if !ok {
-		http.Error(w, "that code didn't match -- check your authenticator app's clock and try again", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "that code didn't match -- check your authenticator app's clock and try again", nil)
 		return
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
 	if err := g.deps.Users.ConfirmTOTP(user.ID, now, matched); err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if err == gauntlet.ErrNoPendingTOTP {
-			status = http.StatusConflict
+			status, class = http.StatusConflict, classConflict
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -204,10 +204,9 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		// read the message, and a bare 500 reads as "setup failed" while
 		// the factor is on and this browser holds a new session.
 		g.logError("generating recovery codes for " + user.Username + " after confirming TOTP: " + err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error":      "the authenticator app is now active, but recovery codes could not be generated -- remove it and enrol again from account settings",
-			"totpActive": true,
-		})
+		writeProblem(w, http.StatusInternalServerError, classPartiallyCompleted,
+			"the authenticator app is now active, but recovery codes could not be generated -- remove it and enrol again from account settings",
+			map[string]any{"totpActive": true})
 		return
 	}
 	detail := "authenticator app confirmed"
@@ -237,13 +236,13 @@ type totpEnrolRequest struct {
 func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	var req totpDeleteRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -254,7 +253,7 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.deps.Users.ClearTOTP(user.ID); err != nil {
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 
@@ -286,21 +285,21 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "user id is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
-		http.Error(w, "an administrator cannot clear their own authenticator app here", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot clear their own authenticator app here", nil)
 		return
 	}
 
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
-		http.Error(w, "no such user", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
 		return
 	}
 	if err := g.deps.Users.ClearTOTP(id); err != nil {
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 

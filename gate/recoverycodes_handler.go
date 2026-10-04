@@ -29,13 +29,13 @@ type recoveryCodesRegenerateResponse struct {
 func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	var req recoveryCodesRegenerateRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -50,7 +50,7 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 	// snapshot -- same reasoning handleTOTPConfirm's header comment gives
 	// for re-reading rather than trusting UserFromContext.
 	if !current.HasSecondFactor() {
-		http.Error(w, "this account has no second factor yet -- recovery codes stand in for one, not for a password alone", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account has no second factor yet -- recovery codes stand in for one, not for a password alone", nil)
 		return
 	}
 
@@ -59,7 +59,7 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 		// GenerateRecoveryCodes' own restore-on-failure contract already
 		// left the old set intact and reported nothing as issued -- this
 		// is a clean refusal, not a half-done one.
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 

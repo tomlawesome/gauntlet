@@ -51,11 +51,11 @@ type userSummary struct {
 func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	if req.Role == string(gauntlet.RoleAdmin) {
-		g.writeAuthError(w, r, gauntlet.ErrSingleAdmin, http.StatusBadRequest)
+		g.writeAuthError(w, r, gauntlet.ErrSingleAdmin, http.StatusBadRequest, classInvalidRequest)
 		return
 	}
 	var role gauntlet.Role
@@ -65,7 +65,7 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	case string(gauntlet.RoleViewer):
 		role = gauntlet.RoleViewer
 	default:
-		g.writeAuthError(w, r, gauntlet.ErrInvalidRole, http.StatusBadRequest)
+		g.writeAuthError(w, r, gauntlet.ErrInvalidRole, http.StatusBadRequest, classInvalidRequest)
 		return
 	}
 
@@ -74,18 +74,18 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := g.deps.Users.CreateUser(req.Username, req.Password, role, g.now())
 	if err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		switch err {
 		case gauntlet.ErrUsernameTaken:
-			status = http.StatusConflict
+			status, class = http.StatusConflict, classConflict
 		case gauntlet.ErrNotPersisted:
-			status = http.StatusServiceUnavailable
+			status, class = http.StatusServiceUnavailable, classNotPersisted
 		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
 			gauntlet.ErrSingleAdmin, gauntlet.ErrInvalidRole,
 			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
-			status = http.StatusBadRequest
+			status, class = http.StatusBadRequest, classInvalidRequest
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 	g.audit(r, auditActor(r), "user.create", user.Username, "role="+string(user.Role))
@@ -133,20 +133,20 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "user id is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
 
 	user, err := g.deps.Users.DeleteUser(id)
 	if err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		switch err {
 		case gauntlet.ErrUserNotFound:
-			status = http.StatusNotFound
+			status, class = http.StatusNotFound, classNotFound
 		case gauntlet.ErrCannotDeleteAdmin:
-			status = http.StatusConflict
+			status, class = http.StatusConflict, classConflict
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -162,10 +162,9 @@ func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		g.logError(fmt.Sprintf("revoking tokens for deleted user %s: %v", user.ID, err))
 		g.audit(r, auditActor(r), "user.delete", user.Username,
 			fmt.Sprintf("role=%s tokensRevoked=0 tokenRevokeFailed=true", user.Role))
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"username": user.Username,
-			"error":    "the account was deleted, but its API tokens could not be revoked -- check the server log and revoke them by hand",
-		})
+		writeProblem(w, http.StatusInternalServerError, classPartiallyCompleted,
+			"the account was deleted, but its API tokens could not be revoked -- check the server log and revoke them by hand",
+			map[string]any{"username": user.Username})
 		return
 	}
 
@@ -212,27 +211,27 @@ type resetPasswordResponse struct {
 func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "user id is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
-		http.Error(w, "an administrator cannot reset their own password here -- change it from the account menu", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot reset their own password here -- change it from the account menu", nil)
 		return
 	}
 
 	now := g.now()
 	user, code, err := g.deps.Users.IssueResetCode(id, now)
 	if err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		switch err {
 		case gauntlet.ErrUserNotFound:
-			status = http.StatusNotFound
+			status, class = http.StatusNotFound, classNotFound
 		case gauntlet.ErrNoLocalPassword:
-			status = http.StatusConflict
+			status, class = http.StatusConflict, classConflict
 		case gauntlet.ErrNotPersisted:
-			status = http.StatusServiceUnavailable
+			status, class = http.StatusServiceUnavailable, classNotPersisted
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -292,7 +291,7 @@ type unlockSelfRequest struct {
 func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "user id is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
 	now := g.now()
@@ -301,7 +300,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 		// takes none, as before.
 		var req unlockSelfRequest
 		if err := g.decodeJSONBody(w, r, &req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 			return
 		}
 		if !g.recheckUnlockSelf(w, r, caller, req, now) {
@@ -311,7 +310,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
-		http.Error(w, "no such user", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
 		return
 	}
 	resp := unlockUserResponse{
@@ -320,11 +319,11 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 		WasLockedOut: now.Before(target.LoginLockedUntil),
 	}
 	if err := g.deps.Limiter.UnlockLogin(g.deps.Users, id); err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrUserNotFound) {
-			status = http.StatusNotFound // deleted since the read above
+			status, class = http.StatusNotFound, classNotFound // deleted since the read above
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -358,7 +357,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 // remains the way back for an admin with no session left.
 func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, req unlockSelfRequest, now time.Time) bool {
 	if req.Password == "" || req.Code == "" {
-		http.Error(w, "unlocking your own account needs your password and a code from your authenticator app or a recovery code", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "unlocking your own account needs your password and a code from your authenticator app or a recovery code", nil)
 		return false
 	}
 	if _, ok := g.recheckPassword(w, r, caller, req.Password, "incorrect password or code", now); !ok {

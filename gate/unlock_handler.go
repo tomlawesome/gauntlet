@@ -37,14 +37,14 @@ type unlockCodeRequest struct {
 func (g *Gate) handleUnlockCode(w http.ResponseWriter, r *http.Request) {
 	var req unlockCodeRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
 	now := g.now()
 	ipKey := "ip:" + g.cfg.ClientIP(r)
 	if !g.deps.Limiter.Reserve(ipKey, now) {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
 	}
 	user, err := g.deps.Users.CheckUnlockCode(req.Username, req.UnlockCode)
@@ -54,13 +54,13 @@ func (g *Gate) handleUnlockCode(w http.ResponseWriter, r *http.Request) {
 		// address are quoted: one is typed by a stranger, the other may
 		// come from a proxy header a client controls.
 		g.logWarn(fmt.Sprintf("refused an unlock code for %q from %q", req.Username, g.cfg.ClientIP(r)))
-		writeUnauthorized(w, "invalid username or unlock code -- the current code, if any, is in the server's log")
+		writeUnauthorized(w, classInvalidCredentials, "invalid username or unlock code -- the current code, if any, is in the server's log")
 		return
 	}
 	g.deps.Limiter.Release(ipKey, now)
 
 	if err := g.deps.Limiter.UnlockLogin(g.deps.Users, user.ID); err != nil {
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 

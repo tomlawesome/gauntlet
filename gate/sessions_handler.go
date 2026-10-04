@@ -100,7 +100,7 @@ func (g *Gate) currentSessionID(r *http.Request) string {
 func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	live := g.liveSessions(user, g.now())
@@ -141,7 +141,7 @@ func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	ref := r.PathValue("ref")
@@ -161,13 +161,13 @@ func (g *Gate) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !listed {
-		http.Error(w, "no such session", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such session", nil)
 		return
 	}
 	ended, ok := g.deps.Sessions.RevokeRef(user.ID, ref)
 	if !ok {
 		// Ended between the two steps, by another request or expiry.
-		http.Error(w, "no such session", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such session", nil)
 		return
 	}
 

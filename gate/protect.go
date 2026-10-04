@@ -130,7 +130,7 @@ func isSafeMethod(method string) bool {
 func (g *Gate) csrfOK(w http.ResponseWriter, r *http.Request) bool {
 	if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
 		g.warnRefused(r, "csrf", "gate: refused a request without the CSRF header")
-		http.Error(w, "missing required header", http.StatusForbidden)
+		writeProblem(w, http.StatusForbidden, classCSRFRequired, "missing required header", nil)
 		return false
 	}
 	return true
@@ -215,9 +215,12 @@ func (g *Gate) isExempt(path string) bool {
 // writeUnauthorized answers a 401 with the WWW-Authenticate header RFC
 // 9110 §15.5.2 requires on every 401 -- see rest.go's own doc comment on
 // why this covers session-cookie paths too, not just bearer-token ones.
-func writeUnauthorized(w http.ResponseWriter, msg string) {
+// class is explicit at every call site (invalid-credentials, sign-in-
+// required or step-expired -- the three classes a 401 ever carries),
+// never derived from msg.
+func writeUnauthorized(w http.ResponseWriter, class problemClass, msg string) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="gate"`)
-	http.Error(w, msg, http.StatusUnauthorized)
+	writeProblem(w, http.StatusUnauthorized, class, msg, nil)
 }
 
 // authGateHeader marks a 403 that means "sign-in worked, but this
@@ -248,9 +251,18 @@ const (
 // writeForcedAuthGate is writeUnauthorized's sibling for this pair of
 // doors: sets the machine-readable header before the human-readable
 // body, the same shape as that helper's WWW-Authenticate header.
+// gateName is always one of authGateMustChangePassword or
+// authGateMustEnrolFactor, which are also exactly the anchors of the
+// two classes a forced gate ever answers with, so the class follows
+// from gateName rather than being a third, independently-written
+// parameter the two could drift apart from.
 func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 	w.Header().Set(authGateHeader, gateName)
-	http.Error(w, msg, http.StatusForbidden)
+	class := classMustChangePassword
+	if gateName == authGateMustEnrolFactor {
+		class = classMustEnrolFactor
+	}
+	writeProblem(w, http.StatusForbidden, class, msg, nil)
 }
 
 // Protect is mikroview's requireAuth, generalized over an application's
@@ -291,7 +303,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 
 		if g.deps.Users.Count() == 0 {
 			if !bootstrapExemptPaths[path] {
-				http.Error(w, "setup required", http.StatusServiceUnavailable)
+				writeProblem(w, http.StatusServiceUnavailable, classSetupRequired, "setup required", nil)
 				return
 			}
 			if !g.csrfOK(w, r) {
@@ -309,7 +321,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 					return
 				}
 			}
-			writeUnauthorized(w, "invalid or revoked token")
+			writeUnauthorized(w, classInvalidCredentials, "invalid or revoked token")
 			return
 		}
 		// An Authorization header that is there but is not a
@@ -320,7 +332,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// Authorization header at all goes on to the cookie.
 		if _, sent := r.Header["Authorization"]; sent {
 			g.warnRefused(r, "authorization", "gate: refused a malformed Authorization header")
-			writeUnauthorized(w, "invalid or revoked token")
+			writeUnauthorized(w, classInvalidCredentials, "invalid or revoked token")
 			return
 		}
 
@@ -334,7 +346,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 
 		user, ok := g.sessionUser(r, now)
 		if !ok {
-			writeUnauthorized(w, "unauthorized")
+			writeUnauthorized(w, classSignInRequired, "unauthorized")
 			return
 		}
 		// docs/design.md §4's fail-closed list: "Unknown role → denied
@@ -351,7 +363,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// Role.AtLeast (issue #14).
 		if !isKnownRole(user.Role) {
 			g.warnRefused(r, "role", fmt.Sprintf("gate: refused account %q: its role is not recognized", user.Username))
-			http.Error(w, "account role is not recognized", http.StatusForbidden)
+			writeProblem(w, http.StatusForbidden, classForbidden, "account role is not recognized", nil)
 			return
 		}
 		// Two things set MustChangePassword: an administrator's reset,
@@ -441,7 +453,7 @@ func requireRole(min gauntlet.Role, next http.Handler, refused func(r *http.Requ
 			if refused != nil {
 				refused(r, min)
 			}
-			http.Error(w, "insufficient role", http.StatusForbidden)
+			writeProblem(w, http.StatusForbidden, classForbidden, "insufficient role", nil)
 			return
 		}
 		next.ServeHTTP(w, r)

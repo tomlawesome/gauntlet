@@ -70,20 +70,20 @@ func (g *Gate) failSSO(w http.ResponseWriter, r *http.Request, code string, iden
 // -- see Deps.OIDC's doc comment.
 func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	if g.deps.OIDC == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return
 	}
 
 	fs, err := oidc.NewFlowState(g.now())
 	if err != nil {
 		g.logError("starting SSO login: " + err.Error())
-		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO login", nil)
 		return
 	}
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
 		g.logError("starting SSO login: " + err.Error())
-		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO login", nil)
 		return
 	}
 	g.setOIDCFlowCookie(w, encoded)
@@ -107,17 +107,17 @@ func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 // which account a link applies to.
 func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	if g.deps.OIDC == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return
 	}
 	caller := UserFromContext(r)
 	if caller == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	// Already SSO-only: there is no local password left to convert.
 	if !caller.LocalPassword() {
-		http.Error(w, "this account already signs in through your identity provider", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account already signs in through your identity provider", nil)
 		return
 	}
 	// Already connected -- keeping a password only if it is the admin.
@@ -125,7 +125,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	// identity, which LinkOIDCIdentity refuses -- said here too so the
 	// answer comes before the provider round trip.
 	if caller.OIDCSubject != "" {
-		http.Error(w, "this account is already connected to your identity provider", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account is already connected to your identity provider", nil)
 		return
 	}
 
@@ -133,7 +133,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	fs, err := oidc.NewFlowState(now)
 	if err != nil {
 		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
-		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO linking", nil)
 		return
 	}
 	fs.LinkUserID = caller.ID
@@ -141,7 +141,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
 		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
-		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO linking", nil)
 		return
 	}
 	g.setOIDCFlowCookie(w, encoded)
@@ -215,7 +215,7 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 // of outcome.
 func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if g.deps.OIDC == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return
 	}
 

@@ -94,12 +94,12 @@ func signInQuery(r *http.Request) (q gauntlet.SignInQuery, reason string) {
 // adminOnly).
 func (g *Gate) handleSignInsList(w http.ResponseWriter, r *http.Request) {
 	if g.deps.SignIns == nil {
-		http.Error(w, "sign-in history is not configured", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "sign-in history is not configured", nil)
 		return
 	}
 	q, reason := signInQuery(r)
 	if reason != "" {
-		http.Error(w, reason, http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, reason, nil)
 		return
 	}
 	rows, more := g.deps.SignIns.List(q)

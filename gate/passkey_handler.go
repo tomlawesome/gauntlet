@@ -44,7 +44,7 @@ import (
 // (Deps.Passkeys nil), and reports whether it did.
 func (g *Gate) passkeysOff(w http.ResponseWriter, r *http.Request) bool {
 	if g.deps.Passkeys == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return true
 	}
 	return false
@@ -61,7 +61,7 @@ func (g *Gate) passkeysReady() bool {
 // /api/auth/session's passkeys.status, so this only has to be
 // diagnosable.
 func (g *Gate) writePasskeysNotReady(w http.ResponseWriter) {
-	http.Error(w, fmt.Sprintf("passkeys are not available on this deployment (%s)", g.deps.Passkeys.Status()), http.StatusConflict)
+	writeProblem(w, http.StatusConflict, classConflict, fmt.Sprintf("passkeys are not available on this deployment (%s)", g.deps.Passkeys.Status()), nil)
 }
 
 // usablePasskeyCount is how many of u's passkeys are registered under
@@ -124,7 +124,7 @@ func (g *Gate) handlePasskeysList(w http.ResponseWriter, r *http.Request) {
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	currentRPID := g.deps.Passkeys.RPID()
@@ -164,16 +164,16 @@ func (g *Gate) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	if !user.LocalPassword() {
-		http.Error(w, "this account signs in through your identity provider -- a passkey is not offered", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account signs in through your identity provider -- a passkey is not offered", nil)
 		return
 	}
 	var req passkeyRegisterBeginRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	// The freshly authenticated copy is also the re-read the exclude
@@ -190,7 +190,7 @@ func (g *Gate) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request
 	options, sealed, err := g.deps.Passkeys.BeginRegistration(current)
 	if err != nil {
 		g.logError("beginning passkey registration for " + current.Username + ": " + err.Error())
-		http.Error(w, "unable to start passkey registration", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey registration", nil)
 		return
 	}
 	g.setPasskeyRegisterCookie(w, sealed)
@@ -251,7 +251,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	if !g.passkeysReady() {
@@ -263,21 +263,21 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// leaves a live ceremony alone instead of reporting it dead.
 	var req passkeyRegisterFinishRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
 	cookie, err := r.Cookie(passkeyRegisterCookieName)
 	if err != nil {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
 	now := g.now()
 	key := registrationKey(cookie.Value)
 	if spentRegistrations.Spent(key, now) {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
 
@@ -285,18 +285,18 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// requests have written since Protect resolved the session.
 	current, ok := g.deps.Users.Get(user.ID)
 	if !ok {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	pk, err := g.deps.Passkeys.FinishRegistration(current, cookie.Value, req.Credential)
 	if errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
 	if err != nil {
-		http.Error(w, "that passkey couldn't be registered -- try again", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "that passkey couldn't be registered -- try again", nil)
 		return
 	}
 	// The library accepted it: from here the ceremony is spent, whatever
@@ -305,7 +305,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// later), plus the set's grace of another lifetime.
 	if !spentRegistrations.Claim(key, now.Add(passkeyCeremonyCookieMaxAge), now) {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
 
@@ -315,11 +315,11 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	stored, err := g.deps.Users.AddPasskey(current.ID, pk)
 	if err != nil {
 		g.clearPasskeyRegisterCookie(w) // the ceremony is spent: begin again
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrPasskeyDuplicate) || errors.Is(err, gauntlet.ErrPasskeyLimitReached) {
-			status = http.StatusConflict
+			status, class = http.StatusConflict, classConflict
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -361,7 +361,8 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 		// Not answered like "already issued" (null codes, 200): nothing
 		// was ever issued for this account to fall back on.
 		g.logError("generating recovery codes for " + current.Username + " after registering a passkey: " + mintErr.Error())
-		http.Error(w, "the passkey is now active, but recovery codes could not be saved -- generate a new set from account settings", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classPartiallyCompleted,
+			"the passkey is now active, but recovery codes could not be saved -- generate a new set from account settings", nil)
 		return
 	}
 
@@ -387,26 +388,26 @@ func (g *Gate) handlePasskeyRename(w http.ResponseWriter, r *http.Request) {
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	var req passkeyRenameRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	credID, err := base64.RawURLEncoding.DecodeString(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, "invalid passkey id", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid passkey id", nil)
 		return
 	}
 	pk, err := g.deps.Users.RenamePasskey(user.ID, credID, req.Name)
 	if err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrPasskeyNotFound) {
-			status = http.StatusNotFound
+			status, class = http.StatusNotFound, classNotFound
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 	writeJSON(w, http.StatusOK, toPasskeySummary(pk, g.deps.Passkeys.RPID()))
@@ -429,17 +430,17 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	var req passkeyDeleteRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	credID, err := base64.RawURLEncoding.DecodeString(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, "invalid passkey id", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid passkey id", nil)
 		return
 	}
 
@@ -450,11 +451,11 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 
 	removed, err := g.deps.Users.DeletePasskey(user.ID, credID)
 	if err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrPasskeyNotFound) {
-			status = http.StatusNotFound
+			status, class = http.StatusNotFound, classNotFound
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -492,7 +493,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 	user, ok := g.deps.Users.Get(st.UserID)
 	if !ok {
 		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+		writeUnauthorized(w, classStepExpired, "sign in again")
 		return
 	}
 	if !g.passkeysReady() {
@@ -500,7 +501,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if g.usablePasskeyCount(user) == 0 {
-		http.Error(w, "this account has no passkey usable at this address", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account has no passkey usable at this address", nil)
 		return
 	}
 
@@ -515,7 +516,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		// This server's failure, not the caller's attempt.
 		g.releaseLogin(res, now)
 		g.logError("beginning passkey sign-in for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to start passkey sign-in", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey sign-in", nil)
 		return
 	}
 	g.setPasskeyAssertCookie(w, sealed)
@@ -554,11 +555,11 @@ const passkeyStartAgain = "start passkey sign-in again"
 // passkeyNotVerified and keeps it, so a corrected assertion can still
 // finish inside the window.
 func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, user *gauntlet.User, assertion json.RawMessage, res loginReservation, now time.Time) bool {
-	refuse := func(msg string) bool {
+	refuse := func(class problemClass, msg string) bool {
 		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodPasskey), res, now)
-		writeUnauthorized(w, msg)
+		writeUnauthorized(w, class, msg)
 		return false
 	}
 	if !g.passkeysReady() {
@@ -568,16 +569,16 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 	cookie, err := r.Cookie(passkeyAssertCookieName)
 	if err != nil {
 		g.clearPasskeyAssertCookie(w)
-		return refuse(passkeyStartAgain)
+		return refuse(classStepExpired, passkeyStartAgain)
 	}
 
 	verified, err := g.deps.Passkeys.FinishLogin(user, cookie.Value, assertion)
 	if errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 		g.clearPasskeyAssertCookie(w)
-		return refuse(passkeyStartAgain)
+		return refuse(classStepExpired, passkeyStartAgain)
 	}
 	if err != nil {
-		return refuse(passkeyNotVerified)
+		return refuse(classInvalidCredentials, passkeyNotVerified)
 	}
 
 	if verified.CloneWarning {
@@ -592,7 +593,7 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 		g.audit(r, user.Username, "account.passkey_clone_suspected", user.Username,
 			fmt.Sprintf("credential=%s presentedCount=%d storedCount=%s",
 				base64.RawURLEncoding.EncodeToString(verified.CredentialID), verified.SignCount, stored))
-		return refuse(passkeyNotVerified)
+		return refuse(classInvalidCredentials, passkeyNotVerified)
 	}
 
 	accepted, err := g.deps.Users.RecordPasskeyAssertionIfFresh(user.ID, verified.CredentialID, verified.SignCount, now)
@@ -600,7 +601,7 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 	case errors.Is(err, gauntlet.ErrPasskeyNotFound), errors.Is(err, gauntlet.ErrUserNotFound):
 		// Removed since FinishLogin read the account: nothing to sign in
 		// with any more.
-		return refuse(passkeyNotVerified)
+		return refuse(classInvalidCredentials, passkeyNotVerified)
 	case err != nil:
 		// A counter that could not be saved is refused (accepted is
 		// false), but as the backend failing, not a wrong guess -- the
@@ -613,10 +614,10 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 		g.releaseLogin(res, now)
 		g.releaseLogin(res, now)
 		g.logError("recording passkey assertion for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return false
 	case !accepted:
-		return refuse(passkeyNotVerified)
+		return refuse(classInvalidCredentials, passkeyNotVerified)
 	}
 
 	g.clearPasskeyAssertCookie(w)
@@ -636,21 +637,21 @@ func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) 
 	}
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "user id is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
-		http.Error(w, "an administrator cannot clear their own passkeys here", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot clear their own passkeys here", nil)
 		return
 	}
 
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
-		http.Error(w, "no such user", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
 		return
 	}
 	if err := g.deps.Users.ClearPasskeys(id); err != nil {
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 

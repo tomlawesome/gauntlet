@@ -130,7 +130,7 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 			ev.Username = gauntlet.MaskUnknownUsername(username)
 		}
 		g.recordSignIn(r, ev, res, now)
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 	}
 	return res, ok
 }
@@ -207,7 +207,7 @@ func (g *Gate) releaseAfterReset(res loginReservation) {
 func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req credentialsRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -237,7 +237,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// toward a lockout that outlasts the outage.
 		g.releaseLogin(res, now)
 		g.logError("recording login for " + req.Username + ": " + err.Error())
-		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	}
 	if err != nil {
@@ -252,7 +252,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 			outcome = gauntlet.SignInNoSuchUser
 		}
 		g.recordSignIn(r, loginEvent(matched, req.Username, outcome, gauntlet.SignInMethodPassword), res, now)
-		writeUnauthorized(w, "invalid username or password")
+		writeUnauthorized(w, classInvalidCredentials, "invalid username or password")
 		return
 	}
 	// Only a success releases, so ordinary repeated logins never
@@ -295,7 +295,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		g.endAfterReset(res)
 		if err := g.setPendingLoginCookie(w, user.ID, res.afterReset, now); err != nil {
 			g.logError("sealing pending-login cookie for " + user.Username + ": " + err.Error())
-			http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+			writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 			return
 		}
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInPasswordOK, gauntlet.SignInMethodPassword), res, now)
@@ -345,7 +345,7 @@ type loginFactorRequest struct {
 func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	var req loginFactorRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	// An assertion where the application has no passkeys is a request
@@ -367,7 +367,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	user, ok := g.deps.Users.Get(st.UserID)
 	if !ok || !user.HasSecondFactor() {
 		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+		writeUnauthorized(w, classStepExpired, "sign in again")
 		return
 	}
 
@@ -409,7 +409,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		// a lockout that outlasts the outage.
 		g.releaseLogin(res, now)
 		g.logError("recording TOTP replay counter for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	}
 	if matched {
@@ -423,7 +423,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		// failure, like the TOTP case above: no 401, no lockout count.
 		g.releaseLogin(res, now)
 		g.logError("recording spent recovery code for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	} else if burned {
 		g.completeLoginFactor(w, r, user, res, st, method, now)
@@ -438,7 +438,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	g.endAfterReset(res)
 	g.secondFactorFailed(user, now)
 	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode), res, now)
-	writeUnauthorized(w, "invalid code")
+	writeUnauthorized(w, classInvalidCredentials, "invalid code")
 }
 
 // completeLoginFactor is handleLoginFactor's success path: spend the
@@ -458,7 +458,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+		writeUnauthorized(w, classStepExpired, "sign in again")
 		return false
 	}
 	g.completeLogin(res, now)

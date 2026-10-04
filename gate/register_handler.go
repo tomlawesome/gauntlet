@@ -37,32 +37,33 @@ type registerRequest struct {
 func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
 	now := g.now()
 	ipKey := "ip:" + g.cfg.ClientIP(r)
 	if !g.deps.Limiter.Reserve(ipKey, now) {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
 	}
 	if err := g.deps.Users.CheckSetupCode(req.SetupCode); err != nil {
 		status := http.StatusInternalServerError
+		class := classServerError
 		switch err {
 		case gauntlet.ErrSetupCodeInvalid:
 			// The address is quoted: it comes from the application's
 			// ClientIP, which may read a proxy header a client controls.
 			g.logWarn(fmt.Sprintf("refused first-run registration for %q from %q: wrong setup code", req.Username, g.cfg.ClientIP(r)))
-			writeUnauthorized(w, "invalid setup code -- the current one is in the server's log")
+			writeUnauthorized(w, classInvalidCredentials, "invalid setup code -- the current one is in the server's log")
 			return
 		case gauntlet.ErrRegistrationClosed:
-			status = http.StatusConflict
+			status, class = http.StatusConflict, classConflict
 		case gauntlet.ErrNotPersisted:
-			status = http.StatusServiceUnavailable
+			status, class = http.StatusServiceUnavailable, classNotPersisted
 		}
 		g.deps.Limiter.Release(ipKey, now)
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 	g.deps.Limiter.Release(ipKey, now)
@@ -81,18 +82,19 @@ func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 			// created; the generic "registration is closed" message
 			// above would read as the code itself being wrong, when
 			// it was in fact spent, elsewhere, between the two checks.
-			http.Error(w, "the setup code was already used to create the first admin", http.StatusConflict)
+			writeProblem(w, http.StatusConflict, classConflict, "the setup code was already used to create the first admin", nil)
 			return
 		}
 		status := http.StatusInternalServerError
+		class := classServerError
 		switch err {
 		case gauntlet.ErrNotPersisted:
-			status = http.StatusServiceUnavailable
+			status, class = http.StatusServiceUnavailable, classNotPersisted
 		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
 			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
-			status = http.StatusBadRequest
+			status, class = http.StatusBadRequest, classInvalidRequest
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
