@@ -334,8 +334,8 @@ func TestCreateUserWithoutStorageSaysWhatToDo(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 with no account storage, got %d", rec.Code)
 	}
-	if got, want := strings.TrimSpace(rec.Body.String()), gateErrorMessages[gauntlet.ErrNotPersisted]; got != want {
-		t.Errorf("body = %q, want %q", got, want)
+	if got, want := decodeProblem(t, rec.Body.Bytes()).Detail, gateErrorMessages[gauntlet.ErrNotPersisted]; got != want {
+		t.Errorf("detail = %q, want %q", got, want)
 	}
 }
 

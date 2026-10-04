@@ -172,8 +172,8 @@ func TestCreateTokenRejectsATooLongName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.TrimSpace(string(body)), gauntlet.ErrTokenNameInvalid.Error(); got != want {
-		t.Errorf("body = %q, want %q", got, want)
+	if got, want := decodeProblem(t, body).Detail, gauntlet.ErrTokenNameInvalid.Error(); got != want {
+		t.Errorf("detail = %q, want %q", got, want)
 	}
 	if len(g.deps.Tokens.List()) != 0 {
 		t.Error("a refused token was created anyway")
@@ -202,8 +202,8 @@ func TestCreateTokenWithoutStorageSaysWhatToDo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.TrimSpace(string(body)), gateErrorMessages[gauntlet.ErrTokenNotPersisted]; got != want {
-		t.Errorf("body = %q, want %q", got, want)
+	if got, want := decodeProblem(t, body).Detail, gateErrorMessages[gauntlet.ErrTokenNotPersisted]; got != want {
+		t.Errorf("detail = %q, want %q", got, want)
 	}
 }
 

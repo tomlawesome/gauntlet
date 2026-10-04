@@ -206,6 +206,27 @@ func doJSON(t *testing.T, client *http.Client, method, url string, body any) *ht
 	return resp
 }
 
+// problemBody is an RFC 9457 error body's fields -- for a test that
+// checks one of them by name rather than as a substring of the raw
+// body. See problem_test.go for the class-shape tests this also backs.
+type problemBody struct {
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// decodeProblem decodes raw as a problemBody, failing the test if it is
+// not JSON.
+func decodeProblem(t *testing.T, raw []byte) problemBody {
+	t.Helper()
+	var p problemBody
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("decoding a problem body: %v: %s", err, raw)
+	}
+	return p
+}
+
 func mustCookieJar(t *testing.T) http.CookieJar {
 	t.Helper()
 	jar, err := cookiejar.New(nil)

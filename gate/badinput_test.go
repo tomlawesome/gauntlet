@@ -232,8 +232,8 @@ func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding the error body: %v", err)
 	}
-	if body["error"] == nil || body["error"] == "" {
-		t.Errorf("expected a non-empty error field, got %+v", body)
+	if body["detail"] == nil || body["detail"] == "" {
+		t.Errorf("expected a non-empty detail field, got %+v", body)
 	}
 	if body["username"] != "operator" {
 		t.Errorf("expected the response to still name the deleted account, got %+v", body)
