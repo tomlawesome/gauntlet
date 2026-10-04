@@ -64,6 +64,18 @@ type UnusualSignInPolicy struct {
 	// raises, any that resolve to off are dropped and the strictest of
 	// the rest decides (block over confirm over flag).
 	NewBrowser, NewCountry, ImpossibleTravel UnusualSignInAction
+	// Decide, if set, is asked once per unusual sign-in after every
+	// credential has passed and before any session exists, with the
+	// settings' answer in c.Default; what it returns replaces that
+	// answer. It is not asked when no signal is kept. It runs under ctx,
+	// which ends after DecideTimeout; it may do I/O within that (a local
+	// lookup, not a web call) and must honour ctx. A panic, an error, a
+	// timeout, or an answer that is not flag, confirm or block -- or
+	// confirm with no Config.NotifyUnusualSignIn to deliver the code --
+	// refuses this attempt (block), audited and noticed with the reason
+	// (decide-failed, decide-timeout, decide-invalid): a check that
+	// lets people in when it breaks would make breaking it the attack.
+	Decide func(ctx context.Context, c UnusualSignInCase) (UnusualSignInAction, error)
 }
 
 // UnusualSignInCase is one unusual sign-in as the policy sees it. It
@@ -127,8 +139,9 @@ type UnusualSignInNotice struct {
 }
 
 // DecideTimeout bounds the synchronous calls an unusual sign-in makes
-// before it is answered: the notice carrying a confirmation code. Fixed,
-// not configurable: the application should hand the message to its
+// before it is answered: UnusualSignInPolicy.Decide, and the notice
+// carrying a confirmation code. Fixed, not configurable: Decide should
+// be a local lookup, and the notifier should hand the message to its
 // mailer and return.
 const DecideTimeout = 3 * time.Second
 
@@ -143,15 +156,13 @@ var errCallTimedOut = errors.New("did not return within the deadline")
 // after decideTimeout, and waits for it or the deadline, whichever comes
 // first. A panic is an error carrying the panic text, so a failing
 // function fails closed. A function that ignores its context is
-// abandoned at the deadline and left to finish on its own (counted in
-// notifying, so a test can wait for it).
+// abandoned at the deadline and left to finish on its own; what it
+// returns then goes nowhere.
 func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), decideTimeout)
 	defer cancel()
 	done := make(chan error, 1)
-	g.notifying.Add(1)
 	go func() {
-		defer g.notifying.Done()
 		defer func() {
 			if p := recover(); p != nil {
 				done <- fmt.Errorf("panicked: %q", fmt.Sprint(p))
@@ -354,19 +365,68 @@ type unusualVerdict struct {
 	previousCountry string
 }
 
-// judgeSignIn judges userID's completed sign-in from place: read-only,
-// and skipped altogether when the policy turns every signal off.
-func (g *Gate) judgeSignIn(r *http.Request, userID string, place signInPlace, now time.Time) unusualVerdict {
+// judgeSignIn judges user's completed sign-in from place: read-only,
+// and skipped altogether when the policy turns every signal off. When
+// a signal is kept and the policy has a Decide, Decide's answer
+// replaces the settings' (decide).
+func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet.SignInMethod, place signInPlace, now time.Time) unusualVerdict {
 	if g.judgesNothing() {
 		return unusualVerdict{}
 	}
-	j := g.deps.Users.JudgeSignIn(userID, knownBrowserTokens(r), place.client.Country, place.loc, now)
+	j := g.deps.Users.JudgeSignIn(user.ID, knownBrowserTokens(r), place.client.Country, place.loc, now)
 	action, kept := g.resolveUnusual(j.Signals)
 	v := unusualVerdict{action: action, signals: kept, reason: "policy"}
 	if kept.Has(gauntlet.SignalImpossibleTravel) {
 		v.previousCountry = j.PreviousCountry
 	}
+	if kept != 0 && g.cfg.UnusualSignIns.Decide != nil {
+		v.action, v.reason = g.decide(r, user, method, place, v)
+	}
 	return v
+}
+
+// decide asks the policy's Decide about v, in its own goroutine with a
+// recover and a DecideTimeout context (callBounded), and returns the
+// action and, for a block, the reason. Every failure is block: a panic
+// or an error is decide-failed, the deadline decide-timeout, and an
+// answer that is not flag, confirm or block -- or confirm with nothing
+// to deliver the code -- decide-invalid. Each failure leaves one error
+// line with what happened; the audit carries only the reason.
+func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict) (UnusualSignInAction, string) {
+	client := place.client
+	client.Unusual = v.signals
+	c := UnusualSignInCase{
+		UserID: user.ID, Username: user.Username, Role: user.Role,
+		Signals: v.signals, Country: place.client.Country, PreviousCountry: v.previousCountry,
+		Method: method, Client: client, Default: v.action,
+	}
+	decide := g.cfg.UnusualSignIns.Decide
+	var answer UnusualSignInAction
+	err := g.callBounded(r.Context(), func(ctx context.Context) error {
+		a, err := decide(ctx, c)
+		answer = a
+		return err
+	})
+	fail := func(reason, what string) (UnusualSignInAction, string) {
+		g.logError(fmt.Sprintf("gate: the unusual sign-in Decide for account %q %s; the sign-in is refused (%s)", user.Username, what, reason))
+		return UnusualSignInBlock, reason
+	}
+	switch {
+	case errors.Is(err, errCallTimedOut):
+		return fail("decide-timeout", fmt.Sprintf("did not answer within %v", decideTimeout))
+	case err != nil:
+		return fail("decide-failed", fmt.Sprintf("failed: %q", err.Error()))
+	}
+	switch answer {
+	case UnusualSignInFlag, UnusualSignInBlock:
+		return answer, "policy"
+	case UnusualSignInConfirm:
+		if g.cfg.NotifyUnusualSignIn != nil {
+			return answer, "policy"
+		}
+		return fail("decide-invalid", "answered confirm, and no Config.NotifyUnusualSignIn can deliver a code")
+	}
+	return fail("decide-invalid", fmt.Sprintf("answered %q, which is not flag, confirm or block", string(answer)))
 }
 
 // completeSignIn issues the session a judged sign-in has earned and

@@ -310,7 +310,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Every credential has passed: judge the sign-in (#55) before any
 	// session exists.
 	place := g.placeOf(r, res.address)
-	verdict := g.judgeSignIn(r, user.ID, place, now)
+	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodPassword, place, now)
 	if verdict.stopsSignIn() {
 		// Confirm or block: the credential was right, so the attempt is
 		// handed back rather than completed; nothing completed, so the
@@ -491,7 +491,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// Every credential has passed: judge the sign-in (#55) before any
 	// session exists.
 	place := g.placeOf(r, res.address)
-	verdict := g.judgeSignIn(r, user.ID, place, now)
+	verdict := g.judgeSignIn(r, user, method, place, now)
 	if verdict.stopsSignIn() {
 		// The pending login is already spent above, so one correct code
 		// yields one refusal or one confirmation code, never that and

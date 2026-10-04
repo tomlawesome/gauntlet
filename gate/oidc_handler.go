@@ -311,7 +311,7 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// sign-in (#55) before any session exists. Never on the link branch
 	// above, whose caller already holds a session.
 	place := g.placeOf(r, "")
-	verdict := g.judgeSignIn(r, user.ID, place, now)
+	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodSSO, place, now)
 	if verdict.stopsSignIn() {
 		sent, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
 		if sent {

@@ -1324,3 +1324,221 @@ func TestUnusualConfirmSSO(t *testing.T) {
 		t.Error("no session after the code")
 	}
 }
+
+// decideRecorder is a Decide that keeps every case and answers with
+// answer.
+type decideRecorder struct {
+	mu     sync.Mutex
+	cases  []UnusualSignInCase
+	answer func(ctx context.Context, c UnusualSignInCase) (UnusualSignInAction, error)
+}
+
+func (d *decideRecorder) decide(ctx context.Context, c UnusualSignInCase) (UnusualSignInAction, error) {
+	d.mu.Lock()
+	d.cases = append(d.cases, c)
+	answer := d.answer
+	d.mu.Unlock()
+	return answer(ctx, c)
+}
+
+func (d *decideRecorder) all() []UnusualSignInCase {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]UnusualSignInCase(nil), d.cases...)
+}
+
+func answering(a UnusualSignInAction) func(context.Context, UnusualSignInCase) (UnusualSignInAction, error) {
+	return func(context.Context, UnusualSignInCase) (UnusualSignInAction, error) { return a, nil }
+}
+
+// decideEnv is newNotifiedEnv (or, withoutNotifier, newUnusualEnv)
+// with a Decide over the given policy, bob signed in once from London
+// in browser b.
+func decideEnv(t *testing.T, policy UnusualSignInPolicy, withoutNotifier bool) (*unusualEnv, *noticeRecorder, *decideRecorder, *browser) {
+	t.Helper()
+	d := &decideRecorder{answer: answering(UnusualSignInFlag)}
+	policy.Decide = d.decide
+	var e *unusualEnv
+	rec := &noticeRecorder{}
+	if withoutNotifier {
+		e = newUnusualEnv(t, policy)
+	} else {
+		e = newUnusualEnvWith(t, persist.NewMemory(), func(c *Config) {
+			c.UnusualSignIns = policy
+			c.NotifyUnusualSignIn = rec
+		})
+	}
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	e.advance(time.Hour)
+	return e, rec, d, b
+}
+
+// Decide is asked once per unusual sign-in, with the settings' answer,
+// and its answer replaces it.
+func TestUnusualDecideBeatsTheSettings(t *testing.T) {
+	e, rec, d, b := decideEnv(t, UnusualSignInPolicy{NewCountry: UnusualSignInBlock}, false)
+	if got := d.all(); len(got) != 0 {
+		t.Fatalf("Decide was asked about an ordinary sign-in: %+v", got)
+	}
+	// A wrong password is never judged.
+	if status, _ := readAll(t, postJSON(t, b.at(addrParis), e.ts.URL+"/api/auth/login",
+		credentialsRequest{Username: totpBobUsername, Password: "wrong-password-placeholder"})); status != http.StatusUnauthorized {
+		t.Fatal("precondition")
+	}
+	if len(d.all()) != 0 {
+		t.Error("Decide was asked about a wrong password")
+	}
+	e.mustSignIn(t, b, addrParis) // block by settings, flag by Decide
+	got := d.all()
+	if len(got) != 1 {
+		t.Fatalf("Decide asked %d times, want 1", len(got))
+	}
+	c := got[0]
+	if c.UserID != e.bobID || c.Username != totpBobUsername || c.Role != gauntlet.RoleUser || c.Signals != gauntlet.SignalNewCountry ||
+		c.Country != "FR" || c.PreviousCountry != "" || c.Method != gauntlet.SignInMethodPassword ||
+		c.Client.Address != addrParis || c.Client.Country != "FR" || c.Default != UnusualSignInBlock {
+		t.Errorf("case = %+v", c)
+	}
+	e.expectSignals(t, gauntlet.SignalNewCountry)
+	if len(e.notices(rec)) != 1 {
+		t.Error("the flag Decide chose sent no notice")
+	}
+	// Decide can block what the settings would flag.
+	d.answer = answering(UnusualSignInBlock)
+	e.advance(time.Hour)
+	status, _ := e.signIn(t, newTestBrowser(t), addrParis)
+	if status != http.StatusForbidden {
+		t.Errorf("Decide's block = %d", status)
+	}
+	if entry, _ := e.lastAudit("user.login_refused"); !strings.Contains(entry.Detail, "reason=policy") {
+		t.Errorf("audit = %q", entry.Detail)
+	}
+}
+
+// Impossible travel hands Decide the country the account last signed in
+// from.
+func TestUnusualDecidePreviousCountry(t *testing.T) {
+	e, _, d, b := decideEnv(t, UnusualSignInPolicy{}, false)
+	e.advance(-time.Hour + 10*time.Minute) // ten minutes after London
+	e.mustSignIn(t, b, addrNewYork)
+	got := d.all()
+	if len(got) != 1 || got[0].Signals != gauntlet.SignalNewCountry|gauntlet.SignalImpossibleTravel || got[0].PreviousCountry != "GB" || got[0].Country != "US" {
+		t.Errorf("cases = %+v", got)
+	}
+}
+
+// Decide runs after the second factor, on the factor step.
+func TestUnusualDecideAfterTheFactor(t *testing.T) {
+	e, _, d, first := decideEnv(t, UnusualSignInPolicy{}, false)
+	// Enrolled at the fixture's clock, which has moved an hour on.
+	enrolled := totpEnrol(t, first.at(addrLondon), e.ts)
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postJSON(t, first.at(addrLondon), e.ts.URL+"/api/auth/totp/confirm",
+		totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, totpCounterNow(e.clock.now()))})
+	status, body := readAll(t, resp)
+	if status != http.StatusOK {
+		t.Fatalf("confirm = %d %s", status, body)
+	}
+	var confirmed totpConfirmResponse
+	if err := json.Unmarshal([]byte(body), &confirmed); err != nil {
+		t.Fatal(err)
+	}
+	codes := confirmed.RecoveryCodes
+	confirmEnrolmentOK(t, first.at(addrLondon), e.ts)
+	e.advance(time.Hour)
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	if len(d.all()) != 0 {
+		t.Fatal("Decide was asked at the password step")
+	}
+	_ = submitLoginFactor(t, b.at(addrLondon), e.ts, "000000").Body.Close()
+	if len(d.all()) != 0 {
+		t.Fatal("Decide was asked about a wrong code")
+	}
+	if status, _ := readAll(t, submitLoginFactor(t, b.at(addrLondon), e.ts, codes[0])); status != http.StatusOK {
+		t.Fatal("factor step")
+	}
+	if got := d.all(); len(got) != 1 || got[0].Method != gauntlet.SignInMethodCode {
+		t.Errorf("cases = %+v", got)
+	}
+}
+
+// Every way Decide can fail refuses the attempt, with its reason.
+func TestUnusualDecideFailsClosed(t *testing.T) {
+	was := decideTimeout
+	decideTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { decideTimeout = was })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	for _, c := range []struct {
+		name            string
+		answer          func(context.Context, UnusualSignInCase) (UnusualSignInAction, error)
+		withoutNotifier bool
+		reason          string
+	}{
+		{"panic", func(context.Context, UnusualSignInCase) (UnusualSignInAction, error) { panic("decide exploded") }, false, "decide-failed"},
+		{"error", func(context.Context, UnusualSignInCase) (UnusualSignInAction, error) {
+			return UnusualSignInFlag, errors.New("lookup down")
+		}, false, "decide-failed"},
+		{"ignores ctx past the deadline", func(context.Context, UnusualSignInCase) (UnusualSignInAction, error) {
+			<-release
+			return UnusualSignInFlag, nil
+		}, false, "decide-timeout"},
+		{"off", answering(UnusualSignInOff), false, "decide-invalid"},
+		{"empty", answering(""), false, "decide-invalid"},
+		{"unknown", answering("allow"), false, "decide-invalid"},
+		{"confirm with no notifier", answering(UnusualSignInConfirm), true, "decide-invalid"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, rec, d, b := decideEnv(t, UnusualSignInPolicy{}, c.withoutNotifier)
+			d.answer = c.answer
+			sessionsBefore := len(e.g.deps.Sessions.ListForUser(e.bobID, e.clock.now()))
+			errorsBefore := strings.Count(e.logText(), "level=ERROR")
+			resp := postJSON(t, b.at(addrParis), e.ts.URL+"/api/auth/login", credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
+			checkRefused(t, e.g, resp)
+			if n := len(e.g.deps.Sessions.ListForUser(e.bobID, e.clock.now())); n != sessionsBefore {
+				t.Error("a session was issued")
+			}
+			if row := e.newestRow(t); row.Outcome != gauntlet.SignInRefused || row.Client.Unusual != gauntlet.SignalNewCountry {
+				t.Errorf("row = %+v", row)
+			}
+			entry, _ := e.lastAudit("user.login_refused")
+			if !strings.Contains(entry.Detail, "reason="+c.reason+";") || strings.Contains(entry.Detail, "exploded") || strings.Contains(entry.Detail, "lookup down") {
+				t.Errorf("audit = %q, want reason %s and no error text", entry.Detail, c.reason)
+			}
+			if c.withoutNotifier {
+				if strings.Contains(entry.Detail, "notify=") {
+					t.Errorf("audit = %q", entry.Detail)
+				}
+			} else if got := e.notices(rec); len(got) != 1 || got[0].Action != UnusualSignInBlock || got[0].Reason != c.reason {
+				t.Errorf("notices = %+v", got)
+			}
+			if got := strings.Count(e.logText(), "level=ERROR") - errorsBefore; got != 1 {
+				t.Errorf("%d error lines, want 1:\n%s", got, e.logText())
+			}
+		})
+	}
+}
+
+// Decide is not asked when nothing is kept, and a confirm it chooses
+// sends a code.
+func TestUnusualDecideNotAskedWhenNothingIsKept(t *testing.T) {
+	e, rec, d, b := decideEnv(t, UnusualSignInPolicy{NewCountry: UnusualSignInOff}, false)
+	e.mustSignIn(t, b, addrParis)
+	if got := d.all(); len(got) != 0 {
+		t.Errorf("Decide was asked about a dropped signal: %+v", got)
+	}
+	d.answer = answering(UnusualSignInConfirm)
+	e.advance(time.Hour)
+	status, body := e.signIn(t, newTestBrowser(t), addrParis)
+	if status != http.StatusOK || strings.TrimSpace(body) != `{"confirm":true}` {
+		t.Errorf("Decide's confirm = %d %s", status, body)
+	}
+	if code := confirmCode(t, rec); len(code) != 9 {
+		t.Errorf("code = %q", code)
+	}
+}
