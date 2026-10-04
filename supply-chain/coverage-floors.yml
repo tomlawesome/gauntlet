@@ -48,6 +48,8 @@
 # #52: blocklist is new at 95.5%, internal/listsig at 97.8% and
 # cmd/pwlist at 90.7%. What they leave uncovered is mostly a failing
 # disk or JSON encoder, and pwlist's main() itself.
+# #54: geoip is new at 92.1%. What it leaves uncovered is mostly a
+# failing disk, and a file that opens but whose lookups fail.
 
 floors:
   persist: 90
@@ -63,3 +65,4 @@ floors:
   blocklist: 95
   internal/listsig: 97
   cmd/pwlist: 90
+  geoip: 92

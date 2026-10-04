@@ -15,6 +15,9 @@ copied between the two. See [docs/design.md](docs/design.md) and
 no non-test file in `gate` or the root package may import it or
 go-webauthn, so an app that never imports it never links the library.
 `go list -deps ./gate | grep -i webauthn` must print nothing.
+`geoip/` (#54, [ADR-0008](docs/adr/0008-sign-in-country.md)) is a leaf
+the same way for maxminddb: `go list -deps ./gate ./ | grep -i
+maxminddb` must print nothing (`lint:go` checks both).
 
 **Belongs in the apps, not here:** a database-table backend (each app
 supplies its own `persist.Backend`), the public URL a relying party is
@@ -67,8 +70,10 @@ owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. For v0.2.0
 #22 and ADR-0002; `github.com/go-webauthn/webauthn` v0.18.2 in `passkey/`
 for G8 (#20), and in its test fake (`internal/passkeytest`) and the
 contract module. For #54 (owner 2026-10-04):
-`github.com/oschwald/maxminddb-golang/v2` (ISC), to read MaxMind and
-IPinfo country files. Anything else goes to the owner first.
+`github.com/oschwald/maxminddb-golang/v2` v2.6.0 (ISC) in `geoip/` only,
+to read MaxMind and IPinfo country files, and `github.com/maxmind/mmdbwriter`
+v1.2.0 (Apache-2.0 or MIT) in `geoip/` tests only, to build their fixture
+files (it brings `go4.org/netipx`). Anything else goes to the owner first.
 
 ## Checks
 
