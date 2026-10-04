@@ -448,11 +448,25 @@ func (s *SessionStore) RevokeRef(userID, ref string) (Session, bool) {
 // a password is reset (via the CLI recovery tool), so a stolen session
 // doesn't survive a deliberate credential reset.
 func (s *SessionStore) RevokeAllForUser(userID string) {
+	s.RevokeAllForUserCount(userID)
+}
+
+// RevokeAllForUserCount is RevokeAllForUser, also reporting how many
+// sessions it ended -- counted under the same lock the revoke runs
+// under, so a session a login issues between a separate count and the
+// revoke is never missed: it either lands before the lock is taken,
+// and is counted and ended here, or after this returns, and is simply
+// a new session this sign-out never claimed to touch. A caller that
+// counted first and revoked after (gauntlet#58 R5, the admin sign-out's
+// "ended" response) could report one short when a login raced it.
+func (s *SessionStore) RevokeAllForUserCount(userID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n := len(s.byUser[userID])
 	for id := range s.byUser[userID] {
 		s.revokeVisits++
 		delete(s.sessions, id)
 	}
 	delete(s.byUser, userID)
+	return n
 }

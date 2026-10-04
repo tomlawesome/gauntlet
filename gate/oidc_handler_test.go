@@ -331,6 +331,9 @@ func TestOIDCLoginRedirectsToProviderAndSetsFlowCookie(t *testing.T) {
 	if loc == "" {
 		t.Fatal("expected a redirect Location")
 	}
+	if !strings.HasPrefix(loc, fp.Issuer()+"/authorize") {
+		t.Errorf("redirect Location = %q, want the provider's authorization endpoint %s/authorize", loc, fp.Issuer())
+	}
 	var flowCookie *http.Cookie
 	for _, c := range resp.Cookies() {
 		if c.Name == oidcFlowCookieName {
@@ -340,7 +343,6 @@ func TestOIDCLoginRedirectsToProviderAndSetsFlowCookie(t *testing.T) {
 	if flowCookie == nil {
 		t.Fatal("expected the OIDC flow cookie to be set")
 	}
-	_ = fp
 	_ = g
 }
 
@@ -1020,5 +1022,16 @@ func TestOIDCCallbackFailureLogIsRated(t *testing.T) {
 	defer logs.mu.Unlock()
 	if len(logs.msgs) != 1 {
 		t.Errorf("got %d warnings for three identical failures, want one: %q", len(logs.msgs), logs.msgs)
+	}
+}
+
+// The OIDC flow cookie must reach both OIDC routes; the routes stay
+// string literals for the contract tests, so this keeps them from
+// drifting out from under the cookie's Path (#58).
+func TestOIDCFlowCookiePathCoversItsRoutes(t *testing.T) {
+	for _, route := range []string{oidcLoginPath, oidcCallbackPath} {
+		if !strings.HasPrefix(route, oidcFlowCookiePath+"/") {
+			t.Errorf("route %q is not under the OIDC flow cookie's Path %q", route, oidcFlowCookiePath)
+		}
 	}
 }

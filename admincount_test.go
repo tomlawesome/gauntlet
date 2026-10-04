@@ -16,7 +16,11 @@ import (
 // can write: CreateUser refuses a second admin and TransferAdmin swaps
 // the role in one save. Only a hand edit, or a writer outside this
 // package, produces it.
-const twoAdminsDocument = `{"users":[` +
+//
+// Its seq (#59) is set far ahead of anything a test using it saves
+// first, so the sequence check never intercepts this fixture before the
+// admin-count check it exists to test.
+const twoAdminsDocument = `{"seq":1000,"users":[` +
 	`{"id":"u1","username":"alice","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"},` +
 	`{"id":"u2","username":"bob","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"}]}`
 
@@ -46,7 +50,10 @@ func TestOpenRefusesADocumentWithTwoAdmins(t *testing.T) {
 // can write either: DeleteUser refuses to remove the admin account, so
 // an existing deployment can never be emptied of one from underneath
 // it. Only a hand edit, or a foreign writer, produces it.
-const noAdminDocument = `{"users":[` +
+//
+// Its seq (#59) is set far ahead for the same reason as
+// twoAdminsDocument's above.
+const noAdminDocument = `{"seq":1000,"users":[` +
 	`{"id":"u1","username":"alice","passwordHash":"$argon2id$fake","role":"user","createdAt":"2026-01-01T00:00:00Z"},` +
 	`{"id":"u2","username":"bob","passwordHash":"$argon2id$fake","role":"user","createdAt":"2026-01-01T00:00:00Z"}]}`
 

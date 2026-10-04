@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,7 +89,7 @@ func TestFileBackendSaveWaitsForTheLock(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	held, err := lockFile(path + ".lock")
+	held, err := lockFile(context.Background(), path+".lock")
 	if err != nil {
 		t.Fatalf("lockFile: %v", err)
 	}
@@ -115,6 +116,46 @@ func TestFileBackendSaveWaitsForTheLock(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Save did not return after the lock was released")
+	}
+}
+
+// A Save stuck waiting for the sidecar lock must give up on its context
+// deadline rather than wait indefinitely for the other holder to release
+// it (#58, R14).
+func TestFileBackendSaveHonoursContextDeadlineWhileWaitingForTheLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	b := newFileBackend(path)
+	v1, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	held, err := lockFile(context.Background(), path+".lock")
+	if err != nil {
+		t.Fatalf("lockFile: %v", err)
+	}
+	defer func() { _ = held.unlock() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Save(ctx, []byte(`{"n":2}`), v1)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Save returned %v, want context.DeadlineExceeded", err)
+		}
+		if elapsed := time.Since(start); elapsed > 1*time.Second {
+			t.Fatalf("Save took %v to honour its context deadline", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Save ignored its context deadline and is still waiting for the lock")
 	}
 }
 

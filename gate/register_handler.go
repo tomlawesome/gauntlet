@@ -72,10 +72,20 @@ func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := g.deps.Users.Register(req.Username, req.Password, now)
 	if err != nil {
+		if err == gauntlet.ErrRegistrationClosed {
+			// Reached only after CheckSetupCode already passed, so the
+			// code this caller showed was valid at that instant --
+			// this process's own view was just momentarily stale (a
+			// lagging reload), and another registration using the same
+			// code saved the first admin first. No second admin was
+			// created; the generic "registration is closed" message
+			// above would read as the code itself being wrong, when
+			// it was in fact spent, elsewhere, between the two checks.
+			http.Error(w, "the setup code was already used to create the first admin", http.StatusConflict)
+			return
+		}
 		status := http.StatusInternalServerError
 		switch err {
-		case gauntlet.ErrRegistrationClosed:
-			status = http.StatusConflict
 		case gauntlet.ErrNotPersisted:
 			status = http.StatusServiceUnavailable
 		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,

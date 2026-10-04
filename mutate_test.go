@@ -74,7 +74,7 @@ func usernamesIn(t *testing.T, m *persist.Memory) []string {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	st, err := decodeAccounts(snap.Payload)
+	st, err := decodeAccounts(snap.Payload, 0)
 	if err != nil {
 		t.Fatalf("decoding the saved document: %v", err)
 	}

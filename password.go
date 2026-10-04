@@ -43,6 +43,7 @@ const (
 const (
 	maxVerifyMemory  = 4 * argon2Memory // KiB
 	maxVerifyTime    = 4 * argon2Time
+	maxVerifyThreads = 4 * argon2Threads
 	maxVerifyKeyLen  = 64
 	maxVerifySaltLen = 64
 )
@@ -138,7 +139,7 @@ func VerifyPassword(password, encodedHash string) bool {
 	}
 	if version != argon2.Version ||
 		iterations < 1 || iterations > maxVerifyTime ||
-		threads < 1 ||
+		threads < 1 || threads > maxVerifyThreads ||
 		memory < 8*uint32(threads) || memory > maxVerifyMemory {
 		return false
 	}

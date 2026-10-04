@@ -73,6 +73,7 @@ contract module. Anything else goes to the owner first.
 ```
 gofmt -l .                     # must print nothing
 go build ./... && go vet ./... && go test ./... -race -coverprofile=coverage.out
+(cd gate/contracttest && go vet ./... && golangci-lint run ./... && go test ./... -race)  # own module
 python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
 scripts/licence-check.sh

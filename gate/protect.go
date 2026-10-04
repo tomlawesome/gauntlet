@@ -29,6 +29,7 @@ const (
 	loginPath        = "/api/auth/login"
 	loginFactorPath  = "/api/auth/login/factor"
 	logoutPath       = "/api/auth/logout"
+	oidcPathPrefix   = "/api/auth/oidc"
 	oidcLoginPath    = "/api/auth/oidc/login"
 	oidcCallbackPath = "/api/auth/oidc/callback"
 	totpEnrolPath    = "/api/auth/totp/enrol"

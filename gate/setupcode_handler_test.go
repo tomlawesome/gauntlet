@@ -1,12 +1,14 @@
 package gate
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // The first account is created only with the setup code the store
@@ -115,6 +117,49 @@ func TestRegisterRightCodeReleasesTheAttempt(t *testing.T) {
 // SSO cannot create the first account: the OIDC routes are not in the
 // bootstrap set, so they answer 503 like every other route until the
 // first admin exists.
+// TestRegisterOnALaggingProcessNamesTheSpentCode pins gauntlet#58 S11:
+// two processes open on the same empty backend, each announcing its
+// own setup code. One registers the first admin. The other's own
+// CheckSetupCode has not reloaded and still sees no account, so its
+// code passes that first check -- but Register (which does reload)
+// then finds the admin already exists and refuses. That refusal used
+// to read like the submitted code was simply wrong; it should say the
+// code was spent instead, since the caller showed a code that really
+// was valid an instant before.
+func TestRegisterOnALaggingProcessNamesTheSpentCode(t *testing.T) {
+	m := persist.NewMemory()
+	usersA := openTrackedStore(t, m)
+	usersB := openTrackedStore(t, m)
+	gA := newTestGateWithUsers(t, usersA)
+	gB := newTestGateWithUsers(t, usersB)
+	tsA := newTestServer(t, gA)
+	tsB := newTestServer(t, gB)
+	codeA := setupCodeFor(t, gA)
+	codeB := setupCodeFor(t, gB)
+	if codeA == codeB {
+		t.Fatal("precondition: the two processes announced the same code")
+	}
+
+	first := postJSON(t, &http.Client{}, tsA.URL+"/api/auth/register", registerRequest{Username: "admin", Password: "password-placeholder-345", SetupCode: codeA})
+	_ = first.Body.Close()
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first registration: status %d, want 201", first.StatusCode)
+	}
+
+	second := postJSON(t, &http.Client{}, tsB.URL+"/api/auth/register", registerRequest{Username: "second", Password: "password-placeholder-345", SetupCode: codeB})
+	body, _ := io.ReadAll(second.Body)
+	_ = second.Body.Close()
+	if second.StatusCode != http.StatusConflict {
+		t.Fatalf("second process's registration: status %d, want 409", second.StatusCode)
+	}
+	if want := "the setup code was already used to create the first admin"; !strings.Contains(string(body), want) {
+		t.Errorf("body = %q, want it to mention %q", body, want)
+	}
+	if usersB.Count() != 1 {
+		t.Errorf("the lagging process's refused registration created an account too: count = %d", usersB.Count())
+	}
+}
+
 func TestOIDCRoutesClosedWhileSetupRequired(t *testing.T) {
 	_, ts, _ := newEmptyOIDCTestGate(t, oidc.Policy{})
 	for _, path := range []string{"/api/auth/oidc/login", "/api/auth/oidc/callback?state=x&code=y"} {

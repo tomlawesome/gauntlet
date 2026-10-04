@@ -596,8 +596,8 @@ func TestNewRefresherUsesTheCommittedKeys(t *testing.T) {
 func TestRefusalMemory(t *testing.T) {
 	t.Run("content refusal is remembered", func(t *testing.T) {
 		f := newFixture(t)
-		data, sig := f.signedList(t, testBuilt.Add(96*time.Hour), "a") // in the future
-		f.reg.publish(data, sig)
+		data := []byte("# format: gauntlet-pwned-top10k/1\nnot a list\n") // malformed
+		f.reg.publish(data, sign(t, data, f.priv))
 		r := f.refresher(t, &List{})
 		r.refresh(context.Background())
 		f.reg.resetHits()
@@ -611,6 +611,38 @@ func TestRefusalMemory(t *testing.T) {
 		r.refresh(context.Background())
 		if r.Current().Len() != size {
 			t.Fatal("a good list under a new checksum was not adopted")
+		}
+	})
+	// A list refused only because it claims a build time in the future
+	// is not latched by checksum: it must be re-checked against the
+	// clock on every refresh, so it is adopted once the clock catches
+	// up without needing a new checksum (#58, R7).
+	t.Run("future build time is rechecked, not remembered", func(t *testing.T) {
+		f := newFixture(t)
+		built := testBuilt.Add(96 * time.Hour) // in the future relative to f.now
+		data, sig := f.signedList(t, built, "a")
+		f.reg.publish(data, sig)
+		r := f.refresher(t, &List{})
+		r.refresh(context.Background())
+		if r.Current().Len() != 0 {
+			t.Fatal("adopted a list dated in the future")
+		}
+
+		f.reg.resetHits()
+		r.refresh(context.Background())
+		if f.reg.hitsFor("top10k.txt") == 0 {
+			t.Fatal("a future-dated list under the same checksum must be fetched again, not latched")
+		}
+		if r.Current().Len() != 0 {
+			t.Fatal("adopted a still-future-dated list")
+		}
+
+		// The clock catches up: the same bytes, same checksum, are now
+		// adopted without a new list being published.
+		f.now = built.Add(time.Hour)
+		r.refresh(context.Background())
+		if r.Current().Len() != size {
+			t.Fatal("a list whose build time the clock has caught up to was not adopted")
 		}
 	})
 	t.Run("signature refusal is retried", func(t *testing.T) {

@@ -311,7 +311,6 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 
 	pk.Name = req.Name
 	pk.CreatedAt = now
-	wasFirstFactor := !current.HasSecondFactor()
 
 	stored, err := g.deps.Users.AddPasskey(current.ID, pk)
 	if err != nil {
@@ -328,6 +327,18 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// let two first factors racing each other both mint (see
 	// handleTOTPConfirm's identical call).
 	codes, alreadyIssued, mintErr := g.deps.Users.GenerateRecoveryCodesIfAbsent(current.ID, now)
+
+	// wasFirstFactor rides the same atomic decision alreadyIssued just
+	// made, rather than current.HasSecondFactor() read before
+	// AddPasskey: two first-factor registrations finishing at the same
+	// moment would both have read no second factor yet from that stale
+	// snapshot, so both would revoke-and-reissue below -- whichever ran
+	// second would revoke the session the first had just issued
+	// (gauntlet#58 R3). Recovery codes are minted exactly once, on
+	// whichever concurrent call's mutate wins the store's lock, which is
+	// the same "no second factor yet" instant this needs: at most one of
+	// two racing registrations now revokes and reissues.
+	wasFirstFactor := !alreadyIssued
 
 	// The passkey is live from AddPasskey on, so rotation and the audit
 	// record happen whether or not the mint worked: no retry could do

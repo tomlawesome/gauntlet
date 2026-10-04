@@ -232,6 +232,35 @@ func TestSignInHistoryCapDropsTheOldest(t *testing.T) {
 	}
 }
 
+// TestOpenSignInHistoryLoweredMaxRowsLogsTheDrop pins gauntlet#58 S3:
+// opening over a document that already holds more rows than a newly
+// lowered MaxRows drops the oldest ones in memory (saved so at the
+// next save) with nothing logged, so an operator who tightens MaxRows
+// gets no record that history was actually lost.
+func TestOpenSignInHistoryLoweredMaxRowsLogsTheDrop(t *testing.T) {
+	b := persist.NewMemory()
+	h := openTestHistory(t, b, SignInHistoryOptions{MaxRows: 10})
+	for i := range 8 {
+		h.Record(successFrom("u1", "bob", fmt.Sprintf("192.0.2.%d", i)), signInBase.Add(time.Duration(i)*time.Minute))
+	}
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &signInLogRecorder{}
+	h2 := openTestHistory(t, b, SignInHistoryOptions{MaxRows: 5, Log: slog.New(logs)})
+	total, _ := h2.Summary()
+	if total != 5 {
+		t.Fatalf("Summary total = %d, want 5", total)
+	}
+	if n := logs.count("MaxRows"); n != 1 {
+		t.Errorf("messages mentioning MaxRows = %d, want exactly 1 logging the drop: %v", n, logs.all())
+	}
+}
+
 // MaxRows: zero is the default, above the ceiling or negative refused.
 func TestOpenSignInHistoryMaxRows(t *testing.T) {
 	h := openTestHistory(t, nil, SignInHistoryOptions{})
@@ -588,6 +617,38 @@ func TestSignInHistoryRemovedDocumentLogsOnceAndKeepsMemory(t *testing.T) {
 	}
 	if total, _ := h.Summary(); total != 4 {
 		t.Errorf("memory holds %d rows, want 4", total)
+	}
+}
+
+// TestSignInHistoryReadNoticesANullDocumentWithoutASave pins
+// gauntlet#58 (fix review FR3): save never runs while nothing is
+// dirty, so a document replaced with the JSON literal null while no
+// one is signing in used to go unnoticed until the next sign-in's
+// save finally looked. List and Summary now check for themselves.
+func TestSignInHistoryReadNoticesANullDocumentWithoutASave(t *testing.T) {
+	m := persist.NewMemory()
+	logs := &signInLogRecorder{}
+	h := openTestHistory(t, m, SignInHistoryOptions{Log: slog.New(logs)})
+	h.Record(successFrom("u1", "bob", "192.0.2.1"), signInBase)
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Save(context.Background(), []byte("null"), snap.Version); err != nil {
+		t.Fatal(err)
+	}
+
+	h.List(SignInQuery{})
+	total, _ := h.Summary()
+	if total != 1 {
+		t.Errorf("Summary total = %d, want the in-memory row kept (1) -- nothing should be overwritten", total)
+	}
+	if n := logs.count("null"); n != 1 {
+		t.Errorf("messages mentioning null = %d, want exactly 1 logging the replacement without any sign-in or save", n)
 	}
 }
 

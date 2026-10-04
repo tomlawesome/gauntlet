@@ -17,8 +17,11 @@ const oidcFlowCookieName = "gate_oidc_flow"
 
 // oidcFlowCookiePath scopes the cookie to gate's own OIDC routes, per
 // docs/design.md §1.5's fixed behaviour ("the OIDC flow cookie scoped to
-// /api/auth/oidc").
-const oidcFlowCookiePath = "/api/auth/oidc"
+// /api/auth/oidc"). oidcLoginPath and oidcCallbackPath (protect.go) stay
+// plain string literals, because the contract tests read route patterns
+// from the source; TestOIDCFlowCookiePathCoversItsRoutes keeps them under
+// this prefix.
+const oidcFlowCookiePath = oidcPathPrefix
 
 // oidcFlowCookieMaxAge bounds both the cookie's own Max-Age and the
 // tolerance passed to StateCodec.Decode -- kept as one constant so the

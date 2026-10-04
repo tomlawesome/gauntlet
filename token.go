@@ -217,6 +217,12 @@ type tokenState struct {
 	// lastUsedGranularity), since the in-memory value may be ahead of
 	// it. Store.lastLoginSaved is the same for LastLogin.
 	lastUsedSaved map[string]time.Time
+	// seq is the document's own save counter (#59, tokenFile.Seq) and
+	// this process's watermark -- storeState.seq's exact counterpart.
+	// See decodeTokens and errStaleDocument. Lowercase for the same
+	// reason as storeState.seq: tokenState is embedded in the exported
+	// TokenStore, and this is purely internal bookkeeping.
+	seq int64
 }
 
 // clone deep-copies the state, so a change to the copy can be thrown
@@ -227,6 +233,7 @@ func (st *tokenState) clone() *tokenState {
 		byID:          make(map[string]*Token, len(st.byID)),
 		byHash:        make(map[string]string, len(st.byHash)),
 		lastUsedSaved: make(map[string]time.Time, len(st.lastUsedSaved)),
+		seq:           st.seq,
 	}
 	for id, t := range st.byID {
 		tc := *t
@@ -263,38 +270,46 @@ func (st *tokenState) tokens() []*Token {
 // wrote the bare list; parseTokens reads it as version 1, and the next
 // save writes it in this shape.
 type tokenFile struct {
-	Version int      `json:"version"`
-	Tokens  []*Token `json:"tokens"`
+	Version int `json:"version"`
+	// Seq is storeFile.Seq's exact counterpart for this document (#59,
+	// version 2): the save counter inside persist.Encrypt's seal that
+	// lets a running store refuse an older, valid copy of the file --
+	// see errStaleDocument. An older document has no field and reads
+	// as zero.
+	Seq    int64    `json:"seq"`
+	Tokens []*Token `json:"tokens"`
 }
 
 // encodeTokens is the state as the document is saved.
 func encodeTokens(st *tokenState) ([]byte, error) {
-	return json.MarshalIndent(tokenFile{Version: tokensDocumentVersion, Tokens: st.tokens()}, "", "  ")
+	return json.MarshalIndent(tokenFile{Version: tokensDocumentVersion, Seq: st.seq, Tokens: st.tokens()}, "", "  ")
 }
 
 // parseTokens parses a stored tokens document in either shape: v0.1.0's
 // bare list, or a tokenFile, refusing one newer than this build reads
-// (see checkDocumentVersion) before parsing the rest of it.
-func parseTokens(data []byte) ([]*Token, error) {
+// (see checkDocumentVersion) before parsing the rest of it. The bare
+// v0.1.0 list carries no seq counter either, and reads as zero, same as
+// a tokenFile with no "seq" field.
+func parseTokens(data []byte) ([]*Token, int64, error) {
 	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
 		var list []*Token
 		if err := json.Unmarshal(data, &list); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		return list, nil
+		return list, 0, nil
 	}
 	version, err := documentVersion(data)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := checkDocumentVersion("API tokens", version, tokensDocumentVersion); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var file tokenFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return file.Tokens, nil
+	return file.Tokens, file.Seq, nil
 }
 
 // indexTokens builds the state for a document's token list, leaving a
@@ -302,11 +317,12 @@ func parseTokens(data []byte) ([]*Token, error) {
 // OpenTokenStore) and warning about it. Shared by OpenTokenStore and
 // the conflict replay in mutate, so the two can't diverge on what
 // loading means.
-func (s *TokenStore) indexTokens(list []*Token) *tokenState {
+func (s *TokenStore) indexTokens(list []*Token, seq int64) *tokenState {
 	st := &tokenState{
 		byID:          make(map[string]*Token, len(list)),
 		byHash:        make(map[string]string, len(list)),
 		lastUsedSaved: make(map[string]time.Time, len(list)),
+		seq:           seq,
 	}
 	for _, t := range list {
 		if t == nil { // see indexUsers' identical guard for why this is needed
@@ -325,13 +341,20 @@ func (s *TokenStore) indexTokens(list []*Token) *tokenState {
 	return st
 }
 
-// decodeTokens is the document as it is opened.
-func (s *TokenStore) decodeTokens(data []byte) (*tokenState, error) {
-	list, err := parseTokens(data)
+// decodeTokens is the document as it is opened. minSeq is the highest
+// sequence counter this process has already loaded or written
+// (tokenState.Seq, #59); a document naming a lower one is refused
+// (errStaleDocument) before its tokens are even indexed -- see
+// decodeAccounts's exact counterpart in store.go.
+func (s *TokenStore) decodeTokens(data []byte, minSeq int64) (*tokenState, error) {
+	list, seq, err := parseTokens(data)
 	if err != nil {
 		return nil, err
 	}
-	return s.indexTokens(list), nil
+	if err := checkDocumentSeq("API tokens", seq, minSeq); err != nil {
+		return nil, err
+	}
+	return s.indexTokens(list, seq), nil
 }
 
 // tokens is the replay loop's view of this store -- see mutate.go.
@@ -341,7 +364,14 @@ func (s *TokenStore) tokens() document[tokenState] {
 		what:    "API tokens",
 		clone:   (*tokenState).clone,
 		encode:  encodeTokens,
-		decode:  s.decodeTokens,
+		// s.seq, read here rather than under a separate
+		// lock, for the same reason as accounts() in store.go: every
+		// call runs while mutate already holds the write lock for the
+		// whole replay.
+		decode: func(data []byte) (*tokenState, error) {
+			return s.decodeTokens(data, s.seq)
+		},
+		bump: func(st *tokenState) { st.seq++ },
 	}
 }
 
@@ -443,10 +473,13 @@ func OpenTokenStore(b persist.Backend, opts TokenOptions) (*TokenStore, error) {
 		log:     opts.Log,
 		kinds:   kinds,
 	}
-	s.tokenState = *s.indexTokens(nil)
+	s.tokenState = *s.indexTokens(nil, 0)
 
 	version, existed, err := persist.Open(context.Background(), b, "the API tokens store", func(data []byte) error {
-		st, err := s.decodeTokens(data)
+		// s.seq is 0 here, the same reason OpenStore passes 0
+		// in store.go: nothing is loaded yet, and this process has no
+		// memory of the counter across a restart either way.
+		st, err := s.decodeTokens(data, s.seq)
 		if err != nil {
 			return err
 		}
@@ -533,14 +566,16 @@ func (s *TokenStore) reloadIfStale() {
 	}
 	s.mu.RLock()
 	alreadyRefused := s.hasRefusedVersion && snap.Version == s.refusedVersion
+	minSeq := s.seq
 	s.mu.RUnlock()
 	if alreadyRefused {
 		return
 	}
-	st, err := s.decodeTokens(snap.Payload)
-	// A newer document and the literal null are both refused loudly:
-	// someone wrote them, and the operator should hear why once.
-	if errors.Is(err, errNewerDocument) || errors.Is(err, errNullDocument) {
+	st, err := s.decodeTokens(snap.Payload, minSeq)
+	// A newer document, one older than this process has already seen
+	// (#59), and the literal null are all refused loudly: someone wrote
+	// them, and the operator should hear why once.
+	if errors.Is(err, errNewerDocument) || errors.Is(err, errStaleDocument) || errors.Is(err, errNullDocument) {
 		s.mu.Lock()
 		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
 		s.mu.Unlock()

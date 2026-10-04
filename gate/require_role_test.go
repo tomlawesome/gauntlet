@@ -136,6 +136,36 @@ func TestMustChangePasswordDoesNotDeadlockWithSecondFactorDoor(t *testing.T) {
 	}
 }
 
+// TestSessionMustEnrolSecondFactorFollowsMustChangePasswordDoor pins
+// gauntlet#58 F2: while MustChangePassword holds, Protect refuses the
+// enrol routes with 403 (the guard above), so GET /api/auth/session
+// must report mustEnrolSecondFactor as false too -- it names the door
+// Protect enforces, not the raw HasSecondFactor fact, and that door is
+// shut here.
+func TestSessionMustEnrolSecondFactorFollowsMustChangePasswordDoor(t *testing.T) {
+	g := newTestGate(t)
+	g.deps.Users = primeMustChangePasswordAdmin(t)
+	ts := newTestServer(t, g)
+
+	client := &http.Client{Jar: mustCookieJar(t)}
+	loginResp := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
+	_ = loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected login to succeed, got %d", loginResp.StatusCode)
+	}
+
+	enrol := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: "password-placeholder-1"})
+	_ = enrol.Body.Close()
+	if enrol.StatusCode != http.StatusForbidden {
+		t.Fatalf("precondition: expected the enrol route to be refused while MustChangePassword holds, got %d", enrol.StatusCode)
+	}
+
+	sess := sessionOf(t, client, ts)
+	if sess.MustEnrolSecondFactor {
+		t.Errorf("mustEnrolSecondFactor = true while the enrol routes answer 403 must-change-password; the flag should follow the routes")
+	}
+}
+
 // TestForcedAuthGateHeaderNamesTheDoor pins the machine-readable header
 // (protect.go's authGateHeader) that lets a frontend tell a forced-door
 // 403 apart from an ordinary refusal.
