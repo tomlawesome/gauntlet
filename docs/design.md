@@ -683,6 +683,7 @@ type AccountNotice struct {
     Lockout       *LockoutDetail       // account-locked, sign-in-disabled
     SessionsEnded *SessionsEndedDetail // sessions-ended
     UnusualSignIn *UnusualSignInDetail // unusual-sign-in (flag, block -- confirm sends only the code, below)
+    RoleChanged   *RoleChangeDetail    // role-changed (#67): From (empty for a created admin), To
 }
 const MaxSessionEndReason = 200 // characters
 
@@ -763,6 +764,23 @@ response is written, `Config.Notices` (or the deprecated `Config.Notify`)
 is called in its own goroutine with a 10-second deadline and `recover()`;
 an error or panic is one log line, and the response's `notified` means
 asked, not delivered.
+
+**Several admins and role changes (#67, #75, ADR-0010).**
+`POST /api/auth/users` accepts `role: admin`, and `PUT
+/api/auth/users/{id}/role` moves an account among `admin`, `user` and
+`viewer`. Granting `admin` on either needs the caller's own password
+and a current second factor on the same request (`recheckStepUp`, the
+`UnlockSelfRequest` shape; `password` and `code` on the role route,
+`adminPassword` and `adminCode` on create, whose `password` is the new
+account's), on the account's `ReserveRecheck` budget: either missing
+400, either wrong 401, 429 once the budget is spent. Any other change
+needs none. The last admin can be neither demoted nor deleted (409,
+class `last-admin`); an admin may demote themselves while another
+remains, and cannot delete their own account. A downgrade ends the
+account's sessions (the store writes `SessionsEndedAt`; the handler
+drops the in-memory ones). Audited as `user.role_changed` with actor,
+from and to; `Config.Notices` gets `NoticeRoleChanged`
+(`RoleChangeDetail{From, To}`), also for an admin created over HTTP.
 
 **Unusual sign-ins (#55).** The one-step password path, the
 second-factor step and the SSO callback's sign-in branch each judge a

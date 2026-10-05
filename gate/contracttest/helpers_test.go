@@ -348,9 +348,24 @@ type changePasswordRequest struct {
 }
 
 type createUserRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	Role          string `json:"role"`
+	AdminPassword string `json:"adminPassword,omitempty"`
+	AdminCode     string `json:"adminCode,omitempty"`
+}
+
+type setRoleRequest struct {
 	Role     string `json:"role"`
+	Password string `json:"password,omitempty"`
+	Code     string `json:"code,omitempty"`
+}
+
+type setRoleResponse struct {
+	Username      string `json:"username"`
+	From          string `json:"from"`
+	To            string `json:"to"`
+	SessionsEnded bool   `json:"sessionsEnded"`
 }
 
 type totpEnrolRequest struct {
