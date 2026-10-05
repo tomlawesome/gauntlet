@@ -216,7 +216,7 @@ func TestUnsavedDisableIsEnforcedAndSavedLater(t *testing.T) {
 	if !mustGet(t, s, id).LoginDisabledAt.IsZero() {
 		t.Fatal("test setup: the disable was saved although every save failed")
 	}
-	later := at.Add(365 * 24 * time.Hour)
+	later := at.Add(23 * time.Hour) // still inside the 24 hours (#70)
 	if l.ReserveAccount(s, id, later) {
 		t.Fatal("an unsaved disable was not enforced from memory")
 	}
@@ -232,7 +232,7 @@ func TestUnsavedDisableIsEnforcedAndSavedLater(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mustNewLoginLimiter(t, 5, 5*time.Minute).ReserveAccount(restarted, id, later.Add(time.Hour)) {
+	if mustNewLoginLimiter(t, 5, 5*time.Minute).ReserveAccount(restarted, id, later.Add(time.Minute)) {
 		t.Error("a restart after the backend recovered lifted the disable")
 	}
 }

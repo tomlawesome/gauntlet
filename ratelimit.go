@@ -41,11 +41,12 @@ var maxLoginLimiterKeys = 4096
 //
 // Lockouts escalate (#44): each one on an account lasts three times the
 // one before, up to maxLoginLockout, and MaxConsecutiveLoginFailures
-// failures in a row disable the account's sign-in until UnlockLogin. The
+// failures in a row disable the account's sign-in until UnlockLogin or
+// until LoginDisableDuration has passed (#70), whichever is first. The
 // count of lockouts and the disable are written in the same write that
-// starts a lockout. Both reset only on a completed sign-in (SignedIn) or
-// a new password -- never on a correct password alone, nor on a lockout
-// running out.
+// starts a lockout. Both reset only on a completed sign-in (SignedIn), a
+// new password or a disable running out -- never on a correct password
+// alone, nor on a lockout running out.
 //
 // A browser the account remembers (Store.KnowsBrowser) keeps a budget of
 // its own when the ordinary one refuses it (ReserveKnownBrowser), so a
@@ -124,9 +125,11 @@ type secondFactorRun struct {
 // alike, since they share one count, however long apart. SP 800-63B-4
 // §3.2.2 allows no more than 100; no real person needs anywhere near 50
 // tries at their own credentials, and at five a window under the
-// escalating lockout the fiftieth arrives only after about four days of
+// escalating lockout the fiftieth arrives after about eight hours of
 // lockouts. Counted as each lockout's attempts (the limiter's threshold
 // times the lockouts on the record) plus those in the current window.
+// The disable lifts itself LoginDisableDuration after it began (#70),
+// and the count starts again from zero.
 const MaxConsecutiveLoginFailures = 50
 
 // maxLoginLockout caps one lockout's length: one hour (#70), reached from
@@ -407,7 +410,11 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // counted from fresh attempts only. The attempt that brings the
 // account's consecutive failures to MaxConsecutiveLoginFailures also
 // disables its sign-in, in the same write: from then on every attempt is
-// refused exactly as during a lockout, with no end, until UnlockLogin.
+// refused exactly as during a lockout, until UnlockLogin or until
+// LoginDisableDuration after it (#70). The first attempt after that
+// lifts it as UnlockLogin does, the count of lockouts back to zero, so
+// the next failure is the first of a new run and does not disable the
+// account again at once.
 // The attempts are counted as they are reserved, before their outcome is
 // known, as they always have been; one that turns out to succeed hands
 // its count back (ReleaseAccount, SignedIn), and with it a lockout or
@@ -476,6 +483,8 @@ func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountI
 
 	l.mu.Lock()
 	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
+	recorded := cur
+	cur = l.liftLapsedLocked(accountID, cur, now)
 	if cur.disabled() || now.Before(cur.until) {
 		// Refused. A decision this limiter has yet to save is tried
 		// again here, once per lockoutRetryInterval; so is a clamped
@@ -526,7 +535,7 @@ func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountI
 	if !next.disabled() && consecutiveFailures(cur.episodes, l.threshold, len(entries)) >= MaxConsecutiveLoginFailures {
 		next.disabledAt = now
 	}
-	sync := l.settleLocked(accountID, cur, next, p, pending, now)
+	sync := l.settleLocked(accountID, recorded, next, p, pending, now)
 	l.mu.Unlock()
 
 	if sync {
@@ -613,6 +622,28 @@ func (l *LoginLimiter) currentLocked(accountID string, stored, record lockoutSta
 		return p.state, p, true
 	}
 	return record, pendingLockout{}, false
+}
+
+// liftLapsedLocked is cur with a disable that has run out
+// (LoginDisableDuration, #70) lifted: the state UnlockLogin leaves --
+// no lockout, no count of lockouts, no disable -- and the account's
+// counters for the window dropped, as UnlockLogin drops them. The count
+// of lockouts must go with it: left at the figure that disabled the
+// account, the next failure would disable it again at once.
+//
+// Nothing is saved here. The caller decides its next state from the
+// lifted one and settles it against the state it read (not the lifted
+// one), so the write that records its attempt carries the lift; a
+// refusal never reaches that, so a lapsed disable is only ever lifted by
+// the first attempt it admits. A state with no lapsed disable comes back
+// as it was.
+func (l *LoginLimiter) liftLapsedLocked(accountID string, cur lockoutState, now time.Time) lockoutState {
+	if !cur.lapsed(now) {
+		return cur
+	}
+	delete(l.accounts, loginBucket+accountID)
+	delete(l.accounts, knownBrowserBucket+accountID)
+	return lockoutState{}
 }
 
 // settleLocked records next as the state accountID's record should carry,
@@ -789,6 +820,8 @@ func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, acc
 
 	l.mu.Lock()
 	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
+	recorded := cur
+	cur = l.liftLapsedLocked(accountID, cur, now)
 	if cur.disabled() {
 		// Refused, and a disable this limiter has yet to save is tried
 		// again, as ReserveAccount does while refusing.
@@ -824,7 +857,7 @@ func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, acc
 	if !next.disabled() && consecutiveFailures(cur.episodes, l.threshold, len(entries)) >= MaxConsecutiveLoginFailures {
 		next.disabledAt = now
 	}
-	sync := l.settleLocked(accountID, cur, next, p, pending, now)
+	sync := l.settleLocked(accountID, recorded, next, p, pending, now)
 	l.mu.Unlock()
 
 	if sync {

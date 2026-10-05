@@ -306,8 +306,9 @@ func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 // to lift, and still 200.
 type unlockUserResponse struct {
 	Username string `json:"username"`
-	// WasDisabled is true when the account's sign-in had been disabled
-	// after gauntlet.MaxConsecutiveLoginFailures failures in a row.
+	// WasDisabled is true when the account's sign-in was disabled, and
+	// had not yet lifted itself (gauntlet.LoginDisableDuration), after
+	// gauntlet.MaxConsecutiveLoginFailures failures in a row.
 	WasDisabled bool `json:"wasDisabled"`
 	// WasLockedOut is true when a login lockout was in force.
 	WasLockedOut bool `json:"wasLockedOut"`
@@ -364,7 +365,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := unlockUserResponse{
 		Username:     target.Username,
-		WasDisabled:  !target.LoginDisabledAt.IsZero(),
+		WasDisabled:  target.LoginDisabled(now),
 		WasLockedOut: now.Before(target.LoginLockedUntil),
 	}
 	if err := g.deps.Limiter.UnlockLogin(g.deps.Users, id); err != nil {

@@ -107,9 +107,10 @@ func wrongTOTPCode(secret []byte, now time.Time) string {
 	panic("unreachable: four distinct codes, at most three valid")
 }
 
-// After fifty failures in a row the right password is refused, a year
-// later, with exactly what a locked account is told: the caller learns
-// nothing new from a disabled account.
+// After fifty failures in a row the right password is refused, once the
+// last lockout has ended and while the disable lasts (it lifts after 24
+// hours, #70), with exactly what a locked account is told: the caller
+// learns nothing new from a disabled account.
 func TestADisabledAccountIsRefusedExactlyLikeALockedOne(t *testing.T) {
 	g, ts, clock := escalationFixture(t)
 
@@ -122,9 +123,9 @@ func TestADisabledAccountIsRefusedExactlyLikeALockedOne(t *testing.T) {
 	for failed := 5; failed < gauntlet.MaxConsecutiveLoginFailures; failed += 5 {
 		failLoginWindow(t, g, ts, clock, totpBobUsername)
 	}
-	clock.set(clock.now().Add(365 * 24 * time.Hour))
+	clock.set(clock.now().Add(2 * time.Hour))
 	if disabled := tryLogin(t, ts, totpBobUsername, totpBobPassword); disabled != locked {
-		t.Errorf("the right password a year after 50 failures got %+v, want exactly the locked response %+v", disabled, locked)
+		t.Errorf("the right password two hours after 50 failures got %+v, want exactly the locked response %+v", disabled, locked)
 	}
 }
 

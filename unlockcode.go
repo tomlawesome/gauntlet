@@ -37,6 +37,12 @@ import (
 // none on the setup code: the code is 80 bits and a gate counts each
 // attempt against the client's address.
 //
+// A disable also lifts itself LoginDisableDuration after it began (#70),
+// but the store has no clock to read that against here, so the code is
+// still issued, and still redeemed, for a disable the record holds that
+// has run out and no attempt has yet cleared: redeeming it is the same
+// clear that attempt would make.
+//
 // It is issued only at OpenStore, never on a reload or as the limiter
 // disables the account at runtime: the owner's design writes it "at
 // startup", and a restart is what an admin who finds themselves disabled
@@ -73,8 +79,9 @@ var ErrUnlockCodeInvalid = errors.New("gauntlet: the username or unlock code is 
 func unlockCodeLogLine(username, code string) string {
 	return fmt.Sprintf("sign-in for the admin account %q is disabled after %d failed attempts in a row, and no other admin can unlock it -- "+
 		"lift the disable with unlock code %s (valid until the account is unlocked or this process restarts; "+
-		"the admin then signs in with their existing password and second factor)",
-		username, MaxConsecutiveLoginFailures, code)
+		"the admin then signs in with their existing password and second factor). "+
+		"Without it the disable lifts itself %s after it began",
+		username, MaxConsecutiveLoginFailures, code, LoginDisableDuration)
 }
 
 // lockedOutAdmin returns the admin account whose local sign-in is
