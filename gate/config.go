@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -84,14 +85,26 @@ type Config struct {
 	// Audit receives account and token events (register, login,
 	// password change, user/token create/delete). nil means no audit.
 	Audit Auditor
-	// Notify is told when an admin ends another account's sessions
-	// (POST /api/auth/users/{id}/logout-all), so the application can
-	// tell the account's owner. nil means nobody is told. See Notifier.
+	// Notices is told about every account event this module raises --
+	// a password reset, a second factor added or removed, recovery
+	// codes regenerated, a lockout or disable, an admin ending every
+	// session, an unusual sign-in (#73) -- so the application can tell
+	// the account's owner. nil means nobody is told; everything is still
+	// shown and audited either way. See AccountNotifier. New refuses a
+	// Config with both Notices and the deprecated Notify set.
+	Notices AccountNotifier
+	// Deprecated: Notify is Notices narrowed to one event (an admin
+	// ending another account's sessions). Kept working for a minor
+	// release (ADR-0002 decision 2); set Notices instead. See Notifier.
 	Notify Notifier
-	// NotifyUnusualSignIn is told about unusual sign-ins (#55), so the
-	// application can tell the account's owner. nil means nobody is told;
-	// the signals are still shown and audited. See UnusualSignInNotifier.
-	NotifyUnusualSignIn UnusualSignInNotifier
+	// DeliverConfirmCode hands an unusual sign-in's confirmation code to
+	// the application, synchronously, before the sign-in is answered
+	// (#55, #73): nil means the confirm action is unavailable, and New
+	// refuses a Config.UnusualSignIns that asks for it. Unlike Notices,
+	// a failure here -- an error, a panic, or running past DecideTimeout
+	// -- refuses the sign-in: no code reached anyone, so none is owed.
+	// See ConfirmCode.
+	DeliverConfirmCode func(ctx context.Context, c ConfirmCode) error
 	// ClientIP resolves the address the login limiter is keyed on
 	// (mikroview's clientIP -- its own trusted-proxy policy is the
 	// application's, not gate's). Required.
@@ -259,6 +272,9 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	// codec there is a panic on that request, not here.
 	if deps.OIDC != nil && deps.OIDCState == nil {
 		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
+	}
+	if cfg.Notify != nil && cfg.Notices != nil {
+		return nil, fmt.Errorf("gate: Config.Notify and Config.Notices must not both be set; Notices replaces the deprecated Notify")
 	}
 	if err := checkUnusualPolicy(cfg); err != nil {
 		return nil, err

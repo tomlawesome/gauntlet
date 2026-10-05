@@ -97,26 +97,16 @@ type UnusualSignInCase struct {
 	Default UnusualSignInAction
 }
 
-// UnusualSignInNotifier is how an application hears about unusual
-// sign-ins (Config.NotifyUnusualSignIn), so it can tell the account's
-// owner: gauntlet sends nothing itself. The application chooses the
-// wording, address and channel; it should treat Client.UserAgent as
-// text, never markup.
+// UnusualSignInDetail is NoticeUnusualSignIn's detail (Config.Notices):
+// an unusual sign-in flagged, confirmed or blocked. It never carries the
+// account's coordinates. The application chooses the wording, address
+// and channel; it should treat Client.UserAgent as text, never markup.
 //
-// Under flag it is asked after the response is written, in its own
-// goroutine, with a context that ends after notifyTimeout (10 seconds),
-// as Notifier is: an error or a panic is one error line in Config.Log
-// and changes nothing about the sign-in. At most one notice per account
-// per hour is sent; one held back is "notify=quiet" in the audit.
-type UnusualSignInNotifier interface {
-	UnusualSignIn(ctx context.Context, n UnusualSignInNotice) error
-}
-
-// UnusualSignInNotice is what an UnusualSignInNotifier is told. It never
-// carries the account's coordinates.
-type UnusualSignInNotice struct {
-	UserID, Username string
-	Role             gauntlet.Role
+// Under flag the notice is asked for after the response is written, as
+// every AccountNotice is; a block and the confirm notifier.go sends are
+// the same. At most one flag or block notice per account per hour is
+// sent; one held back is "notify=quiet" in the audit.
+type UnusualSignInDetail struct {
 	// Action is what happened: flag, confirm or block.
 	Action  UnusualSignInAction
 	Signals gauntlet.SignInSignals
@@ -124,15 +114,9 @@ type UnusualSignInNotice struct {
 	// Client is the address, agent (text, never markup) and country the
 	// sign-in came from.
 	Client gauntlet.SessionClient
-	At     time.Time
 	// SessionRef, under flag, is the session's ref as the person's own
 	// session list shows it, so a message can say "end this session".
 	SessionRef string
-	// Code, under confirm, is the confirmation code, shown to the
-	// application exactly once: a secret for one person. ExpiresAt is
-	// when it dies.
-	Code      string
-	ExpiresAt time.Time
 	// Reason, under block, says why: policy, decide-failed,
 	// decide-timeout, decide-invalid or notify-failed.
 	Reason string
@@ -185,7 +169,7 @@ func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) 
 // the block notice to send once the response is written, nil for none.
 // A confirm whose code could not be delivered is refused as
 // notify-failed: no code reached anyone.
-func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (confirmSent bool, notice *UnusualSignInNotice) {
+func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (confirmSent bool, notice *AccountNotice) {
 	reason := v.reason
 	if v.action == UnusualSignInConfirm {
 		if g.startConfirm(w, r, user, res, method, place, v.signals, now) {
@@ -213,37 +197,13 @@ var unusualNoticeInterval = time.Hour
 // no notifier (nothing about notices is recorded), else "asked" or
 // "quiet".
 func (g *Gate) noticeAllowed(userID string, now time.Time) string {
-	if g.cfg.NotifyUnusualSignIn == nil {
+	if g.cfg.Notices == nil {
 		return ""
 	}
 	if ok, _, _ := g.notices.allow(userID, now); ok {
 		return "asked"
 	}
 	return "quiet"
-}
-
-// notifyUnusualSignIn asks Config.NotifyUnusualSignIn to tell n's
-// account, in the background (flag and block). Call it only once the
-// response is written. A nil n is nothing to send.
-func (g *Gate) notifyUnusualSignIn(ctx context.Context, n *UnusualSignInNotice) {
-	notify := g.cfg.NotifyUnusualSignIn
-	if notify == nil || n == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
-	g.notifying.Add(1)
-	go func() {
-		defer g.notifying.Done()
-		defer cancel()
-		defer func() {
-			if p := recover(); p != nil {
-				g.logError(fmt.Sprintf("gate: the unusual sign-in notifier panicked for account %q: %q", n.Username, fmt.Sprint(p)))
-			}
-		}()
-		if err := notify.UnusualSignIn(ctx, *n); err != nil {
-			g.logError(fmt.Sprintf("gate: the unusual sign-in notifier failed for account %q: %q", n.Username, err.Error()))
-		}
-	}()
 }
 
 // checkUnusualPolicy is New's check of Config.UnusualSignIns: every
@@ -261,10 +221,10 @@ func checkUnusualPolicy(cfg Config) error {
 		switch f.a {
 		case "", UnusualSignInOff, UnusualSignInFlag:
 		case UnusualSignInConfirm:
-			if cfg.NotifyUnusualSignIn != nil {
+			if cfg.DeliverConfirmCode != nil {
 				continue
 			}
-			return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which needs Config.NotifyUnusualSignIn to deliver the code", f.name)
+			return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which needs Config.DeliverConfirmCode to deliver the code", f.name)
 		case UnusualSignInBlock:
 		default:
 			return fmt.Errorf("gate: Config.UnusualSignIns.%s is %q; want %q, %q, %q or %q",
@@ -421,10 +381,10 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 	case UnusualSignInFlag, UnusualSignInBlock:
 		return answer, "policy"
 	case UnusualSignInConfirm:
-		if g.cfg.NotifyUnusualSignIn != nil {
+		if g.cfg.DeliverConfirmCode != nil {
 			return answer, "policy"
 		}
-		return fail("decide-invalid", "answered confirm, and no Config.NotifyUnusualSignIn can deliver a code")
+		return fail("decide-invalid", "answered confirm, and no Config.DeliverConfirmCode can deliver a code")
 	}
 	return fail("decide-invalid", fmt.Sprintf("answered %q, which is not flag, confirm or block", string(answer)))
 }
@@ -436,7 +396,7 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 // fails, nothing is flagged and nobody is told: the signals are dropped
 // (issueSignInSession). It returns the notice to send once the response
 // is written (notifyUnusualSignIn), nil for none.
-func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *UnusualSignInNotice {
+func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *AccountNotice {
 	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
 	ev.Client.Unusual = signals
@@ -453,10 +413,11 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	if notify != "asked" {
 		return nil
 	}
-	return &UnusualSignInNotice{
-		UserID: user.ID, Username: user.Username, Role: user.Role,
-		Action: v.action, Signals: signals, Method: method, Client: sess.Client, At: now,
-		SessionRef: sess.Ref(),
+	return &AccountNotice{
+		Kind: NoticeUnusualSignIn, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		UnusualSignIn: &UnusualSignInDetail{
+			Action: v.action, Signals: signals, Method: method, Client: sess.Client, SessionRef: sess.Ref(),
+		},
 	}
 }
 
@@ -480,7 +441,7 @@ func writeSignInRefused(w http.ResponseWriter) {
 // refused row with the signals and user.login_refused, and returns the
 // notice to send once the response is written, nil for none. reason is
 // policy, or why a Decide or the confirm notice failed.
-func (g *Gate) refuseSignIn(r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, reason string, now time.Time) *UnusualSignInNotice {
+func (g *Gate) refuseSignIn(r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, reason string, now time.Time) *AccountNotice {
 	ev := loginEvent(user, "", gauntlet.SignInRefused, method)
 	ev.Client.Unusual = signals
 	note := fmt.Sprintf("unusual=%s; reason=%s; method=%s; ", signals, reason, method)
@@ -494,9 +455,10 @@ func (g *Gate) refuseSignIn(r *http.Request, user *gauntlet.User, res loginReser
 	}
 	client := place.client
 	client.Unusual = signals
-	return &UnusualSignInNotice{
-		UserID: user.ID, Username: user.Username, Role: user.Role,
-		Action: UnusualSignInBlock, Signals: signals, Method: method, Client: client, At: now,
-		Reason: reason,
+	return &AccountNotice{
+		Kind: NoticeUnusualSignIn, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		UnusualSignIn: &UnusualSignInDetail{
+			Action: UnusualSignInBlock, Signals: signals, Method: method, Client: client, Reason: reason,
+		},
 	}
 }

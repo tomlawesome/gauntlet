@@ -111,17 +111,38 @@ func confirmCodeMatches(typed, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(confirmCodeHash(typed)), []byte(want)) == 1
 }
 
+// ConfirmCode is what Config.DeliverConfirmCode is handed: an unusual
+// sign-in's confirmation code, shown to the application exactly once --
+// a secret for one person -- and the case it belongs to, minus anything
+// a function handed it could complete the sign-in with itself (no
+// request, header, password or session).
+type ConfirmCode struct {
+	UserID, Username string
+	Role             gauntlet.Role
+	// Code is the eight digits, shown ("1234-5678"). ExpiresAt is when
+	// they die.
+	Code      string
+	ExpiresAt time.Time
+	Signals   gauntlet.SignInSignals
+	Method    gauntlet.SignInMethod
+	// Client is the address, agent (text, never markup) and country the
+	// sign-in came from.
+	Client gauntlet.SessionClient
+	At     time.Time
+}
+
 // startConfirm mints a code and its ticket for user's sign-in, asks the
-// application to deliver the code -- synchronously, before the response,
-// under decideTimeout -- and only then sets the ticket cookie and
-// records confirm_sent with the signals (no audit record, as password_ok
-// writes none). Nothing is written to the account. It reports whether
-// the code went out; when it did not (the notifier failed, panicked or
-// outlasted the deadline), no ticket or cookie exists and the caller
-// refuses the attempt (notify-failed).
+// application to deliver it -- synchronously, before the response, under
+// decideTimeout (callBounded) -- and only then sets the ticket cookie
+// and records confirm_sent with the signals (no audit record, as
+// password_ok writes none). Nothing is written to the account. It
+// reports whether the code went out; when it did not
+// (Config.DeliverConfirmCode failed, panicked or outlasted the
+// deadline), no ticket or cookie exists and the caller refuses the
+// attempt (notify-failed).
 func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, now time.Time) bool {
-	notify := g.cfg.NotifyUnusualSignIn
-	if notify == nil {
+	deliver := g.cfg.DeliverConfirmCode
+	if deliver == nil {
 		return false
 	}
 	shown, digits, err := newConfirmCode()
@@ -144,13 +165,13 @@ func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntl
 	}
 	client := place.client
 	client.Unusual = signals
-	n := UnusualSignInNotice{
+	c := ConfirmCode{
 		UserID: user.ID, Username: user.Username, Role: user.Role,
-		Action: UnusualSignInConfirm, Signals: signals, Method: method, Client: client, At: now,
 		Code: shown, ExpiresAt: now.Add(ConfirmCodeLifetime),
+		Signals: signals, Method: method, Client: client, At: now,
 	}
-	if err := g.callBounded(r.Context(), func(ctx context.Context) error { return notify.UnusualSignIn(ctx, n) }); err != nil {
-		g.logError(fmt.Sprintf("gate: the unusual sign-in notifier could not take the confirmation code for account %q: %q", user.Username, err.Error()))
+	if err := g.callBounded(r.Context(), func(ctx context.Context) error { return deliver(ctx, c) }); err != nil {
+		g.logError(fmt.Sprintf("gate: Config.DeliverConfirmCode could not take the confirmation code for account %q: %q", user.Username, err.Error()))
 		return false
 	}
 	g.writeCookie(w, confirmLoginCookieName, ticket, confirmLoginCookiePath, int(ConfirmCodeLifetime.Seconds()))
