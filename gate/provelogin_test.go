@@ -545,7 +545,7 @@ func TestDecideProveWithoutDeliveryBlocksAsPolicy(t *testing.T) {
 // -- policy ---------------------------------------------------------------------
 
 func TestProveRanksBetweenConfirmAndBlock(t *testing.T) {
-	if !(UnusualSignInConfirm.rank() < UnusualSignInProve.rank() && UnusualSignInProve.rank() < UnusualSignInBlock.rank()) {
+	if UnusualSignInConfirm.rank() >= UnusualSignInProve.rank() || UnusualSignInProve.rank() >= UnusualSignInBlock.rank() {
 		t.Error("prove does not rank between confirm and block")
 	}
 	g := &Gate{cfg: Config{UnusualSignIns: UnusualSignInPolicy{
