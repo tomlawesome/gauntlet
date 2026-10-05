@@ -494,6 +494,66 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/reauthenticate:
+    post:
+      operationId: reauthenticate
+      summary: Resume a timed-out session with the password alone
+      description: |
+        After a session has been idle past the idle timeout (one hour) and
+        before its lifetime ceiling (24 hours from the sign-in), this takes
+        the timed-out session's cookie and the account's password and
+        issues a new session ID for the same account (#71, NIST SP
+        800-63B-4 section 2.2.3: a password in conjunction with the
+        session secret may re-authenticate after inactivity). The
+        sign-in time does not change, so the ceiling does not move, and the
+        new cookie ends at it. The old session ID ends. `GET
+        /api/auth/session` says `resumable: true` while this is possible.
+
+        It is a password sign-in for the limiter: the same per-address and
+        per-account limits, lockout, disable, address ban and known-browser
+        allowance as `POST /api/auth/login` (`429` at the limit), and a
+        wrong password is a failed sign-in, counted. It is not judged for
+        unusual-sign-in signals (the session it continues already was) and
+        never asks for a second factor. Session-exempt like login, and
+        still needs the CSRF header.
+
+        Anything that cannot be resumed answers `401` `sign-in-required`
+        alike: no cookie, an unknown, live or ended session (logout, sign
+        out everywhere, a password change), one past the ceiling, a deleted
+        account, an account with no local password, or one that owes a
+        password change (sign in again in full, which leads to that door).
+        The sign-in history row has method `resume`, and the audit record is
+        `user.reauthenticated`.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReauthenticateRequest"
+      responses:
+        "200":
+          description: Resumed. The new session cookie is set. The body is the one a completed login answers with.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
+        "403":
+          $ref: "#/components/responses/CSRFRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/logout:
     post:
       operationId: logout
@@ -2336,6 +2396,14 @@ components:
           type: string
         password:
           type: string
+    ReauthenticateRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+          description: The password of the account the timed-out session belongs to.
     SetupCredentials:
       type: object
       additionalProperties: false
@@ -2675,6 +2743,15 @@ components:
           type: string
           format: date-time
           description: This session's start (RFC 3339, seconds); present only while authenticated.
+        resumable:
+          const: true
+          description: |
+            Present, as `true`, only while `authenticated` is false and the
+            request's session cookie names a session that timed out through
+            inactivity inside its 24-hour ceiling and can be resumed with the
+            password alone (`POST /api/auth/reauthenticate`, #71). A frontend
+            then asks for the password instead of showing the full sign-in
+            form. Absent otherwise.
     UserSummary:
       type: object
       additionalProperties: false
@@ -2789,8 +2866,8 @@ components:
           description: The account's username, or the name typed, masked (see the operation). Absent on an `unrecorded` row, and for an empty name.
         method:
           type: string
-          enum: [password, code, passkey, sso]
-          description: What the attempt presented. New values may be added.
+          enum: [password, code, passkey, sso, resume]
+          description: What the attempt presented. `resume` is the password alone, to resume a timed-out session (#71). New values may be added.
         address:
           type: string
           maxLength: 64

@@ -62,7 +62,9 @@ named under the class it shares, below.
 - Returned by: `POST /api/auth/register` (wrong or missing setup code),
   `POST /api/auth/login` (wrong username or password), `POST
   /api/auth/login/factor` (wrong authenticator code or recovery code, or
-  a refused passkey assertion), `POST /api/auth/login/confirm` (wrong
+  a refused passkey assertion), `POST /api/auth/reauthenticate` (wrong
+  password for the timed-out session's account, #71: "incorrect
+  password"; it names no account, so there is no pair), `POST /api/auth/login/confirm` (wrong
   confirmation code, #55: "invalid confirmation code", one cause, no
   pair), `POST /api/auth/login/escape` (wrong escape code, #66: "invalid
   escape code", one cause, no pair), `POST /api/auth/unlock` (wrong admin
@@ -104,8 +106,17 @@ named under the class it shares, below.
   reset, an SSO link); every handler's own "sign in first" check answers
   the same class when reached directly (normally unreachable once
   mounted under `Protect`, which already refuses the request first).
-- `detail` is "sign in first" or "unauthorized" depending on which check
-  answered; a frontend never reads it.
+- `POST /api/auth/reauthenticate` (#71) answers it, with `detail` "sign in
+  again", when there is no session it can resume, whatever the reason: no
+  cookie, an unknown, live, ended or past-ceiling session, a deleted
+  account, an account with no local password, or one that owes a password
+  change. A frontend then shows the full sign-in form. While a session has
+  timed out inside its ceiling, every other session-gated route answers
+  the plain `sign-in-required` as before, and `GET /api/auth/session`
+  carries `resumable: true`, which is how a frontend learns the password
+  alone will do.
+- `detail` is "sign in first", "unauthorized" or "sign in again" depending
+  on which check answered; a frontend never reads it.
 
 ## step-expired
 
@@ -268,7 +279,8 @@ named under the class it shares, below.
   in the current window, or from an address banned for 24 hours after
   100 failed sign-ins (#70). `detail` is always "too many attempts, try
   again later": the ban reads as the address limit does.
-- Returned by every rate-limited route: login, the second-factor step,
+- Returned by every rate-limited route: login, the password-only resume of
+  a timed-out session (#71), the second-factor step,
   the confirmation-code step (#55), registration, the admin and lone-admin unlock routes, and every
   password or second-factor re-check, granting the admin role included.
 
