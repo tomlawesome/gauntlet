@@ -223,8 +223,9 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The factor is committed from here on, so every other session ends.
+	method := g.sessionMethod(r, user.ID, now)
 	g.deps.Sessions.RevokeAllForUser(user.ID)
-	g.issueSession(w, r, user.ID, now)
+	g.issueSession(w, r, user.ID, method, now)
 
 	g.audit(r, user.Username, "account.totp_enabled", user.Username, "authenticator app confirmed; existing recovery codes unchanged")
 

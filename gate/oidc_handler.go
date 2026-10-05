@@ -194,8 +194,9 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 	// the only record of the link's, and an older build saving the
 	// document while this one runs would drop it (#28). A fresh session
 	// is issued so the person stays signed in on this browser.
+	method := g.sessionMethod(r, caller.ID, now)
 	g.deps.Sessions.RevokeAllForUser(caller.ID)
-	g.issueSession(w, r, caller.ID, now)
+	g.issueSession(w, r, caller.ID, method, now)
 	http.Redirect(w, r, "/?ssoLinked=1", http.StatusFound)
 }
 

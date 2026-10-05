@@ -2560,6 +2560,10 @@ components:
           description: The country `address` resolved to at sign-in, if a country lookup is configured and the address matched. Absent otherwise.
         unusual:
           $ref: "#/components/schemas/UnusualSignals"
+        method:
+          type: string
+          enum: [password, code, passkey, passkey_alone, sso]
+          description: How the sign-in that started the session was made -- `code` is a password then a code, `passkey` a password then a passkey, `passkey_alone` a passkey on its own. A resumed or rotated session keeps the method of the sign-in it continues. Absent when none was recorded. New values may be added.
     SessionList:
       type: object
       additionalProperties: false

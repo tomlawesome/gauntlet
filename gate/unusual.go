@@ -410,7 +410,7 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 // (issueSignInSession). It returns the notice to send once the response
 // is written (notifyUnusualSignIn), nil for none.
 func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *AccountNotice {
-	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, now)
+	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, method, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
 	ev.Client.Unusual, ev.Confirmed = signals, v.escape
 	if signals == 0 {

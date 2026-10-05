@@ -234,3 +234,25 @@ func TestSessionResumeConcurrentlyOnlyOnce(t *testing.T) {
 		t.Errorf("%d of %d concurrent resumes of one session succeeded, want exactly 1", got, n)
 	}
 }
+
+// A session records how its sign-in was made (#77), and a resumed one
+// keeps that: it continues the sign-in, it is not a new one.
+func TestSessionKeepsItsMethodAcrossResume(t *testing.T) {
+	s := NewSessionStore(time.Hour, 24*time.Hour)
+	t0 := time.Now()
+	old := s.CreateFrom("user-1", SessionClient{Method: SignInMethodPasskeyAlone}, t0)
+	if old.Client.Method != SignInMethodPasskeyAlone {
+		t.Fatalf("CreateFrom kept method %q, want passkey_alone", old.Client.Method)
+	}
+	if got := s.Create("user-1", t0); got.Client.Method != "" {
+		t.Errorf("Create recorded method %q, want none", got.Client.Method)
+	}
+
+	resumed, ok := s.Resume(old.ID, SessionClient{Method: SignInMethodPassword}, t0.Add(2*time.Hour))
+	if !ok {
+		t.Fatal("Resume refused a timed-out session")
+	}
+	if resumed.Client.Method != SignInMethodPasskeyAlone {
+		t.Errorf("resumed session method = %q, want the original sign-in's passkey_alone, not what the caller passed", resumed.Client.Method)
+	}
+}

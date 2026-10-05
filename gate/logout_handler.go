@@ -34,6 +34,7 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	method := g.sessionMethod(r, user.ID, now)
 	g.deps.Sessions.RevokeAllForUser(user.ID)
 	detail := "sessions ended: all, via sign out everywhere; remembered browsers forgotten"
 	if err := g.deps.Users.ClearKnownBrowsers(user.ID); err != nil {
@@ -42,6 +43,6 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	}
 	g.audit(r, user.Username, "account.sessions_ended", user.Username, detail)
 
-	g.issueSession(w, r, user.ID, now)
+	g.issueSession(w, r, user.ID, method, now)
 	writeJSON(w, http.StatusOK, map[string]any{"signedOutEverywhere": true})
 }

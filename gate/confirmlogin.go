@@ -251,7 +251,7 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 	g.endAfterReset(res)
 	g.clearConfirmLoginCookie(w)
 	place := g.placeOf(r, res.address)
-	_, signals := g.issueSignInSession(w, r, user.ID, place, st.Signals, now)
+	_, signals := g.issueSignInSession(w, r, user.ID, place, st.Signals, st.Method, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, st.Method)
 	ev.Client.Unusual, ev.Confirmed = signals, true
 	note := ""

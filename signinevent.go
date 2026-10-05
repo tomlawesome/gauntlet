@@ -54,17 +54,26 @@ const (
 )
 
 // SignInMethod is what an attempt presented: a password, a code (TOTP
-// or recovery), a passkey assertion, a single sign-on callback, or a
-// password alone to resume a session that timed out (#71).
+// or recovery), a passkey assertion as the second step after a
+// password, a passkey assertion on its own (#77), a single sign-on
+// callback, or a password or passkey alone to resume a session that
+// timed out (#71).
 type SignInMethod string
 
 const (
 	SignInMethodPassword SignInMethod = "password"
 	SignInMethodCode     SignInMethod = "code"
 	SignInMethodPasskey  SignInMethod = "passkey"
-	SignInMethodSSO      SignInMethod = "sso"
-	// SignInMethodResume is the password-only resume of a session that
-	// timed out through inactivity inside its lifetime ceiling
+	// SignInMethodPasskeyAlone is a passkey assertion that verified the
+	// user, presented with no password before it (#77, ADR-0012): the
+	// authenticator's own check -- a PIN or a biometric, neither of which
+	// reaches gauntlet -- is the second factor, and the passkey itself
+	// the first.
+	SignInMethodPasskeyAlone SignInMethod = "passkey_alone"
+	SignInMethodSSO          SignInMethod = "sso"
+	// SignInMethodResume is the password-only (or, #77, user-verifying
+	// passkey-only) resume of a session that timed out through
+	// inactivity inside its lifetime ceiling
 	// (POST /api/auth/reauthenticate, #71). A SignInSuccess with this
 	// method issued a new session ID for the same sign-in, not a new
 	// sign-in.

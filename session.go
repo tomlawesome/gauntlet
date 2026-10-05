@@ -83,11 +83,16 @@ const (
 // Unusual is the unusual-sign-in signals the sign-in raised (#55), none
 // for an ordinary one: gate's judgement, not the client's word, so it
 // too passes through CreateFrom unchanged.
+//
+// Method is how the sign-in was made (#77): gate's own record, passed
+// through CreateFrom unchanged, and empty for a session made without
+// one. A resumed session keeps the method of the sign-in it continues.
 type SessionClient struct {
 	Address   string
 	UserAgent string
 	Country   string
 	Unusual   SignInSignals
+	Method    SignInMethod
 }
 
 // Session is deliberately an opaque random ID (see newID), not a JWT --
@@ -226,6 +231,7 @@ func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.
 		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
 		Country:   client.Country,
 		Unusual:   client.Unusual,
+		Method:    client.Method,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -427,7 +433,7 @@ func (s *SessionStore) Resumable(id string, now time.Time) (Session, bool) {
 // one session cannot both succeed: the second finds it gone and gets
 // false. The new session has a new ID (ASVS 7.2.4), the old session's
 // IssuedAt -- the lifetime ceiling does not move -- and its unusual-
-// sign-in signals, since it continues a sign-in already judged; its
+// sign-in signals and method, since it continues a sign-in already judged; its
 // client is client, cleaned as CreateFrom does. Its expiry is now plus
 // the idle timeout, never past the ceiling.
 //
@@ -445,7 +451,7 @@ func (s *SessionStore) Resume(id string, client SessionClient, now time.Time) (S
 		return Session{}, false
 	}
 	s.removeLocked(old)
-	client.Unusual = old.Client.Unusual
+	client.Unusual, client.Method = old.Client.Unusual, old.Client.Method
 	deadline, _ := s.deadline(old) // resumable implies a ceiling
 	sess := Session{ID: newID(), UserID: old.UserID, IssuedAt: old.IssuedAt, ExpiresAt: earliest(now.Add(s.ttl), deadline), LastUsedAt: now, Client: client}
 	s.sessions[sess.ID] = sess

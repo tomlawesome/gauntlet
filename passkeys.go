@@ -64,7 +64,7 @@ var (
 	// the account happens to be full.
 	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
 	// ErrPasskeyCeremonyInvalid is wrapped by gauntlet/passkey's
-	// FinishRegistration and FinishLogin (PasskeyCeremony) whenever the
+	// FinishRegistration and FinishLogin (PasskeyCeremony), and FinishSignIn (PasskeySignIn), whenever the
 	// sealed ceremony state is unusable: it fails the authentication
 	// tag, is malformed, was sealed for the other ceremony or by another
 	// process, has expired, or its challenge was already used. Such a
@@ -164,6 +164,47 @@ type PasskeyAssertion struct {
 	// stored one and either is non-zero -- never for 0 -> 0, which is how
 	// most platform passkeys behave. A caller refuses the login on it.
 	CloneWarning bool
+	// UserVerified is the authenticator's user-verification flag for this
+	// assertion: it checked the person (a PIN or a biometric) as well as
+	// their presence. FinishLogin reports what it saw; FinishSignIn
+	// refuses an assertion without it, so it is always true there (#77).
+	UserVerified bool
+}
+
+// PasskeySignIn is the optional second interface beside PasskeyCeremony
+// (ADR-0004 said a later need would be one): signing in with a passkey
+// alone, no password first (#77, ADR-0012). gauntlet/passkey's
+// RelyingParty implements both; gate offers the routes only when
+// Deps.Passkeys also implements this and Config.PasskeySignIn is set.
+// Every method refuses while Status is not PasskeyStatusReady.
+//
+// It is a client-side discoverable credential login (WebAuthn Level 3):
+// no username is typed, the browser offers the passkeys it holds for
+// this relying party, and the one chosen names its account through the
+// user handle -- the account ID, as FinishRegistration's user supplies
+// it. User verification is required, not preferred.
+type PasskeySignIn interface {
+	// BeginSignIn starts a discoverable login ceremony: options for
+	// navigator.credentials.get() with no allowed list and user
+	// verification required, and the sealed state. The sealed state is
+	// for this ceremony only; it cannot finish a login of the second-step
+	// kind or a registration.
+	BeginSignIn() (options json.RawMessage, sealed string, err error)
+	// FinishSignIn verifies the browser's assertion. It reads the user
+	// handle out of the assertion and calls lookup with it, before the
+	// signature is checked, so the caller can find the account and apply
+	// its own limits; lookup returns false for a handle that names no
+	// account it will sign in, and the assertion is then refused. The
+	// signature is checked against that account's passkeys under the
+	// current RPID, and user verification is required: an assertion
+	// without it is refused.
+	//
+	// It returns the account lookup gave for the verified assertion, and
+	// the assertion as FinishLogin reports it, UserVerified included. As
+	// with FinishLogin, the caller refuses a CloneWarning and records the
+	// count through Store.RecordPasskeyAssertionIfFresh, and an error
+	// wrapping ErrPasskeyCeremonyInvalid means the sealed state is dead.
+	FinishSignIn(lookup func(userHandle []byte) (*User, bool), sealed string, assertion json.RawMessage) (*User, PasskeyAssertion, error)
 }
 
 // Passkey is one registered WebAuthn credential, held on User.Passkeys.
