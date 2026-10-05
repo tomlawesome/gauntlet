@@ -6,6 +6,22 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **An escape code for a lone admin refused by `block`** (#66,
+  ADR-0011). When the unusual-sign-in policy refuses an admin from a new
+  browser and no other admin can act, the refusal now writes a one-time
+  code to the server's log (or hands it to the new `Config.OnEscapeCode`)
+  and sets a sealed ticket cookie `gate_escape_login` in the refused
+  browser; `POST /api/auth/login/escape` with that code (15 minutes,
+  single use, through the login limiter) lets that one sign-in through
+  and remembers the browser. The `403 sign-in-refused` body is
+  unchanged. Never for users, viewers or the SSO callback; with neither
+  `Config.Log` nor `Config.OnEscapeCode` nothing is issued. Additive API:
+  `gauntlet.NewOneTimeCode` (the setup and unlock codes' generator),
+  `Store.OtherAdminCanAct(userID, now)`, `SignInEscapeIssued` and
+  `SignInEscapeRefused`, `gate.EscapeCodeHandler`, `gate.EscapeCodeFunc`
+  and `gate.EscapeCodeLifetime`. `user.login_refused` gains
+  `escape=issued`, a completed escape records `escape=used` (confirmed),
+  and its notice is a `NoticeUnusualSignIn` with `Reason: "escape"`.
 - **Several admins, the last one protected** (#67, ADR-0010). A
   deployment may hold any number of admins; the last can be neither
   deleted nor demoted. `Store.CreateUser` accepts `RoleAdmin`; new
@@ -31,6 +47,19 @@ All notable changes to this project are documented in this file.
 - `gate.NoticeRoleChanged` and `AccountNotice.RoleChanged`
   (`RoleChangeDetail{From, To}`): `Config.Notices` is told of a role
   change, and of an admin created over HTTP (`From` empty).
+- An address ban (#70): `LoginLimiter.RecordAddressFailure` counts failed
+  sign-in attempts per source address, and the 100th within a rolling 24
+  hours bans the address for 24 hours (`AddressBanFailures`,
+  `AddressBanDuration`); `AddressBanned` reads it. IPv6 addresses count
+  per /64 (`AddressBanGroup`), IPv4 by the full address, an address that
+  does not parse as itself. Counts and bans are kept in memory only, in a
+  capped map that sheds counts before bans. `gate` refuses a banned
+  address with the same `429` as the per-address limit, and a browser the
+  account remembers passes the ban, so a reverse proxy that hides visitor
+  addresses cannot lock the owner out. The ban starting is one
+  `address.banned` audit record. Today's per-address limit is unchanged.
+- `LoginDisableDuration` and `User.LoginDisabled`, for the disable that
+  lifts itself (see Changed) (#70).
 
 - `persist/persisttest`, a test suite an application runs against its
   own `persist.Backend` from its own tests: `persisttest.Run`. It checks
@@ -144,6 +173,17 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Breaking: five admin routes now take the calling admin's password**
+  (#72, ASVS 7.5.3). `POST /api/auth/users/{id}/reset-password`,
+  `POST /api/tokens`, `DELETE /api/auth/users/{id}`,
+  `DELETE /api/auth/users/{id}/totp` and
+  `DELETE /api/auth/users/{id}/passkeys` need `password` (the caller's
+  own) in the JSON request body, which the three `DELETE`s and
+  `reset-password` did not read before; a request without a readable
+  body is `400`. A missing or wrong password is `401`
+  `invalid-credentials`, counted on the same per-account re-check budget
+  as the self-service routes (`429` once spent). A caller sending the
+  old bodies must add it. `POST /api/auth/users` is unchanged.
 - **The accounts document is now version 9** (#67). No field changed:
   a document with several admins is now legal, which a build reading up
   to version 8 refuses at load as "allows exactly one". A version-8
@@ -159,6 +199,19 @@ All notable changes to this project are documented in this file.
   applications switching on it keep compiling. `ErrCannotDeleteAdmin`
   is still the value `DeleteUser` returns, and also answers
   `errors.Is(err, ErrLastAdmin)`. `ErrInvalidRole`'s text now names admin.
+- Login lockouts are capped at one hour, not 24 (#70): 5, 15 and 45
+  minutes at 5 attempts per 5 minutes, then an hour each. The escalation
+  and the known-browser allowance are unchanged. A stranger who knew the
+  username could keep the owner out for a day; the address ban now puts
+  the long penalty on the attacker instead.
+- The disable after `MaxConsecutiveLoginFailures` (50) failures lifts
+  itself 24 hours after `User.LoginDisabledAt`, with no unlock needed
+  (#70). The record is unchanged: the disable is the field and the clock.
+  The first attempt afterwards clears the account's count of lockouts as
+  `UnlockLogin` does, so the next failure does not disable it again at
+  once. The admin unlock answer's `wasDisabled` is false for a disable
+  that has lapsed. The one-time unlock code is still issued for a disable
+  the record holds that has lapsed and no attempt has cleared yet.
 
 - `gate.Config.Notify` and `Notifier` are deprecated in favour of
   `Config.Notices`: kept working for a minor release (ADR-0002 decision

@@ -83,7 +83,8 @@ func (s *Store) SetLoginLockedUntil(accountID string, until time.Time) error {
 	})
 }
 
-// UnlockLogin lifts a disabled sign-in on accountID (#44) and clears its
+// UnlockLogin lifts a disabled sign-in on accountID (#44; it also lifts
+// itself, LoginDisableDuration after it began, #70) and clears its
 // lockout and its count of lockouts, in one write: afterwards the
 // account signs in as one that never failed. Refused with
 // ErrUserNotFound for an account that does not exist; an account with
@@ -122,8 +123,28 @@ func (a lockoutState) equal(b lockoutState) bool {
 	return a.until.Equal(b.until) && a.episodes == b.episodes && a.disabledAt.Equal(b.disabledAt)
 }
 
-// disabled reports whether the state disables the account's sign-in.
+// LoginDisableDuration is how long a disabled sign-in lasts (#70): the
+// disable at MaxConsecutiveLoginFailures lifts itself this long after
+// User.LoginDisabledAt, with no admin unlock needed. Nothing is written
+// to make it lift: LoginDisabledAt and the clock are enough (see
+// lapsed).
+const LoginDisableDuration = 24 * time.Hour
+
+// disabled reports whether the state records a disabled sign-in -- one
+// that may since have run out (lapsed).
 func (a lockoutState) disabled() bool { return !a.disabledAt.IsZero() }
+
+// lapsed reports whether the state records a disable that has run out
+// by now: LoginDisableDuration after it began.
+func (a lockoutState) lapsed(now time.Time) bool {
+	return a.disabled() && !loginDisabledAt(a.disabledAt, now)
+}
+
+// loginDisabledAt reports whether a sign-in disabled at disabledAt (zero
+// for never) is still disabled at now.
+func loginDisabledAt(disabledAt, now time.Time) bool {
+	return !disabledAt.IsZero() && now.Before(disabledAt.Add(LoginDisableDuration))
+}
 
 // lockoutRecorder is what *Store offers a LoginLimiter beyond
 // AccountLockouts: the whole lockout state together with the account's

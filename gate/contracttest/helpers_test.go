@@ -385,9 +385,10 @@ type recoveryCodesRegenerateRequest struct {
 }
 
 type createTokenRequest struct {
-	Name   string `json:"name"`
-	Kind   string `json:"kind"`
-	Device string `json:"device"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Device   string `json:"device"`
+	Password string `json:"password"`
 }
 
 type sessionResponse struct {

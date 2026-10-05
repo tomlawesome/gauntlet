@@ -186,7 +186,7 @@ func TestAKnownBrowserCannotPassOrOutlastTheDisable(t *testing.T) {
 	if u, _ := g.deps.Users.Get(id); u.LoginDisabledAt.IsZero() {
 		t.Fatal("the fiftieth failure, from the known browser, did not disable the account")
 	}
-	clock.set(clock.now().Add(48 * time.Hour))
+	clock.set(clock.now().Add(2 * time.Hour)) // past the last lockout, inside the 24-hour disable
 	if status := signInFrom(t, bob, ts, totpBobUsername, totpBobPassword); status != http.StatusTooManyRequests {
 		t.Errorf("the known browser's right password on a disabled account = %d, want 429", status)
 	}
@@ -223,7 +223,7 @@ func TestSignOutEverywhereAndAResetCodeForgetKnownBrowsers(t *testing.T) {
 		t.Errorf("after sign out everywhere the account remembers %d, want 1", len(u.KnownBrowsers))
 	}
 
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	if status, body := readAll(t, resp); status != http.StatusOK {
 		t.Fatalf("reset = %d %s", status, body)
 	}

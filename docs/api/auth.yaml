@@ -63,6 +63,9 @@ info:
     or the client's address is at its limit, a browser carrying a value
     the named account remembers keeps a small allowance of its own (the
     limiter's attempts per window), where any other browser gets `429`.
+    A request carrying such a value is also not refused by the address
+    ban (#70: 100 failed sign-ins from one address in a day ban it for 24
+    hours, answered with the same `429`).
     It never signs anyone in by itself, is refused while the account's
     sign-in is disabled, and every failure through it counts toward the
     disable. An account remembers at most three browsers, each for 45
@@ -219,6 +222,12 @@ paths:
         `{"confirm": true}`, the confirm cookie set and no session
         cookie; `POST /api/auth/login/confirm` finishes it). The response
         never says which signal was raised or where a code went.
+
+        A `403` `sign-in-refused` for an admin whom no other admin can act
+        for may also set the escape cookie (#66): the code that lets that
+        one attempt through is in the server's log, not in any response,
+        and `POST /api/auth/login/escape` redeems it. The `403` body is
+        the same either way.
       security:
         - {}
       parameters:
@@ -356,6 +365,71 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           description: The code was wrong (`invalid-credentials`), or the confirm cookie is missing, invalid, expired or already used, or its account is gone (`step-expired`; the cookie is cleared) -- sign in again from the start.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+        "403":
+          $ref: "#/components/responses/CSRFRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/login/escape:
+    post:
+      operationId: loginEscape
+      summary: Finish a refused sign-in with the escape code from the server log
+      description: |
+        Lets through a sign-in the unusual-sign-in policy refused (#66,
+        ADR-0011). Only a lone admin -- an admin with no other admin able
+        to act -- is ever offered it: `login` or `login/factor` answered
+        `403` `sign-in-refused` and set the escape cookie, and the server
+        wrote a one-time code to its own log (or handed it to the
+        application's `Config.OnEscapeCode`); nothing in any response
+        carries it. `code` is that code, `xxxx-xxxx-xxxx-xxxx`, in either
+        case, with or without the dashes. The code is useless without the
+        cookie, and the cookie without the code. Shares the login rate
+        limit, so an address ban or a lockout refuses it with `429`; a
+        wrong code counts as a failed second factor. The ticket is used by
+        exactly one sign-in and lives 15 minutes (and until the process
+        restarts). Sets the session cookie on success, remembers the
+        browser, and clears the escape cookie.
+      security:
+        - escapeLoginCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EscapeCodeRequest"
+      responses:
+        "200":
+          description: Signed in; sets the session cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: The code was wrong (`invalid-credentials`, "invalid escape code"), or the escape cookie is missing, invalid, expired or already used, or its account is gone (`step-expired`; the cookie is cleared) -- sign in again from the start.
           headers:
             WWW-Authenticate:
               required: true
@@ -1287,10 +1361,16 @@ paths:
     delete:
       operationId: deleteUser
       summary: Delete an account (admin)
-      description: Deletes the account, then ends its sessions and revokes every token it created. The last admin cannot be deleted (`409` class `last-admin`), and nobody can delete the account they are signed in with (`409` class `conflict`); another admin can be deleted. Takes no body.
+      description: Deletes the account, then ends its sessions and revokes every token it created. The last admin cannot be deleted (`409` class `last-admin`), and nobody can delete the account they are signed in with (`409` class `conflict`); another admin can be deleted. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked after the `409` for the caller's own account and before anything is deleted.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Deleted.
@@ -1309,13 +1389,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/ConflictOrLastAdmin"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           description: |
             `server-error` when the account could not be deleted at all.
@@ -1398,10 +1480,18 @@ paths:
         Issues a single-use reset code for the account, ends its sessions,
         and makes it change its password at next sign-in. The code exists
         only in this response; issuing another kills it. Refused for the
-        caller's own account and for an SSO-only one. Takes no body.
+        caller's own account and for an SSO-only one. Takes the calling admin's
+        own password in the body (a rate-limited re-check, #72); the `409`s
+        for the caller's own account come before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: The code, to read out to the account's owner.
@@ -1423,13 +1513,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1440,7 +1532,8 @@ paths:
       operationId: unlockUser
       summary: Lift an account's disabled sign-in or lockout (admin)
       description: |
-        Lifts a disabled sign-in (fifty failed sign-ins in a row, #44),
+        Lifts a disabled sign-in (fifty failed sign-ins in a row, #44; it
+        also lifts itself 24 hours after it began, #70),
         ends any login lockout and clears the count of lockouts, so the
         account signs in as one that never failed, with the password and
         second factor it already has. Nothing else changes. Answers `200`
@@ -1479,7 +1572,9 @@ paths:
                     type: string
                   wasDisabled:
                     type: boolean
-                    description: The account's sign-in had been disabled.
+                    description: |
+                      The account's sign-in was disabled and had not yet
+                      lifted itself (it does, 24 hours after it began).
                   wasLockedOut:
                     type: boolean
                     description: A login lockout was in force.
@@ -1552,10 +1647,16 @@ paths:
     delete:
       operationId: clearUserTOTP
       summary: Remove another account's authenticator app (admin)
-      description: For a lost phone when the owner still has their password. Refused on the caller's own account. Takes no body.
+      description: For a lost phone when the owner still has their password. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Removed.
@@ -1573,13 +1674,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1589,10 +1692,16 @@ paths:
     delete:
       operationId: clearUserPasskeys
       summary: Remove every passkey on another account (admin)
-      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. Takes no body.
+      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Removed.
@@ -1610,13 +1719,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1737,7 +1848,7 @@ paths:
     post:
       operationId: createToken
       summary: Issue an API token (admin)
-      description: The raw value is in this response only; the server keeps its SHA-256 hash.
+      description: The raw value is in this response only; the server keeps its SHA-256 hash. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked once the name is known to be well formed. Only an admin signed in with a session reaches it; a bearer token never does.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1747,8 +1858,11 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [name]
+              required: [name, password]
               properties:
+                password:
+                  type: string
+                  description: The calling admin's own password.
                 name:
                   type: string
                   description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
@@ -1770,9 +1884,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1830,6 +1946,11 @@ components:
       in: cookie
       name: gate_confirm_login
       description: Set by `POST /api/auth/login`, `POST /api/auth/login/factor` or the SSO callback when an unusual sign-in owes a confirmation code (#55); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in.
+    escapeLoginCookie:
+      type: apiKey
+      in: cookie
+      name: gate_escape_login
+      description: Set by the `403` `sign-in-refused` of `POST /api/auth/login` or `POST /api/auth/login/factor` when the refused account is an admin no other admin can act for (#66); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in. Never set for a user, a viewer or an SSO sign-in.
     passkeyRegisterCookie:
       type: apiKey
       in: cookie
@@ -1968,7 +2089,9 @@ components:
         `csrf-required`); or every credential was right and the
         account's unusual-sign-in policy refused the attempt (class
         `sign-in-refused`, #55). No session cookie is set and no
-        `X-Auth-Gate` header is sent.
+        `X-Auth-Gate` header is sent. For an admin no other admin can act
+        for, the escape cookie is set (#66); the code that goes with it is
+        in the server's log, never in the response.
       content:
         application/problem+json:
           schema:
@@ -2296,6 +2419,14 @@ components:
         code:
           type: string
           description: The confirmation code the application delivered, `1234-5678`; the dash and surrounding whitespace are optional.
+    EscapeCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: The escape code from the server's log, `xxxx-xxxx-xxxx-xxxx`; the dashes and surrounding whitespace are optional and either case is accepted.
     LoginFactorRequest:
       type: object
       additionalProperties: false
@@ -2599,7 +2730,7 @@ components:
           description: The raw bearer token; only in the response that creates it.
     SignInOutcome:
       type: string
-      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, refused, confirm_sent, confirm_refused, unrecorded]
+      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, refused, confirm_sent, confirm_refused, escape_issued, escape_refused, unrecorded]
       description: |
         How an attempt ended. `password_ok` is the right password with a
         second factor still owed; `factor_refused` a wrong or used code or a
@@ -2608,7 +2739,10 @@ components:
         every credential right but the attempt refused by the unusual
         sign-in policy; `confirm_sent` every credential right and a
         confirmation code sent, no session yet; `confirm_refused` a wrong
-        confirmation code; `unrecorded` the failed attempts past a
+        confirmation code; `escape_issued` a refused lone admin's escape
+        code written to the server's log (#66), no session yet (a
+        `refused` row is recorded with it); `escape_refused` a wrong
+        escape code; `unrecorded` the failed attempts past a
         bucket's row budget. New values may be added.
     UnusualSignals:
       type: array
@@ -2680,7 +2814,7 @@ components:
           $ref: "#/components/schemas/UnusualSignals"
         confirmed:
           type: boolean
-          description: True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`). Absent when false.
+          description: True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`) or an escape code (`POST /api/auth/login/escape`, #66). Absent when false.
     SignInList:
       type: object
       additionalProperties: false

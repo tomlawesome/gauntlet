@@ -22,7 +22,7 @@ func TestTokensCreateRequiresAdmin(t *testing.T) {
 	userClient := &http.Client{Jar: mustCookieJar(t)}
 	_ = postJSON(t, userClient, ts.URL+"/api/auth/login", credentialsRequest{Username: "operator", Password: "password456"}).Body.Close()
 
-	resp := postJSON(t, userClient, ts.URL+"/api/tokens", createTokenRequest{Name: "mine"})
+	resp := postJSON(t, userClient, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected a non-admin to be forbidden from creating a token, got %d", resp.StatusCode)
@@ -34,7 +34,7 @@ func TestCreateTokenRejectsEmptyName(t *testing.T) {
 	ts := newTestServer(t, g)
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: ""})
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "", Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for an empty name, got %d", resp.StatusCode)
@@ -48,7 +48,7 @@ func TestCreateTokenRejectsABlankName(t *testing.T) {
 	ts := newTestServer(t, g)
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "   "})
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "   ", Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for a name of only spaces, got %d", resp.StatusCode)
@@ -63,7 +63,7 @@ func TestCreateTokenRejectsInvalidKind(t *testing.T) {
 	ts := newTestServer(t, g)
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Kind: "not-a-real-kind"})
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Kind: "not-a-real-kind", Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for an unregistered kind, got %d", resp.StatusCode)
@@ -94,7 +94,7 @@ func TestAdminCanCreateListAndRevokeTokens(t *testing.T) {
 	ts := newTestServer(t, g)
 	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	createResp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: "integration"})
+	createResp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: "integration", Password: testAdminPassword})
 	defer func() { _ = createResp.Body.Close() }()
 	if createResp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", createResp.StatusCode)
@@ -148,7 +148,7 @@ func TestCreateTokenRejectsAnUnscopedIngestToken(t *testing.T) {
 	ts := newTestServer(t, g)
 	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	resp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: "router", Kind: string(gauntlet.TokenKindIngest)})
+	resp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: "router", Kind: string(gauntlet.TokenKindIngest), Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for an ingest token with no device, got %d", resp.StatusCode)
@@ -163,7 +163,7 @@ func TestCreateTokenRejectsATooLongName(t *testing.T) {
 	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	name := strings.Repeat("n", gauntlet.MaxTokenNameLen+1)
-	resp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: name})
+	resp := postJSON(t, adminClient, ts.URL+"/api/tokens", createTokenRequest{Name: name, Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a %d-character token name, got %d", len(name), resp.StatusCode)
@@ -193,7 +193,7 @@ func TestCreateTokenWithoutStorageSaysWhatToDo(t *testing.T) {
 	ts := newTestServer(t, g)
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine"})
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 with no token storage, got %d", resp.StatusCode)
@@ -282,11 +282,11 @@ func TestTokenRegisteredKinds(t *testing.T) {
 	}
 
 	var created tokenResponse
-	expect(postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "pull", Kind: string(custom)}), http.StatusCreated, &created)
+	expect(postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "pull", Kind: string(custom), Password: testAdminPassword}), http.StatusCreated, &created)
 	if created.Kind != custom {
 		t.Errorf("created kind = %q, want %q", created.Kind, custom)
 	}
-	expect(postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "default"}), http.StatusBadRequest, nil)
+	expect(postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "default", Password: testAdminPassword}), http.StatusBadRequest, nil)
 	var list struct {
 		Tokens []tokenResponse `json:"tokens"`
 	}

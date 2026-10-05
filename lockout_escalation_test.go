@@ -44,16 +44,16 @@ func failConsecutively(t *testing.T, l *LoginLimiter, s *Store, id string, n int
 	return at
 }
 
-// Each lockout lasts three times the one before -- 5, 15, 45, 135, 405
-// and 1215 minutes at the consumers' 5 attempts per 5 minutes -- then
-// 24 hours each, and refuses every attempt until it ends. A lockout
+// Each lockout lasts three times the one before -- 5, 15 and 45 minutes
+// at the consumers' 5 attempts per 5 minutes -- then an hour each (#70),
+// and refuses every attempt until it ends. A lockout
 // running out does not reset the count.
 func TestEachLockoutLastsThreeTimesTheOneBefore(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
 	at := escalationStart
 	// Nine lockouts: 45 failures, short of the 50 that disable sign-in.
-	for n, minutes := range []time.Duration{5, 15, 45, 135, 405, 1215, 1440, 1440, 1440} {
+	for n, minutes := range []time.Duration{5, 15, 45, 60, 60, 60, 60, 60, 60} {
 		until := failWindow(t, l, s, id, at)
 		if got, want := until.Sub(at), minutes*time.Minute; got != want {
 			t.Errorf("lockout %d lasts %v, want %v", n+1, got, want)
@@ -89,9 +89,10 @@ func TestLockoutCountSurvivesARestart(t *testing.T) {
 	}
 }
 
-// Fifty failed attempts in a row disable the account's sign-in for
-// good: an attempt a year later is refused, by this limiter and by a
-// fresh one after a restart. Forty-nine do not.
+// Fifty failed attempts in a row disable the account's sign-in: an
+// attempt 22 hours later is refused, by this limiter and by a fresh one
+// after a restart (it lifts itself after 24, #70: see
+// lockout_disable_expiry_test.go). Forty-nine do not.
 func TestFiftyConsecutiveFailuresDisableSignIn(t *testing.T) {
 	t.Run("49 leave it open", func(t *testing.T) {
 		s, id := openLockoutStore(t, persist.NewMemory())
@@ -106,9 +107,9 @@ func TestFiftyConsecutiveFailuresDisableSignIn(t *testing.T) {
 		s, id := openLockoutStore(t, m)
 		l := mustNewLoginLimiter(t, 5, 5*time.Minute)
 		at := failConsecutively(t, l, s, id, MaxConsecutiveLoginFailures, escalationStart)
-		later := at.Add(365 * 24 * time.Hour)
+		later := at.Add(22 * time.Hour)
 		if l.ReserveAccount(s, id, later) {
-			t.Fatal("an attempt a year after 50 failures in a row was admitted")
+			t.Fatal("an attempt 22 hours after 50 failures in a row was admitted")
 		}
 		restarted, err := OpenStore(m, Options{})
 		if err != nil {

@@ -941,7 +941,7 @@ func TestUnusualBlockOneStep(t *testing.T) {
 
 	// After an admin's reset code, the refused place sets the baseline.
 	admin := e.adminNow(t)
-	resp := postJSON(t, admin, e.ts.URL+"/api/auth/users/"+e.bobID+"/reset-password", nil)
+	resp := postJSON(t, admin, e.ts.URL+"/api/auth/users/"+e.bobID+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	status, body := readAll(t, resp)
 	if status != http.StatusOK {
 		t.Fatalf("reset = %d %s", status, body)

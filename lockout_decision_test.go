@@ -60,7 +60,7 @@ func TestReserveAccountDecisionReportsTheDisable(t *testing.T) {
 	if !d.Allowed || !d.DisabledNow {
 		t.Fatalf("the fiftieth failure's decision = %+v, want Allowed and DisabledNow", d)
 	}
-	refused := l.ReserveAccountDecision(s, id, at.Add(365*24*time.Hour))
+	refused := l.ReserveAccountDecision(s, id, at.Add(23*time.Hour))
 	if refused.Allowed || !refused.Disabled || refused.DisabledNow {
 		t.Fatalf("an attempt on a disabled account = %+v, want Disabled only", refused)
 	}

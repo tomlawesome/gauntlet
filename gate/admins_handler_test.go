@@ -340,7 +340,7 @@ func TestLastAdminCannotBeDemotedOrDeleted(t *testing.T) {
 	if status != http.StatusConflict || adminProblemType(t, body) != problemTypeBase+"last-admin" {
 		t.Errorf("demoting the last admin to viewer = %d %s, want 409 last-admin", status, body)
 	}
-	req, _ := http.NewRequest(http.MethodDelete, f.ts.URL+"/api/auth/users/"+f.adminID, nil)
+	req, _ := http.NewRequest(http.MethodDelete, f.ts.URL+"/api/auth/users/"+f.adminID, strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
 	req.Header.Set(csrfHeaderName, testCSRFValue)
 	resp, err := f.admin.Do(req)
 	if err != nil {
@@ -387,7 +387,7 @@ func TestAdminMayDeleteAnotherAdminButNotThemselves(t *testing.T) {
 	f := newAdminsFixture(t)
 	f.grantBob(t)
 	del := func(id string) (int, string) {
-		req, _ := http.NewRequest(http.MethodDelete, f.ts.URL+"/api/auth/users/"+id, nil)
+		req, _ := http.NewRequest(http.MethodDelete, f.ts.URL+"/api/auth/users/"+id, strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
 		req.Header.Set(csrfHeaderName, testCSRFValue)
 		resp, err := f.admin.Do(req)
 		if err != nil {

@@ -283,7 +283,7 @@ func TestDisableIsAuditedOnce(t *testing.T) {
 	if len(disabled) != 1 || !strings.HasPrefix(disabled[0].Detail, "after 50 consecutive failures; from=") {
 		t.Fatalf("account.disabled = %+v, want one", disabled)
 	}
-	clock.set(clock.now().Add(365 * 24 * time.Hour))
+	clock.set(clock.now().Add(2 * time.Hour)) // past the last lockout, inside the 24-hour disable
 	if r := tryLogin(t, ts, totpBobUsername, totpBobPassword); r.status != http.StatusTooManyRequests {
 		t.Fatalf("an attempt on a disabled account: status %d", r.status)
 	}

@@ -33,7 +33,7 @@ func TestNoticePasswordReset(t *testing.T) {
 	g.cfg.Notices = rec
 	bobID := totpBobID(t, g)
 
-	status, body := readAll(t, postJSON(t, admin, ts.URL+"/api/auth/users/"+bobID+"/reset-password", nil))
+	status, body := readAll(t, postJSON(t, admin, ts.URL+"/api/auth/users/"+bobID+"/reset-password", adminStepUpRequest{Password: testAdminPassword}))
 	if status != http.StatusOK {
 		t.Fatalf("reset = %d %s", status, body)
 	}
@@ -133,7 +133,7 @@ func TestNoticeSecondFactorRemoved(t *testing.T) {
 		bobID := totpBobID(t, g)
 		rec := &noticeRecorder{}
 		g.cfg.Notices = rec
-		status, body := readAll(t, deleteJSON(t, admin, ts.URL+"/api/auth/users/"+bobID+"/totp", nil))
+		status, body := readAll(t, deleteJSON(t, admin, ts.URL+"/api/auth/users/"+bobID+"/totp", adminStepUpRequest{Password: testAdminPassword}))
 		if status != http.StatusOK {
 			t.Fatalf("admin clear = %d %s", status, body)
 		}
@@ -164,7 +164,7 @@ func TestNoticeSecondFactorRemoved(t *testing.T) {
 		bilboID := passkeyBilboID(t, g)
 		rec := &noticeRecorder{}
 		g.cfg.Notices = rec
-		status, body := readAll(t, deleteJSON(t, admin, ts.URL+"/api/auth/users/"+bilboID+"/passkeys", nil))
+		status, body := readAll(t, deleteJSON(t, admin, ts.URL+"/api/auth/users/"+bilboID+"/passkeys", adminStepUpRequest{Password: testAdminPassword}))
 		if status != http.StatusOK {
 			t.Fatalf("admin clear = %d %s", status, body)
 		}

@@ -122,6 +122,31 @@ func (g *Gate) recheckPassword(w http.ResponseWriter, r *http.Request, user *gau
 	return current, true
 }
 
+// adminStepUpRequest is the body of an admin route that takes nothing
+// but the caller's own password (#72, ASVS 7.5.3): reset-password,
+// delete user, and clearing a user's authenticator app or passkeys.
+type adminStepUpRequest struct {
+	Password string `json:"password"`
+}
+
+// recheckAdminPassword is recheckPassword for the admin routes that
+// take over, remove or hand out access to an account (#72): the
+// caller's own password, entered again on the request itself, so a
+// stolen session cookie alone cannot do any of them. A missing password
+// is a wrong one -- 401 and counted on the same re-check budget -- not a
+// separate 400, as on every other re-check route. Call it after the
+// request has been checked for being well formed and before it reads or
+// changes any account. Writes every refusal itself.
+func (g *Gate) recheckAdminPassword(w http.ResponseWriter, r *http.Request, password string, now time.Time) bool {
+	caller := UserFromContext(r)
+	if caller == nil {
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return false
+	}
+	_, ok := g.recheckPassword(w, r, caller, password, "incorrect password", now)
+	return ok
+}
+
 // recheckSecondFactor is recheckPassword for a signed-in caller's
 // second factor: code is a current TOTP code or one of the account's
 // recovery codes, checked the way the login factor step checks them

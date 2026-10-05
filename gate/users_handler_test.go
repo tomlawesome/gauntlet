@@ -205,7 +205,7 @@ func TestDeletingAUserRevokesTheirSessionAndTokens(t *testing.T) {
 		t.Fatalf("the session under test does not work before the delete: %d", live.StatusCode)
 	}
 
-	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+operator.ID, nil)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+operator.ID, strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
 	req.Header.Set(csrfHeaderName, testCSRFValue)
 	resp, err := adminClient.Do(req)
 	if err != nil {
@@ -244,7 +244,7 @@ func TestDeletingTheAdminIsRefused(t *testing.T) {
 		t.Fatal("the admin account was not created")
 	}
 
-	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+admin.ID, nil)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+admin.ID, strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
 	req.Header.Set(csrfHeaderName, testCSRFValue)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -271,7 +271,7 @@ func TestDeleteUserNotFound(t *testing.T) {
 	ts := newTestServer(t, g)
 	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/does-not-exist", nil)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/does-not-exist", strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
 	req.Header.Set(csrfHeaderName, testCSRFValue)
 	resp, err := client.Do(req)
 	if err != nil {

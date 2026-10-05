@@ -302,3 +302,7 @@ func enrolTOTPFactor(t *testing.T, client *http.Client, ts *httptest.Server, pas
 	}
 	confirmEnrolmentOK(t, client, ts)
 }
+
+// testAdminPassword is the password the fixtures register "admin" with;
+// the admin routes that re-check the caller's password (#72) take it.
+const testAdminPassword = "password-placeholder-1"

@@ -16,6 +16,9 @@ type createTokenRequest struct {
 	// end up with an ingest token by leaving the field out.
 	Kind   string `json:"kind"`
 	Device string `json:"device"`
+	// Password is the calling admin's own, entered again (#72, ASVS
+	// 7.5.3): a token outlives the session that minted it.
+	Password string `json:"password"`
 }
 
 // tokenResponse mirrors gauntlet.Token but never carries HashedValue --
@@ -36,7 +39,10 @@ type tokenResponse struct {
 
 // handleTokensCreate issues a new bearer token. The raw value is
 // returned exactly once, in this response; the store itself never
-// retains it, only its SHA-256 hash.
+// retains it, only its SHA-256 hash. Admin-only, and only through a
+// session: a bearer token never reaches this route. The calling admin's
+// own password is asked for again on the request (#72), since the token
+// outlives the session that minted it.
 func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	var req createTokenRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
@@ -47,6 +53,10 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	// would pass an untrimmed check and be issued with no name at all.
 	if strings.TrimSpace(req.Name) == "" {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "name is required", nil)
+		return
+	}
+
+	if !g.recheckAdminPassword(w, r, req.Password, g.now()) {
 		return
 	}
 

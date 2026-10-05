@@ -664,8 +664,11 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	if u, _ := s.Get(id); u.LoginLockoutCount != 2 {
 		t.Errorf("linking the admin reset its count of lockouts: the next one is number %d, want 2", u.LoginLockoutCount)
 	}
-	if got, want := s.LoginLockedUntil(id), ended.Add(3*time.Hour); !got.Equal(want) {
-		t.Errorf("the second lockout ends at %v, want three windows on, %v", got, want)
+	// Three windows would be three hours, but a lockout is capped at an
+	// hour (#70), which is also one window here: the count, not the
+	// length, is what shows the escalation was kept.
+	if got, want := s.LoginLockedUntil(id), ended.Add(time.Hour); !got.Equal(want) {
+		t.Errorf("the second lockout ends at %v, want the one-hour cap on, %v", got, want)
 	}
 }
 

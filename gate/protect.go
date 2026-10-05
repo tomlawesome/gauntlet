@@ -29,6 +29,7 @@ const (
 	loginPath        = "/api/auth/login"
 	loginFactorPath  = "/api/auth/login/factor"
 	loginConfirmPath = "/api/auth/login/confirm"
+	loginEscapePath  = "/api/auth/login/escape"
 	logoutPath       = "/api/auth/logout"
 	oidcPathPrefix   = "/api/auth/oidc"
 	oidcLoginPath    = "/api/auth/oidc/login"
@@ -81,6 +82,7 @@ var exemptPaths = map[string]bool{
 	loginFactorPath:      true,
 	loginFactorBeginPath: true,
 	loginConfirmPath:     true,
+	loginEscapePath:      true,
 	oidcLoginPath:        true,
 	oidcCallbackPath:     true,
 	unlockPath:           true,

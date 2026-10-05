@@ -169,10 +169,14 @@ type User struct {
 	// LoginDisabledAt is when this account's local sign-in was disabled
 	// after MaxConsecutiveLoginFailures failures in a row (#44), zero
 	// while it is not. A disabled account is refused at the password step
-	// exactly as a locked one is, for good: it does not time out, no
-	// sign-in can complete while it is in force, and a new password does
-	// not lift it. Only UnlockLogin does. It disables the local password sign-in, not
-	// the account's sessions, its SSO identity or its second factors.
+	// exactly as a locked one is: no sign-in can complete while it is in
+	// force, and a new password does not lift it. UnlockLogin does, and
+	// so does the clock: it lifts itself LoginDisableDuration after this
+	// time (#70), and the next attempt then restarts the count of
+	// failures. The field keeps the old time until then, so read it with
+	// LoginDisabled, not as non-zero. It disables the local password
+	// sign-in, not the account's sessions, its SSO identity or its second
+	// factors.
 	LoginDisabledAt time.Time `json:"loginDisabledAt,omitzero"`
 	// KnownBrowsers are the browsers that have completed a sign-in on
 	// this account and keep a small allowance of their own while it is
@@ -337,6 +341,13 @@ func (u *User) SessionCutoff() time.Time {
 	}
 	return u.PasswordChangedAt
 }
+
+// LoginDisabled reports whether the account's local sign-in is disabled
+// at now (#70): LoginDisabledAt is set and LoginDisableDuration has not
+// yet passed since. A disable that has run out reads as not disabled,
+// though the field still carries its time until the next attempt clears
+// it.
+func (u *User) LoginDisabled(now time.Time) bool { return loginDisabledAt(u.LoginDisabledAt, now) }
 
 // LocalPassword reports whether this account has a real, user-chosen
 // password that may be reset.

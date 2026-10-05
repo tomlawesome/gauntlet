@@ -327,6 +327,7 @@ func TestContractEveryRoute(t *testing.T) {
 	contractPasskeys(t, c)
 	contractUnlockCode(t, c)
 	contractUnusualSignIns(t, c)
+	contractEscapeCode(t, c)
 	c.requireEveryOperationDriven()
 }
 
@@ -391,6 +392,61 @@ func contractUnusualSignIns(t *testing.T, c *contractChecker) {
 		t.Fatalf("login/factor under confirm = %v", challenge)
 	}
 	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 200, nil)
+}
+
+// contractEscapeCode covers the lone admin's escape (#66): blocked from a
+// new browser, the admin gets the escape cookie and the application the
+// code (Config.OnEscapeCode), and POST /api/auth/login/escape lets that
+// attempt through.
+func contractEscapeCode(t *testing.T, c *contractChecker) {
+	users, code := openStore(t, persist.NewMemory())
+	escapes := &escapeCatcher{}
+	g := newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInBlock}
+		cfg.OnEscapeCode = escapes
+	})
+	ts := newTestServer(t, g)
+	u := ts.URL
+	const adminPass = "contract-admin-password"
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+
+	stranger := c.client()
+	resp := c.do(stranger, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 403, nil)
+	if resp.Header.Get("X-Auth-Gate") != "" {
+		t.Errorf("a refused sign-in carries X-Auth-Gate %q", resp.Header.Get("X-Auth-Gate"))
+	}
+	if escapes.last() == "" {
+		t.Fatal("the lone admin's refusal gave the application no escape code")
+	}
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: "not json", bad: true}, 400, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: escapes.last()}, noCSRF: true}, 403, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: escapes.last()}}, 200, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: escapes.last()}}, 401, nil)
+}
+
+// escapeCodeRequest is POST /api/auth/login/escape's body.
+type escapeCodeRequest struct {
+	Code string `json:"code"`
+}
+
+// escapeCatcher is a gate.Config.OnEscapeCode keeping the last escape
+// code it was given.
+type escapeCatcher struct {
+	mu   sync.Mutex
+	code string
+}
+
+func (e *escapeCatcher) EscapeCode(_, _, code string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.code = code
+}
+
+func (e *escapeCatcher) last() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.code
 }
 
 // confirmCodeRequest is POST /api/auth/login/confirm's body.
@@ -701,15 +757,18 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	// non-enrolment route to such an account before the handler runs.
 	c.do(bob, u, call{method: "POST", path: "/api/auth/recovery-codes", body: recoveryCodesRegenerateRequest{Password: bobPass}}, 403, nil)
 
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + bobID + "/totp"}, 200, nil)
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID + "/totp"}, 409, nil)
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id/totp"}, 404, nil)
+	// The admin routes that take over or strip an account ask for the
+	// calling admin's own password again (#72): a wrong one is a 401.
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + bobID + "/totp", body: passwordRequest{"wrong"}}, 401, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + bobID + "/totp", body: passwordRequest{adminPass}}, 200, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID + "/totp", body: passwordRequest{adminPass}}, 409, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id/totp", body: passwordRequest{adminPass}}, 404, nil)
 
 	// Admin reset, the must-change-password door, and changing a password.
 	var reset resetPasswordResponse
-	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/reset-password"}, 200, &reset)
-	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/reset-password"}, 409, nil)
-	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/reset-password"}, 404, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/reset-password", body: passwordRequest{adminPass}}, 200, &reset)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/" + adminID + "/reset-password", body: passwordRequest{adminPass}}, 409, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/reset-password", body: passwordRequest{adminPass}}, 404, nil)
 
 	// The admin unlock route (#44): 200 whether or not anything was
 	// locked, 404 for no account. The caller's own takes the password
@@ -796,10 +855,10 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 
 	// API tokens.
 	var created tokenResponse
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "grafana"}}, 201, &created)
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: ""}}, 400, nil)
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: strings.Repeat("n", gauntlet.MaxTokenNameLen+1)}}, 400, nil)
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "sensor", Kind: "ingest", Device: "sensor-1"}}, 201, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "grafana", Password: adminPass}}, 201, &created)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "", Password: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: strings.Repeat("n", gauntlet.MaxTokenNameLen+1), Password: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "sensor", Kind: "ingest", Device: "sensor-1", Password: adminPass}}, 201, nil)
 	// Used once, so the list carries lastUsedAt (see alreadyIssued above).
 	used := bearerRequest(t, u, "/api/protected", created.Value)
 	_ = used.Body.Close()
@@ -818,9 +877,9 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "DELETE", path: "/api/tokens/" + created.ID}, 404, nil)
 
 	// Deleting accounts.
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID}, 409, nil)
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id"}, 404, nil)
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + bobID}, 200, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID, body: passwordRequest{adminPass}}, 409, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id", body: passwordRequest{adminPass}}, 404, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + bobID, body: passwordRequest{adminPass}}, 200, nil)
 
 	// Several admins (#67) and role changes (#75). The step-up is the
 	// caller's password and a current second factor (an unspent recovery
@@ -877,9 +936,9 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	var refusal struct {
 		Type string `json:"type"`
 	}
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID}, 409, nil) // eve exists: not your own account
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + eveID}, 200, nil)
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID}, 409, &refusal)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID, body: passwordRequest{adminPass}}, 409, nil) // eve exists: not your own account
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + eveID, body: passwordRequest{adminPass}}, 200, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID, body: passwordRequest{adminPass}}, 409, &refusal)
 	lastAdmin(&refusal)
 	c.do(admin, u, call{method: "PUT", path: role(adminID), body: setRoleRequest{Role: "user"}}, 409, &refusal)
 	lastAdmin(&refusal)
@@ -1029,11 +1088,13 @@ func TestContractTokenRegisteredKinds(t *testing.T) {
 	enrolTOTPFactor(t, c, u, admin, "contract-admin-password") // POST /api/tokens is not an enrolment route
 
 	var created tokenResponse
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom)}}, 201, &created)
+	// The calling admin's own password is asked for again (#72).
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom), Password: "wrong"}}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "pull", Kind: string(custom), Password: "contract-admin-password"}}, 201, &created)
 	if created.Kind != custom {
 		t.Errorf("created kind = %q, want %q", created.Kind, custom)
 	}
-	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "default"}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "default", Password: "contract-admin-password"}}, 400, nil)
 	var list struct {
 		Tokens []tokenResponse `json:"tokens"`
 	}
@@ -1289,10 +1350,11 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	if adminRow < 0 || bobRow < 0 || users[bobRow].PasskeyCount != 3 {
 		t.Fatalf("users list = %+v, want bob with passkeyCount 3", users)
 	}
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[adminRow].ID + "/passkeys"}, 409, nil)
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id/passkeys"}, 404, nil)
-	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/users/" + users[bobRow].ID + "/passkeys"}, 403, nil)
-	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[bobRow].ID + "/passkeys"}, 200, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[adminRow].ID + "/passkeys", body: passwordRequest{"contract-admin-password"}}, 409, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id/passkeys", body: passwordRequest{"contract-admin-password"}}, 404, nil)
+	c.do(bob2, u, call{method: "DELETE", path: "/api/auth/users/" + users[bobRow].ID + "/passkeys", body: passwordRequest{bobPass}}, 403, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[bobRow].ID + "/passkeys", body: passwordRequest{"wrong"}}, 401, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + users[bobRow].ID + "/passkeys", body: passwordRequest{"contract-admin-password"}}, 200, nil)
 
 	// A relying party that is not ready.
 	_, unready, unreadyAdmin := passkeyGateServer(t, c, "", true)
@@ -1322,7 +1384,7 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	c.do(offAdmin, o, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(`{}`), ""}}, 404, nil)
 	c.do(offAdmin, o, call{method: "PATCH", path: "/api/auth/passkeys/eA", body: passkeyRenameRequest{"x"}}, 404, nil)
 	c.do(offAdmin, o, call{method: "DELETE", path: "/api/auth/passkeys/eA", body: passwordRequest{"contract-admin-password"}}, 404, nil)
-	c.do(offAdmin, o, call{method: "DELETE", path: "/api/auth/users/" + bobOff.ID + "/passkeys"}, 404, nil)
+	c.do(offAdmin, o, call{method: "DELETE", path: "/api/auth/users/" + bobOff.ID + "/passkeys", body: passwordRequest{"contract-admin-password"}}, 404, nil)
 	c.do(anon, o, call{method: "POST", path: "/api/auth/login/factor/begin"}, 404, nil)
 	c.do(anon, o, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Assertion: json.RawMessage(`{"id":"eA"}`)}}, 404, nil)
 }

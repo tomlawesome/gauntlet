@@ -69,9 +69,9 @@ func setupCodeLogLine(code string) string {
 // dashes and in either case. Only the hash is kept, so nothing in this
 // process can print the code again after announcing it.
 func newSetupCode() (display string, hash []byte) {
-	canonical := newResetCode()
+	display, canonical := NewOneTimeCode() // also the escape code's (#66)
 	sum := sha256.Sum256([]byte(canonical))
-	return FormatResetCode(canonical), sum[:]
+	return display, sum[:]
 }
 
 // issueSetupCodeLocked makes a new code if the store needs one -- empty,

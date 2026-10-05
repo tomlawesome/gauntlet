@@ -254,7 +254,7 @@ func TestLoginFactorAccountLostFactorMidFlow(t *testing.T) {
 
 	pending := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
 
-	clearResp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/totp", nil)
+	clearResp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/totp", adminStepUpRequest{Password: testAdminPassword})
 	_ = clearResp.Body.Close()
 	if clearResp.StatusCode != http.StatusOK {
 		t.Fatalf("admin clear returned %d", clearResp.StatusCode)
