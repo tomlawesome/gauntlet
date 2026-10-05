@@ -158,3 +158,34 @@ func TestNewRefusesBothNotifyAndNotices(t *testing.T) {
 		t.Errorf("New = %v, want a refusal naming Notify and Notices", err)
 	}
 }
+
+// TestNewRefusesAGroupThatGivesAdminOrAnUnknownRole pins ADR-0013
+// decision 1: an identity provider never mints an admin, and the
+// refusal comes at startup, naming the decision.
+func TestNewRefusesAGroupThatGivesAdminOrAnUnknownRole(t *testing.T) {
+	cases := map[string]oidc.Policy{
+		"admin from a group":      {RoleFromGroups: map[string]string{"ops": "admin"}},
+		"unknown role from group": {RoleFromGroups: map[string]string{"ops": "root"}},
+		"admin as the fallback":   {RoleFromGroups: map[string]string{"ops": "user"}, RoleWithoutGroup: "admin"},
+		"unknown fallback":        {RoleFromGroups: map[string]string{"ops": "user"}, RoleWithoutGroup: "guest"},
+	}
+	for name, policy := range cases {
+		t.Run(name, func(t *testing.T) {
+			deps := validDeps(t)
+			deps.OIDCPolicy = policy
+			_, err := New(validConfig(), deps)
+			if err == nil {
+				t.Fatal("expected New to refuse the policy")
+			}
+			if !strings.Contains(err.Error(), "0013") {
+				t.Errorf("error %q does not name ADR-0013", err)
+			}
+		})
+	}
+
+	deps := validDeps(t)
+	deps.OIDCPolicy = oidc.Policy{RoleFromGroups: map[string]string{"staff": "user", "guests": "viewer"}, RoleWithoutGroup: "user"}
+	if _, err := New(validConfig(), deps); err != nil {
+		t.Errorf("a user/viewer map was refused: %v", err)
+	}
+}

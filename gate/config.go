@@ -291,6 +291,17 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if deps.OIDC != nil && deps.OIDCState == nil {
 		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
 	}
+	// A group never gives admin (ADR-0013 decision 1): an identity
+	// provider that is misconfigured or compromised must not be able to
+	// mint an account that skips the local password and second factor
+	// every admin keeps (ADR-0010). Refused here, not at the first
+	// sign-in, so the mistake shows at startup.
+	if err := deps.OIDCPolicy.ValidateRoles(func(role string) bool {
+		return role == string(gauntlet.RoleUser) || role == string(gauntlet.RoleViewer)
+	}); err != nil {
+		return nil, fmt.Errorf("gate: Deps.OIDCPolicy: %w (a group may give only %q or %q; see docs/adr/0013-sso-group-roles.md)",
+			err, gauntlet.RoleUser, gauntlet.RoleViewer)
+	}
 	if cfg.Notify != nil && cfg.Notices != nil {
 		return nil, fmt.Errorf("gate: Config.Notify and Config.Notices must not both be set; Notices replaces the deprecated Notify")
 	}
