@@ -24,11 +24,11 @@ func mustGet(t *testing.T, s *Store, id string) *User {
 }
 
 // lockoutFor is one window, then three times the one before, capped at
-// 24 hours -- or at the window itself, when that is longer.
+// one hour (#70) -- or at the window itself, when that is longer.
 func TestLockoutForEscalatesAndCaps(t *testing.T) {
 	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
 	for n, minutes := range map[int]time.Duration{
-		0: 5, 1: 5, 2: 15, 3: 45, 4: 135, 5: 405, 6: 1215, 7: 1440, 8: 1440, 1000: 1440,
+		0: 5, 1: 5, 2: 15, 3: 45, 4: 60, 5: 60, 6: 60, 7: 60, 8: 60, 1000: 60,
 	} {
 		if got := l.lockoutFor(n); got != minutes*time.Minute {
 			t.Errorf("lockoutFor(%d) = %v, want %v", n, got, minutes*time.Minute)
@@ -67,8 +67,8 @@ func TestLockoutRecordCarriesTheCountAndTheDisable(t *testing.T) {
 	if !u.LoginDisabledAt.Equal(fiftieth) {
 		t.Errorf("LoginDisabledAt = %v after the fiftieth failure, want %v", u.LoginDisabledAt, fiftieth)
 	}
-	if u.LoginLockoutCount != 10 || !u.LoginLockedUntil.Equal(fiftieth.Add(24*time.Hour)) {
-		t.Errorf("the fiftieth failure recorded lockout %d until %v, want the tenth, 24h on", u.LoginLockoutCount, u.LoginLockedUntil)
+	if u.LoginLockoutCount != 10 || !u.LoginLockedUntil.Equal(fiftieth.Add(time.Hour)) {
+		t.Errorf("the fiftieth failure recorded lockout %d until %v, want the tenth, an hour on", u.LoginLockoutCount, u.LoginLockedUntil)
 	}
 }
 

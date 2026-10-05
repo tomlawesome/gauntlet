@@ -129,11 +129,14 @@ type secondFactorRun struct {
 // times the lockouts on the record) plus those in the current window.
 const MaxConsecutiveLoginFailures = 50
 
-// maxLoginLockout caps one lockout's length: 24 hours, reached from the
-// consumers' five-minute window at the seventh lockout (5, 15, 45, 135,
-// 405 and 1215 minutes before it). Never less than one window, so a
+// maxLoginLockout caps one lockout's length: one hour (#70), reached from
+// the consumers' five-minute window at the fourth lockout (5, 15 and 45
+// minutes before it). Mainstream defaults lock for minutes, and the
+// usernames here are easy to guess, so a longer lockout hands a stranger
+// the owner's sign-in for a day; the address ban (addressban.go) puts the
+// long penalty on the attacker instead. Never less than one window, so a
 // lockout always outlasts the attempts that caused it (see lockoutFor).
-const maxLoginLockout = 24 * time.Hour
+const maxLoginLockout = time.Hour
 
 // secondFactorFailuresForPasswordChange is how many failed second-factor
 // steps in a row, since the last completed sign-in, make the account's
@@ -398,8 +401,8 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 // limiter's memory only (memoryLockouts).
 //
 // Each lockout lasts three times as long as the one before (lockoutFor):
-// with the consumers' 5 attempts per 5 minutes, 5, 15, 45, 135, 405 and
-// 1215 minutes, then 24 hours each (#44). It runs from the attempt that
+// with the consumers' 5 attempts per 5 minutes, 5, 15 and 45 minutes,
+// then an hour each (#44, #70). It runs from the attempt that
 // starts it, so it always outlasts the window and the next lockout is
 // counted from fresh attempts only. The attempt that brings the
 // account's consecutive failures to MaxConsecutiveLoginFailures also

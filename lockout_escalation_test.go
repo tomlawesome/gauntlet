@@ -44,16 +44,16 @@ func failConsecutively(t *testing.T, l *LoginLimiter, s *Store, id string, n int
 	return at
 }
 
-// Each lockout lasts three times the one before -- 5, 15, 45, 135, 405
-// and 1215 minutes at the consumers' 5 attempts per 5 minutes -- then
-// 24 hours each, and refuses every attempt until it ends. A lockout
+// Each lockout lasts three times the one before -- 5, 15 and 45 minutes
+// at the consumers' 5 attempts per 5 minutes -- then an hour each (#70),
+// and refuses every attempt until it ends. A lockout
 // running out does not reset the count.
 func TestEachLockoutLastsThreeTimesTheOneBefore(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
 	at := escalationStart
 	// Nine lockouts: 45 failures, short of the 50 that disable sign-in.
-	for n, minutes := range []time.Duration{5, 15, 45, 135, 405, 1215, 1440, 1440, 1440} {
+	for n, minutes := range []time.Duration{5, 15, 45, 60, 60, 60, 60, 60, 60} {
 		until := failWindow(t, l, s, id, at)
 		if got, want := until.Sub(at), minutes*time.Minute; got != want {
 			t.Errorf("lockout %d lasts %v, want %v", n+1, got, want)
