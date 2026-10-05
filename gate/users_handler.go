@@ -13,6 +13,12 @@ type createUserRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	Role     string `json:"role"`
+	// AdminPassword and AdminCode are the creating admin's own password
+	// and a current second factor, entered again: required, and read,
+	// only when Role is "admin" (#67). They are not Password, which is
+	// the new account's.
+	AdminPassword string `json:"adminPassword,omitempty"`
+	AdminCode     string `json:"adminCode,omitempty"`
 }
 
 // userSummary is what the account list exposes -- deliberately not
@@ -47,15 +53,15 @@ type userSummary struct {
 }
 
 // handleCreateUser lets an existing admin add another account -- the
-// only way to create a user once self-registration has closed.
+// only way to create a user once self-registration has closed. Creating
+// an admin (#67) also takes the caller's own password and a current
+// second factor (adminPassword, adminCode), checked as a role grant is
+// (recheckStepUp): a stolen session alone cannot make its holder
+// permanent.
 func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
-		return
-	}
-	if req.Role == string(gauntlet.RoleAdmin) {
-		g.writeAuthError(w, r, gauntlet.ErrSingleAdmin, http.StatusBadRequest, classInvalidRequest)
 		return
 	}
 	var role gauntlet.Role
@@ -64,6 +70,8 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		role = gauntlet.RoleUser
 	case string(gauntlet.RoleViewer):
 		role = gauntlet.RoleViewer
+	case string(gauntlet.RoleAdmin):
+		role = gauntlet.RoleAdmin
 	default:
 		g.writeAuthError(w, r, gauntlet.ErrInvalidRole, http.StatusBadRequest, classInvalidRequest)
 		return
@@ -72,7 +80,22 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if g.refuseProductName(w, r, req.Password) {
 		return
 	}
-	user, err := g.deps.Users.CreateUser(req.Username, req.Password, role, g.now())
+	now := g.now()
+	// The step-up is the last check before the write, after every
+	// refusal that costs the caller nothing, so a recovery code is not
+	// spent on a request that was always going to be refused.
+	if role == gauntlet.RoleAdmin {
+		caller := UserFromContext(r)
+		if caller == nil {
+			writeUnauthorized(w, classSignInRequired, "sign in first")
+			return
+		}
+		if !g.recheckStepUp(w, r, caller, req.AdminPassword, req.AdminCode, now,
+			"creating an admin needs your own password and a code from your authenticator app or a recovery code (adminPassword, adminCode)") {
+			return
+		}
+	}
+	user, err := g.deps.Users.CreateUser(req.Username, req.Password, role, now)
 	if err != nil {
 		status, class := http.StatusInternalServerError, classServerError
 		switch err {
@@ -81,15 +104,25 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		case gauntlet.ErrNotPersisted:
 			status, class = http.StatusServiceUnavailable, classNotPersisted
 		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
-			gauntlet.ErrSingleAdmin, gauntlet.ErrInvalidRole,
+			gauntlet.ErrInvalidRole,
 			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
 			status, class = http.StatusBadRequest, classInvalidRequest
 		}
 		g.writeAuthError(w, r, err, status, class)
 		return
 	}
-	g.audit(r, auditActor(r), "user.create", user.Username, "role="+string(user.Role))
+	detail := "role=" + string(user.Role)
+	if user.Role == gauntlet.RoleAdmin {
+		detail += "; granting admin's password and second factor re-entered"
+	}
+	g.audit(r, auditActor(r), "user.create", user.Username, detail)
 	writeJSON(w, http.StatusCreated, map[string]any{"username": user.Username, "role": user.Role})
+	if user.Role == gauntlet.RoleAdmin {
+		g.notify(r.Context(), &AccountNotice{
+			Kind: NoticeRoleChanged, UserID: user.ID, Username: user.Username, Role: user.Role, At: now, By: auditActor(r),
+			RoleChanged: &RoleChangeDetail{To: user.Role},
+		})
+	}
 }
 
 // handleListUsers backs the admin-facing account list. Admin-only (via
@@ -120,6 +153,9 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 // that the account still exists on every request, so both would outlive
 // the deletion if not revoked here.
 //
+// The last admin cannot be deleted (409 last-admin, #67), nor can the
+// caller's own account while other admins exist (409 conflict).
+//
 // Divergence from mikroview (gauntlet #15): when RevokeAllCreatedBy
 // fails, mikroview's handleAuthDeleteUser logs it and still answers 200
 // with tokensRevoked=0 -- indistinguishable, on the wire, from "this
@@ -137,14 +173,22 @@ func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Nobody deletes the account they are signed in with. For the last
+	// admin the store's own refusal, with its own class, is the better
+	// answer, so that case is left to it.
+	if caller := UserFromContext(r); caller != nil && caller.ID == id && len(g.deps.Users.Admins()) > 1 {
+		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot delete their own account -- ask another admin to", nil)
+		return
+	}
+
 	user, err := g.deps.Users.DeleteUser(id)
 	if err != nil {
 		status, class := http.StatusInternalServerError, classServerError
-		switch err {
-		case gauntlet.ErrUserNotFound:
+		switch {
+		case errors.Is(err, gauntlet.ErrUserNotFound):
 			status, class = http.StatusNotFound, classNotFound
-		case gauntlet.ErrCannotDeleteAdmin:
-			status, class = http.StatusConflict, classConflict
+		case errors.Is(err, gauntlet.ErrLastAdmin):
+			status, class = http.StatusConflict, classLastAdmin
 		}
 		g.writeAuthError(w, r, err, status, class)
 		return
@@ -199,8 +243,8 @@ type resetPasswordResponse struct {
 //   - the caller's own. An admin locked out of their own account cannot
 //     bootstrap themselves back in with a code they mint for themselves
 //     -- that is POST /api/auth/password if they still know the current
-//     one. gauntlet holds exactly one admin (ErrSingleAdmin), so this is
-//     also what keeps the admin account out of this route entirely.
+//     one. Another admin's account is not excluded since #67: a second
+//     admin is how a locked-out admin gets back in.
 //   - an SSO-only account. Its identity provider owns the credential --
 //     see gauntlet.ErrNoLocalPassword.
 //
@@ -361,12 +405,135 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 // The one-time unlock code in the server's log (POST /api/auth/unlock)
 // remains the way back for an admin with no session left.
 func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, req unlockSelfRequest, now time.Time) bool {
-	if req.Password == "" || req.Code == "" {
-		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "unlocking your own account needs your password and a code from your authenticator app or a recovery code", nil)
+	return g.recheckStepUp(w, r, caller, req.Password, req.Code, now,
+		"unlocking your own account needs your password and a code from your authenticator app or a recovery code")
+}
+
+// recheckStepUp is the step-up shared by every admin route that needs the
+// caller's password and a current second factor on the request itself
+// (#67; ASVS 7.5.3): the unlock of the caller's own account above, and
+// granting the admin role. missing is the 400's detail when either
+// field is empty, which checks nothing. Otherwise the password is
+// checked first, then the code, each on the account's re-check budget
+// (recheckPassword, recheckSecondFactor), a wrong one 401 with one
+// message for both so a caller learns nothing about which was wrong.
+// Writes every refusal itself.
+func (g *Gate) recheckStepUp(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, password, code string, now time.Time, missing string) bool {
+	if password == "" || code == "" {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, missing, nil)
 		return false
 	}
-	if _, ok := g.recheckPassword(w, r, caller, req.Password, "incorrect password or code", now); !ok {
+	if _, ok := g.recheckPassword(w, r, caller, password, "incorrect password or code", now); !ok {
 		return false
 	}
-	return g.recheckSecondFactor(w, r, caller, req.Code, "incorrect password or code", now)
+	return g.recheckSecondFactor(w, r, caller, code, "incorrect password or code", now)
+}
+
+// setRoleRequest is the body of PUT /api/auth/users/{id}/role. Password
+// and Code are the caller's own, as in unlockSelfRequest, and are read
+// only when Role is "admin".
+type setRoleRequest struct {
+	Role     string `json:"role"`
+	Password string `json:"password,omitempty"`
+	Code     string `json:"code,omitempty"`
+}
+
+// setRoleResponse is what the role route answers: the account and the
+// role it held and holds now.
+type setRoleResponse struct {
+	Username string `json:"username"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	// SessionsEnded is true when the change was a downgrade, which ends
+	// every session the account held.
+	SessionsEnded bool `json:"sessionsEnded"`
+}
+
+// handleSetRole is the one route for every role change among admin,
+// user and viewer (#67, #75). Granting admin takes the caller's own
+// password and a current second factor (recheckStepUp); any other
+// change takes none. The last admin cannot be demoted (409 last-admin);
+// an account already holding the role is 409 conflict. A downgrade ends
+// the account's sessions: the store records SessionsEndedAt, which ends
+// them across processes, and this drops the ones held in memory at
+// once. Audited as user.role_changed with actor, from and to, and the
+// application is told through Config.Notices (NoticeRoleChanged).
+func (g *Gate) handleSetRole(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
+		return
+	}
+	caller := UserFromContext(r)
+	if caller == nil {
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
+	var req setRoleRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
+	role := gauntlet.Role(req.Role)
+	if role != gauntlet.RoleAdmin && role != gauntlet.RoleUser && role != gauntlet.RoleViewer {
+		g.writeAuthError(w, r, gauntlet.ErrInvalidRole, http.StatusBadRequest, classInvalidRequest)
+		return
+	}
+	target, ok := g.deps.Users.Get(id)
+	if !ok {
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
+		return
+	}
+	// Refused before the step-up, so a recovery code is not spent on a
+	// request that changes nothing.
+	if target.Role == role {
+		g.writeAuthError(w, r, gauntlet.ErrRoleUnchanged, http.StatusConflict, classConflict)
+		return
+	}
+	now := g.now()
+	if role == gauntlet.RoleAdmin &&
+		!g.recheckStepUp(w, r, caller, req.Password, req.Code, now,
+			"granting the admin role needs your own password and a code from your authenticator app or a recovery code (password, code)") {
+		return
+	}
+
+	changed, from, err := g.deps.Users.SetRole(id, role, now)
+	if err != nil {
+		status, class := http.StatusInternalServerError, classServerError
+		switch {
+		case errors.Is(err, gauntlet.ErrUserNotFound):
+			status, class = http.StatusNotFound, classNotFound // deleted since the read above
+		case errors.Is(err, gauntlet.ErrLastAdmin):
+			status, class = http.StatusConflict, classLastAdmin
+		case errors.Is(err, gauntlet.ErrRoleUnchanged):
+			status, class = http.StatusConflict, classConflict
+		case errors.Is(err, gauntlet.ErrNotPersisted):
+			status, class = http.StatusServiceUnavailable, classNotPersisted
+		}
+		g.writeAuthError(w, r, err, status, class)
+		return
+	}
+
+	// from != to here (ErrRoleUnchanged otherwise), so "from is at least
+	// to" is exactly a downgrade.
+	ended := from.AtLeast(changed.Role)
+	if ended {
+		g.deps.Sessions.RevokeAllForUser(changed.ID)
+	}
+	by := auditActor(r)
+	detail := fmt.Sprintf("from=%s to=%s", from, changed.Role)
+	if role == gauntlet.RoleAdmin {
+		detail += "; granting admin's password and second factor re-entered"
+	}
+	if ended {
+		detail += "; sessions ended: all"
+	}
+	g.audit(r, by, "user.role_changed", changed.Username, detail)
+	writeJSON(w, http.StatusOK, setRoleResponse{
+		Username: changed.Username, From: string(from), To: string(changed.Role), SessionsEnded: ended,
+	})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeRoleChanged, UserID: changed.ID, Username: changed.Username, Role: changed.Role, At: now, By: by,
+		RoleChanged: &RoleChangeDetail{From: from, To: changed.Role},
+	})
 }

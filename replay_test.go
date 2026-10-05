@@ -386,7 +386,7 @@ func TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted(t *te
 }
 
 // refuseNextSave makes the other process write a document this store
-// refuses (two admins) just before this store's next save, so the
+// refuses (no admin) just before this store's next save, so the
 // replay is refused outright: the op's first run, against memory, is
 // the only one that happened, and its result was never saved.
 func refuseNextSave(t *testing.T, b *otherProcessBackend) {
@@ -398,7 +398,7 @@ func refuseNextSave(t *testing.T, b *otherProcessBackend) {
 			return
 		}
 		// b.Memory, not b: b's own Save is the one that runs this hook.
-		if _, err := b.Memory.Save(context.Background(), []byte(twoAdminsDocument), snap.Version); err != nil {
+		if _, err := b.Memory.Save(context.Background(), []byte(noAdminDocument), snap.Version); err != nil {
 			t.Error(err)
 		}
 	}

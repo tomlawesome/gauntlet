@@ -220,11 +220,13 @@ func (s *Store) Count() int
 func (s *Store) Register(username, password string, now time.Time) (*User, error)          // first account only, becomes admin; host-side -- gate checks the setup code first
 func (s *Store) CheckSetupCode(code string) error                                           // new (#37, ADR-0003): the one-time code an empty store announced
 func (s *Store) CheckUnlockCode(username, code string) (*User, error)                       // new (#44): the one-time code a store with its lone admin disabled announced
-func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error)
-func (s *Store) DeleteUser(id string) (*User, error)
-func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error)
-func (s *Store) Admin() *User
-func (s *Store) HasLocalAdmin() bool
+func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error) // role may be RoleAdmin since #67; gate step-ups the caller first
+func (s *Store) DeleteUser(id string) (*User, error)                                       // refuses the last admin: ErrCannotDeleteAdmin, also ErrLastAdmin
+func (s *Store) SetRole(id string, role Role, now time.Time) (*User, Role, error)          // new (#67, #75): the user and the role it held; refuses demoting the last admin inside the write (ErrLastAdmin); a downgrade ends the account's sessions; ErrRoleUnchanged when nothing would change
+func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) // console handover from the one admin; ErrSeveralAdmins with more
+func (s *Store) Admin() *User                                                              // an admin: the first by username (#67)
+func (s *Store) Admins() []User                                                            // new (#67): every admin, by username, credentials blanked
+func (s *Store) HasLocalAdmin() bool                                                       // any admin has a local password
 func (s *Store) Authenticate(username, password string, now time.Time) (*User, error)     // also redeems a live reset code; rechecks a BreachCheckPending account (#43)
 func (s *Store) Get(id string) (*User, bool)
 func (s *Store) ByUsername(username string) (*User, bool)
@@ -377,7 +379,8 @@ const ResetCodeTTL = 24 * time.Hour
 // Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
 // ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
 // ErrPasswordTooShort, ErrPasswordBlocked, ErrPasswordContext (#43), ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
-// ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin,
+// ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin
+// (kept, never returned since #67), ErrLastAdmin and ErrRoleUnchanged (#67),
 // ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
 // ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
 // ErrPasskeyLimitReached, ErrPasskeyNotFound, ErrTokenNotFound, ErrTokenKindInvalid,
@@ -680,6 +683,7 @@ type AccountNotice struct {
     Lockout       *LockoutDetail       // account-locked, sign-in-disabled
     SessionsEnded *SessionsEndedDetail // sessions-ended
     UnusualSignIn *UnusualSignInDetail // unusual-sign-in (flag, block -- confirm sends only the code, below)
+    RoleChanged   *RoleChangeDetail    // role-changed (#67): From (empty for a created admin), To
 }
 const MaxSessionEndReason = 200 // characters
 
@@ -760,6 +764,23 @@ response is written, `Config.Notices` (or the deprecated `Config.Notify`)
 is called in its own goroutine with a 10-second deadline and `recover()`;
 an error or panic is one log line, and the response's `notified` means
 asked, not delivered.
+
+**Several admins and role changes (#67, #75, ADR-0010).**
+`POST /api/auth/users` accepts `role: admin`, and `PUT
+/api/auth/users/{id}/role` moves an account among `admin`, `user` and
+`viewer`. Granting `admin` on either needs the caller's own password
+and a current second factor on the same request (`recheckStepUp`, the
+`UnlockSelfRequest` shape; `password` and `code` on the role route,
+`adminPassword` and `adminCode` on create, whose `password` is the new
+account's), on the account's `ReserveRecheck` budget: either missing
+400, either wrong 401, 429 once the budget is spent. Any other change
+needs none. The last admin can be neither demoted nor deleted (409,
+class `last-admin`); an admin may demote themselves while another
+remains, and cannot delete their own account. A downgrade ends the
+account's sessions (the store writes `SessionsEndedAt`; the handler
+drops the in-memory ones). Audited as `user.role_changed` with actor,
+from and to; `Config.Notices` gets `NoticeRoleChanged`
+(`RoleChangeDetail{From, To}`), also for an admin created over HTTP.
 
 **Unusual sign-ins (#55).** The one-step password path, the
 second-factor step and the SSO callback's sign-in branch each judge a
@@ -965,8 +986,15 @@ gives and birdcage's `api.go` comment already promises.
 
 Roles, as a recommendation: viewer reads; user edits per-canary settings
 and other operational toggles; admin manages accounts, tokens and
-approvals. Mikroview's single-admin rule and `TransferAdmin` come with
-the module and are not reopened here.
+approvals. A deployment may hold several admins and the last one is
+protected (#67, ADR-0010): it can be neither deleted nor demoted, an
+admin may be granted over HTTP only with the granting admin's password
+and a current second factor re-entered on the same request, and every
+admin keeps a local password when SSO is linked. `TransferAdmin` stays
+for an app's console while there is one admin; with several it refuses
+(`ErrSeveralAdmins`) and the console uses `SetRole`. Two levels, `admin` includes `user` includes
+`viewer`; no finer admin roles -- an app composes `RequireRole` over its
+own routes.
 
 ### 2.2 `requireAuth` replacement
 
@@ -1279,7 +1307,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A browser shared by two accounts refused on every switch | the known-browser cookie carries up to four tokens, one per account (#55 change to #44), so switching accounts in one browser is not "new" to the second account |
 | A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
-| The lone admin refused from a new laptop under `block` | documented, not fixed: shipped as designed (owner, 2026-10-04); `Decide` answering `confirm` or `flag` for the admin account is the mitigation (§2.4), and a server-log escape code is tracked as a follow-up (#66) |
+| The lone admin refused from a new laptop under `block` | documented, not fixed: shipped as designed (owner, 2026-10-04). First remedy: add a second admin (#67), who can issue the reset code; then `Decide` answering `confirm` or `flag` for the admin account is the mitigation (§2.4), and a server-log escape code is tracked as a follow-up (#66) |
 
 ### Fail-closed list
 

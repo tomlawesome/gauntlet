@@ -70,7 +70,9 @@ named under the class it shares, below.
   `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST
   /api/auth/recovery-codes`, `POST /api/auth/passkeys/register/begin`,
   `DELETE /api/auth/passkeys/{id}`, `POST
-  /api/auth/users/{id}/unlock` on the caller's own account), and `gate.
+  /api/auth/users/{id}/unlock` on the caller's own account, and `POST
+  /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant
+  the admin role, #67), and `gate.
   Protect` itself for a bearer token that matches no registered kind, is
   revoked or expired, or is not a well-formed `Bearer <token>` credential
   at all.
@@ -227,12 +229,28 @@ named under the class it shares, below.
   already holds ten passkeys, already has a first factor held for its
   recovery codes to be confirmed, or has nothing held to confirm), an
   account the route refuses to act on
-  (the admin account, the caller's own), or a relying party or SSO
+  (the caller's own, an account that already holds the role asked for),
+  or a relying party or SSO
   identity that is not ready or not usable. `detail` names which.
 - Returned across most routes with a notion of "already done" or "not
   this account". `GET /api/auth/session`'s `passkeys.status` is the
   machine-readable form of "relying party not ready"; this class's
   `detail` only repeats it for a human.
+
+## last-admin
+
+- **Status:** 409. **Title:** Last admin.
+- The request would leave the deployment with no admin account (#67):
+  deleting the last admin, or demoting them to `user` or `viewer`. Make
+  another account an admin first, then retry. Nothing was changed.
+- Returned by `DELETE /api/auth/users/{id}` (the last admin; deleting
+  the caller's own account while other admins exist is `conflict`
+  instead) and `PUT /api/auth/users/{id}/role`. Before #67 deleting the
+  admin answered `conflict`; a frontend that branched on that should
+  branch on this class too.
+- `detail` is "this is the last admin account -- make another account
+  an admin first", or, for a delete, "the last admin account cannot be
+  deleted -- make another account an admin first".
 
 ## rate-limited
 
@@ -242,7 +260,7 @@ named under the class it shares, below.
   again later".
 - Returned by every rate-limited route: login, the second-factor step,
   the confirmation-code step (#55), registration, the admin and lone-admin unlock routes, and every
-  password or second-factor re-check.
+  password or second-factor re-check, granting the admin role included.
 
 ## setup-required
 

@@ -20,9 +20,9 @@ import (
 // secrets or passkeys, gone without a word.
 
 // newerAccountsDocument is an accounts document from a build one format
-// version ahead of this one (this build writes version 8, #55),
+// version ahead of this one (this build writes version 9, #67),
 // otherwise valid: one admin, one user.
-const newerAccountsDocument = `{"version":9,"users":[` +
+const newerAccountsDocument = `{"version":10,"users":[` +
 	`{"id":"u1","username":"alice","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"},` +
 	`{"id":"u2","username":"bob","passwordHash":"$argon2id$fake","role":"user","createdAt":"2026-01-01T00:00:00Z"}]}`
 
@@ -55,7 +55,7 @@ func assertNamesBothVersions(t *testing.T, err error, got, known int) {
 func TestOpenRefusesANewerAccountsDocument(t *testing.T) {
 	for name, doc := range map[string]string{
 		"same shape":      newerAccountsDocument,
-		"different shape": `{"version":9,"users":{"alice":{"role":"admin"}}}`,
+		"different shape": `{"version":10,"users":{"alice":{"role":"admin"}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := persist.NewMemory()
@@ -69,7 +69,7 @@ func TestOpenRefusesANewerAccountsDocument(t *testing.T) {
 			if !errors.As(err, &startup) {
 				t.Fatalf("expected a *persist.StartupError, got %T: %v", err, err)
 			}
-			assertNamesBothVersions(t, err, 9, 8)
+			assertNamesBothVersions(t, err, 10, 9)
 		})
 	}
 }
@@ -118,15 +118,15 @@ func TestReloadIfStaleRefusesANewerAccountsDocument(t *testing.T) {
 			t.Fatalf("a newer document was applied: bob loaded as %+v", u)
 		}
 	}
-	if n := strings.Count(logs.String(), "version 9"); n != 1 {
+	if n := strings.Count(logs.String(), "version 10"); n != 1 {
 		t.Errorf("expected exactly one log line about the newer document, got %d:\n%s", n, logs.String())
 	}
-	if !strings.Contains(logs.String(), "version 8") {
+	if !strings.Contains(logs.String(), "version 9") {
 		t.Errorf("the log line does not name the version this build reads:\n%s", logs.String())
 	}
 
 	_, err = s.CreateUser("carol", "password456", RoleUser, time.Now())
-	assertNamesBothVersions(t, err, 9, 8)
+	assertNamesBothVersions(t, err, 10, 9)
 	assertPayload(t, m, newerAccountsDocument)
 }
 
@@ -184,7 +184,7 @@ func TestMutateRefusesToWriteOverANewerAccountsDocument(t *testing.T) {
 	b.beforeSave = func() { overwrite(t, m, newerAccountsDocument) }
 
 	_, err = s.CreateUser("carol", "password456", RoleUser, time.Now())
-	assertNamesBothVersions(t, err, 9, 8)
+	assertNamesBothVersions(t, err, 10, 9)
 	assertPayload(t, m, newerAccountsDocument)
 }
 
@@ -230,8 +230,8 @@ func TestAV010AccountsDocumentLoadsAndGainsAVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 8,\n  \"seq\": 1,\n  \"users\": [") {
-		t.Errorf("the saved accounts document does not carry version 8 stamped at seq 1:\n%s", snap.Payload)
+	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 9,\n  \"seq\": 1,\n  \"users\": [") {
+		t.Errorf("the saved accounts document does not carry version 9 stamped at seq 1:\n%s", snap.Payload)
 	}
 }
 

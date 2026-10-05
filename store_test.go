@@ -117,10 +117,8 @@ func TestCreateUserAcceptsViewer(t *testing.T) {
 	}
 }
 
-// TestCreateUserRejectsUnknownRole covers the branch ErrSingleAdmin
-// doesn't: a role that is neither RoleAdmin (refused separately as
-// ErrSingleAdmin, see transfer_test.go) nor one of the two CreateUser
-// actually grants.
+// TestCreateUserRejectsUnknownRole: a role that is none of the three
+// CreateUser grants is refused, not coerced to a lesser one.
 func TestCreateUserRejectsUnknownRole(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
@@ -734,7 +732,7 @@ func TestConcurrentRegisterCreatesExactlyOneAdmin(t *testing.T) {
 	}
 }
 
-func TestDeleteUserRefusesTheAdmin(t *testing.T) {
+func TestDeleteUserRefusesTheLastAdmin(t *testing.T) {
 	s := openTestStore(t)
 	admin, _ := s.Register("alice", "password-placeholder-1", time.Now())
 
@@ -869,6 +867,40 @@ func TestTransferAdminReturnsNoCredentials(t *testing.T) {
 	}
 	requireNoCredentials(t, "TransferAdmin (from)", from)
 	requireNoCredentials(t, "TransferAdmin (to)", to)
+}
+
+// TestTransferAdminRefusesWithSeveralAdmins: with two admins there is no
+// one account to hand over from, so TransferAdmin must refuse rather
+// than demote whichever admin sorts first, and change nothing (#67).
+func TestTransferAdminRefusesWithSeveralAdmins(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	ids := map[string]string{}
+	for _, c := range []struct {
+		name string
+		role Role
+	}{{"alice", RoleAdmin}, {"bob", RoleAdmin}, {"carol", RoleUser}} {
+		var u *User
+		var err error
+		if c.name == "alice" {
+			u, err = s.Register(c.name, "password-placeholder-1", now)
+		} else {
+			u, err = s.CreateUser(c.name, "password-placeholder-2", c.role, now)
+		}
+		if err != nil {
+			t.Fatalf("creating %s: %v", c.name, err)
+		}
+		ids[c.name] = u.ID
+	}
+
+	if _, _, err := s.TransferAdmin("carol", now); !errors.Is(err, ErrSeveralAdmins) {
+		t.Fatalf("TransferAdmin with two admins: err = %v, want ErrSeveralAdmins", err)
+	}
+	for name, want := range map[string]Role{"alice": RoleAdmin, "bob": RoleAdmin, "carol": RoleUser} {
+		if u, ok := s.Get(ids[name]); !ok || u.Role != want {
+			t.Errorf("after the refused transfer %s is %v, want %v", name, u.Role, want)
+		}
+	}
 }
 
 // TestDeleteUserLeavesTheAccountInPlaceWhenPersistFails: a deletion that

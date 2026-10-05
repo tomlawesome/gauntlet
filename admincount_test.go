@@ -12,37 +12,31 @@ import (
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// twoAdminsDocument is an accounts document no code path in this package
-// can write: CreateUser refuses a second admin and TransferAdmin swaps
-// the role in one save. Only a hand edit, or a writer outside this
-// package, produces it.
+// twoAdminsDocument is an accounts document with two admins: legal
+// since #67, and the shape the tests of several admins start from.
 //
 // Its seq (#59) is set far ahead of anything a test using it saves
-// first, so the sequence check never intercepts this fixture before the
-// admin-count check it exists to test.
-const twoAdminsDocument = `{"seq":1000,"users":[` +
+// first, so the sequence check never intercepts this fixture.
+const twoAdminsDocument = `{"version":9,"seq":1000,"users":[` +
 	`{"id":"u1","username":"alice","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"},` +
 	`{"id":"u2","username":"bob","passwordHash":"$argon2id$fake","role":"admin","createdAt":"2026-01-01T00:00:00Z"}]}`
 
-// TestOpenRefusesADocumentWithTwoAdmins: a document holding more than
-// one admin is refused at startup like one that will not parse -- the
-// same "not a fresh install, restore from backup" error -- instead of
-// loading a deployment the rest of the package assumes cannot exist
-// (TransferAdmin would demote whichever admin it met first).
-func TestOpenRefusesADocumentWithTwoAdmins(t *testing.T) {
+// TestOpenLoadsADocumentWithTwoAdmins: several admins are legal (#67),
+// so a document holding two loads, and both can be listed.
+func TestOpenLoadsADocumentWithTwoAdmins(t *testing.T) {
 	m := persist.NewMemory()
 	primeMemory(t, m, twoAdminsDocument)
 
 	s, err := OpenStore(m, Options{})
-	if err == nil {
-		t.Fatalf("OpenStore accepted a document with two admins (admin: %+v)", s.Admin())
+	if err != nil {
+		t.Fatalf("OpenStore refused a document with two admins: %v", err)
 	}
-	var startup *persist.StartupError
-	if !errors.As(err, &startup) {
-		t.Fatalf("expected a *persist.StartupError, got %T: %v", err, err)
+	admins := s.Admins()
+	if len(admins) != 2 || admins[0].Username != "alice" || admins[1].Username != "bob" {
+		t.Fatalf("Admins() = %+v, want alice then bob", admins)
 	}
-	if !errors.Is(err, errMultipleAdmins) {
-		t.Errorf("expected the error to name the admin count, got: %v", err)
+	if a := s.Admin(); a == nil || a.Username != "alice" {
+		t.Errorf("Admin() = %+v, want the first by username", a)
 	}
 }
 
@@ -119,23 +113,18 @@ func TestReloadIfStaleIgnoresADocumentWithNoAdmin(t *testing.T) {
 	}
 }
 
-// TestReloadIfStaleIgnoresADocumentWithTwoAdmins: the same document
-// written under a running server is not applied. The server keeps
-// serving what it holds, says so in the log once, and does not re-log
-// on every request while the document stays as it is.
-func TestReloadIfStaleIgnoresADocumentWithTwoAdmins(t *testing.T) {
-	var logs bytes.Buffer
+// TestReloadIfStaleAppliesADocumentWithTwoAdmins: a second admin
+// written by another process (a console command) is picked up by a
+// running server like any other change.
+func TestReloadIfStaleAppliesADocumentWithTwoAdmins(t *testing.T) {
 	m := persist.NewMemory()
-	// OnSetupCode keeps the empty store's setup-code line out of logs:
-	// this test counts lines about the refused document, nothing else.
-	s, err := OpenStore(m, Options{Log: slog.New(slog.NewTextHandler(&logs, nil)), OnSetupCode: SetupCodeFunc(func(string) {})})
+	s, err := OpenStore(m, Options{OnSetupCode: SetupCodeFunc(func(string) {})})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Register("alice", "password-placeholder-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-
 	snap, err := m.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -143,33 +132,24 @@ func TestReloadIfStaleIgnoresADocumentWithTwoAdmins(t *testing.T) {
 	if _, err := m.Save(context.Background(), []byte(twoAdminsDocument), snap.Version); err != nil {
 		t.Fatal(err)
 	}
-
-	for range 3 { // each read runs reloadIfStale
-		if u, ok := s.ByUsername("bob"); ok {
-			t.Fatalf("a document with two admins was applied: bob loaded as %+v", u)
-		}
-	}
-	if a := s.Admin(); a == nil || a.Username != "alice" {
-		t.Fatalf("expected alice to remain the only admin, got %+v", a)
-	}
-	if n := strings.Count(logs.String(), "admin"); n != 1 {
-		t.Errorf("expected exactly one log line about the refused document, got %d:\n%s", n, logs.String())
+	if u, ok := s.ByUsername("bob"); !ok || u.Role != RoleAdmin {
+		t.Fatalf("the two-admin document was not applied: bob = %+v, %v", u, ok)
 	}
 }
 
-// TestRegisterStaysClosedWhileATwoAdminDocumentIsRefused: this Store
+// TestRegisterStaysClosedWhileANoAdminDocumentIsRefused: this Store
 // opens on an empty backend, so it has no admin of its own -- Count()
-// stays 0 even after the two-admin document is refused. Register must
+// stays 0 even after the no-admin document is refused. Register must
 // not read that 0 as "registration is open": doing so would create a
 // new admin and save it over the operator's restored document on the
 // next conflict-retry.
-func TestRegisterStaysClosedWhileATwoAdminDocumentIsRefused(t *testing.T) {
+func TestRegisterStaysClosedWhileANoAdminDocumentIsRefused(t *testing.T) {
 	m := persist.NewMemory()
 	s, err := OpenStore(m, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	primeMemory(t, m, twoAdminsDocument)
+	primeMemory(t, m, noAdminDocument)
 
 	if _, err := s.Register("carol", "password-placeholder-1", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
 		t.Fatalf("expected ErrRegistrationClosed, got %v", err)
@@ -179,7 +159,7 @@ func TestRegisterStaysClosedWhileATwoAdminDocumentIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(snap.Payload) != twoAdminsDocument {
+	if string(snap.Payload) != noAdminDocument {
 		t.Fatalf("the refused document was overwritten:\n%s", snap.Payload)
 	}
 	if n := s.Count(); n != 0 {
@@ -199,7 +179,7 @@ func TestRegisterReopensOnceTheRefusedDocumentIsReplaced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	primeMemory(t, m, twoAdminsDocument)
+	primeMemory(t, m, noAdminDocument)
 
 	if _, err := s.Register("carol", "password-placeholder-1", time.Now()); !errors.Is(err, ErrRegistrationClosed) {
 		t.Fatalf("expected ErrRegistrationClosed, got %v", err)

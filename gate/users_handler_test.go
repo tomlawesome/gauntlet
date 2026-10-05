@@ -104,7 +104,7 @@ func TestAdminCreateUserRejectsDuplicateUsername(t *testing.T) {
 	}
 }
 
-func TestAdminCannotCreateASecondAdmin(t *testing.T) {
+func TestAdminCreatingAnAdminWithoutStepUpIsRefused(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
@@ -112,7 +112,7 @@ func TestAdminCannotCreateASecondAdmin(t *testing.T) {
 	resp := postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "second", Password: "password456", Role: "admin"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400 for an admin-role request, got %d", resp.StatusCode)
+		t.Errorf("expected 400 for an admin-role request with no step-up, got %d", resp.StatusCode)
 	}
 	if _, ok := g.deps.Users.ByUsername("second"); ok {
 		t.Error("a refused admin-role request created the account anyway")
@@ -287,9 +287,8 @@ func TestDeleteUserNotFound(t *testing.T) {
 	}
 }
 
-// TestCreateAdminRoleRequestGetsSpecificMessage covers the other half of
-// gauntlet #15's error-message work: ErrSingleAdmin, from a create-user
-// request asking for role "admin".
+// TestCreateAdminRoleRequestGetsSpecificMessage: a create-user request
+// asking for role "admin" without the step-up fields says what it needs.
 func TestCreateAdminRoleRequestGetsSpecificMessage(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
@@ -301,8 +300,8 @@ func TestCreateAdminRoleRequestGetsSpecificMessage(t *testing.T) {
 		t.Fatalf("expected 400 for an admin-role request, got %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "only one admin account") {
-		t.Errorf("expected a specific single-admin message, got %q", body)
+	if !strings.Contains(string(body), "your own password") {
+		t.Errorf("expected a message naming the step-up, got %q", body)
 	}
 	if _, ok := g.deps.Users.ByUsername("second"); ok {
 		t.Error("a refused admin-role request created the account anyway")

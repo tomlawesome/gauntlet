@@ -21,7 +21,7 @@ import (
 //     struct (see each struct's comment, and each one's mikroview
 //     original), so this can only ever refuse a body no real client
 //     sends.
-//   - gateErrorMessages gives ErrSingleAdmin and ErrCannotDeleteAdmin
+//   - gateErrorMessages gives ErrCannotDeleteAdmin and ErrLastAdmin
 //     their own message below, so the admin UI can say why a request
 //     was refused instead of "unable to complete the request".
 //     mikroview's own authErrorMessages (auth.go) has neither entry, so
@@ -116,7 +116,9 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrUsernameInvalid:       "that username contains characters that aren't allowed -- no control characters, and no leading or trailing spaces",
 	gauntlet.ErrUsernameLength:        gauntlet.ErrUsernameLength.Error(), // already phrased for an end user
 	gauntlet.ErrUsernameIsEmail:       "a local account's username can't be an email address -- pick a plain name",
-	gauntlet.ErrInvalidRole:           `role must be "user" or "viewer"`,
+	gauntlet.ErrInvalidRole:           `role must be "admin", "user" or "viewer"`,
+	gauntlet.ErrLastAdmin:             "this is the last admin account -- make another account an admin first",
+	gauntlet.ErrRoleUnchanged:         "that account already has that role",
 	gauntlet.ErrTokenNotPersisted:     "this deployment has no persistent storage configured -- an administrator needs to set one up before a token can be created",
 	gauntlet.ErrTokenKindInvalid:      gauntlet.ErrTokenKindInvalid.Error(),
 	gauntlet.ErrTokenDeviceRequired:   gauntlet.ErrTokenDeviceRequired.Error(),
@@ -124,8 +126,7 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrTokenDeviceInvalid:    gauntlet.ErrTokenDeviceInvalid.Error(),
 	gauntlet.ErrTokenNameInvalid:      gauntlet.ErrTokenNameInvalid.Error(),
 	gauntlet.ErrUserNotFound:          "no such user",
-	gauntlet.ErrSingleAdmin:           "this deployment allows only one admin account -- transfer the admin role to this user first",
-	gauntlet.ErrCannotDeleteAdmin:     "the admin account cannot be deleted -- transfer the admin role to another account first",
+	gauntlet.ErrCannotDeleteAdmin:     "the last admin account cannot be deleted -- make another account an admin first",
 	gauntlet.ErrTOTPAlreadyActive:     gauntlet.ErrTOTPAlreadyActive.Error(), // already phrased for an end user
 	gauntlet.ErrNoPendingTOTP:         gauntlet.ErrNoPendingTOTP.Error(),     // already phrased for an end user
 	gauntlet.ErrNoLocalPassword:       gauntlet.ErrNoLocalPassword.Error(),   // already phrased for an end user
@@ -175,7 +176,7 @@ type problemClass struct {
 // "type" member.
 const problemTypeBase = "https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#"
 
-// The sixteen classes docs/api/errors.md documents, one var each --
+// The seventeen classes docs/api/errors.md documents, one var each --
 // Go has no constant struct literal, so these stand in for the
 // constants the design calls for: built once at package load and never
 // written to again.
@@ -198,6 +199,9 @@ var (
 	// classSignInRefused (#55) is every credential right and the
 	// attempt refused by the account's unusual-sign-in policy (block).
 	classSignInRefused = problemClass{"sign-in-refused", "Sign-in refused"}
+	// classLastAdmin (#67) is a change refused because it would leave
+	// the deployment with no admin: deleting or demoting the last one.
+	classLastAdmin = problemClass{"last-admin", "Last admin"}
 )
 
 // writeProblem writes an RFC 9457 application/problem+json body: type

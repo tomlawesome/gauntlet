@@ -822,6 +822,68 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/no-such-id"}, 404, nil)
 	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + bobID}, 200, nil)
 
+	// Several admins (#67) and role changes (#75). The step-up is the
+	// caller's password and a current second factor (an unspent recovery
+	// code here) on the same request.
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "eve", Password: bobPass, Role: "admin"}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "eve", Password: bobPass, Role: "admin", AdminPassword: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "eve", Password: bobPass, Role: "admin", AdminPassword: "wrong-password", AdminCode: adminRecovery[1]}}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "eve", Password: bobPass, Role: "admin", AdminPassword: adminPass, AdminCode: adminRecovery[1]}}, 201, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "dan", Password: bobPass, Role: "user"}}, 201, nil)
+	var several []userSummary
+	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, &several)
+	eveID, danID := "", ""
+	for _, s := range several {
+		switch s.Username {
+		case "eve":
+			eveID = s.ID
+		case "dan":
+			danID = s.ID
+		}
+	}
+	role := func(id string) string { return "/api/auth/users/" + id + "/role" }
+	dan := c.client()
+	c.do(dan, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"dan", bobPass}}, 200, nil)
+	var changed setRoleResponse
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "user"}}, 409, nil) // already a user
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "owner"}}, 400, nil)
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: "{", bad: true}, 400, nil)
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "admin"}}, 400, nil) // no step-up
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "admin", Password: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "admin", Password: "wrong-password", Code: adminRecovery[2]}}, 401, nil)
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "admin", Password: adminPass, Code: adminRecovery[2]}}, 200, &changed)
+	if changed != (setRoleResponse{Username: "dan", From: "user", To: "admin"}) {
+		t.Fatalf("granting admin = %+v", changed)
+	}
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "viewer"}}, 200, &changed) // a downgrade needs no step-up
+	if changed != (setRoleResponse{Username: "dan", From: "admin", To: "viewer", SessionsEnded: true}) {
+		t.Fatalf("demoting an admin = %+v", changed)
+	}
+	c.do(dan, u, call{method: "GET", path: "/api/auth/users"}, 401, nil) // dan's session ended with the downgrade
+	c.do(admin, u, call{method: "PUT", path: role("no-such-id"), body: setRoleRequest{Role: "user"}}, 404, nil)
+	c.do(admin, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "user"}, noCSRF: true}, 403, nil)
+	c.do(anon, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "user"}}, 401, nil)
+	c.do(vic, u, call{method: "PUT", path: role(danID), body: setRoleRequest{Role: "user"}}, 403, nil)
+	// Another admin may be deleted; the last one may be neither deleted
+	// nor demoted, and says so with its own class.
+	lastAdmin := func(p *struct {
+		Type string `json:"type"`
+	}) {
+		t.Helper()
+		if want := "https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#last-admin"; p.Type != want {
+			t.Errorf("the last admin's refusal has type %q, want %q", p.Type, want)
+		}
+	}
+	var refusal struct {
+		Type string `json:"type"`
+	}
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID}, 409, nil) // eve exists: not your own account
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + eveID}, 200, nil)
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/users/" + adminID}, 409, &refusal)
+	lastAdmin(&refusal)
+	c.do(admin, u, call{method: "PUT", path: role(adminID), body: setRoleRequest{Role: "user"}}, 409, &refusal)
+	lastAdmin(&refusal)
+
 	// SSO is off on this gate.
 	c.do(anon, u, call{method: "GET", path: "/api/auth/oidc/login"}, 404, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/oidc/callback?state=x&code=y"}, 404, nil)

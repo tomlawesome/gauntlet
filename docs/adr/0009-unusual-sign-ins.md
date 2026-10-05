@@ -177,7 +177,9 @@ remembers, and let the application decide what happens next.
 - Gauntlet holds one admin account design decision open: under `block`,
   a lone admin signing in from an untrusted browser and place with
   nobody else to issue them a reset code is refused until they reach a
-  trusted browser. Shipped as designed, documented (design.md §4's
+  trusted browser. The first remedy is to add a second admin (ADR-0010,
+  #67): another admin can issue the reset code, so the risk is only the
+  lone admin's. Shipped as designed, documented (design.md §4's
   pitfalls table), with a follow-up for a server-log escape code
   tracked as #66.
 - `geoip` gains a dependency on the City file's larger download (tens

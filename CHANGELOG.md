@@ -6,6 +6,32 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Several admins, the last one protected** (#67, ADR-0010). A
+  deployment may hold any number of admins; the last can be neither
+  deleted nor demoted. `Store.CreateUser` accepts `RoleAdmin`; new
+  `Store.SetRole(id, role, now)` (any of admin, user and viewer, in either
+  direction, returning the account and the role it held), `Store.Admins`,
+  `ErrLastAdmin` and `ErrRoleUnchanged`. The last-admin check runs inside
+  the same locked write as the change, so two admins removed at once
+  cannot leave none. A downgrade, `TransferAdmin`'s demotion included,
+  ends the account's sessions (`SessionsEndedAt`); every change writes
+  `RoleChangedAt`. `TransferAdmin` refuses with `ErrSeveralAdmins` when
+  more than one admin exists. `Admin()` returns the first admin by username;
+  `HasLocalAdmin` is true when any admin has a local password; every
+  admin keeps its password and second factor when SSO is linked.
+- `PUT /api/auth/users/{id}/role` (#75, #67): the one route for every
+  role change among admin, user and viewer. `POST /api/auth/users` now
+  accepts `role: admin`. Granting admin on either needs the caller's own
+  password and a current second factor on the same request (`password`
+  and `code` on the role route; `adminPassword` and `adminCode` on
+  create), on the re-check budget: missing is `400`, wrong is `401`, `429`
+  once the budget is spent. Audited as `user.role_changed` (actor, from,
+  to).
+- The `last-admin` error class (409): deleting or demoting the last admin.
+- `gate.NoticeRoleChanged` and `AccountNotice.RoleChanged`
+  (`RoleChangeDetail{From, To}`): `Config.Notices` is told of a role
+  change, and of an admin created over HTTP (`From` empty).
+
 - `persist/persisttest`, a test suite an application runs against its
   own `persist.Backend` from its own tests: `persisttest.Run`. It checks
   that a save reads back as the same bytes and version, that a wrong
@@ -117,6 +143,22 @@ All notable changes to this project are documented in this file.
   stopped is still accepted on start (docs/design.md §4) (#59).
 
 ### Changed
+
+- **The accounts document is now version 9** (#67). No field changed:
+  a document with several admins is now legal, which a build reading up
+  to version 8 refuses at load as "allows exactly one". A version-8
+  document opens unchanged, and a version-8 build refuses a version-9
+  one. A document with accounts and no admin is still refused.
+- Deleting the last admin answers `409` class `last-admin` (the
+  `conflict` class it had on `dev` was never released), and the caller's own account
+  cannot be deleted while other admins exist (`409` `conflict`).
+  `POST /api/auth/users` with `role: admin` is no longer a `400` for
+  being an admin; without `adminPassword` and `adminCode` it is a `400`
+  naming them.
+- `ErrSingleAdmin` is never returned now; it stays exported so
+  applications switching on it keep compiling. `ErrCannotDeleteAdmin`
+  is still the value `DeleteUser` returns, and also answers
+  `errors.Is(err, ErrLastAdmin)`. `ErrInvalidRole`'s text now names admin.
 
 - `gate.Config.Notify` and `Notifier` are deprecated in favour of
   `Config.Notices`: kept working for a minor release (ADR-0002 decision

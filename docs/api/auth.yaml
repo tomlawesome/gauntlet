@@ -23,7 +23,7 @@ info:
       /api/auth/session` and `POST /api/auth/register` while no account
       exists yet. The SSO routes are not exempt: the first account is
       never an SSO one.
-    - `403` class `csrf-required` on every `POST`, `PATCH` and `DELETE`
+    - `403` class `csrf-required` on every `POST`, `PUT`, `PATCH` and `DELETE`
       without the `X-Requested-With` header carrying the application's
       configured value.
     - `401` class `sign-in-required` on every route that needs a session
@@ -1176,7 +1176,7 @@ paths:
         Sets the flow cookie and returns the provider URL for the browser
         to navigate to; `GET /api/auth/oidc/callback` finishes it. A
         completed link removes the local password of every account except
-        the admin's. Takes no body.
+        an admin's: every admin keeps theirs (#67). Takes no body.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       responses:
@@ -1226,7 +1226,17 @@ paths:
     post:
       operationId: createUser
       summary: Create an account (admin)
-      description: The only way to add an account once registration has closed. `role` defaults to `user`; `admin` is refused (one admin per deployment). The password is checked as every new password is (see `changePassword`); a refused one is `400`, with the reason.
+      description: |
+        The only way to add an account once registration has closed.
+        `role` defaults to `user`. Creating an `admin` (#67) also needs
+        the caller's own password and a current second factor on the same
+        request, in `adminPassword` and `adminCode` (as in
+        `UnlockSelfRequest`): either missing is `400` and checks nothing;
+        either wrong is `401` and counts against the account's password
+        re-check budget (`429` once it is spent), and nothing is created.
+        The two fields are not read for any other role. The password is
+        checked as every new password is (see `changePassword`); a refused
+        one is `400`, with the reason.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1244,7 +1254,13 @@ paths:
                   type: string
                 role:
                   type: string
-                  description: "`user` (the default when empty or absent) or `viewer`. Anything else is a 400."
+                  description: "`user` (the default when empty or absent), `viewer` or `admin` (with `adminPassword` and `adminCode`). Anything else is a 400."
+                adminPassword:
+                  type: string
+                  description: The caller's own current password. Only for role `admin`.
+                adminCode:
+                  type: string
+                  description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here). Only for role `admin`.
       responses:
         "201":
           description: Created.
@@ -1255,11 +1271,13 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1269,7 +1287,7 @@ paths:
     delete:
       operationId: deleteUser
       summary: Delete an account (admin)
-      description: Deletes the account, then ends its sessions and revokes every token it created. The admin account cannot be deleted. Takes no body.
+      description: Deletes the account, then ends its sessions and revokes every token it created. The last admin cannot be deleted (`409` class `last-admin`), and nobody can delete the account they are signed in with (`409` class `conflict`); another admin can be deleted. Takes no body.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -1297,7 +1315,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/ConflictOrLastAdmin"
         "500":
           description: |
             `server-error` when the account could not be deleted at all.
@@ -1316,6 +1334,61 @@ paths:
                   - $ref: "#/components/schemas/PartiallyCompletedProblem"
         "503":
           $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/users/{id}/role:
+    put:
+      operationId: setUserRole
+      summary: Change an account's role (admin)
+      description: |
+        The one route for every role change among `admin`, `user` and
+        `viewer`, in either direction (#67, #75). Granting `admin` needs
+        the caller's own password and a current second factor on the same
+        request (`password`, `code`, as in `UnlockSelfRequest`): either
+        missing is `400` and checks nothing; either wrong is `401` and
+        counts against the account's password re-check budget (`429` once
+        it is spent), and nothing changes. Any other change needs
+        neither.
+
+        The last admin cannot be demoted (`409` class `last-admin`); an
+        admin may demote themselves while another admin remains. An
+        account that already holds the role is `409` class `conflict`,
+        refused before any step-up is asked for. A downgrade (to a lower
+        tier than before) ends every session the account holds, the
+        caller's own included when it is their own account; a grant ends
+        none. Audited as `user.role_changed` with actor, from and to, and
+        told to the application as `role-changed`.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRoleRequest"
+      responses:
+        "200":
+          description: Changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetRoleResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ConflictOrLastAdmin"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupOrNotPersisted"
 
   /api/auth/users/{id}/reset-password:
     post:
@@ -1778,7 +1851,7 @@ components:
       name: X-Requested-With
       in: header
       required: true
-      description: Must equal the application's `Config.CSRFHeaderValue`. Without it every POST, PATCH and DELETE is refused with 403.
+      description: Must equal the application's `Config.CSRFHeaderValue`. Without it every POST, PUT, PATCH and DELETE is refused with 403.
       schema:
         type: string
     UserID:
@@ -2003,6 +2076,18 @@ components:
               - properties:
                   type:
                     const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#conflict
+    ConflictOrLastAdmin:
+      description: The request is refused because of the account's or the deployment's current state (class `conflict`), or because it would leave the deployment with no admin (class `last-admin`).
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#conflict
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#last-admin
     TooManyRequests:
       description: Too many failed attempts from this address or on this account; try again later. Class `rate-limited`.
       content:
@@ -2161,6 +2246,33 @@ components:
         code:
           type: string
           description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here).
+    SetRoleRequest:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role:
+          $ref: "#/components/schemas/Role"
+        password:
+          type: string
+          description: The caller's current password. Required, and read, only when `role` is `admin`.
+        code:
+          type: string
+          description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here). Required, and read, only when `role` is `admin`.
+    SetRoleResponse:
+      type: object
+      additionalProperties: false
+      required: [username, from, to, sessionsEnded]
+      properties:
+        username:
+          type: string
+        from:
+          $ref: "#/components/schemas/Role"
+        to:
+          $ref: "#/components/schemas/Role"
+        sessionsEnded:
+          type: boolean
+          description: True when the change was a downgrade, which ended every session the account held.
     PasswordRequest:
       type: object
       additionalProperties: false
