@@ -39,6 +39,10 @@ const (
 	// NoticeRoleChanged (#67, #75): an admin changed an account's role,
 	// or created an account as an admin.
 	NoticeRoleChanged NoticeKind = "role-changed"
+	// NoticeTokenExpiring (#74): an API token the account created
+	// expires within a week. Raised by Gate.SweepTokens, not by a
+	// request, so By is empty.
+	NoticeTokenExpiring NoticeKind = "token-expiring"
 )
 
 // AccountNotice is what an AccountNotifier is told. Exactly one of the
@@ -65,6 +69,18 @@ type AccountNotice struct {
 	SessionsEnded *SessionsEndedDetail
 	UnusualSignIn *UnusualSignInDetail
 	RoleChanged   *RoleChangeDetail
+	TokenExpiring *TokenExpiringDetail
+}
+
+// TokenExpiringDetail is NoticeTokenExpiring's detail: which token, and
+// when it stops working. The token's value is never here -- it was shown
+// once, at creation.
+type TokenExpiringDetail struct {
+	TokenID string
+	Name    string
+	Kind    gauntlet.TokenKind
+	// ExpiresAt is when Authenticate starts refusing the token.
+	ExpiresAt time.Time
 }
 
 // RoleChangeDetail is NoticeRoleChanged's detail. By on the notice is
