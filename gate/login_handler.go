@@ -307,6 +307,27 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every credential has passed: judge the sign-in (#55) before any
+	// session exists.
+	place := g.placeOf(r, res.address)
+	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodPassword, place, now)
+	if verdict.stopsSignIn() {
+		// Confirm or block: the credential was right, so the attempt is
+		// handed back rather than completed; nothing completed, so the
+		// account's count is not reset.
+		g.releaseLogin(res, now)
+		g.endAfterReset(res)
+		g.clearPendingLoginCookie(w)
+		sent, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
+		if sent {
+			writeJSON(w, http.StatusOK, confirmChallenge)
+			return
+		}
+		writeSignInRefused(w)
+		g.notify(r.Context(), notice)
+		return
+	}
+
 	// A leftover pending-login cookie from an earlier, abandoned attempt
 	// (this account or another one on the same browser) has no bearing
 	// on a login that just completed through the ordinary one-step path.
@@ -316,9 +337,9 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// The session this browser already held for the account ends here:
 	// the cookie below replaces it, and nothing else would (ASVS 7.2.4;
 	// see revokeReplacedSession).
-	g.issueSession(w, r, user.ID, now)
-	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodPassword), res, now)
+	notice := g.completeSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
+	g.notify(r.Context(), notice)
 }
 
 type loginFactorRequest struct {
@@ -445,7 +466,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // pending login, release the reservations a wrong guess would have kept
 // and reset the account's count (completeLogin), drop the pending
 // cookie, and issue the real session handleLogin withheld. It reports
-// whether it did. method is how the second factor was presented.
+// whether every credential was accepted. method is how the second
+// factor was presented.
 //
 // The pending login is claimed first, under spentPendingLogins' lock, so
 // of two completions racing on one cookie exactly one wins (ruling R2 on
@@ -454,6 +476,11 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // pendingLoginCookieMaxAge -- the same expiry pendingLoginCodec.decode
 // refuses the cookie at, so the claim and the decode share one expiry by
 // construction, on the same wall clock.
+//
+// It also reports true when the unusual-sign-in policy refused the
+// sign-in or held it for a confirmation code (#55): every credential
+// was right, so the passkey begin step's reservation is handed back as
+// for a success.
 func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) bool {
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
@@ -461,14 +488,34 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		writeUnauthorized(w, classStepExpired, "sign in again")
 		return false
 	}
+	// Every credential has passed: judge the sign-in (#55) before any
+	// session exists.
+	place := g.placeOf(r, res.address)
+	verdict := g.judgeSignIn(r, user, method, place, now)
+	if verdict.stopsSignIn() {
+		// The pending login is already spent above, so one correct code
+		// yields one refusal or one confirmation code, never that and
+		// then a session.
+		g.releaseLogin(res, now)
+		g.endAfterReset(res)
+		g.clearPendingLoginCookie(w)
+		sent, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)
+		if sent {
+			writeJSON(w, http.StatusOK, confirmChallenge)
+			return true
+		}
+		writeSignInRefused(w)
+		g.notify(r.Context(), notice)
+		return true
+	}
 	g.completeLogin(res, now)
 	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
 	// As in handleLogin: the session this browser held for the account
 	// is replaced by the cookie below, so it ends here (ASVS 7.2.4). Only
 	// here, not at the password step, which issues no session.
-	g.issueSession(w, r, user.ID, now)
-	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, method), res, now)
+	notice := g.completeSignIn(w, r, user, res, method, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
+	g.notify(r.Context(), notice)
 	return true
 }

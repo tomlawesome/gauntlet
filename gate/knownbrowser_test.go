@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,8 +27,8 @@ func knownCookieFrom(resp *http.Response) *http.Cookie {
 	return nil
 }
 
-// knownToken is the known-browser token client's jar would send to the
-// login routes, or "".
+// knownToken is the newest known-browser token client's jar would send
+// to the login routes -- the first of the cookie's tokens -- or "".
 func knownToken(t *testing.T, client *http.Client, ts *httptest.Server) string {
 	t.Helper()
 	u, err := url.Parse(ts.URL + loginPath)
@@ -36,7 +37,8 @@ func knownToken(t *testing.T, client *http.Client, ts *httptest.Server) string {
 	}
 	for _, c := range client.Jar.Cookies(u) {
 		if c.Name == knownBrowserCookieName {
-			return c.Value
+			first, _, _ := strings.Cut(c.Value, ".")
+			return first
 		}
 	}
 	return ""
@@ -113,7 +115,7 @@ func TestEverySessionIssueSetsTheKnownBrowserCookie(t *testing.T) {
 			t.Fatalf("%s = %d", name, resp.StatusCode)
 		}
 		c := knownCookieFrom(resp)
-		if c == nil || !g.deps.Users.KnowsBrowser(id, c.Value, g.now()) {
+		if c == nil || !g.deps.Users.KnowsBrowser(id, strings.Split(c.Value, ".")[0], g.now()) {
 			t.Errorf("%s set no known-browser cookie the account knows", name)
 		}
 	}

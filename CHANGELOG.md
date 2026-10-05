@@ -46,6 +46,63 @@ All notable changes to this project are documented in this file.
   stores the key and keeps it out of every log and error; the
   application credits the provider (docs/geoip.md, ADR-0008). Neither
   `gate` nor the root package imports it (#54).
+- Unusual sign-ins (#55, ADR-0009): a completed sign-in -- password or
+  SSO, plus any second factor, with no session yet -- is judged against
+  what the account remembers (`Store.JudgeSignIn`), and every session
+  issue remembers it (`Store.RememberSignIn`), whatever the policy. Three
+  signals, each raised only against something already remembered:
+  `gauntlet.SignInSignals` (`new-browser`, `new-country`,
+  `impossible-travel`), carried on `SessionClient.Unusual`. The account
+  remembers up to three countries for 90 days (`User.SeenCountries`) and
+  its one latest located sign-in (`User.LastPlace`); both are cleared
+  wherever known browsers already are. The accounts document is now
+  version 8 for the added fields, and an older build refuses it.
+- `gate.Config.UnusualSignIns` (`UnusualSignInPolicy`): what each signal
+  does -- `off`, `flag` (default), `confirm` or `block`, with an optional
+  override per signal and an optional `Decide` function that can
+  overrule the settings' answer once per sign-in, under a fixed 3-second
+  `DecideTimeout`. `Decide`, a failed delivery or an invalid answer all
+  fail closed to `block`. `gate.New` refuses an unknown action, `confirm`
+  with no way to deliver a code, and impossible travel turned on with no
+  `Config.Locate` (#55).
+- `gate.Config.Locate`, and `geoip.Config.Edition`/`geoip.EditionCity`/
+  `(*geoip.Manager).Locate`: an optional point-and-radius lookup from
+  MaxMind's larger GeoLite2-City file, so impossible travel can be
+  judged; `New` refuses `EditionCity` with IPinfo Lite, which has no
+  coordinates. `geoip.Status` gains `Edition` and `Locates` (#55,
+  docs/geoip.md).
+- `POST /api/auth/login/confirm` and the sealed `gate_confirm_login`
+  cookie (15 minutes): under the `confirm` action, a sign-in with every
+  credential right is held for an eight-digit code that
+  `gate.Config.DeliverConfirmCode` hands the application synchronously;
+  typing the code into the same sign-in completes it. Only the code's
+  SHA-256 is ever kept (#55).
+- The `sign-in-refused` error class (403): under the `block` action,
+  every credential was right and the account's sign-in policy refused
+  the attempt from this browser or place; returned by `login` and
+  `login/factor`, and as `?ssoError=refused` from the SSO callback.
+  `SignInOutcome` gains `refused`, `confirm_sent` and `confirm_refused`;
+  `SignInEvent` and `SignInRow` gain `Confirmed`. `GET
+  /api/auth/sign-ins` and `GET /api/auth/sessions` both gain `unusual`,
+  and `sign-ins` also gains `confirmed`; `SignInQuery` gains `Unusual`,
+  and `?unusual=true` on `GET /api/auth/sign-ins` answers only rows that
+  raised at least one signal. The sign-in history document is now
+  version 3 for the added fields, and an older build refuses it (#55).
+- `gate.Config.Notices` (`AccountNotifier`): one hook for every account
+  event this module raises -- a password reset, a second factor added
+  or removed, recovery codes regenerated, an account lockout, a disable,
+  every session ended, and an unusual sign-in flagged or blocked -- each
+  carrying a `NoticeKind` and the one typed detail pointer that kind
+  names (`PasswordResetDetail`, `SecondFactorDetail`, `LockoutDetail`,
+  `SessionsEndedDetail`, `UnusualSignInDetail`). Same async contract as
+  the deprecated `Config.Notify` (own goroutine, 10 s, `recover()`,
+  errors logged only, after the response); nil means nobody is told
+  (#73).
+- `gate.Config.DeliverConfirmCode`: hands an unusual sign-in's
+  confirmation code to the application synchronously, before the
+  sign-in is answered -- the opposite contract from `Notices`, which may
+  be queued. A failure refuses the attempt, since no code reached
+  anyone; nil means the confirm action is unavailable (#55, #73).
 
 ### Security
 
@@ -61,6 +118,24 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `gate.Config.Notify` and `Notifier` are deprecated in favour of
+  `Config.Notices`: kept working for a minor release (ADR-0002 decision
+  2), and `gate.New` refuses a `Config` setting both. An admin ending
+  another account's sessions now goes to `Notices` when it is set, else
+  the deprecated `Notify` (#73).
+- The known-browser cookie (`gate_known_browser`) now carries up to four
+  tokens, one per account, rather than one for whichever account last
+  completed a sign-in in that browser: a browser shared by two accounts
+  is no longer "new" to the second one on every switch. A one-token
+  cookie from before this change still reads as a list of one (#55).
+- `Store.ClearKnownBrowsers` also forgets `User.SeenCountries` and
+  `User.LastPlace`, and `Store.IssueResetCode` clears all three in its
+  own write: sign out everywhere, or an admin reset code, now forgets
+  everything the account trusts, not only its known browsers (#55).
+- The sign-in history's fold key now also includes the unusual-sign-in
+  signals and whether a confirmation code completed the sign-in, so an
+  unusual success is never folded into an ordinary one from the same
+  address (#55).
 - **Breaking for HTTP clients: an account's first second factor is held
   until its recovery codes are confirmed** (#58). The first passkey
   (`register/finish`) or first authenticator app (`totp/confirm`) is

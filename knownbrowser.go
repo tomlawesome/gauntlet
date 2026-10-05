@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"slices"
 	"time"
 )
 
@@ -120,44 +119,13 @@ func newKnownBrowserToken() string {
 // this, and the browser keeps whatever token it had. Refused with
 // ErrUserNotFound for an account that does not exist.
 func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (string, error) {
-	token := newKnownBrowserToken()
-	entry := KnownBrowser{Hash: knownBrowserHash(token), IssuedAt: now}
-	var replaced string
-	if replacing != "" {
-		replaced = knownBrowserHash(replacing)
-	}
-
-	s.reloadIfStale()
-	err := s.mutate(func(st *storeState) error {
-		u, ok := st.byID[accountID]
-		if !ok {
-			return ErrUserNotFound
-		}
-		kept := make([]KnownBrowser, 0, len(u.KnownBrowsers)+1)
-		for _, b := range u.KnownBrowsers {
-			if b.Hash == replaced || !b.live(now) {
-				continue
-			}
-			kept = append(kept, b)
-		}
-		kept = append(kept, entry)
-		if len(kept) > MaxKnownBrowsers {
-			// Stable, so of two issued at the same instant the one
-			// already on the record goes first and the new one stays.
-			slices.SortStableFunc(kept, func(a, b KnownBrowser) int { return a.IssuedAt.Compare(b.IssuedAt) })
-			kept = kept[len(kept)-MaxKnownBrowsers:]
-		}
-		u.KnownBrowsers = kept
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return token, nil
+	return s.RememberSignIn(accountID, replacing, "", nil, now)
 }
 
 // ClearKnownBrowsers forgets every browser accountID remembers, so none
-// of them keeps an allowance any longer. Called by sign out everywhere
+// of them keeps an allowance any longer, and with them the countries it
+// signs in from and its last place (#55): sign out everywhere forgets
+// what the account trusts, so the next sign-in sets a fresh baseline. Called by sign out everywhere
 // -- whose own browser is then remembered again as its new session is
 // issued -- and done by IssueResetCode in its own write.
 //
@@ -168,7 +136,7 @@ func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (str
 // be remembered.
 //
 // Refused with ErrUserNotFound for an account that does not exist; an
-// account remembering nothing costs no write.
+// account remembering none of the three costs no write.
 func (s *Store) ClearKnownBrowsers(accountID string) error {
 	s.reloadIfStale()
 	return s.mutate(func(st *storeState) error {
@@ -176,10 +144,10 @@ func (s *Store) ClearKnownBrowsers(accountID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		if len(u.KnownBrowsers) == 0 {
+		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil {
 			return errNoChange
 		}
-		u.KnownBrowsers = nil
+		u.KnownBrowsers, u.SeenCountries, u.LastPlace = nil, nil, nil
 		return nil
 	})
 }

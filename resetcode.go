@@ -219,6 +219,10 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		// owner's browser is remembered again at the sign-in the code
 		// leads to.
 		u.KnownBrowsers = nil
+		// So are the countries and last place unusual sign-ins judge
+		// against (#55), by the same rule: the next sign-in sets a
+		// fresh baseline and raises nothing.
+		u.SeenCountries, u.LastPlace = nil, nil
 		issued = *u
 		return nil
 	})

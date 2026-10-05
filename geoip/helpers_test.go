@@ -273,6 +273,11 @@ func newEnv(t *testing.T, src Source) *env {
 
 func newEnvIn(t *testing.T, src Source, dir string) *env {
 	t.Helper()
+	return newEnvWith(t, src, "", dir)
+}
+
+func newEnvWith(t *testing.T, src Source, ed Edition, dir string) *env {
+	t.Helper()
 	fp, srv := newFakeProvider(t)
 	logs := &logBuf{}
 	c := &clock{t: start}
@@ -281,6 +286,7 @@ func newEnvIn(t *testing.T, src Source, dir string) *env {
 		MaxMind:    MaxMindKey{AccountID: testAccount, LicenceKey: testLicence},
 		IPinfo:     IPinfoKey{Token: testToken},
 		Dir:        dir,
+		Edition:    ed,
 		HTTPClient: srv.Client(),
 		Log:        slog.New(slog.NewTextHandler(logs, nil)),
 		Now:        c.Now,

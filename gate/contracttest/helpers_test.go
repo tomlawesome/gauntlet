@@ -98,6 +98,13 @@ func openStore(t *testing.T, backend persist.Backend) (*gauntlet.Store, string) 
 // token and limiter stores wherever deps leaves one nil.
 func newGate(t *testing.T, deps gate.Deps) *gate.Gate {
 	t.Helper()
+	return newGateWith(t, deps, nil)
+}
+
+// newGateWith is newGate with configure applied to the Config before
+// gate.New sees it.
+func newGateWith(t *testing.T, deps gate.Deps, configure func(*gate.Config)) *gate.Gate {
+	t.Helper()
 	if deps.Tokens == nil {
 		tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{})
 		if err != nil {
@@ -115,13 +122,17 @@ func newGate(t *testing.T, deps gate.Deps) *gate.Gate {
 	if deps.Sessions == nil {
 		deps.Sessions = gauntlet.NewSessionStore(gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime)
 	}
-	g, err := gate.New(gate.Config{
+	cfg := gate.Config{
 		CookieName:      testCookieName,
 		CSRFHeaderValue: testCSRFValue,
 		ClientIP:        func(*http.Request) string { return "198.51.100.1" },
 		ProductName:     testProductName,
 		LoginPath:       testLoginPath,
-	}, deps)
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+	g, err := gate.New(cfg, deps)
 	if err != nil {
 		t.Fatalf("gate.New: %v", err)
 	}

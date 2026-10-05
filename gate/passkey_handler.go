@@ -374,6 +374,10 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 		RecoveryCodes: nil,
 		AlreadyIssued: true,
 	})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorAdded, UserID: current.ID, Username: current.Username, Role: current.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: stored.Name},
+	})
 }
 
 // writePasskeyStoreError answers a refused passkey save: 409 for a
@@ -481,6 +485,10 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 
 	g.audit(r, user.Username, "account.passkey_removed", user.Username, fmt.Sprintf("name=%q", removed.Name))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "signedOut": signedOut})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: removed.Name},
+	})
 }
 
 // -- POST /api/auth/login/factor/begin ------------------------------------
@@ -669,6 +677,11 @@ func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	g.audit(r, auditActor(r), "user.passkeys_cleared", target.Username, "passkeys removed by admin")
+	by := auditActor(r)
+	g.audit(r, by, "user.passkeys_cleared", target.Username, "passkeys removed by admin")
 	writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": true})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: target.ID, Username: target.Username, Role: target.Role, At: g.now(), By: by,
+		SecondFactor: &SecondFactorDetail{Method: "passkey", All: true},
+	})
 }

@@ -79,10 +79,15 @@ const (
 // Unlike Address and UserAgent it is not the client's own word -- it
 // comes from gate.Config.Country, not a header -- so CreateFrom passes
 // it through unchanged rather than cleaning or cutting it.
+//
+// Unusual is the unusual-sign-in signals the sign-in raised (#55), none
+// for an ordinary one: gate's judgement, not the client's word, so it
+// too passes through CreateFrom unchanged.
 type SessionClient struct {
 	Address   string
 	UserAgent string
 	Country   string
+	Unusual   SignInSignals
 }
 
 // Session is deliberately an opaque random ID (see newID), not a JWT --
@@ -220,6 +225,7 @@ func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.
 		Address:   cleanClientText(client.Address, MaxSessionAddress),
 		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
 		Country:   client.Country,
+		Unusual:   client.Unusual,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -9,9 +9,15 @@
 // it current, and answers from it. No address is ever sent anywhere.
 // There is no default source and no fallback from one to the other.
 //
+// With Config.Edition set to EditionCity (MaxMind only), the Manager
+// keeps GeoLite2-City instead, and (*Manager).Locate also answers a
+// point and radius for an address; the application passes it as
+// gate.Config.Locate so impossible travel can be judged (#55). IPinfo
+// Lite has no coordinates, so impossible travel is unavailable under it.
+//
 // It is a leaf, like passkey: it imports
-// github.com/oschwald/maxminddb-golang/v2, and neither gate nor the root
-// package imports it, so an application that never imports this package
+// github.com/oschwald/maxminddb-golang/v2 (and the root package, for
+// gauntlet.Location), and neither gate nor the root package imports it, so an application that never imports this package
 // never compiles the reader in.
 //
 // The keys are the application's: they arrive in Config as plain

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/oschwald/maxminddb-golang/v2"
@@ -184,6 +185,10 @@ func (m *Manager) adopt(tmpName string, res response) error {
 		_ = r.Close()
 		return fmt.Errorf("the download is not a usable country file: %w", err)
 	}
+	if err := m.checkEdition(r); err != nil {
+		_ = r.Close()
+		return fmt.Errorf("the download is not a city file: %w", err)
+	}
 	if err := os.Rename(tmpName, m.cacheFile()); err != nil {
 		_ = r.Close()
 		return fmt.Errorf("keep the new file in %s: %w", m.dir, err)
@@ -221,8 +226,24 @@ func probe(r *maxminddb.Reader) error {
 	return nil
 }
 
-// cacheFile is where the source's file is kept.
+// checkEdition is the second check for EditionCity: the file must say
+// it is a City database, so a Country file served at the City URL never
+// replaces one that locates. Any type is accepted for EditionCountry,
+// as before editions existed.
+func (m *Manager) checkEdition(r *maxminddb.Reader) error {
+	if m.edition == EditionCity && !strings.Contains(r.Metadata.DatabaseType, "City") {
+		return fmt.Errorf("its database type is %q", r.Metadata.DatabaseType)
+	}
+	return nil
+}
+
+// cacheFile is where the source's file is kept: <Source>.mmdb, or
+// maxmind-city.mmdb for the City file, so switching editions never
+// loads the other edition's file.
 func (m *Manager) cacheFile() string {
+	if m.edition == EditionCity {
+		return filepath.Join(m.dir, string(m.source)+"-city.mmdb")
+	}
 	return filepath.Join(m.dir, string(m.source)+".mmdb")
 }
 
@@ -230,10 +251,22 @@ func (m *Manager) cacheFile() string {
 // to report the file's age honestly. It is the provider's public data's
 // bookkeeping, not the application's state, and holds no key.
 type stateFile struct {
-	Source       Source    `json:"source"`
+	Source Source `json:"source"`
+	// Edition is the kept file's edition; a document written before
+	// editions existed has none and is about the Country file.
+	Edition      Edition   `json:"edition,omitempty"`
 	FetchedAt    time.Time `json:"fetchedAt"`
 	ETag         string    `json:"etag,omitempty"`
 	LastModified string    `json:"lastModified,omitempty"`
+}
+
+// edition is the document's edition, EditionCountry when it predates
+// editions.
+func (st stateFile) edition() Edition {
+	if st.Edition == "" {
+		return EditionCountry
+	}
+	return st.Edition
 }
 
 // loadCache puts the kept file in use, if there is one and it passes
@@ -253,7 +286,10 @@ func (m *Manager) loadCache() {
 		r, err = maxminddb.Open(p)
 	}
 	if err == nil {
-		if err = probe(r); err != nil {
+		if err = probe(r); err == nil {
+			err = m.checkEdition(r)
+		}
+		if err != nil {
 			_ = r.Close()
 		}
 	}
@@ -269,7 +305,7 @@ func (m *Manager) loadCache() {
 	if data, err := os.ReadFile(filepath.Join(m.dir, stateFileName)); err == nil {
 		if err := json.Unmarshal(data, &st); err != nil {
 			m.log.Warn("geoip: ignoring an unreadable state.json", "file", filepath.Join(m.dir, stateFileName), "err", err.Error())
-		} else if st.Source == m.source && !st.FetchedAt.IsZero() {
+		} else if st.Source == m.source && st.edition() == m.edition && !st.FetchedAt.IsZero() {
 			m.fetchedAt, m.etag, m.lastModified = st.FetchedAt, st.ETag, st.LastModified
 		}
 	}
@@ -280,7 +316,7 @@ func (m *Manager) loadCache() {
 // otherwise ignored: its only cost is a full download after a restart.
 func (m *Manager) saveState() {
 	m.mu.RLock()
-	st := stateFile{Source: m.source, FetchedAt: m.fetchedAt, ETag: m.etag, LastModified: m.lastModified}
+	st := stateFile{Source: m.source, Edition: m.edition, FetchedAt: m.fetchedAt, ETag: m.etag, LastModified: m.lastModified}
 	m.mu.RUnlock()
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err == nil {

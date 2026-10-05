@@ -55,9 +55,11 @@ info:
     the browser's value instead of adding another; only `login`,
     `login/factor` and `login/factor/begin` use it for the allowance),
     no `__Host-` prefix (that needs path `/`),
-    `Max-Age` 45 days. Its value is 32 random bytes, base64url, and names
-    nothing; the account's record holds only its SHA-256, and a fresh
-    value replaces it at every sign-in. While the account is locked out,
+    `Max-Age` 45 days. Its value is up to four tokens joined by `.`,
+    one per account the browser has signed in to, most recent first
+    (#55); each is 32 random bytes, base64url, and names nothing. An
+    account's record holds only its own tokens' SHA-256, and a fresh
+    token replaces that account's one at every sign-in. While the account is locked out,
     or the client's address is at its limit, a browser carrying a value
     the named account remembers keeps a small allowance of its own (the
     limiter's attempts per window), where any other browser gets `429`.
@@ -209,6 +211,14 @@ paths:
         registered for it. The `secondFactor` list can be empty (an account
         whose only passkeys are stale, or an application without
         passkeys): a recovery code still completes it.
+
+        A sign-in that completes here (no second factor) is first judged
+        for unusual-sign-in signals (#55); under the application's policy
+        it may be refused (`403` `sign-in-refused`), or held for a
+        confirmation code the application delivers (`200`
+        `{"confirm": true}`, the confirm cookie set and no session
+        cookie; `POST /api/auth/login/confirm` finishes it). The response
+        never says which signal was raised or where a code went.
       security:
         - {}
       parameters:
@@ -221,19 +231,20 @@ paths:
               $ref: "#/components/schemas/Credentials"
       responses:
         "200":
-          description: Signed in, or a second factor is needed.
+          description: Signed in, a second factor is needed, or a confirmation code was sent (#55; sets the confirm cookie, no session cookie).
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/Account"
                   - $ref: "#/components/schemas/SecondFactorChallenge"
+                  - $ref: "#/components/schemas/ConfirmationChallenge"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/InvalidCredentials"
         "403":
-          $ref: "#/components/responses/CSRFRequired"
+          $ref: "#/components/responses/CSRFRequiredOrSignInRefused"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -253,7 +264,10 @@ paths:
         `POST /api/auth/login/factor/begin` gave, checked against the
         passkey ceremony cookie that route set; a completed passkey sign-in
         also hands back the attempt that begin counted. Shares the login
-        rate limit. Sets the session cookie on success.
+        rate limit. Sets the session cookie on success. Like `login`, the
+        completed sign-in is first judged for unusual-sign-in signals and
+        may be refused (`403` `sign-in-refused`) or held for a
+        confirmation code (`200` `{"confirm": true}`, #55).
       security:
         - pendingLoginCookie: []
         - pendingLoginCookie: []
@@ -268,11 +282,13 @@ paths:
               $ref: "#/components/schemas/LoginFactorRequest"
       responses:
         "200":
-          description: Signed in; sets the session cookie.
+          description: Signed in (sets the session cookie), or a confirmation code was sent (#55; sets the confirm cookie, no session cookie).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Account"
+                oneOf:
+                  - $ref: "#/components/schemas/Account"
+                  - $ref: "#/components/schemas/ConfirmationChallenge"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -294,11 +310,70 @@ paths:
                           - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
                           - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
         "403":
-          $ref: "#/components/responses/CSRFRequired"
+          $ref: "#/components/responses/CSRFRequiredOrSignInRefused"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/login/confirm:
+    post:
+      operationId: loginConfirm
+      summary: Finish a sign-in with a confirmation code
+      description: |
+        Completes a sign-in the unusual-sign-in policy held for a
+        confirmation code (#55): `login`, `login/factor` or the SSO
+        callback set the confirm cookie and the application delivered the
+        code to the person. `code` is the eight digits, with or without
+        the dash, surrounding whitespace ignored. Shares the login rate
+        limit; a wrong code counts as a failed second factor. The ticket
+        is used by exactly one sign-in and lives 15 minutes. Sets the
+        session cookie on success and clears the confirm cookie.
+      security:
+        - confirmLoginCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmCodeRequest"
+      responses:
+        "200":
+          description: Signed in; sets the session cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: The code was wrong (`invalid-credentials`), or the confirm cookie is missing, invalid, expired or already used, or its account is gone (`step-expired`; the cookie is cleared) -- sign in again from the start.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+        "403":
+          $ref: "#/components/responses/CSRFRequired"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1059,7 +1134,13 @@ paths:
         cookie), or to the application's `Config.LoginPath` with
         `?ssoError=` and one of `state_mismatch`, `provider_error`,
         `verification_failed`, `not_permitted`, `login_failed`,
-        `link_session_changed`, `link_identity_taken`, `link_failed`. The
+        `link_session_changed`, `link_identity_taken`, `link_failed`,
+        `refused` (every credential right, refused by the unusual
+        sign-in policy, #55). A sign-in held for a confirmation code
+        (#55) instead redirects to `Config.LoginPath` with `?confirm=1`
+        and sets the confirm cookie, no session cookie; the frontend
+        asks for the code and posts it to `POST /api/auth/login/confirm`.
+        The
         flow cookie is cleared on every path. While no account exists
         yet this route answers 503 like every other route except
         session and register: the first account is never an SSO one.
@@ -1358,10 +1439,10 @@ paths:
 
         The body is optional. `reason` is at most 200 characters of plain text
         (no control or format characters); it goes into the audit record
-        and to the application's `Config.Notify`, which may mail the
-        account's owner. `notified` is true when the application was
-        asked -- after this response, in the background -- not that a
-        message was delivered.
+        and to the application's `Config.Notices` (or the deprecated
+        `Config.Notify`), which may mail the account's owner. `notified`
+        is true when the application was asked -- after this response,
+        in the background -- not that a message was delivered.
 
         `409` for the caller's own account: use `POST
         /api/auth/logout-all`, which keeps this browser signed in.
@@ -1515,6 +1596,13 @@ paths:
           description: Only rows with this outcome.
           schema:
             $ref: "#/components/schemas/SignInOutcome"
+        - name: unusual
+          in: query
+          required: false
+          description: Only rows that raised at least one unusual-sign-in signal -- flagged sign-ins, ones sent a confirmation code and ones refused. Only `true` is accepted.
+          schema:
+            type: string
+            enum: ["true"]
         - name: before
           in: query
           required: false
@@ -1664,6 +1752,11 @@ components:
       in: cookie
       name: gate_pending_login
       description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived, used by exactly one sign-in -- once a code, recovery code or passkey completes it, it is refused with 401 at login/factor and login/factor/begin.
+    confirmLoginCookie:
+      type: apiKey
+      in: cookie
+      name: gate_confirm_login
+      description: Set by `POST /api/auth/login`, `POST /api/auth/login/factor` or the SSO callback when an unusual sign-in owes a confirmation code (#55); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in.
     passkeyRegisterCookie:
       type: apiKey
       in: cookie
@@ -1796,6 +1889,23 @@ components:
                     enum:
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+    CSRFRequiredOrSignInRefused:
+      description: |
+        The `X-Requested-With` header is missing or wrong (class
+        `csrf-required`); or every credential was right and the
+        account's unusual-sign-in policy refused the attempt (class
+        `sign-in-refused`, #55). No session cookie is set and no
+        `X-Auth-Gate` header is sent.
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#csrf-required
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-refused
     CSRFRequired:
       description: The `X-Requested-With` header is missing or wrong. Class `csrf-required`.
       content:
@@ -2066,6 +2176,14 @@ components:
         code:
           type: string
           description: An authenticator-app code, or (at login) a recovery code.
+    ConfirmCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: The confirmation code the application delivered, `1234-5678`; the dash and surrounding whitespace are optional.
     LoginFactorRequest:
       type: object
       additionalProperties: false
@@ -2122,6 +2240,8 @@ components:
           type: string
           pattern: "^[A-Z]{2}$"
           description: The country `address` resolved to at sign-in, if a country lookup is configured and the address matched. Absent otherwise.
+        unusual:
+          $ref: "#/components/schemas/UnusualSignals"
     SessionList:
       type: object
       additionalProperties: false
@@ -2230,6 +2350,15 @@ components:
           type: string
         role:
           $ref: "#/components/schemas/Role"
+    ConfirmationChallenge:
+      type: object
+      additionalProperties: false
+      required: [confirm]
+      properties:
+        confirm:
+          type: boolean
+          const: true
+          description: A confirmation code was sent through the application; post it to `POST /api/auth/login/confirm`. Says nothing about where it went.
     SecondFactorChallenge:
       type: object
       additionalProperties: false
@@ -2358,14 +2487,31 @@ components:
           description: The raw bearer token; only in the response that creates it.
     SignInOutcome:
       type: string
-      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded]
+      enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, refused, confirm_sent, confirm_refused, unrecorded]
       description: |
         How an attempt ended. `password_ok` is the right password with a
         second factor still owed; `factor_refused` a wrong or used code or a
         refused passkey; `locked`, `disabled` and `rate_limited` the login
-        limiter refusing it before any credential was checked; `unrecorded`
-        the failed attempts past a bucket's row budget. New values may be
-        added.
+        limiter refusing it before any credential was checked; `refused`
+        every credential right but the attempt refused by the unusual
+        sign-in policy; `confirm_sent` every credential right and a
+        confirmation code sent, no session yet; `confirm_refused` a wrong
+        confirmation code; `unrecorded` the failed attempts past a
+        bucket's row budget. New values may be added.
+    UnusualSignals:
+      type: array
+      minItems: 1
+      uniqueItems: true
+      items:
+        type: string
+        enum: [new-browser, new-country, impossible-travel]
+      description: |
+        The unusual-sign-in signals the sign-in raised (#55), in this
+        order: `new-browser` (a browser the account does not remember),
+        `new-country` (a country it has not signed in from in 90 days),
+        `impossible-travel` (too far from its last located sign-in for the
+        time between them). Absent for an ordinary sign-in. New values may
+        be added; ignore unknown ones.
     SignInRow:
       type: object
       additionalProperties: false
@@ -2418,6 +2564,11 @@ components:
         disabled:
           type: boolean
           description: True on the failure that disabled the account's sign-in, and on a `disabled` refusal.
+        unusual:
+          $ref: "#/components/schemas/UnusualSignals"
+        confirmed:
+          type: boolean
+          description: True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`). Absent when false.
     SignInList:
       type: object
       additionalProperties: false

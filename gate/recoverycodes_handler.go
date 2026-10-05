@@ -73,6 +73,9 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 	g.audit(r, user.Username, "account.recovery_codes_regenerated", user.Username, "")
 
 	writeJSON(w, http.StatusOK, recoveryCodesRegenerateResponse{RecoveryCodes: codes})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeRecoveryCodesRegenerated, UserID: user.ID, Username: user.Username, Role: current.Role, At: now,
+	})
 }
 
 // -- POST /api/auth/recovery-codes/confirm (#58) -------------------------
@@ -124,12 +127,18 @@ func (g *Gate) handleEnrolmentConfirm(w http.ResponseWriter, r *http.Request) {
 	g.deps.Sessions.RevokeAllForUser(user.ID)
 	g.issueSession(w, r, user.ID, now)
 
+	detail := &SecondFactorDetail{Method: "totp"}
 	if held.Kind == gauntlet.HeldFactorPasskey && held.Passkey != nil {
 		// Quoted, as in handlePasskeyRegisterFinish: the name is the
 		// user's own text.
 		g.audit(r, user.Username, "account.passkey_added", user.Username, fmt.Sprintf("name=%q", held.Passkey.Name))
+		detail = &SecondFactorDetail{Method: "passkey", Name: held.Passkey.Name}
 	} else {
 		g.audit(r, user.Username, "account.totp_enabled", user.Username, "authenticator app confirmed; recovery codes issued")
 	}
 	writeJSON(w, http.StatusOK, enrolmentConfirmResponse{Confirmed: true, Factor: string(held.Kind)})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorAdded, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		SecondFactor: detail,
+	})
 }

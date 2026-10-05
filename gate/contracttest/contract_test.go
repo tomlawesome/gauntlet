@@ -326,7 +326,98 @@ func TestContractEveryRoute(t *testing.T) {
 	contractNoStorage(t, c)
 	contractPasskeys(t, c)
 	contractUnlockCode(t, c)
+	contractUnusualSignIns(t, c)
 	c.requireEveryOperationDriven()
+}
+
+// contractUnusualSignIns covers the unusual-sign-in answers (#55) on a
+// gate whose policy blocks a new browser: the password step and the
+// second-factor step each answer 403 sign-in-refused, with no
+// X-Auth-Gate header.
+func contractUnusualSignIns(t *testing.T, c *contractChecker) {
+	users, code := openStore(t, persist.NewMemory())
+	g := newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInBlock}
+	})
+	ts := newTestServer(t, g)
+	u := ts.URL
+	const adminPass = "contract-admin-password"
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+
+	refused := func(resp *http.Response) {
+		t.Helper()
+		if resp.Header.Get("X-Auth-Gate") != "" {
+			t.Errorf("a refused sign-in carries X-Auth-Gate %q", resp.Header.Get("X-Auth-Gate"))
+		}
+	}
+	stranger := c.client()
+	refused(c.do(stranger, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 403, nil))
+
+	recovery := enrolTOTPFactor(t, c, u, admin, adminPass)
+	stranger = c.client()
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+	refused(c.do(stranger, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery[0]}}, 403, nil))
+
+	// The same under confirm: a new browser is sent a code, through the
+	// application, and finishes with POST /api/auth/login/confirm.
+	users, code = openStore(t, persist.NewMemory())
+	codes := &codeCatcher{}
+	g = newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInConfirm}
+		cfg.DeliverConfirmCode = codes.deliver
+	})
+	ts = newTestServer(t, g)
+	u = ts.URL
+	admin = c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+	var challenge map[string]any
+	newcomer := c.client()
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, &challenge)
+	if challenge["confirm"] != true {
+		t.Fatalf("login under confirm = %v", challenge)
+	}
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: "not json", bad: true}, 400, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: "0000-000x"}}, 401, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}, noCSRF: true}, 403, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 200, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 401, nil)
+
+	recovery = enrolTOTPFactor(t, c, u, admin, adminPass)
+	newcomer = c.client()
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery[0]}}, 200, &challenge)
+	if challenge["confirm"] != true {
+		t.Fatalf("login/factor under confirm = %v", challenge)
+	}
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 200, nil)
+}
+
+// confirmCodeRequest is POST /api/auth/login/confirm's body.
+type confirmCodeRequest struct {
+	Code string `json:"code"`
+}
+
+// codeCatcher is a gate.Config.DeliverConfirmCode keeping the last
+// confirmation code it was given.
+type codeCatcher struct {
+	mu   sync.Mutex
+	code string
+}
+
+func (c *codeCatcher) deliver(_ context.Context, n gate.ConfirmCode) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n.Code != "" {
+		c.code = n.Code
+	}
+	return nil
+}
+
+func (c *codeCatcher) last() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.code
 }
 
 // contractNoStorage covers the 503 an admin gets creating an account
@@ -485,6 +576,43 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "GET", path: "/api/auth/sign-ins?outcome=bogus", bad: true}, 400, nil)
 	c.do(bob, u, call{method: "GET", path: "/api/auth/sign-ins"}, 403, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/sign-ins"}, 401, nil)
+
+	// Unusual sign-ins (#55): the admin signing in from a second browser
+	// is flagged (new-browser, the default policy), on that session's row
+	// and on the history's; ?unusual=true lists only such rows.
+	admin2 := c.client()
+	c.do(admin2, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+	c.do(admin2, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: adminRecovery[len(adminRecovery)-1]}}, 200, nil)
+	var adminSessions struct {
+		Sessions []struct {
+			Current bool     `json:"current"`
+			Unusual []string `json:"unusual"`
+		} `json:"sessions"`
+	}
+	c.do(admin2, u, call{method: "GET", path: "/api/auth/sessions"}, 200, &adminSessions)
+	flagged := 0
+	for _, s := range adminSessions.Sessions {
+		if len(s.Unusual) > 0 {
+			flagged++
+			if !s.Current || s.Unusual[0] != "new-browser" {
+				t.Fatalf("admin's sessions = %+v, want only the second browser's flagged new-browser", adminSessions)
+			}
+		}
+	}
+	if flagged != 1 {
+		t.Fatalf("admin's sessions = %+v, want one flagged", adminSessions)
+	}
+	var unusualHistory struct {
+		SignIns []struct {
+			Unusual []string `json:"unusual"`
+		} `json:"signIns"`
+	}
+	c.do(admin2, u, call{method: "GET", path: "/api/auth/sign-ins?unusual=true"}, 200, &unusualHistory)
+	if len(unusualHistory.SignIns) != 1 || len(unusualHistory.SignIns[0].Unusual) != 1 {
+		t.Fatalf("unusual sign-ins = %+v, want the second browser's", unusualHistory)
+	}
+	c.do(admin2, u, call{method: "GET", path: "/api/auth/sign-ins?unusual=maybe", bad: true}, 400, nil)
+	c.do(admin2, u, call{method: "POST", path: "/api/auth/logout"}, 200, nil)
 	bobID, adminID, vicID := "", "", ""
 	for _, s := range users {
 		switch s.Username {

@@ -244,10 +244,15 @@ func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("one-time code issued, expires %s; sessions ended: all; sign-in lockout and any disable lifted",
 			user.ResetCodeExpiresAt.Format(time.RFC3339)))
 
+	by := auditActor(r)
 	writeJSON(w, http.StatusOK, resetPasswordResponse{
 		Username:  user.Username,
 		Code:      code,
 		ExpiresAt: user.ResetCodeExpiresAt,
+	})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticePasswordReset, UserID: user.ID, Username: user.Username, Role: user.Role, At: now, By: by,
+		PasswordReset: &PasswordResetDetail{ExpiresAt: user.ResetCodeExpiresAt},
 	})
 }
 

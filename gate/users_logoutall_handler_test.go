@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // POST /api/auth/users/{id}/logout-all (#53): an admin ends every
@@ -254,5 +256,28 @@ func TestAdminLogoutAllWithoutNotifier(t *testing.T) {
 	}
 	if !strings.Contains(findAuditEntry(t, g, "user.sessions_ended").Detail, "notify=none") {
 		t.Error("audit does not say no notification was asked for")
+	}
+}
+
+// Config.Notices, once set, carries sessions-ended as one AccountNotice
+// kind among the rest (#73) -- the generalised twin of
+// TestAdminLogoutAllNotifiesAfterTheResponse, which pins the deprecated
+// Config.Notify still working.
+func TestAdminLogoutAllNotifiesThroughNotices(t *testing.T) {
+	g, ts, admin, _ := adminLogoutFixture(t)
+	at := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	g.cfg.Now = func() time.Time { return at }
+	rec := &noticeRecorder{}
+	g.cfg.Notices = rec
+
+	bobID := totpBobID(t, g)
+	status, out, raw := adminLogoutAll(t, admin, ts, bobID, adminLogoutAllRequest{Reason: "lost phone"})
+	if status != http.StatusOK || !out.Notified {
+		t.Fatalf("status %d %q, want 200 with notified", status, raw)
+	}
+	n := lastNotice(t, g, rec, NoticeSessionsEnded)
+	if n.UserID != bobID || n.Username != totpBobUsername || n.Role != gauntlet.RoleUser || n.By != "admin" || !n.At.Equal(at) ||
+		n.SessionsEnded == nil || n.SessionsEnded.Reason != "lost phone" || n.SessionsEnded.Ended != 2 {
+		t.Errorf("notice = %+v", n)
 	}
 }

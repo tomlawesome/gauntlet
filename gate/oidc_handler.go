@@ -307,9 +307,26 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// An SSO sign-in is a re-authentication like the password paths:
 	// the session this browser held for the account ends, since the
 	// cookie below replaces it (ASVS 7.2.4; see revokeReplacedSession).
-	g.issueSession(w, r, user.ID, now)
-	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodSSO), loginReservation{}, now)
+	// The identity provider vouched for every credential: judge the
+	// sign-in (#55) before any session exists. Never on the link branch
+	// above, whose caller already holds a session.
+	place := g.placeOf(r, "")
+	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodSSO, place, now)
+	if verdict.stopsSignIn() {
+		sent, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
+		if sent {
+			// The frontend asks for the code and posts it to
+			// login/confirm, which holds the ticket this set.
+			http.Redirect(w, r, g.cfg.LoginPath+"?confirm=1", http.StatusFound)
+			return
+		}
+		g.redirectWithSSOError(w, r, "refused")
+		g.notify(r.Context(), notice)
+		return
+	}
+	notice := g.completeSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
 	http.Redirect(w, r, "/", http.StatusFound)
+	g.notify(r.Context(), notice)
 }
 
 // ssoUsernameHint is the name an identity asks to be known by: its

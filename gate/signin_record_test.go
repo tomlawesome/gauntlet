@@ -180,8 +180,10 @@ func TestSecondFactorSignInRecordsPasswordOKThenSuccess(t *testing.T) {
 	if len(failed) != 1 || failed[0].Detail != "outcome=factor_refused method=code "+fixtureFrom {
 		t.Errorf("user.login_failed = %+v, want one factor_refused by code", failed)
 	}
+	// The code step came from a browser bob had not signed in from
+	// before, which the default policy flags (#55) ahead of the rest.
 	logins := auditEntries(audit, "user.login")
-	if len(logins) != 1 || logins[0].Detail != "via second factor; "+fixtureFrom {
+	if len(logins) != 1 || logins[0].Detail != "unusual=new-browser; action=flag; via second factor; "+fixtureFrom {
 		t.Errorf("user.login = %+v, want one, via second factor with the address", logins)
 	}
 }

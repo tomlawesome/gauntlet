@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -84,10 +85,26 @@ type Config struct {
 	// Audit receives account and token events (register, login,
 	// password change, user/token create/delete). nil means no audit.
 	Audit Auditor
-	// Notify is told when an admin ends another account's sessions
-	// (POST /api/auth/users/{id}/logout-all), so the application can
-	// tell the account's owner. nil means nobody is told. See Notifier.
+	// Notices is told about every account event this module raises --
+	// a password reset, a second factor added or removed, recovery
+	// codes regenerated, a lockout or disable, an admin ending every
+	// session, an unusual sign-in (#73) -- so the application can tell
+	// the account's owner. nil means nobody is told; everything is still
+	// shown and audited either way. See AccountNotifier. New refuses a
+	// Config with both Notices and the deprecated Notify set.
+	Notices AccountNotifier
+	// Deprecated: Notify is Notices narrowed to one event (an admin
+	// ending another account's sessions). Kept working for a minor
+	// release (ADR-0002 decision 2); set Notices instead. See Notifier.
 	Notify Notifier
+	// DeliverConfirmCode hands an unusual sign-in's confirmation code to
+	// the application, synchronously, before the sign-in is answered
+	// (#55, #73): nil means the confirm action is unavailable, and New
+	// refuses a Config.UnusualSignIns that asks for it. Unlike Notices,
+	// a failure here -- an error, a panic, or running past DecideTimeout
+	// -- refuses the sign-in: no code reached anyone, so none is owed.
+	// See ConfirmCode.
+	DeliverConfirmCode func(ctx context.Context, c ConfirmCode) error
 	// ClientIP resolves the address the login limiter is keyed on
 	// (mikroview's clientIP -- its own trusted-proxy policy is the
 	// application's, not gate's). Required.
@@ -100,6 +117,20 @@ type Config struct {
 	// that address (no data file loaded yet, a private address, or no
 	// match), and gate then records no country for it, never an error.
 	Country func(address string) (code string, ok bool)
+	// Locate resolves an address to a point and accuracy radius, so a
+	// sign-in can be judged for impossible travel (#55). Optional: nil
+	// means impossible travel is never raised. The application passes
+	// (*geoip.Manager).Locate, which answers only from a MaxMind City
+	// file (geoip.EditionCity). Coordinates are kept only as the
+	// account's last place; no route, notice or record shows them.
+	Locate func(address string) (gauntlet.Location, bool)
+	// UnusualSignIns is what a sign-in from a new browser, a new country
+	// or an impossible distance away does (#55; unusual.go). The zero
+	// value flags each one: the sign-in completes and is marked on the
+	// session, the history and the audit record. New refuses a value
+	// that is not one of the actions, and impossible travel turned on
+	// with no Locate.
+	UnusualSignIns UnusualSignInPolicy
 	// Now is the clock Protect and every handler read the current time
 	// from. nil means time.Now.
 	Now func() time.Time
@@ -164,6 +195,9 @@ type Gate struct {
 	// notifying counts Notifier calls still running (notify.go), so a
 	// test can wait for them.
 	notifying sync.WaitGroup
+	// notices rates the unusual-sign-in notices for flag and block: one
+	// per account per unusualNoticeInterval (#55).
+	notices warnRater
 
 	// signInHook, when set, receives every sign-in attempt recordSignIn
 	// handles, after its client and lockout fields are filled, beside
@@ -239,6 +273,12 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if deps.OIDC != nil && deps.OIDCState == nil {
 		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
 	}
+	if cfg.Notify != nil && cfg.Notices != nil {
+		return nil, fmt.Errorf("gate: Config.Notify and Config.Notices must not both be set; Notices replaces the deprecated Notify")
+	}
+	if err := checkUnusualPolicy(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -247,6 +287,7 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 		deps:         deps,
 		exempt:       make(map[string]bool),
 		kindHandlers: make(map[gauntlet.TokenKind]http.Handler),
+		notices:      warnRater{interval: &unusualNoticeInterval},
 	}
 	// Not a refusal: plain HTTP is what development runs on, and the
 	// application, not gate, knows whether TLS terminates in front of

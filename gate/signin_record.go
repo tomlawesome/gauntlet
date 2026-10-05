@@ -17,12 +17,18 @@ import (
 //
 //   - user.login on a completed sign-in, its detail carrying the client
 //     address (from=, quoted: Config.ClientIP may read a header the
-//     client set) and, for the second-factor and SSO paths, how.
+//     client set) and, for the second-factor and SSO paths, how. An
+//     unusual one (#55) starts with its signals and the action taken:
+//     "unusual=new-browser,new-country; action=flag; ".
 //   - user.login_failed on every failed attempt the limiter admitted:
 //     actor and target the account's username when the name matched one,
 //     else "unknown"; detail the outcome, the method, the address and,
 //     for a name that matched no account, the name as
 //     gauntlet.MaskUnknownUsername shows it -- never as typed.
+//   - user.login_refused on a sign-in whose every credential was right
+//     and which the unusual-sign-in policy refused (#55): actor and
+//     target the username; detail the signals, the reason, the method,
+//     whether the application was told, and the address.
 //   - account.locked and account.disabled beside the user.login_failed
 //     of the attempt that started a lockout or disabled sign-in. An
 //     attempt that did either but succeeded hands it back
@@ -60,9 +66,15 @@ func (g *Gate) signInClient(r *http.Request, address string) gauntlet.SessionCli
 }
 
 // signInFailed reports whether o is a refused credential or a refused
-// attempt, rather than a sign-in or a password step that passed.
+// attempt, rather than an outcome that proved every credential so far:
+// a sign-in, a password step that passed, or one the unusual-sign-in
+// policy refused or sent a confirmation code for (#55).
 func signInFailed(o gauntlet.SignInOutcome) bool {
-	return o != gauntlet.SignInSuccess && o != gauntlet.SignInPasswordOK
+	switch o {
+	case gauntlet.SignInSuccess, gauntlet.SignInPasswordOK, gauntlet.SignInRefused, gauntlet.SignInConfirmSent:
+		return false
+	}
+	return true
 }
 
 // limiterRefusal reports whether o is the login limiter refusing the
@@ -82,7 +94,17 @@ func limiterRefusal(o gauntlet.SignInOutcome) bool {
 // history (Deps.SignIns) when there is one, then writes the audit
 // record or Warn line (see this file's header).
 func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginReservation, now time.Time) {
+	g.recordSignInNote(r, ev, res, "", now)
+}
+
+// recordSignInNote is recordSignIn with note -- the unusual-sign-in
+// part of a completed sign-in's detail ("unusual=...; action=...; ",
+// #55) -- put before the rest of the user.login detail. ev's signals
+// (Client.Unusual) are kept; the rest of its client is filled here.
+func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res loginReservation, note string, now time.Time) {
+	unusual := ev.Client.Unusual
 	ev.Client = g.signInClient(r, res.address)
+	ev.Client.Unusual = unusual
 	failed := signInFailed(ev.Outcome)
 	switch {
 	case ev.Outcome == gauntlet.SignInLocked:
@@ -108,18 +130,22 @@ func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginR
 		name = unknownAccount
 	}
 	switch {
+	case ev.Outcome == gauntlet.SignInRefused:
+		g.auditRecord(name, "user.login_refused", name, note+from)
 	case !failed:
 		if ev.Outcome != gauntlet.SignInSuccess {
-			return // password_ok: no sign-in yet
+			return // password_ok, confirm_sent: no sign-in yet
 		}
 		detail := from
-		switch ev.Method {
-		case gauntlet.SignInMethodCode, gauntlet.SignInMethodPasskey:
+		switch {
+		case ev.Confirmed:
+			detail = "via confirmation code; " + from
+		case ev.Method == gauntlet.SignInMethodCode, ev.Method == gauntlet.SignInMethodPasskey:
 			detail = "via second factor; " + from
-		case gauntlet.SignInMethodSSO:
+		case ev.Method == gauntlet.SignInMethodSSO:
 			detail = "via sso; " + from
 		}
-		g.auditRecord(ev.Username, "user.login", ev.Username, detail)
+		g.auditRecord(ev.Username, "user.login", ev.Username, note+detail)
 	case limiterRefusal(ev.Outcome):
 		g.warnRated("login-refused "+ev.Client.Address, fmt.Sprintf(
 			"gate: sign-in refused by the login limiter: outcome=%s method=%s account=%q %s",
@@ -136,10 +162,18 @@ func (g *Gate) recordSignIn(r *http.Request, ev gauntlet.SignInEvent, res loginR
 		if res.lockoutStarted {
 			g.auditRecord(name, "account.locked", name, fmt.Sprintf("until=%s lockouts=%d %s",
 				res.lockedUntil.UTC().Format(time.RFC3339), res.lockouts, from))
+			g.notify(r.Context(), &AccountNotice{
+				Kind: NoticeAccountLocked, UserID: ev.UserID, Username: name, At: now,
+				Lockout: &LockoutDetail{Until: res.lockedUntil, Lockouts: res.lockouts, Address: ev.Client.Address},
+			})
 		}
 		if res.disabledNow {
 			g.auditRecord(name, "account.disabled", name, fmt.Sprintf("after %d consecutive failures; %s",
 				gauntlet.MaxConsecutiveLoginFailures, from))
+			g.notify(r.Context(), &AccountNotice{
+				Kind: NoticeSignInDisabled, UserID: ev.UserID, Username: name, At: now,
+				Lockout: &LockoutDetail{Until: res.lockedUntil, Lockouts: res.lockouts, Address: ev.Client.Address},
+			})
 		}
 	}
 }

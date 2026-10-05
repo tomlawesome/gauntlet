@@ -183,6 +183,15 @@ type User struct {
 	// (ClearKnownBrowsers) and IssueResetCode clear them. Gauntlet's own
 	// field: older documents lack it and read it as none remembered.
 	KnownBrowsers []KnownBrowser `json:"knownBrowsers,omitempty"`
+	// SeenCountries are the countries this account's completed sign-ins
+	// came from (#55; unusual.go): at most MaxSeenCountries, each for
+	// SeenCountryLifetime after its latest sign-in. LastPlace is where
+	// its latest located sign-in came from, for impossible travel.
+	// RememberSignIn keeps both; they are cleared wherever KnownBrowsers
+	// are. Never shown by any route. Gauntlet's own fields: older
+	// documents lack them and read them as nothing remembered.
+	SeenCountries []SeenCountry `json:"seenCountries,omitempty"`
+	LastPlace     *LastPlace    `json:"lastPlace,omitempty"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
@@ -297,6 +306,11 @@ func (u *User) clone() *User {
 	cp := *u
 	cp.RecoveryCodes = slices.Clone(u.RecoveryCodes)
 	cp.KnownBrowsers = slices.Clone(u.KnownBrowsers)
+	cp.SeenCountries = slices.Clone(u.SeenCountries)
+	if u.LastPlace != nil {
+		place := *u.LastPlace
+		cp.LastPlace = &place
+	}
 	if u.Passkeys != nil {
 		cp.Passkeys = make([]Passkey, len(u.Passkeys))
 		for i := range u.Passkeys {
