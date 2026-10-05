@@ -64,7 +64,8 @@ named under the class it shares, below.
   /api/auth/login/factor` (wrong authenticator code or recovery code, or
   a refused passkey assertion), `POST /api/auth/login/confirm` (wrong
   confirmation code, #55: "invalid confirmation code", one cause, no
-  pair), `POST /api/auth/unlock` (wrong admin
+  pair), `POST /api/auth/login/escape` (wrong escape code, #66: "invalid
+  escape code", one cause, no pair), `POST /api/auth/unlock` (wrong admin
   username or unlock code), every route that re-checks the caller's own
   password or second factor before acting (`POST /api/auth/password`,
   `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST
@@ -128,7 +129,8 @@ named under the class it shares, below.
   than ten minutes without its recovery codes being confirmed, and has
   been deleted) (#58), and `POST /api/auth/login/confirm` (the confirm
   cookie: missing, expired, tampered with, already spent, or the account
-  was deleted since; #55).
+  was deleted since; #55), and `POST /api/auth/login/escape` (the escape
+  cookie, same causes; #66).
 - A frontend restarts the flow from its first step -- there is nothing
   left for a retry at this step to complete.
 
@@ -166,6 +168,13 @@ named under the class it shares, below.
   which signal was raised, or whether a code would have been sent.
 - No `X-Auth-Gate` header: that header marks a session stopped at a
   door, and no session exists here.
+- For an admin no other admin can act for, the response also sets the
+  escape cookie `gate_escape_login` (#66, ADR-0011) -- the body is the
+  same either way, so a stranger learns nothing -- and the server's log
+  holds the one-time code that `POST /api/auth/login/escape` takes. A
+  frontend can offer "have a code from the server log?" on every refused
+  screen; for anyone else, or where nothing could announce a code, the
+  cookie is absent and the form simply fails with `step-expired`.
 
 ## must-change-password
 
