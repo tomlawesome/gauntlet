@@ -37,6 +37,13 @@ const (
 	// UnusualSignInConfirm holds the sign-in until a code the
 	// application delivers is typed into the same sign-in.
 	UnusualSignInConfirm UnusualSignInAction = "confirm"
+	// UnusualSignInProve holds the sign-in until the browser answers a
+	// passkey assertion for this account (#65, ADR-0009). A sign-in
+	// that was itself a passkey one is already proved and is flagged.
+	// An account with no passkey usable here cannot prove: it is held
+	// for a code instead when Config.DeliverConfirmCode is set, else
+	// refused.
+	UnusualSignInProve UnusualSignInAction = "prove"
 	// UnusualSignInBlock refuses this one attempt, never the account.
 	UnusualSignInBlock UnusualSignInAction = "block"
 )
@@ -48,8 +55,10 @@ func (a UnusualSignInAction) rank() int {
 		return 1
 	case UnusualSignInConfirm:
 		return 2
-	case UnusualSignInBlock:
+	case UnusualSignInProve:
 		return 3
+	case UnusualSignInBlock:
+		return 4
 	}
 	return 0
 }
@@ -62,7 +71,7 @@ type UnusualSignInPolicy struct {
 	// NewBrowser, NewCountry and ImpossibleTravel override Action for
 	// their own signal; "" means Action. Of the signals one sign-in
 	// raises, any that resolve to off are dropped and the strictest of
-	// the rest decides (block over confirm over flag).
+	// the rest decides (block over prove over confirm over flag).
 	NewBrowser, NewCountry, ImpossibleTravel UnusualSignInAction
 	// Decide, if set, is asked once per unusual sign-in after every
 	// credential has passed and before any session exists, with the
@@ -70,8 +79,8 @@ type UnusualSignInPolicy struct {
 	// answer. It is not asked when no signal is kept. It runs under ctx,
 	// which ends after DecideTimeout; it may do I/O within that (a local
 	// lookup, not a web call) and must honour ctx. A panic, an error, a
-	// timeout, or an answer that is not flag, confirm or block -- or
-	// confirm with no Config.NotifyUnusualSignIn to deliver the code --
+	// timeout, or an answer that is not flag, confirm, prove or block --
+	// or confirm with no Config.DeliverConfirmCode to deliver the code --
 	// refuses this attempt (block), audited and noticed with the reason
 	// (decide-failed, decide-timeout, decide-invalid): a check that
 	// lets people in when it breaks would make breaking it the attack.
@@ -95,6 +104,11 @@ type UnusualSignInCase struct {
 	Client gauntlet.SessionClient
 	// Default is what the settings decided.
 	Default UnusualSignInAction
+	// CanProve is true when answering prove would hold this sign-in for
+	// a passkey: the account has a passkey usable here and this sign-in
+	// was not itself a passkey one. Otherwise prove is flag (a passkey
+	// sign-in), confirm (a code can be delivered) or block (#65).
+	CanProve bool
 }
 
 // UnusualSignInDetail is NoticeUnusualSignIn's detail (Config.Notices):
@@ -118,7 +132,7 @@ type UnusualSignInDetail struct {
 	// session list shows it, so a message can say "end this session".
 	SessionRef string
 	// Reason, under block, says why: policy, decide-failed,
-	// decide-timeout, decide-invalid or notify-failed. On the notice of
+	// decide-timeout, decide-invalid, notify-failed or prove-failed. On the notice of
 	// a block let through by a lone admin's escape code (#66, ADR-0011)
 	// it is "escape", with SessionRef set.
 	Reason string
@@ -164,33 +178,57 @@ func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) 
 	}
 }
 
-// stopSignIn is confirm and block for a judged sign-in, after the
+// stopSignIn is confirm, prove and block for a judged sign-in, after the
 // caller has handed the limiter back and dropped the pending login. It
-// reports whether a confirmation code went out (answer "confirm"); if
-// not, the attempt was refused (answer sign-in-refused) and notice is
-// the block notice to send once the response is written, nil for none.
-// A confirm whose code could not be delivered is refused as
-// notify-failed: no code reached anyone. A block of a lone admin also
+// reports whether the sign-in is held (a confirmation code went out, or
+// a passkey is owed: answer heldChallenge); if not, the attempt was
+// refused (answer sign-in-refused) and notice is the block notice to
+// send once the response is written, nil for none. A confirm whose code
+// could not be delivered is refused as notify-failed: no code reached
+// anyone; a prove whose ticket could not be made, as prove-failed. A
+// block of a lone admin also
 // issues the escape code (refuseSignIn, #66), except on the SSO
 // callback: every admin keeps a local password (ADR-0010).
 func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (confirmSent bool, notice *AccountNotice) {
 	reason := v.reason
-	if v.action == UnusualSignInConfirm {
+	switch v.action {
+	case UnusualSignInConfirm:
 		if g.startConfirm(w, r, user, res, method, place, v.signals, now) {
 			return true, nil
 		}
 		reason = "notify-failed"
+	case UnusualSignInProve:
+		if g.startProve(w, r, user, res, method, v.signals, now) {
+			return true, nil
+		}
+		reason = "prove-failed"
 	}
 	return false, g.refuseSignIn(w, r, user, res, method, place, v.signals, reason, now)
 }
 
-// stopsSignIn reports whether v is confirm or block.
+// stopsSignIn reports whether v is confirm, prove or block.
 func (v unusualVerdict) stopsSignIn() bool {
-	return v.action == UnusualSignInConfirm || v.action == UnusualSignInBlock
+	switch v.action {
+	case UnusualSignInConfirm, UnusualSignInProve, UnusualSignInBlock:
+		return true
+	}
+	return false
 }
 
 // confirmChallenge is the 200 a sign-in owing a confirmation code gets.
 var confirmChallenge = map[string]bool{"confirm": true}
+
+// heldChallenge is the 200 a held sign-in gets (stopSignIn answered
+// true for it): confirmChallenge, or for prove {"prove": "passkey",
+// "passkeyOrigin": ...}, where the origin is what the browser's
+// navigator.credentials.get() must be run against, as the second-step
+// answer's is.
+func (g *Gate) heldChallenge(v unusualVerdict) any {
+	if v.action != UnusualSignInProve {
+		return confirmChallenge
+	}
+	return map[string]any{"prove": "passkey", "passkeyOrigin": g.deps.Passkeys.Origin()}
+}
 
 // unusualNoticeInterval is how long an account's flag and block notices
 // stay quiet after one is sent. A variable so tests can shorten it.
@@ -211,8 +249,9 @@ func (g *Gate) noticeAllowed(userID string, now time.Time) string {
 }
 
 // checkUnusualPolicy is New's check of Config.UnusualSignIns: every
-// field one of the four actions or empty; confirm only where something
-// can deliver the code; impossible travel turned on only where it can
+// field one of the five actions or empty; confirm only where something
+// can deliver the code (prove needs nothing here: it falls back to
+// confirm or block for an account that cannot prove); impossible travel turned on only where it can
 // be judged.
 func checkUnusualPolicy(cfg Config) error {
 	p := cfg.UnusualSignIns
@@ -229,10 +268,10 @@ func checkUnusualPolicy(cfg Config) error {
 				continue
 			}
 			return fmt.Errorf("gate: Config.UnusualSignIns.%s is confirm, which needs Config.DeliverConfirmCode to deliver the code", f.name)
-		case UnusualSignInBlock:
+		case UnusualSignInProve, UnusualSignInBlock:
 		default:
-			return fmt.Errorf("gate: Config.UnusualSignIns.%s is %q; want %q, %q, %q or %q",
-				f.name, f.a, UnusualSignInOff, UnusualSignInFlag, UnusualSignInConfirm, UnusualSignInBlock)
+			return fmt.Errorf("gate: Config.UnusualSignIns.%s is %q; want %q, %q, %q, %q or %q",
+				f.name, f.a, UnusualSignInOff, UnusualSignInFlag, UnusualSignInConfirm, UnusualSignInProve, UnusualSignInBlock)
 		}
 	}
 	if p.ImpossibleTravel != "" && p.ImpossibleTravel != UnusualSignInOff && cfg.Locate == nil {
@@ -355,14 +394,48 @@ func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet
 	if kept != 0 && g.cfg.UnusualSignIns.Decide != nil {
 		v.action, v.reason = g.decide(r, user, method, place, v)
 	}
+	if v.action == UnusualSignInProve {
+		v.action = g.resolveProve(user, method)
+	}
 	return v
+}
+
+// canProve reports whether prove would hold user's sign-in for a
+// passkey: one is usable here (a passkey registered under the current RP
+// ID, none on hold, relying party ready) and the sign-in was not itself
+// a passkey one.
+func (g *Gate) canProve(user *gauntlet.User, method gauntlet.SignInMethod) bool {
+	return !passkeyMethod(method) && g.usablePasskeyCount(user) > 0
+}
+
+// passkeyMethod is true for the two sign-in methods that are a passkey
+// assertion.
+func passkeyMethod(m gauntlet.SignInMethod) bool {
+	return m == gauntlet.SignInMethodPasskey || m == gauntlet.SignInMethodPasskeyAlone
+}
+
+// resolveProve is what an answer of prove comes to for this sign-in
+// (#65): a sign-in that was a passkey one is already proved, so flag;
+// an account with a passkey usable here is held for one (prove); one
+// without is held for a code when the application can deliver one
+// (confirm), else refused (block).
+func (g *Gate) resolveProve(user *gauntlet.User, method gauntlet.SignInMethod) UnusualSignInAction {
+	switch {
+	case passkeyMethod(method):
+		return UnusualSignInFlag
+	case g.canProve(user, method):
+		return UnusualSignInProve
+	case g.cfg.DeliverConfirmCode != nil:
+		return UnusualSignInConfirm
+	}
+	return UnusualSignInBlock
 }
 
 // decide asks the policy's Decide about v, in its own goroutine with a
 // recover and a DecideTimeout context (callBounded), and returns the
 // action and, for a block, the reason. Every failure is block: a panic
 // or an error is decide-failed, the deadline decide-timeout, and an
-// answer that is not flag, confirm or block -- or confirm with nothing
+// answer that is not flag, confirm, prove or block -- or confirm with nothing
 // to deliver the code -- decide-invalid. Each failure leaves one error
 // line with what happened; the audit carries only the reason.
 func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict) (UnusualSignInAction, string) {
@@ -372,6 +445,7 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 		UserID: user.ID, Username: user.Username, Role: user.Role,
 		Signals: v.signals, Country: place.client.Country, PreviousCountry: v.previousCountry,
 		Method: method, Client: client, Default: v.action,
+		CanProve: g.canProve(user, method),
 	}
 	decide := g.cfg.UnusualSignIns.Decide
 	var answer UnusualSignInAction
@@ -391,7 +465,7 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 		return fail("decide-failed", fmt.Sprintf("failed: %q", err.Error()))
 	}
 	switch answer {
-	case UnusualSignInFlag, UnusualSignInBlock:
+	case UnusualSignInFlag, UnusualSignInProve, UnusualSignInBlock:
 		return answer, "policy"
 	case UnusualSignInConfirm:
 		if g.cfg.DeliverConfirmCode != nil {
@@ -399,7 +473,7 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 		}
 		return fail("decide-invalid", "answered confirm, and no Config.DeliverConfirmCode can deliver a code")
 	}
-	return fail("decide-invalid", fmt.Sprintf("answered %q, which is not flag, confirm or block", string(answer)))
+	return fail("decide-invalid", fmt.Sprintf("answered %q, which is not flag, confirm, prove or block", string(answer)))
 }
 
 // completeSignIn issues the session a judged sign-in has earned and

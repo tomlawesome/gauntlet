@@ -29,15 +29,19 @@ const (
 	loginPath        = "/api/auth/login"
 	loginFactorPath  = "/api/auth/login/factor"
 	loginConfirmPath = "/api/auth/login/confirm"
-	loginEscapePath  = "/api/auth/login/escape"
-	logoutPath       = "/api/auth/logout"
-	oidcPathPrefix   = "/api/auth/oidc"
-	oidcLoginPath    = "/api/auth/oidc/login"
-	oidcCallbackPath = "/api/auth/oidc/callback"
-	totpEnrolPath    = "/api/auth/totp/enrol"
-	totpConfirmPath  = "/api/auth/totp/confirm"
-	sessionsPath     = "/api/auth/sessions"
-	unlockPath       = "/api/auth/unlock"
+	// loginProveBeginPath and loginProvePath finish a sign-in held for a
+	// passkey (#65, ADR-0009; provelogin.go).
+	loginProveBeginPath = "/api/auth/login/prove/begin"
+	loginProvePath      = "/api/auth/login/prove"
+	loginEscapePath     = "/api/auth/login/escape"
+	logoutPath          = "/api/auth/logout"
+	oidcPathPrefix      = "/api/auth/oidc"
+	oidcLoginPath       = "/api/auth/oidc/login"
+	oidcCallbackPath    = "/api/auth/oidc/callback"
+	totpEnrolPath       = "/api/auth/totp/enrol"
+	totpConfirmPath     = "/api/auth/totp/confirm"
+	sessionsPath        = "/api/auth/sessions"
+	unlockPath          = "/api/auth/unlock"
 
 	// reauthenticatePath resumes a session that timed out with the
 	// password alone (#71; reauthenticate_handler.go).
@@ -74,7 +78,9 @@ const (
 // half of that step (G8), is reached the same way for the same reason.
 // POST /api/auth/login/passkey/begin and /api/auth/login/passkey sign in
 // with a passkey alone (#77): no session and no pending login, only the
-// ceremony cookie the begin route set.
+// ceremony cookie the begin route set. POST /api/auth/login/prove/begin
+// and /api/auth/login/prove finish a sign-in held for a passkey (#65):
+// only the confirm ticket, as login/confirm has.
 //
 // GET /api/auth/oidc/login and /callback are a top-level
 // browser redirect/navigation the provider issues, not a fetch() an
@@ -106,6 +112,8 @@ var exemptPaths = map[string]bool{
 	loginPasskeyBeginPath: true,
 	loginPasskeyPath:      true,
 	loginConfirmPath:      true,
+	loginProveBeginPath:   true,
+	loginProvePath:        true,
 	loginEscapePath:       true,
 	oidcLoginPath:         true,
 	oidcCallbackPath:      true,

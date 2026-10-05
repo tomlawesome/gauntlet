@@ -336,7 +336,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		g.clearPendingLoginCookie(w)
 		sent, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
 		if sent {
-			writeJSON(w, http.StatusOK, confirmChallenge)
+			writeJSON(w, http.StatusOK, g.heldChallenge(verdict))
 			return
 		}
 		writeSignInRefused(w)
@@ -517,7 +517,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		g.clearPendingLoginCookie(w)
 		sent, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)
 		if sent {
-			writeJSON(w, http.StatusOK, confirmChallenge)
+			writeJSON(w, http.StatusOK, g.heldChallenge(verdict))
 			return true
 		}
 		writeSignInRefused(w)

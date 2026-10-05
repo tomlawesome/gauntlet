@@ -333,8 +333,14 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		sent, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
 		if sent {
 			// The frontend asks for the code and posts it to
-			// login/confirm, which holds the ticket this set.
-			http.Redirect(w, r, g.cfg.LoginPath+"?confirm=1", http.StatusFound)
+			// login/confirm, which holds the ticket this set -- or,
+			// held for a passkey, runs login/prove/begin and posts
+			// the assertion to login/prove (#65).
+			query := "?confirm=1"
+			if verdict.action == UnusualSignInProve {
+				query = "?prove=1"
+			}
+			http.Redirect(w, r, g.cfg.LoginPath+query, http.StatusFound)
 			return
 		}
 		g.redirectWithSSOError(w, r, "refused")

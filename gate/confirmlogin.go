@@ -47,10 +47,16 @@ type confirmLoginState struct {
 	// spentConfirmLogins by the sign-in that completes it.
 	ID string
 	// CodeHash is the hex SHA-256 of the code's eight digits, no dash.
+	// Empty on a prove ticket.
 	CodeHash string
 	Signals  gauntlet.SignInSignals
 	// Method is how the credentials were presented.
 	Method gauntlet.SignInMethod
+	// Prove marks a ticket that is held for a passkey assertion for the
+	// account (#65, login/prove) rather than a code: it carries no
+	// CodeHash, and login/confirm refuses it as login/prove refuses one
+	// that does not.
+	Prove bool
 }
 
 // confirmLoginCodec seals the ticket with its own per-process key, so a
@@ -63,10 +69,11 @@ var confirmLoginCodec = mustNewSealCodec("confirm-login")
 var spentConfirmLogins = spent.New(ConfirmCodeLifetime)
 
 // decodeConfirmLogin opens a ticket, refusing anything malformed,
-// tampered, without an ID, or ConfirmCodeLifetime old or older.
+// tampered, without an ID, with a code hash when it is a prove ticket
+// or none when it is not, or ConfirmCodeLifetime old or older.
 func decodeConfirmLogin(value string, now time.Time) (confirmLoginState, bool) {
 	var st confirmLoginState
-	if !confirmLoginCodec.open(value, &st) || st.ID == "" || st.UserID == "" || st.CodeHash == "" {
+	if !confirmLoginCodec.open(value, &st) || st.ID == "" || st.UserID == "" || (st.CodeHash == "") != st.Prove {
 		return confirmLoginState{}, false
 	}
 	if !now.Before(st.IssuedAt.Add(ConfirmCodeLifetime)) {
@@ -218,7 +225,7 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, ok := decodeConfirmLogin(cookie.Value, now)
-	if !ok || spentConfirmLogins.Spent(st.ID, now) {
+	if !ok || st.Prove || spentConfirmLogins.Spent(st.ID, now) {
 		expired()
 		return
 	}
@@ -247,6 +254,16 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 		expired()
 		return
 	}
+	g.completeHeldSignIn(w, r, user, res, st, UnusualSignInConfirm, now)
+}
+
+// completeHeldSignIn issues the session a held sign-in's ticket has
+// earned, once its code (confirm) or passkey (prove) has checked out and
+// the ticket is claimed: the limiter's reservation is completed, the
+// ticket cookie dropped, the session carries the ticket's signals, the
+// history row is a success marked confirmed and the browser, country and
+// place are remembered. It answers 200 with the account.
+func (g *Gate) completeHeldSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st confirmLoginState, action UnusualSignInAction, now time.Time) {
 	g.completeLogin(res, now)
 	g.endAfterReset(res)
 	g.clearConfirmLoginCookie(w)
@@ -256,7 +273,7 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 	ev.Client.Unusual, ev.Confirmed = signals, true
 	note := ""
 	if signals != 0 {
-		note = fmt.Sprintf("unusual=%s; action=%s; ", signals, UnusualSignInConfirm)
+		note = fmt.Sprintf("unusual=%s; action=%s; ", signals, action)
 	}
 	g.recordSignInNote(r, ev, res, note, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})

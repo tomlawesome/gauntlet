@@ -276,7 +276,7 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 		g.endAfterReset(res)
 		sent, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPasskeyAlone, place, verdict, now)
 		if sent {
-			writeJSON(w, http.StatusOK, confirmChallenge)
+			writeJSON(w, http.StatusOK, g.heldChallenge(verdict))
 			return
 		}
 		writeSignInRefused(w)
