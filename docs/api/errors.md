@@ -272,6 +272,21 @@ named under the class it shares, below.
   an admin first", or, for a delete, "the last admin account cannot be
   deleted -- make another account an admin first".
 
+## role-managed-by-sso
+
+- **Status:** 409. **Title:** Role managed by single sign-on.
+- The request would change to `user` or `viewer` the role of an account
+  linked to single sign-on, on a deployment that maps identity-provider
+  groups to roles (#76, ADR-0013). The provider's groups decide that role
+  at every sign-in and would overwrite the change, so nothing was
+  changed: change the group at the identity provider instead.
+- Returned by `PUT /api/auth/users/{id}/role` only. Granting `admin` to
+  such an account, and demoting an admin, are not refused: the group map
+  never touches an admin. An account that already holds the role asked
+  for is `conflict` instead.
+- `detail` is "this account's role comes from its groups at the identity
+  provider; change the group there".
+
 ## rate-limited
 
 - **Status:** 429. **Title:** Too many attempts.

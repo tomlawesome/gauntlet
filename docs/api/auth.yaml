@@ -1684,7 +1684,12 @@ paths:
         The last admin cannot be demoted (`409` class `last-admin`); an
         admin may demote themselves while another admin remains. An
         account that already holds the role is `409` class `conflict`,
-        refused before any step-up is asked for. A downgrade (to a lower
+        refused before any step-up is asked for. On an account linked to
+        single sign-on, when the deployment maps identity-provider groups
+        to roles (#76), a change to `user` or `viewer` is `409` class
+        `role-managed-by-sso`, also before any step-up: the provider
+        decides that role at every sign-in. Granting `admin` to such an
+        account, and demoting an admin, work as for any account. A downgrade (to a lower
         tier than before) ends every session the account holds, the
         caller's own included when it is their own account; a grant ends
         none. Audited as `user.role_changed` with actor, from and to, and
@@ -2462,7 +2467,7 @@ components:
                   type:
                     const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#conflict
     ConflictOrLastAdmin:
-      description: The request is refused because of the account's or the deployment's current state (class `conflict`), or because it would leave the deployment with no admin (class `last-admin`).
+      description: The request is refused because of the account's or the deployment's current state (class `conflict`), because it would leave the deployment with no admin (class `last-admin`), or because the account's role is decided by the identity provider's groups (class `role-managed-by-sso`, #76; the role route only).
       content:
         application/problem+json:
           schema:
@@ -2473,6 +2478,7 @@ components:
                     enum:
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#conflict
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#last-admin
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#role-managed-by-sso
     TooManyRequests:
       description: Too many failed attempts from this address or on this account; try again later. Class `rate-limited`.
       content:

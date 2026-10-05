@@ -177,7 +177,7 @@ type problemClass struct {
 // "type" member.
 const problemTypeBase = "https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#"
 
-// The seventeen classes docs/api/errors.md documents, one var each --
+// The eighteen classes docs/api/errors.md documents, one var each --
 // Go has no constant struct literal, so these stand in for the
 // constants the design calls for: built once at package load and never
 // written to again.

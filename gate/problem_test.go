@@ -74,7 +74,7 @@ func TestWriteProblemShape(t *testing.T) {
 	}
 }
 
-// TestEveryClassHasAFixedAnchorTitleAndURL pins the seventeen classes
+// TestEveryClassHasAFixedAnchorTitleAndURL pins the eighteen classes
 // docs/api/errors.md documents: each anchor is unique (so two classes
 // never collide on one permanent URL) and problemTypeBase+anchor is
 // well-formed.
@@ -85,7 +85,7 @@ func TestEveryClassHasAFixedAnchorTitleAndURL(t *testing.T) {
 		classMustEnrolFactor, classInvalidRequest, classNotFound,
 		classConflict, classRateLimited, classSetupRequired,
 		classNotPersisted, classServerError, classPartiallyCompleted,
-		classSignInRefused, classLastAdmin,
+		classSignInRefused, classLastAdmin, classRoleManagedBySSO,
 	}
 	seen := map[string]bool{}
 	for _, c := range classes {
@@ -97,8 +97,8 @@ func TestEveryClassHasAFixedAnchorTitleAndURL(t *testing.T) {
 		}
 		seen[c.anchor] = true
 	}
-	if len(seen) != 17 {
-		t.Errorf("got %d distinct anchors, want 17", len(seen))
+	if len(seen) != 18 {
+		t.Errorf("got %d distinct anchors, want 18", len(seen))
 	}
 }
 

@@ -1076,6 +1076,27 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	c.do(first, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 403, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 201, nil)
 
+	// The first SSO account's role comes from its groups (#76): it has
+	// none, so it is a viewer, and the role route will not move it.
+	var accounts []userSummary
+	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, &accounts)
+	firstID := ""
+	for _, a := range accounts {
+		if a.Username == "person" {
+			firstID = a.ID
+		}
+	}
+	if firstID == "" {
+		t.Fatal("the first SSO account is not in the user list")
+	}
+	var managed struct {
+		Type string `json:"type"`
+	}
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + firstID + "/role", body: setRoleRequest{Role: "user"}}, 409, &managed)
+	if want := "https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#role-managed-by-sso"; managed.Type != want {
+		t.Errorf("the managed account's refusal has type %q, want %q", managed.Type, want)
+	}
+
 	// carol links her local account to a second identity.
 	carol := c.client()
 	c.do(carol, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"carol", "contract-carol-password"}}, 200, nil)
