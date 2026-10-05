@@ -1139,7 +1139,7 @@ func (s *Store) Admin() *User {
 	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if a := s.storeState.firstAdmin(); a != nil {
+	if a := s.firstAdmin(); a != nil {
 		cp := *a
 		return &cp
 	}
