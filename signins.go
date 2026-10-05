@@ -399,7 +399,7 @@ func (h *SignInHistory) Describe() string {
 // one sent a confirmation code (#55).
 func signInFailedOutcome(o SignInOutcome) bool {
 	switch o {
-	case SignInSuccess, SignInPasswordOK, SignInRefused, SignInConfirmSent:
+	case SignInSuccess, SignInPasswordOK, SignInRefused, SignInConfirmSent, SignInEscapeIssued:
 		return false
 	}
 	return true

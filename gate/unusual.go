@@ -118,7 +118,9 @@ type UnusualSignInDetail struct {
 	// session list shows it, so a message can say "end this session".
 	SessionRef string
 	// Reason, under block, says why: policy, decide-failed,
-	// decide-timeout, decide-invalid or notify-failed.
+	// decide-timeout, decide-invalid or notify-failed. On the notice of
+	// a block let through by a lone admin's escape code (#66, ADR-0011)
+	// it is "escape", with SessionRef set.
 	Reason string
 }
 
@@ -168,7 +170,9 @@ func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) 
 // not, the attempt was refused (answer sign-in-refused) and notice is
 // the block notice to send once the response is written, nil for none.
 // A confirm whose code could not be delivered is refused as
-// notify-failed: no code reached anyone.
+// notify-failed: no code reached anyone. A block of a lone admin also
+// issues the escape code (refuseSignIn, #66), except on the SSO
+// callback: every admin keeps a local password (ADR-0010).
 func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (confirmSent bool, notice *AccountNotice) {
 	reason := v.reason
 	if v.action == UnusualSignInConfirm {
@@ -177,7 +181,7 @@ func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet
 		}
 		reason = "notify-failed"
 	}
-	return false, g.refuseSignIn(r, user, res, method, place, v.signals, reason, now)
+	return false, g.refuseSignIn(w, r, user, res, method, place, v.signals, reason, now)
 }
 
 // stopsSignIn reports whether v is confirm or block.
@@ -323,7 +327,16 @@ type unusualVerdict struct {
 	// previousCountry is the last place's country when impossible
 	// travel is kept.
 	previousCountry string
+	// escape marks a sign-in completed with the escape code (#66): a
+	// block that was let through. completeSignIn then records it
+	// confirmed, with escape=used in the audit detail, and a notice
+	// whose Reason is "escape".
+	escape bool
 }
+
+// escapeUsedNote is the audit note a sign-in completed with an escape
+// code carries (#66), after unusual= and action=.
+const escapeUsedNote = "escape=used; "
 
 // judgeSignIn judges user's completed sign-in from place: read-only,
 // and skipped altogether when the policy turns every signal off. When
@@ -399,12 +412,19 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *AccountNotice {
 	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
-	ev.Client.Unusual = signals
+	ev.Client.Unusual, ev.Confirmed = signals, v.escape
 	if signals == 0 {
+		if v.escape {
+			g.recordSignInNote(r, ev, res, escapeUsedNote, now)
+			return nil
+		}
 		g.recordSignIn(r, ev, res, now)
 		return nil
 	}
 	note := fmt.Sprintf("unusual=%s; action=%s; ", signals, v.action)
+	if v.escape {
+		note += escapeUsedNote
+	}
 	notify := g.noticeAllowed(user.ID, now)
 	if notify != "" {
 		note += "notify=" + notify + "; "
@@ -413,11 +433,13 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	if notify != "asked" {
 		return nil
 	}
+	detail := &UnusualSignInDetail{Action: v.action, Signals: signals, Method: method, Client: sess.Client, SessionRef: sess.Ref()}
+	if v.escape {
+		detail.Reason = v.reason
+	}
 	return &AccountNotice{
 		Kind: NoticeUnusualSignIn, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
-		UnusualSignIn: &UnusualSignInDetail{
-			Action: v.action, Signals: signals, Method: method, Client: sess.Client, SessionRef: sess.Ref(),
-		},
+		UnusualSignIn: detail,
 	}
 }
 
@@ -441,10 +463,22 @@ func writeSignInRefused(w http.ResponseWriter) {
 // refused row with the signals and user.login_refused, and returns the
 // notice to send once the response is written, nil for none. reason is
 // policy, or why a Decide or the confirm notice failed.
-func (g *Gate) refuseSignIn(r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, reason string, now time.Time) *AccountNotice {
+//
+// For an admin no other admin can act for, on the password or factor
+// path, it first issues the escape code (startEscape, #66): the ticket
+// cookie is set on w, the code goes to the server's log, and the audit
+// note gains "escape=issued; ". The answer stays the same 403.
+func (g *Gate) refuseSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, reason string, now time.Time) *AccountNotice {
+	// A lone admin with no one to reset them gets an escape code in the
+	// server's log and a ticket in this browser (#66); the refusal itself
+	// is unchanged.
+	escape := g.startEscape(w, r, user, res, method, place, signals, now)
 	ev := loginEvent(user, "", gauntlet.SignInRefused, method)
 	ev.Client.Unusual = signals
 	note := fmt.Sprintf("unusual=%s; reason=%s; method=%s; ", signals, reason, method)
+	if escape {
+		note += "escape=issued; "
+	}
 	notify := g.noticeAllowed(user.ID, now)
 	if notify != "" {
 		note += "notify=" + notify + "; "

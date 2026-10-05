@@ -28,6 +28,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("POST "+loginPath, g.handleLogin)
 	mux.HandleFunc("POST "+loginFactorPath, g.handleLoginFactor)
 	mux.HandleFunc("POST "+loginConfirmPath, g.handleLoginConfirm)
+	mux.HandleFunc("POST "+loginEscapePath, g.handleLoginEscape)
 	mux.HandleFunc("POST "+logoutPath, g.handleLogout)
 	mux.HandleFunc("POST /api/auth/logout-all", g.handleLogoutAll)
 	mux.HandleFunc("POST "+changePasswordPath, g.handleChangePassword)

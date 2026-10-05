@@ -126,8 +126,9 @@ func (s *Store) issueUnlockCodeLocked() (username, code string) {
 	if s.unlockCodeHash != nil && s.unlockCodeFor == admin.ID {
 		return "", ""
 	}
-	// The setup code's generator: same alphabet, length and grouping
-	// (80 bits), and only its hash is kept.
+	// The setup code's generator (NewOneTimeCode, which is also the
+	// escape code's, #66): same alphabet, length and grouping (80 bits),
+	// and only its hash is kept.
 	display, hash := newSetupCode()
 	s.unlockCodeHash, s.unlockCodeFor = hash, admin.ID
 	return admin.Username, display

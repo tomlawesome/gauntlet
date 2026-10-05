@@ -61,7 +61,7 @@ var signInOutcomes = map[gauntlet.SignInOutcome]bool{
 	gauntlet.SignInWrongPassword: true, gauntlet.SignInFactorRefused: true, gauntlet.SignInLocked: true,
 	gauntlet.SignInDisabled: true, gauntlet.SignInRateLimited: true, gauntlet.SignInSSORefused: true,
 	gauntlet.SignInUnrecorded: true, gauntlet.SignInRefused: true, gauntlet.SignInConfirmSent: true,
-	gauntlet.SignInConfirmRefused: true,
+	gauntlet.SignInConfirmRefused: true, gauntlet.SignInEscapeIssued: true, gauntlet.SignInEscapeRefused: true,
 }
 
 // signInQuery reads the route's query: user (an account id), address

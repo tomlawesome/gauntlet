@@ -105,6 +105,13 @@ type Config struct {
 	// -- refuses the sign-in: no code reached anyone, so none is owed.
 	// See ConfirmCode.
 	DeliverConfirmCode func(ctx context.Context, c ConfirmCode) error
+	// OnEscapeCode receives the escape code a lone admin refused by the
+	// unusual-sign-in policy may type into the refused browser (#66,
+	// ADR-0011), synchronously, before the refusal is answered. nil
+	// means the code is written to Log as one Warn line, as the setup
+	// and unlock codes are; with both nil no code is issued and the
+	// refusal is as it always was. See EscapeCodeHandler.
+	OnEscapeCode EscapeCodeHandler
 	// ClientIP resolves the address the login limiter is keyed on
 	// (mikroview's clientIP -- its own trusted-proxy policy is the
 	// application's, not gate's). Required.

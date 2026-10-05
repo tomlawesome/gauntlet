@@ -40,6 +40,13 @@ const (
 	SignInConfirmSent SignInOutcome = "confirm_sent"
 	// SignInConfirmRefused is a wrong confirmation code.
 	SignInConfirmRefused SignInOutcome = "confirm_refused"
+	// SignInEscapeIssued is a lone admin's sign-in whose every credential
+	// was right and which the policy refused (#66): an escape code was
+	// written to the server's log, no session yet. A refused row is
+	// recorded with it.
+	SignInEscapeIssued SignInOutcome = "escape_issued"
+	// SignInEscapeRefused is a wrong escape code.
+	SignInEscapeRefused SignInOutcome = "escape_refused"
 	// SignInUnrecorded is a SignInHistory row standing for the failed
 	// attempts past a bucket's row budget (signins.go). gate never
 	// reports it as an event.

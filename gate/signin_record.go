@@ -3,6 +3,7 @@ package gate
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -76,7 +77,7 @@ func (g *Gate) signInClient(r *http.Request, address string) gauntlet.SessionCli
 // policy refused or sent a confirmation code for (#55).
 func signInFailed(o gauntlet.SignInOutcome) bool {
 	switch o {
-	case gauntlet.SignInSuccess, gauntlet.SignInPasswordOK, gauntlet.SignInRefused, gauntlet.SignInConfirmSent:
+	case gauntlet.SignInSuccess, gauntlet.SignInPasswordOK, gauntlet.SignInRefused, gauntlet.SignInConfirmSent, gauntlet.SignInEscapeIssued:
 		return false
 	}
 	return true
@@ -139,10 +140,12 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 		g.auditRecord(name, "user.login_refused", name, note+from)
 	case !failed:
 		if ev.Outcome != gauntlet.SignInSuccess {
-			return // password_ok, confirm_sent: no sign-in yet
+			return // password_ok, confirm_sent, escape_issued: no sign-in yet
 		}
 		detail := from
 		switch {
+		case ev.Confirmed && strings.Contains(note, escapeUsedNote):
+			detail = "via escape code; " + from
 		case ev.Confirmed:
 			detail = "via confirmation code; " + from
 		case ev.Method == gauntlet.SignInMethodCode, ev.Method == gauntlet.SignInMethodPasskey:
