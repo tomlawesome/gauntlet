@@ -234,6 +234,7 @@ func (s *Store) Get(id string) (*User, bool)
 func (s *Store) ByUsername(username string) (*User, bool)
 func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (*User, bool, error)
+func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint string, role Role, now time.Time) (OIDCSignIn, error) // new (#76, ADR-0013): role "" leaves it alone; user|viewer creates or moves the account in the sign-in write, never an admin
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
 func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout (no limiter: a CLI)
@@ -653,6 +654,25 @@ self-hosted-only policy (`multiTenantIssuers`) moves with it and is not
 made configurable: `docs/decisions/multi-tenant-oidc.md` decided that
 deliberately, and [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md) adopted it for birdcage.
 
+**Roles from groups (#76, [ADR-0013](adr/0013-sso-group-roles.md)).**
+`Policy` gains `RoleFromGroups` (group -> `user` | `viewer`, matched like
+`AllowedGroups`) and `RoleWithoutGroup` (`""` means `viewer`), and the
+methods `Groups(id)` (the claim's values, as `Permit` reads them) and
+`ValidateRoles(valid)`. `gate.New` refuses a value of `admin` or any
+unknown role: an identity provider never mints an admin, and an account
+already holding `admin` is never changed by the map. With a map set,
+every SSO sign-in applies the highest role among the identity's mapped
+groups, or the fallback for none (including an absent groups claim), in
+the same store write that finds or creates the account. A downgrade ends
+the account's other sessions; the change is audited as
+`user.role_changed` with actor `sso` and told to `Config.Notices` as
+`NoticeRoleChanged` with `RoleChangeDetail.ViaSSO`. No stored field is
+added, so the accounts document stays at version 9. On such an account
+the role route refuses `user`/`viewer` changes (409
+`role-managed-by-sso`); the map narrows roles, not access, so
+`Restricted` is unchanged and who may sign in stays with
+`AllowedGroups`.
+
 ### 1.5 `gauntlet/gate`
 
 ```go
@@ -889,6 +909,10 @@ account's sessions (the store writes `SessionsEndedAt`; the handler
 drops the in-memory ones). Audited as `user.role_changed` with actor,
 from and to; `Config.Notices` gets `NoticeRoleChanged`
 (`RoleChangeDetail{From, To}`), also for an admin created over HTTP.
+On an SSO account whose role the identity provider's groups decide
+(#76, §1.4), a change to `user` or `viewer` is refused, 409 class
+`role-managed-by-sso`, before any step-up; granting or demoting an admin
+is not.
 
 **The admin's password on the other admin routes (#72, ASVS 7.5.3).**
 `POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`,

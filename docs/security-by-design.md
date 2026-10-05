@@ -367,6 +367,8 @@ store, keep and protect:
   `account.totp_disabled`, `user.totp_cleared`, `account.passkey_added`,
   `account.passkey_removed`, `account.passkey_clone_suspected`,
   `user.passkeys_cleared`, `account.link_sso`, `account.sessions_ended`,
+  `user.role_changed` (an admin's change, or actor `sso` when the identity
+  provider's group map moved an account at sign-in, #76),
   `account.recovery_codes_regenerated`, `user.create`, `user.delete`,
   `user.password_reset`, `token.create`, `token.revoke`, each ending
   with `from=` the client address (#45), and `token.removed_unused`

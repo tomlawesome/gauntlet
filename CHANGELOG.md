@@ -36,6 +36,26 @@ All notable changes to this project are documented in this file.
   Go API: `gauntlet.PasskeySignIn`, `PasskeyAssertion.UserVerified`,
   `SignInMethodPasskeyAlone`, `SessionClient.Method`, `Config.PasskeySignIn`
   and `passkey.RelyingParty`'s `BeginSignIn` and `FinishSignIn`.
+- **Roles for SSO accounts from identity-provider groups** (#76,
+  ADR-0013). `oidc.Policy.RoleFromGroups` maps a group to `user` or
+  `viewer`; `RoleWithoutGroup` (default `viewer`, or `user`) covers an
+  account in no mapped group, an absent groups claim included. The role
+  is applied at provisioning and at every SSO sign-in, in the same write
+  that finds or creates the account: the highest role among the mapped
+  groups wins, and a downgrade ends the account's other sessions. Admin
+  is never given by a group (`gate.New` refuses it, and an unknown role,
+  at start-up) and an account already an admin is never changed by the
+  map. The change is audited as `user.role_changed` with actor `sso` and
+  told to `Config.Notices` as `NoticeRoleChanged` with `By` empty and the
+  new `RoleChangeDetail.ViaSSO`. On such an account (linked to SSO, a map
+  configured, not an admin) `PUT /api/auth/users/{id}/role` to `user` or
+  `viewer` is `409` with the new class `role-managed-by-sso`: change the
+  group at the provider. Granting or demoting an admin still works. Not
+  configured, nothing changes. Additive Go API: `Policy.RoleFromGroups`,
+  `Policy.RoleWithoutGroup`, `Policy.Groups`, `Policy.ValidateRoles`,
+  `Store.FindOrCreateOIDCUserWithRole` and `OIDCSignIn`; the accounts
+  document stays at version 9. Birdcage and mikroview: a frontend that
+  branches on the role route's `409` classes should handle the new one.
 - **Resume a timed-out session with the password alone** (#71). A session
   idle past the one-hour timeout but inside its 24-hour ceiling no longer
   forces a full two-factor sign-in (NIST SP 800-63B-4 section 2.2.3).
