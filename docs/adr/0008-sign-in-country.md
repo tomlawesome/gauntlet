@@ -124,3 +124,8 @@ place.
   memory (a few to tens of megabytes).
 - A sign-in recorded while no file is loaded, or while the provider is
   unreachable on a first start, has no country, and keeps none.
+- `Config.Edition` (#55, ADR-0009) lets an application keep MaxMind's
+  larger GeoLite2-City file instead, which also answers a point and
+  accuracy radius through `Manager.Locate`, for impossible travel;
+  IPinfo Lite has no coordinates, so `EditionCity` needs
+  `SourceMaxMind`. `Country` answers the same way from either file.

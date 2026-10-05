@@ -196,6 +196,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     SessionsEndedAt, LoginLockedUntil time.Time // new (#28, #19): gauntlet's own, zero in mikroview's documents
     LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
     KnownBrowsers []KnownBrowser // new (#44): accounts version 4; none in older documents
+    SeenCountries []SeenCountry; LastPlace *LastPlace // new (#55): accounts version 8; what unusual sign-ins are judged against, none/nil in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
@@ -237,6 +238,19 @@ const MaxKnownBrowsers = 3; const KnownBrowserLifetime = 45 * 24 * time.Hour // 
 func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (string, error) // #44: new token, old one's entry dropped, oldest evicted past 3
 func (s *Store) ClearKnownBrowsers(accountID string) error                                 // #44: sign out everywhere; IssueResetCode does it in its own write
 func (s *Store) KnowsBrowser(accountID, token string, now time.Time) bool                  // #44: hash on the record, under 45 days old
+// Unusual sign-ins (#55): judged against the memory above, never looked up again after the fact.
+type SeenCountry struct { Code string; LastAt time.Time }       // gate.Config.Country's answer, and when it was last seen
+const MaxSeenCountries = 3; const SeenCountryLifetime = 90 * 24 * time.Hour
+type Location struct { Latitude, Longitude float64; RadiusKm int } // a city-level lookup's point and accuracy radius (geoip.EditionCity)
+type LastPlace struct { Country string; Location; At time.Time }   // the account's one latest located sign-in; a point, not a trail
+const ImpossibleTravelSpeedKmh = 800.0                             // Okta's number
+type SignInSignals uint8 // bit set, not a slice, so SessionClient stays comparable
+const ( SignalNewBrowser SignInSignals = 1 << iota; SignalNewCountry; SignalImpossibleTravel ) // fixed order: new-browser, new-country, impossible-travel
+func (s SignInSignals) Has(f SignInSignals) bool; func (s SignInSignals) Names() []string; func (s SignInSignals) String() string
+func ParseSignInSignal(name string) (SignInSignals, bool)
+type SignInJudgement struct { Signals SignInSignals; PreviousCountry string } // PreviousCountry is LastPlace.Country when SignalImpossibleTravel is set
+func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, loc *Location, now time.Time) SignInJudgement // read-only; tokens are the known-browser tokens the browser carries
+func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) // one write: rotates the browser token (as RememberBrowser) and remembers the country and last place; RememberBrowser is RememberSignIn with country and loc left blank
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
@@ -263,7 +277,7 @@ func NewKDFSalt() ([]byte, error)
 func DeriveKey(passphrase string, salt []byte, p KDFParams) []byte  // kept: mikroview's retention key uses it
 
 type Session struct { ID, UserID string; IssuedAt, ExpiresAt, LastUsedAt time.Time; Client SessionClient }
-type SessionClient struct { Address, UserAgent string }             // new (#48): recorded at sign-in, memory only
+type SessionClient struct { Address, UserAgent, Country string; Unusual SignInSignals } // new (#48): recorded at sign-in, memory only; Country (#54) is the lookup's answer, not the client's own word; Unusual (#55) is gate's judgement, not the client's word either
 const ( MaxSessionUserAgent = 256; MaxSessionAddress = 64 )          // bytes kept, after control/format chars are dropped
 func (s Session) Ref() string                                       // new (#48): first 32 hex of SHA-256(ID); shown instead of the ID
 func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore  // new: one constructor; mikroview's two collapse
@@ -323,8 +337,10 @@ type AccountLockoutRecords interface {                              // new: a ho
 type LoginLockoutRecord struct { LockedUntil time.Time; Lockouts int; DisabledAt time.Time }
 
 type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
+// refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out and no session yet, confirm_refused is a wrong code. refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
 type SignInMethod string  // password, code, passkey, sso
-type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool }
+type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool
+    Confirmed bool } // new (#55): the sign-in completed through gate's confirmation-code step
 func MaskUnknownUsername(typed string) string // new (#53): first two runes + one • per further rune; probe names (root, admin, ...) kept
 
 // The sign-in history (#53, ADR-0006): a third sealed document, "signins".
@@ -332,8 +348,8 @@ func OpenSignInHistory(b persist.Backend, opts SignInHistoryOptions) (*SignInHis
 type SignInHistoryOptions struct { Log *slog.Logger; MaxRows int; AllowPlaintextAtRest bool }
 const DefaultMaxSignInRows = 10_000 // MaxRows 0; MaxSignInRows = 50_000 is the most allowed
 const DefaultSignInListLimit, MaxSignInListLimit = 50, 200
-type SignInRow struct { Seq uint64; At, Until time.Time; Count int; UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool }
-type SignInQuery struct { UserID, Address string; Outcome SignInOutcome; Before uint64; Limit int }
+type SignInRow struct { Seq uint64; At, Until time.Time; Count int; UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled, Confirmed bool } // Client.Unusual and Confirmed new (#55); signins document version 3, an older build refuses it, an older row reads as none and false
+type SignInQuery struct { UserID, Address string; Outcome SignInOutcome; Before uint64; Limit int; Unusual bool } // Unusual new (#55): only rows that raised at least one signal
 func (h *SignInHistory) Record(ev SignInEvent, now time.Time)        // never waits for a save
 func (h *SignInHistory) List(q SignInQuery) (rows []SignInRow, more bool) // newest first
 func (h *SignInHistory) Summary() (total int, since time.Time)
@@ -620,6 +636,35 @@ func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below min
 
+// Unusual sign-ins (#55): Config.UnusualSignIns says what each signal
+// does; Decide, if set, can overrule the settings' answer once per
+// judged sign-in, fixed-timeout, fail-closed to block.
+type UnusualSignInAction string
+const ( UnusualSignInOff UnusualSignInAction = "off"; UnusualSignInFlag UnusualSignInAction = "flag"
+        UnusualSignInConfirm UnusualSignInAction = "confirm"; UnusualSignInBlock UnusualSignInAction = "block" ) // zero value/"" means flag
+type UnusualSignInPolicy struct {
+    Action UnusualSignInAction // base for every signal; "" means flag
+    NewBrowser, NewCountry, ImpossibleTravel UnusualSignInAction // per-signal override; "" means Action
+    // Decide is asked once per unusual sign-in, after every credential
+    // and before any session, with the settings' answer in c.Default;
+    // its answer replaces that. Runs under ctx, bounded by
+    // DecideTimeout; may do local I/O within that. A panic, an error, a
+    // timeout or an answer that is not one of the four actions refuses
+    // the sign-in (block), reasoned decide-failed, decide-timeout or
+    // decide-invalid.
+    Decide func(ctx context.Context, c UnusualSignInCase) (UnusualSignInAction, error)
+}
+type UnusualSignInCase struct {
+    UserID, Username string; Role gauntlet.Role
+    Signals          gauntlet.SignInSignals
+    Country          string // what Config.Country answered; "" if unknown
+    PreviousCountry  string // the account's last place's country when impossible-travel is raised; "" otherwise
+    Method           gauntlet.SignInMethod
+    Client           gauntlet.SessionClient // resolved address and agent, never the headers
+    Default          UnusualSignInAction    // what the settings decided
+}
+const DecideTimeout = 3 * time.Second // fixed, not configurable: Decide should be a local lookup
+
 // #73: the application mails the owner; gauntlet sends nothing. One
 // notice per account event, told apart by Kind, with the one typed
 // detail its Kind names.
@@ -637,6 +682,19 @@ type AccountNotice struct {
     UnusualSignIn *UnusualSignInDetail // unusual-sign-in (flag, block -- confirm sends only the code, below)
 }
 const MaxSessionEndReason = 200 // characters
+
+// UnusualSignInDetail (#55) never carries coordinates; the application
+// chooses wording, address and channel and treats Client.UserAgent as
+// text, never markup. At most one flag or block notice per account per
+// hour (unusualNoticeInterval); a held one is notify=quiet in the audit.
+type UnusualSignInDetail struct {
+    Action     UnusualSignInAction // flag, confirm or block
+    Signals    gauntlet.SignInSignals
+    Method     gauntlet.SignInMethod
+    Client     gauntlet.SessionClient // address, agent (text) and country
+    SessionRef string // flag: the ref the session list shows, so a message can say "end this session"
+    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid or notify-failed
+}
 
 // deprecated (#53, kept a minor release, ADR-0002 decision 2): Notices
 // narrowed to one event. New refuses a Config with both set.
@@ -703,6 +761,31 @@ is called in its own goroutine with a 10-second deadline and `recover()`;
 an error or panic is one log line, and the response's `notified` means
 asked, not delivered.
 
+**Unusual sign-ins (#55).** The one-step password path, the
+second-factor step and the SSO callback's sign-in branch each judge a
+completed sign-in (`gauntlet.Store.JudgeSignIn`) against what the
+account remembers (`SeenCountries`, `LastPlace`, known browsers); every
+other session issue never judges but still remembers
+(`gauntlet.Store.RememberSignIn`), so turning a signal on later starts
+from a baseline. `Config.UnusualSignIns` resolves the signals raised to
+one of `off`, `flag`, `confirm` or `block` -- the strictest of the kept
+signals wins -- and `Decide`, if set, can overrule that answer once,
+fixed at `DecideTimeout` (3 s), failing closed to `block` on a panic,
+an error, a timeout or an answer that is not one of the four. `flag`
+lets the sign-in complete, marked on the session, the sign-in history
+and the audit record. `confirm` holds it behind a code
+`Config.DeliverConfirmCode` hands the application synchronously, typed
+into the same sign-in at `POST /api/auth/login/confirm` (sealed ticket
+cookie `gate_confirm_login`, path `/api/auth/login`, 15 minutes); the
+code is eight decimal digits, shown once, kept only as its SHA-256.
+`block` answers 403 `sign-in-refused` (`docs/api/errors.md`), refusing
+the one attempt, never the account, and writes nothing to the
+account's memory. `gate.New` refuses an unknown action, `confirm` with
+no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with
+no `Config.Locate`. A `flag` or `block` notice through `Config.Notices`
+is rate-limited to once an account per hour; a `confirm` code has no
+limit, since the notice is the code the person is waiting for.
+
 **Account notices (#73, folding in #53 and #55).** `Config.Notices`
 (`AccountNotifier`) is the one hook for every account event this module
 raises: a password reset, a second factor added or removed, recovery
@@ -737,11 +820,21 @@ browser already held, since the new cookie replaces it (#47); the
 known-browser cookie `gate_known_browser` set at every session issue
 (`issueSession`, #44), `HttpOnly`, `SameSite=Lax`, `Secure` per
 `SecureCookie`, path `/api/auth` -- every route that issues a session
-is under it, so each issue sees the browser's old token and replaces
-it rather than adding a second entry against the cap of three -- and
-no `__Host-` prefix (which needs path `/`), `Max-Age` 45 days to match
-the server's own check (§1.3), read for the allowance only once the
-limiter has refused an attempt; the OIDC flow cookie
+is under it, so each issue sees the browser's old tokens and replaces
+its own rather than adding a second entry against the cap of three --
+and no `__Host-` prefix (which needs path `/`), `Max-Age` 45 days to
+match the server's own check (§1.3), read for the allowance only once
+the limiter has refused an attempt; since #55 the cookie carries up to
+four tokens joined by a character base64url never produces, one per
+account, so a browser shared by two accounts is not "new" to whichever
+one is switched to -- a one-token cookie from before this change still
+reads as a list of one; the confirm-login cookie `gate_confirm_login`
+(#55), path `/api/auth/login` (a prefix of `/api/auth/login/confirm`;
+the SSO callback can still set it, since a response sets a cookie for
+any path), `HttpOnly`, `SameSite=Lax`, `Secure` per `SecureCookie`,
+`Max-Age` 15 minutes (`ConfirmCodeLifetime`), sealed under its own
+per-process key so a restart fails a waiting confirmation cleanly; the
+OIDC flow cookie
 scoped to `/api/auth/oidc` with a 5-minute life; the two passkey ceremony
 cookies (`gate_passkey_register` on `/api/auth/passkeys`,
 `gate_passkey_assert` on `/api/auth/login`, 5 minutes, sealed by
@@ -957,6 +1050,13 @@ above `gauntlet.MaxSessionIdle` or a lifetime ceiling above
 (gauntlet#51, `docs/security-by-design.md`'s Sessions table). An app
 passing more than that is refused at start-up, not just logged.
 
+Unusual sign-ins (#55): birdcage leaves `Config.UnusualSignIns` at its
+zero value (`flag` on every signal) for now. It already mails its one
+administrator, so once that mail path is wired to carry a confirmation
+code, `Decide` can answer `confirm` for the admin account alone -- the
+mitigation for the lone-admin-under-`block` risk in §4's pitfalls
+table -- and `flag` for everyone else.
+
 Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
 listening, as mikroview's `main.go:1723` does -- `oidc.New` refuses it
 as well, so this call is belt-and-braces, not the only check. Login
@@ -1047,6 +1147,10 @@ Not done in this work; recorded so the API above is checked against it.
 - `DeriveKey`/`KDFParams` stay exported so mikroview's retention
   encryption keeps importing them from the same place its passwords
   come from.
+- Unusual sign-ins (#55): mikroview keeps no address per account
+  either, so it is the same choice as birdcage's -- `flag` by default,
+  `confirm` for the admin account through `Decide` once a mail path
+  exists to carry the code.
 
 Checked and fits without a data change: `User` (all 19 fields), `Token`
 (9 fields, `droplist-pull` via `Kinds`), `Session` semantics
@@ -1159,6 +1263,23 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A stale file answering quietly | still used, since a country rarely moves, but past 45 days every check logs a warning and `Status().Stale` is true |
 | A provider outage, or a refused key | a failed check retries in an hour, a refused key (401/403) in a day; the kept file is loaded at start, so lookups survive a restart offline; with no file, `Country` says "not known", never an error |
 | An address sent to a third party | lookups are in a local file; only public unicast addresses are looked up |
+
+### Unusual sign-ins (#55, ADR-0009)
+
+| Pitfall | Module does |
+|---|---|
+| A flag that fires on every account right after the upgrade | each signal is raised only against something the account already remembers (the baseline rule); an account with nothing remembered of a kind remembers this sign-in instead and raises nothing, so the first sign-in after the upgrade is always quiet |
+| A flood of notices | at most one `flag` or `block` notice per account per hour (`unusualNoticeInterval`), in memory; a `confirm` notice is never held back, since it carries the code the person is waiting for |
+| A notifier or `Decide` that hangs the sign-in | `Decide` and the `confirm` notice run under `DecideTimeout` (3 s, fixed); a function that ignores its context is abandoned at the deadline and its answer goes nowhere; the `flag`/`block` notice runs after the response, with its own 10 s bound, so it never holds a sign-in up at all |
+| A `Decide` bug that quietly weakens the policy | every failure -- panic, error, timeout, or an answer that is not `off`/`flag`/`confirm`/`block`, or `confirm` with no `Config.DeliverConfirmCode` -- fails closed to `block`, logged once and audited with the reason, rather than silently falling back to the settings' own (looser) answer |
+| An attacker learning the account's places | `UnusualSignInCase` and `UnusualSignInDetail` carry a country, never coordinates; a stranger who proves the full credential learns only that a policy exists, which the 200/403 already told them |
+| An unusual success folded away in the sign-in history | the fold key includes the signals and whether a confirmation code completed it, so an unusual success never folds into an ordinary one from the same address |
+| A confirmation code in a log, an error or a record | only its SHA-256 is kept, inside the sealed ticket cookie; the digits themselves are never logged, audited or written to the history |
+| A blocking action chosen with nothing wired to deliver a code | `gate.New` refuses `confirm` on any field with no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with no `Config.Locate`, as a missing-dependency error at startup, not a runtime surprise |
+| A browser shared by two accounts refused on every switch | the known-browser cookie carries up to four tokens, one per account (#55 change to #44), so switching accounts in one browser is not "new" to the second account |
+| A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
+| Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
+| The lone admin refused from a new laptop under `block` | documented, not fixed: shipped as designed (owner, 2026-10-04); `Decide` answering `confirm` or `flag` for the admin account is the mitigation (§2.4), and a server-log escape code is tracked as a follow-up (#66) |
 
 ### Fail-closed list
 
