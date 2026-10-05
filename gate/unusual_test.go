@@ -118,6 +118,12 @@ func newUnusualEnvWith(t *testing.T, backend persist.Backend, configure func(*Co
 	e.bobID = totpBobID(t, g)
 	e.clock = &escalationClock{t: time.Now()}
 	g.cfg.Now = e.clock.now
+	// registerAdmin enrols the admin's own second factor, which, with
+	// Config.Notices already wired above, fires a background notice: let
+	// it finish before handing the fixture back, so a test that sets a
+	// recorder's fail func right after this call never races the setup
+	// notice's own read of it.
+	g.notifying.Wait()
 	return e
 }
 
@@ -427,8 +433,8 @@ func TestUnusualPolicyChecks(t *testing.T) {
 	}{
 		{"unknown action", UnusualSignInPolicy{Action: "warn"}, true, "Action"},
 		{"unknown per-signal action", UnusualSignInPolicy{NewCountry: "Flag"}, true, "NewCountry"},
-		{"confirm with no notifier", UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm}, true, "NotifyUnusualSignIn"},
-		{"confirm as the base with no notifier", UnusualSignInPolicy{Action: UnusualSignInConfirm}, true, "NotifyUnusualSignIn"},
+		{"confirm with no delivery", UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm}, true, "DeliverConfirmCode"},
+		{"confirm as the base with no delivery", UnusualSignInPolicy{Action: UnusualSignInConfirm}, true, "DeliverConfirmCode"},
 		{"impossible travel with no Locate", UnusualSignInPolicy{ImpossibleTravel: UnusualSignInFlag}, false, "Locate"},
 		{"ok: impossible travel off with no Locate", UnusualSignInPolicy{ImpossibleTravel: UnusualSignInOff}, false, ""},
 		{"ok: nothing set, no Locate", UnusualSignInPolicy{}, false, ""},
@@ -634,15 +640,17 @@ func TestUnusualSSOPathJudges(t *testing.T) {
 	}
 }
 
-// noticeRecorder is a Config.NotifyUnusualSignIn that keeps every notice
-// and does what fail says.
+// noticeRecorder is a Config.Notices that keeps every notice, and,
+// through deliver, a Config.DeliverConfirmCode that keeps every
+// confirmation code; both do what fail says.
 type noticeRecorder struct {
 	mu      sync.Mutex
-	notices []UnusualSignInNotice
+	notices []AccountNotice
+	codes   []ConfirmCode
 	fail    func(ctx context.Context) error
 }
 
-func (n *noticeRecorder) UnusualSignIn(ctx context.Context, notice UnusualSignInNotice) error {
+func (n *noticeRecorder) AccountEvent(ctx context.Context, notice AccountNotice) error {
 	n.mu.Lock()
 	n.notices = append(n.notices, notice)
 	fail := n.fail
@@ -653,27 +661,66 @@ func (n *noticeRecorder) UnusualSignIn(ctx context.Context, notice UnusualSignIn
 	return nil
 }
 
-func (n *noticeRecorder) all() []UnusualSignInNotice {
+func (n *noticeRecorder) deliver(ctx context.Context, code ConfirmCode) error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	return append([]UnusualSignInNotice(nil), n.notices...)
+	n.codes = append(n.codes, code)
+	fail := n.fail
+	n.mu.Unlock()
+	if fail != nil {
+		return fail(ctx)
+	}
+	return nil
 }
 
-// newNotifiedEnv is newUnusualEnv with a notice recorder.
+func (n *noticeRecorder) all() []AccountNotice {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]AccountNotice(nil), n.notices...)
+}
+
+// allCodes is every ConfirmCode delivered so far.
+func (n *noticeRecorder) allCodes() []ConfirmCode {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]ConfirmCode(nil), n.codes...)
+}
+
+// lastCode is the most recently delivered confirmation code, or "".
+func (n *noticeRecorder) lastCode() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.codes) == 0 {
+		return ""
+	}
+	return n.codes[len(n.codes)-1].Code
+}
+
+// newNotifiedEnv is newUnusualEnv with a notice recorder wired as both
+// Config.Notices and Config.DeliverConfirmCode.
 func newNotifiedEnv(t *testing.T, policy UnusualSignInPolicy) (*unusualEnv, *noticeRecorder) {
 	t.Helper()
 	rec := &noticeRecorder{}
 	e := newUnusualEnvWith(t, persist.NewMemory(), func(c *Config) {
 		c.UnusualSignIns = policy
-		c.NotifyUnusualSignIn = rec
+		c.Notices = rec
+		c.DeliverConfirmCode = rec.deliver
 	})
 	return e, rec
 }
 
-// notices waits for the background notices and returns them.
-func (e *unusualEnv) notices(rec *noticeRecorder) []UnusualSignInNotice {
+// notices waits for the background notices and returns the unusual
+// sign-in ones (NoticeUnusualSignIn): what a Config.NotifyUnusualSignIn
+// alone used to receive, before #73 folded it into Config.Notices.
+func (e *unusualEnv) notices(rec *noticeRecorder) []AccountNotice {
 	e.g.notifying.Wait()
-	return rec.all()
+	all := rec.all()
+	out := make([]AccountNotice, 0, len(all))
+	for _, n := range all {
+		if n.Kind == NoticeUnusualSignIn {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func TestUnusualFlagNotice(t *testing.T) {
@@ -694,10 +741,11 @@ func TestUnusualFlagNotice(t *testing.T) {
 	}
 	n := got[0]
 	sess := e.newestSession(t)
-	if n.UserID != e.bobID || n.Username != totpBobUsername || n.Role != gauntlet.RoleUser || n.Action != UnusualSignInFlag ||
-		n.Signals != gauntlet.SignalNewCountry || n.Method != gauntlet.SignInMethodPassword ||
-		n.Client.Address != addrParis || n.Client.Country != "FR" || n.Client.UserAgent == "" ||
-		!n.At.Equal(e.clock.now()) || n.SessionRef != sess.Ref() || n.Code != "" || !n.ExpiresAt.IsZero() || n.Reason != "" {
+	u := n.UnusualSignIn
+	if n.UserID != e.bobID || n.Username != totpBobUsername || n.Role != gauntlet.RoleUser || u == nil || u.Action != UnusualSignInFlag ||
+		u.Signals != gauntlet.SignalNewCountry || u.Method != gauntlet.SignInMethodPassword ||
+		u.Client.Address != addrParis || u.Client.Country != "FR" || u.Client.UserAgent == "" ||
+		!n.At.Equal(e.clock.now()) || u.SessionRef != sess.Ref() || u.Reason != "" {
 		t.Errorf("notice = %+v (session ref %s)", n, sess.Ref())
 	}
 	if entry, _ := e.lastAudit("user.login"); !strings.HasPrefix(entry.Detail, "unusual=new-country; action=flag; notify=asked; from=") {
@@ -781,7 +829,7 @@ func TestUnusualWithoutANotifierOrUnderOff(t *testing.T) {
 func TestUnusualFailedRememberTellsNobody(t *testing.T) {
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
 	rec := &noticeRecorder{}
-	e := newUnusualEnvWith(t, backend, func(c *Config) { c.NotifyUnusualSignIn = rec })
+	e := newUnusualEnvWith(t, backend, func(c *Config) { c.Notices = rec })
 	e.mustSignIn(t, newTestBrowser(t), addrLondon)
 	e.advance(time.Hour)
 	backend.left = 0
@@ -880,8 +928,8 @@ func TestUnusualBlockOneStep(t *testing.T) {
 		t.Errorf("user.login_refused = %+v", entry)
 	}
 	got := e.notices(rec)
-	if len(got) != 1 || got[0].Action != UnusualSignInBlock || got[0].Reason != "policy" || got[0].SessionRef != "" ||
-		got[0].Signals != gauntlet.SignalNewCountry || got[0].Client.Country != "FR" {
+	if len(got) != 1 || got[0].UnusualSignIn == nil || got[0].UnusualSignIn.Action != UnusualSignInBlock || got[0].UnusualSignIn.Reason != "policy" || got[0].UnusualSignIn.SessionRef != "" ||
+		got[0].UnusualSignIn.Signals != gauntlet.SignalNewCountry || got[0].UnusualSignIn.Client.Country != "FR" {
 		t.Errorf("notices = %+v, want one block notice (the hourly rate holds the rest)", got)
 	}
 
@@ -988,7 +1036,7 @@ func TestUnusualBlockSharesTheRate(t *testing.T) {
 	if status != http.StatusForbidden {
 		t.Fatalf("= %d", status)
 	}
-	if got := e.notices(rec); len(got) != 1 || got[0].Action != UnusualSignInFlag {
+	if got := e.notices(rec); len(got) != 1 || got[0].UnusualSignIn == nil || got[0].UnusualSignIn.Action != UnusualSignInFlag {
 		t.Errorf("notices = %+v, want the flag one only", got)
 	}
 	if entry, _ := e.lastAudit("user.login_refused"); !strings.Contains(entry.Detail, "notify=quiet") {
@@ -1007,16 +1055,13 @@ func confirmEnv(t *testing.T) (*unusualEnv, *noticeRecorder, *browser) {
 	return e, rec, b
 }
 
-// confirmCode is the code in the newest confirm notice.
+// confirmCode is the most recently delivered confirmation code.
 func confirmCode(t *testing.T, rec *noticeRecorder) string {
 	t.Helper()
-	all := rec.all()
-	for i := len(all) - 1; i >= 0; i-- {
-		if all[i].Action == UnusualSignInConfirm {
-			return all[i].Code
-		}
+	if code := rec.lastCode(); code != "" {
+		return code
 	}
-	t.Fatal("no confirm notice")
+	t.Fatal("no confirmation code delivered")
 	return ""
 }
 
@@ -1061,14 +1106,22 @@ func TestUnusualConfirmSendsACode(t *testing.T) {
 	if u, _ := e.g.deps.Users.Get(e.bobID); len(u.SeenCountries) != 1 {
 		t.Errorf("the country was remembered before the code: %+v", u.SeenCountries)
 	}
-	got := e.notices(rec)
+	// Confirm sends no AccountNotice -- only the code, through
+	// Config.DeliverConfirmCode.
+	e.g.notifying.Wait()
+	if got := e.notices(rec); len(got) != 0 {
+		t.Fatalf("notices = %+v, want none under confirm", got)
+	}
+	got := rec.allCodes()
 	if len(got) != 1 {
-		t.Fatalf("notices = %+v", got)
+		t.Fatalf("codes = %+v", got)
 	}
 	n := got[0]
-	if n.Action != UnusualSignInConfirm || n.Signals != gauntlet.SignalNewCountry || n.SessionRef != "" || n.Reason != "" ||
-		!n.ExpiresAt.Equal(e.clock.now().Add(ConfirmCodeLifetime)) || len(n.Code) != 9 || n.Code[4] != '-' {
-		t.Errorf("notice = %+v", n)
+	if n.UserID != e.bobID || n.Username != totpBobUsername || n.Role != gauntlet.RoleUser ||
+		n.Signals != gauntlet.SignalNewCountry || n.Method != gauntlet.SignInMethodPassword ||
+		n.Client.Address != addrParis || n.Client.Country != "FR" ||
+		!n.At.Equal(e.clock.now()) || !n.ExpiresAt.Equal(e.clock.now().Add(ConfirmCodeLifetime)) || len(n.Code) != 9 || n.Code[4] != '-' {
+		t.Errorf("code = %+v", n)
 	}
 	for i, r := range n.Code {
 		if i != 4 && (r < '0' || r > '9') {
@@ -1239,9 +1292,13 @@ func mustLoginRequest(t *testing.T, base string) *http.Request {
 
 // A notifier that cannot take the code makes the attempt a block.
 func TestUnusualConfirmNotifyFailedBlocks(t *testing.T) {
+	was := decideTimeout
+	decideTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { decideTimeout = was })
 	for name, fail := range map[string]func(context.Context) error{
-		"error": func(context.Context) error { return errors.New("mailer down") },
-		"panic": func(context.Context) error { panic("mailer exploded") },
+		"error":   func(context.Context) error { return errors.New("mailer down") },
+		"panic":   func(context.Context) error { panic("mailer exploded") },
+		"timeout": func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
 	} {
 		t.Run(name, func(t *testing.T) {
 			e, rec, b := confirmEnv(t)
@@ -1288,7 +1345,7 @@ func TestUnusualConfirmFactorStep(t *testing.T) {
 func TestUnusualConfirmSSO(t *testing.T) {
 	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
 	rec := &noticeRecorder{}
-	g.cfg.NotifyUnusualSignIn = rec
+	g.cfg.DeliverConfirmCode = rec.deliver
 	g.cfg.UnusualSignIns = UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm}
 	callback := func(jar http.CookieJar) *http.Response {
 		t.Helper()
@@ -1365,7 +1422,8 @@ func decideEnv(t *testing.T, policy UnusualSignInPolicy, withoutNotifier bool) (
 	} else {
 		e = newUnusualEnvWith(t, persist.NewMemory(), func(c *Config) {
 			c.UnusualSignIns = policy
-			c.NotifyUnusualSignIn = rec
+			c.Notices = rec
+			c.DeliverConfirmCode = rec.deliver
 		})
 	}
 	b := newTestBrowser(t)
@@ -1514,7 +1572,7 @@ func TestUnusualDecideFailsClosed(t *testing.T) {
 				if strings.Contains(entry.Detail, "notify=") {
 					t.Errorf("audit = %q", entry.Detail)
 				}
-			} else if got := e.notices(rec); len(got) != 1 || got[0].Action != UnusualSignInBlock || got[0].Reason != c.reason {
+			} else if got := e.notices(rec); len(got) != 1 || got[0].UnusualSignIn == nil || got[0].UnusualSignIn.Action != UnusualSignInBlock || got[0].UnusualSignIn.Reason != c.reason {
 				t.Errorf("notices = %+v", got)
 			}
 			if got := strings.Count(e.logText(), "level=ERROR") - errorsBefore; got != 1 {

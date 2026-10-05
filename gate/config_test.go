@@ -1,7 +1,9 @@
 package gate
 
 import (
+	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +11,11 @@ import (
 	"github.com/tomlawesome/gauntlet/oidc"
 	"github.com/tomlawesome/gauntlet/persist"
 )
+
+// accountEventFunc adapts a function to AccountNotifier.
+type accountEventFunc func(ctx context.Context, n AccountNotice) error
+
+func (f accountEventFunc) AccountEvent(ctx context.Context, n AccountNotice) error { return f(ctx, n) }
 
 // validDeps returns a Deps with every required field set, so each
 // subtest below can null out exactly the one it is testing.
@@ -136,5 +143,18 @@ func TestNewDefaultsNowToTimeNow(t *testing.T) {
 	after := time.Now()
 	if got.Before(before) || got.After(after) {
 		t.Errorf("expected now() to default to time.Now, got %v (window %v..%v)", got, before, after)
+	}
+}
+
+// Config.Notices replaces the deprecated Config.Notify (#73): New
+// refuses a Config setting both, so an application migrating cannot
+// leave the old and new hooks both wired and get two notices for one
+// event.
+func TestNewRefusesBothNotifyAndNotices(t *testing.T) {
+	cfg := validConfig()
+	cfg.Notify = notifierFunc(func(context.Context, SessionsEndedNotice) error { return nil })
+	cfg.Notices = accountEventFunc(func(context.Context, AccountNotice) error { return nil })
+	if _, err := New(cfg, validDeps(t)); err == nil || !strings.Contains(err.Error(), "Notify") || !strings.Contains(err.Error(), "Notices") {
+		t.Errorf("New = %v, want a refusal naming Notify and Notices", err)
 	}
 }

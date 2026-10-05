@@ -365,7 +365,7 @@ func contractUnusualSignIns(t *testing.T, c *contractChecker) {
 	codes := &codeCatcher{}
 	g = newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
 		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInConfirm}
-		cfg.NotifyUnusualSignIn = codes
+		cfg.DeliverConfirmCode = codes.deliver
 	})
 	ts = newTestServer(t, g)
 	u = ts.URL
@@ -398,14 +398,14 @@ type confirmCodeRequest struct {
 	Code string `json:"code"`
 }
 
-// codeCatcher is a gate.UnusualSignInNotifier keeping the last
+// codeCatcher is a gate.Config.DeliverConfirmCode keeping the last
 // confirmation code it was given.
 type codeCatcher struct {
 	mu   sync.Mutex
 	code string
 }
 
-func (c *codeCatcher) UnusualSignIn(_ context.Context, n gate.UnusualSignInNotice) error {
+func (c *codeCatcher) deliver(_ context.Context, n gate.ConfirmCode) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if n.Code != "" {
