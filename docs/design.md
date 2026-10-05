@@ -298,12 +298,15 @@ func (s *SessionStore) RevokeAllForUser(userID string)
 type TokenKind string
 const ( TokenKindAPI TokenKind = "api"; TokenKindIngest TokenKind = "ingest" )
 type Token struct { ID, Name string; Kind TokenKind; Device, HashedValue string
-                    CreatedAt, LastUsedAt time.Time; CreatedBy, CreatedByUsername string } // JSON as mikroview token.go
+                    CreatedAt, LastUsedAt, ExpiresAt, ExpiryWarnedAt time.Time; CreatedBy, CreatedByUsername string } // JSON as mikroview token.go; ExpiresAt and ExpiryWarnedAt new (#74), zero = never / not warned; tokens document version 3, an older build refuses it
+const ( TokenPrefix = "gnt_"; DefaultTokenLifetime = 365*24*time.Hour; TokenUnusedLimit = 365*24*time.Hour; TokenExpiryNoticeWindow = 7*24*time.Hour ) // #74
 type TokenOptions struct { Log *slog.Logger; Kinds []TokenKind }          // new: Kinds, default {api, ingest}
 func OpenTokenStore(b persist.Backend, opts TokenOptions) (*TokenStore, error)
 func (s *TokenStore) Persisted() bool
-func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error)
-func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) // SHA-256 lookup; kind must match
+func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) // expires after DefaultTokenLifetime; raw starts gnt_ (#74)
+func (s *TokenStore) CreateWithExpiry(name string, kind TokenKind, device string, creator *User, now, expiresAt time.Time) (raw string, tok *Token, err error) // zero expiresAt = never; not after now is ErrTokenExpiryInvalid
+func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) // SHA-256 lookup; kind must match; an expired token is refused like an unknown one
+func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) // #74: removes tokens unused for a year, marks tokens expiring within a week as warned
 func (s *TokenStore) Revoke(id string) error
 func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error)
 func (s *TokenStore) List() []Token
@@ -697,6 +700,7 @@ func (g *Gate) Exempt(paths ...string)                          // beyond the bu
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's paths,
 // request and response bodies. Mount it under the same Protect.
 func (g *Gate) Routes() http.Handler
+func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, error) // #74: call daily; TokenSweep{Removed, Warned int}
 
 func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
@@ -747,6 +751,7 @@ type AccountNotice struct {
     SessionsEnded *SessionsEndedDetail // sessions-ended
     UnusualSignIn *UnusualSignInDetail // unusual-sign-in (flag, block -- confirm sends only the code, below)
     RoleChanged   *RoleChangeDetail    // role-changed (#67): From (empty for a created admin), To
+    TokenExpiring *TokenExpiringDetail // token-expiring (#74): TokenID, Name, Kind, ExpiresAt; raised by SweepTokens, so By is empty
 }
 const MaxSessionEndReason = 200 // characters
 
@@ -1366,6 +1371,7 @@ once, which is the price of sharing and the reason fixes land once.
 | A read token used to write | dispatch to a mux that has no write routes, decided by token kind, never by handler checks | `gate.Handle(kind, mux)`; the app can only register whole muxes |
 | Token kind confusion | `Authenticate(raw, want)` refuses any other kind | kept; unknown kinds in the document are logged and never authenticate |
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
+| A token valid for years, and a leaked one no scanner recognises | no expiry, a bare hex value | new (#74), GitHub's personal-access-token lifecycle: `Token.ExpiresAt`, a year by default, `never` only by asking (a router's ingest token would stop reporting on its expiry day); `Authenticate` refuses an expired token as it refuses an unknown one; `Gate.SweepTokens`, which the application calls daily (no timer in the library), removes tokens unused for a year (`token.removed_unused`) and sends `NoticeTokenExpiring` once per token, seven days ahead; new values start `gnt_` and `.gitleaks.toml` has a rule for them, while the old bare shape still authenticates. Tokens that exist already keep no expiry |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
 | Unseen failures | only successes audited | new (#45): every failed sign-in, and every wrong password or code at an in-session re-check, is `user.login_failed`; a lockout or disable starting, through a known browser too, is `account.locked` or `account.disabled`, and an address ban starting is `address.banned` (#70); every audit record a request writes carries the client address; refused requests and oversize bodies are rated Warn lines (§1.5) |

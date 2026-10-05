@@ -302,7 +302,7 @@ post-quantum migration) starts from a list rather than a search:
 | Use | Algorithm and parameters | Where |
 |---|---|---|
 | Passwords, recovery codes, reset codes at rest | Argon2id, 64 MiB, 3 passes, 4 lanes, 16-byte salt, 32-byte output; parameters written into each hash and read back on verify, bounded at 4× on read | `password.go:28-48`, `:125-161` |
-| Bearer tokens at rest | SHA-256 of a 128-bit random value (fast hash is enough for a random secret) | `token.go:44` |
+| Bearer tokens at rest | SHA-256 of a 128-bit random value (fast hash is enough for a random secret); expire after a year unless the admin chooses a time or `never`, are removed after a year unused, and start `gnt_` so a leak is recognisable (#74) | `token.go:44` |
 | Setup code | SHA-256, memory only, constant-time compare | `setupcode.go:73,140` |
 | Escape code (#66) | 80 bits (the setup code's generator), only its SHA-256 kept, inside a sealed ticket cookie bound to the refused browser; constant-time compare; single use; 15 minutes; dies with the process | `escapecode.go`, `gate/escapelogin.go` |
 | TOTP | HMAC-SHA1 over a 160-bit secret, 30 s step, 6 digits (RFC 6238; SHA-1 inside HMAC is approved by SP 800-131A) | `totp.go:47-65`, `:206` |
@@ -369,7 +369,9 @@ store, keep and protect:
   `user.passkeys_cleared`, `account.link_sso`, `account.sessions_ended`,
   `account.recovery_codes_regenerated`, `user.create`, `user.delete`,
   `user.password_reset`, `token.create`, `token.revoke`, each ending
-  with `from=` the client address (#45). Timestamps and storage are the
+  with `from=` the client address (#45), and `token.removed_unused`
+  (#74, a token unused for a year removed by `Gate.SweepTokens`, actor
+  `system`, no address). Timestamps and storage are the
   application's sink.
 - The sign-in history (#53, ADR-0006), a third sealed document the
   application stores (`gate.Deps.SignIns`): one row per sign-in

@@ -1932,9 +1932,16 @@ paths:
                 device:
                   type: string
                   description: Required for, and allowed only on, an `ingest` token.
+                expiresAt:
+                  type: string
+                  description: |
+                    When the token stops working: an RFC 3339 timestamp in
+                    the future, or the string `never`. Absent means one year
+                    from now. A time that is not in the future, or a value
+                    that is neither, is a 400.
       responses:
         "201":
-          description: Issued. `value` is the bearer token, shown once.
+          description: Issued. `value` is the bearer token, shown once; it starts `gnt_`.
           content:
             application/json:
               schema:
@@ -2802,9 +2809,13 @@ components:
           type: string
           format: date-time
           description: Absent until the token is first used.
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the token stops working; absent for a token that never expires, which includes every token issued before expiry existed. An expired token is refused like an unknown one and stays listed until it is revoked. A token unused for a year is removed, and the account that created it is told a week before it expires, through the application (`token-expiring`).
         value:
           type: string
-          description: The raw bearer token; only in the response that creates it.
+          description: The raw bearer token; only in the response that creates it. Starts `gnt_` when issued since #74; an older token has no prefix.
     SignInOutcome:
       type: string
       enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, refused, confirm_sent, confirm_refused, escape_issued, escape_refused, unrecorded]

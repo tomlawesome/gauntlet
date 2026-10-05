@@ -931,6 +931,20 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "", Password: adminPass}}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: strings.Repeat("n", gauntlet.MaxTokenNameLen+1), Password: adminPass}}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "sensor", Kind: "ingest", Device: "sensor-1", Password: adminPass}}, 201, nil)
+	// expiresAt (#74): a year by default, chosen, or "never" (the key is
+	// then absent from the response, which the document allows).
+	if created.ExpiresAt.IsZero() || !strings.HasPrefix(created.Value, "gnt_") {
+		t.Fatalf("created token = %+v, want a year-out expiresAt and a gnt_ value", created)
+	}
+	empty, never, soon, past := "", "never", time.Now().Add(48*time.Hour).UTC().Format(time.RFC3339), time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	var neverTok, soonTok tokenResponse
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "forever", ExpiresAt: &never, Password: adminPass}}, 201, &neverTok)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "soon", ExpiresAt: &soon, Password: adminPass}}, 201, &soonTok)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "late", ExpiresAt: &past, Password: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "odd", ExpiresAt: &empty, Password: adminPass}}, 400, nil)
+	if !neverTok.ExpiresAt.IsZero() || soonTok.ExpiresAt.IsZero() {
+		t.Fatalf("never = %+v, soon = %+v", neverTok, soonTok)
+	}
 	// Used once, so the list carries lastUsedAt (see alreadyIssued above).
 	used := bearerRequest(t, u, "/api/protected", created.Value)
 	_ = used.Body.Close()
