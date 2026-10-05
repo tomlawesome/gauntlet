@@ -402,6 +402,7 @@ type sessionResponse struct {
 		Count  int    `json:"count"`
 		Status string `json:"status"`
 		Origin string `json:"origin"`
+		SignIn bool   `json:"signIn"`
 	} `json:"passkeys"`
 }
 
