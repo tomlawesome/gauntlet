@@ -287,8 +287,10 @@ func (s Session) Ref() string                                       // new (#48)
 func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore  // new: one constructor; mikroview's two collapse
 func (s *SessionStore) Create(userID string, now time.Time) Session // CreateFrom with an empty client
 func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.Time) Session // new (#48)
-func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime; moves LastUsedAt
-func (s *SessionStore) ListForUser(userID string, now time.Time) []Session // new (#48): live only, newest first; evicts expired
+func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime; moves LastUsedAt; refuses but keeps a session idle past its ttl inside the ceiling (#71)
+func (s *SessionStore) Resumable(id string, now time.Time) (Session, bool) // new (#71): the timed-out session id names, if still inside the ceiling; authenticates nothing
+func (s *SessionStore) Resume(id string, client SessionClient, now time.Time) (Session, bool) // new (#71): ends that session and starts one with a new ID, same account and IssuedAt, in one step
+func (s *SessionStore) ListForUser(userID string, now time.Time) []Session // new (#48): live only, newest first; evicts what is past the ceiling, skips a resumable one
 func (s *SessionStore) RevokeRef(userID, ref string) (Session, bool)       // new (#48): searches userID's sessions only
 func (s *SessionStore) Revoke(id string)
 func (s *SessionStore) RevokeAllForUser(userID string)
@@ -819,6 +821,42 @@ through it newest first, filtered by `user`, `address` and `outcome`,
 `Deps.SignIns` is nil. Re-checks are not rows: the caller already holds
 a session. Bounds and write cadence are in §4 and ADR-0006.
 
+**Resuming a timed-out session (#71).** A session idle past the idle
+timeout (`MaxSessionIdle`, 1 h) but inside its lifetime ceiling
+(`MaxSessionLifetime`, 24 h from the sign-in) is "timed out, resumable":
+`SessionStore.Validate` refuses it, so it authenticates nothing, but the
+store keeps it until the ceiling (the sweep, logout, `RevokeAllForUser`
+and the password-change cutoff drop it like any other). `POST
+/api/auth/reauthenticate`, `{"password": "..."}`, presented with that
+session's cookie, resumes it: the standard pattern is NIST SP 800-63B-4
+section 2.2.3 (after an inactivity timeout and before the overall
+timeout the verifier MAY accept a password in conjunction with the
+session secret), with the session ID regenerated (ASVS 7.2.4). The
+route is session-exempt like login and needs the CSRF header. It takes
+the same limiter reservation as a password sign-in (`reserveLogin`: the
+account lockout and disable, the address limit and ban, the known-browser
+allowance), a wrong password counting as a failed sign-in. On success
+`SessionStore.Resume` ends the old session and starts one with a new ID,
+the same account and the original `IssuedAt`, so the 24-hour ceiling does
+not move (the cookie's Max-Age is cut to what is left of it); the
+response is login's `{username, role}`. It never asks for a second
+factor, is not judged as an unusual sign-in (#55: the session it
+continues was, and its signals carry over), does not remember the
+browser, and does not reset the account's failure count the way a
+completed sign-in does -- a password alone proves less than the sign-in
+it continues. Anything not resumable -- no cookie, an unknown, live,
+ended or past-ceiling session, an account deleted, with no local password
+(an SSO-only account) or owing a password change -- is the one `401
+sign-in-required`. `GET /api/auth/session` reports `resumable: true` for a
+cookie in that state, which is how a frontend knows to ask for the
+password rather than show the full form; every other gated route still
+answers `sign-in-required`. History row method `resume`; audit
+`user.reauthenticated`. A passkey with user verification may resume a
+session in place of the password once #77 lands: the handler marks where.
+Sessions are in memory, so a restart still ends them, resumable or not;
+holding timed-out sessions to the ceiling raises the map's bound from
+one idle timeout's worth of sessions to one ceiling's worth.
+
 **Admin sign-out (#53).** `POST /api/auth/users/{id}/logout-all` ends
 every gauntlet session the account holds and forgets its remembered
 browsers -- all or nothing, no per-session admin route and no admin list
@@ -1300,7 +1338,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Pitfall | Mikroview today | Module keeps |
 |---|---|---|
 | Session fixation / predictable ids | 128-bit `crypto/rand` id, new id per login, never reused | same; `newID` panics rather than degrades if the CSPRNG fails |
-| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51) |
+| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51). Changed (#71): a session idle past 1h but inside the ceiling can be resumed with the password alone, under a new ID and the same ceiling (`POST /api/auth/reauthenticate`) |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |

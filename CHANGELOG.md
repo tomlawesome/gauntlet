@@ -6,6 +6,27 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Resume a timed-out session with the password alone** (#71). A session
+  idle past the one-hour timeout but inside its 24-hour ceiling no longer
+  forces a full two-factor sign-in (NIST SP 800-63B-4 section 2.2.3).
+  `POST /api/auth/reauthenticate`, `{"password": "..."}`, presented with
+  the timed-out session's cookie, issues a new session ID (ASVS 7.2.4)
+  for the same account with the original sign-in time, so the 24-hour
+  ceiling does not move, and ends the old ID. It takes the same limiter
+  reservation as a password sign-in (lockout, disable, address ban and
+  limit, known-browser allowance; a wrong password is a failed sign-in),
+  is not judged as an unusual sign-in, and never asks for a second factor.
+  Anything not resumable is `401 sign-in-required`, as is an account with
+  no local password or one owing a password change. `GET /api/auth/session`
+  gains `resumable: true` for a cookie in that state. Sign-in history rows
+  and the audit record say so: method `resume`
+  (`gauntlet.SignInMethodResume`) and `user.reauthenticated`. Additive Go
+  API: `SessionStore.Resumable` and `SessionStore.Resume`. Behaviour
+  change: a store with a ceiling now keeps a session idle past its timeout
+  until the ceiling instead of dropping it (it still never authenticates
+  a request, and `ListForUser` does not list it), so the store holds up to
+  a ceiling's worth of sessions rather than an idle timeout's worth. Both
+  caps are unchanged; a restart still ends every session.
 - **An escape code for a lone admin refused by `block`** (#66,
   ADR-0011). When the unusual-sign-in policy refuses an admin from a new
   browser and no other admin can act, the refusal now writes a one-time
