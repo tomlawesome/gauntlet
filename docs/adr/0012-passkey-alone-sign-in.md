@@ -150,4 +150,4 @@ authenticator, AAL2).
   browser the account remembers, as the allowance belongs to an account
   the begin step cannot name yet; it applies at the finish.
 
-Written by Fable 5.1, 2026-10-05.
+Design ratified on #77, 2026-10-05.
