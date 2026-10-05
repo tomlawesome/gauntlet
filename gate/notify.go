@@ -36,8 +36,10 @@ const (
 	NoticeSignInDisabled           NoticeKind = "sign-in-disabled"
 	NoticeSessionsEnded            NoticeKind = "sessions-ended"
 	NoticeUnusualSignIn            NoticeKind = "unusual-sign-in"
-	// NoticeRoleChanged (#67, #75): an admin changed an account's role,
-	// or created an account as an admin.
+	// NoticeRoleChanged (#67, #75, #76): an admin changed an account's
+	// role, or created an account as an admin, or the identity provider's
+	// groups moved an SSO account at sign-in (By is "" and ViaSSO is
+	// set).
 	NoticeRoleChanged NoticeKind = "role-changed"
 	// NoticeTokenExpiring (#74): an API token the account created
 	// expires within a week. Raised by Gate.SweepTokens, not by a
@@ -84,12 +86,16 @@ type TokenExpiringDetail struct {
 }
 
 // RoleChangeDetail is NoticeRoleChanged's detail. By on the notice is
-// the admin who made the change.
+// the admin who made the change, and "" when ViaSSO is set.
 type RoleChangeDetail struct {
 	// From is the role before; "" when the account was created with To.
 	From gauntlet.Role
 	// To is the role the account holds now.
 	To gauntlet.Role
+	// ViaSSO is true when the identity provider's groups caused the
+	// change, at the account's SSO sign-in (Policy.RoleFromGroups,
+	// ADR-0013), rather than an admin.
+	ViaSSO bool
 }
 
 // PasswordResetDetail is NoticePasswordReset's detail. The code itself

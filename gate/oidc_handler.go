@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -299,10 +300,19 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, _, err := g.deps.Users.FindOrCreateOIDCUser(identity.Issuer, identity.Subject, ssoUsernameHint(identity), now)
+	// The role the identity provider's groups give, if this deployment
+	// maps groups to roles, goes into the same write that finds or
+	// creates the account: no sign-in happens at a role the groups no
+	// longer give.
+	wantRole, _ := g.ssoRoleFor(identity)
+	signIn, err := g.deps.Users.FindOrCreateOIDCUserWithRole(identity.Issuer, identity.Subject, ssoUsernameHint(identity), wantRole, now)
 	if err != nil {
 		g.failSSO(w, r, "login_failed", identity)
 		return
+	}
+	user := signIn.User
+	if signIn.RoleBefore != user.Role {
+		g.recordSSORoleChange(r, signIn, identity.Issuer, now)
 	}
 
 	// An SSO sign-in is a re-authentication like the password paths:
@@ -329,6 +339,70 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 	g.notify(r.Context(), notice)
 }
+
+// ssoRoleFor is the role Policy.RoleFromGroups gives identity: the
+// highest role among the mapped groups it carries, else
+// Policy.RoleWithoutGroup ("viewer" when unset). The second result is
+// false when no map is configured, which leaves every role alone.
+//
+// Groups match like AllowedGroups -- trimmed, case-insensitive -- and
+// the highest wins, so the result does not depend on the order the
+// provider lists groups in. Only user and viewer are ever given: gate.New
+// refuses any other value, and one that got past it here would fall to
+// the lowest role rather than a higher one (ADR-0013).
+func (g *Gate) ssoRoleFor(identity *oidc.Identity) (gauntlet.Role, bool) {
+	p := g.deps.OIDCPolicy
+	if len(p.RoleFromGroups) == 0 {
+		return "", false
+	}
+	var best gauntlet.Role
+	for _, group := range p.Groups(identity) {
+		for name, value := range p.RoleFromGroups {
+			if !strings.EqualFold(strings.TrimSpace(group), strings.TrimSpace(name)) {
+				continue
+			}
+			role := gauntlet.Role(value)
+			if role != gauntlet.RoleUser && role != gauntlet.RoleViewer {
+				continue
+			}
+			if best == "" || role.AtLeast(best) {
+				best = role
+			}
+		}
+	}
+	if best != "" {
+		return best, true
+	}
+	if gauntlet.Role(p.RoleWithoutGroup) == gauntlet.RoleUser {
+		return gauntlet.RoleUser, true
+	}
+	return gauntlet.RoleViewer, true
+}
+
+// recordSSORoleChange does what handleSetRole does after a role change,
+// for the change an SSO sign-in made: drop the in-memory sessions of a
+// downgrade (the store already recorded SessionsEndedAt), write the
+// audit line with actor "sso", and tell the application. The sign-in
+// that follows issues its session at the new role.
+func (g *Gate) recordSSORoleChange(r *http.Request, signIn gauntlet.OIDCSignIn, issuer string, now time.Time) {
+	user := signIn.User
+	if signIn.SessionsEnded {
+		g.deps.Sessions.RevokeAllForUser(user.ID)
+	}
+	detail := fmt.Sprintf("from=%s to=%s; by group map at issuer %q", signIn.RoleBefore, user.Role, issuer)
+	if signIn.SessionsEnded {
+		detail += "; sessions ended: all"
+	}
+	g.audit(r, ssoAuditActor, "user.role_changed", user.Username, detail)
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeRoleChanged, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		RoleChanged: &RoleChangeDetail{From: signIn.RoleBefore, To: user.Role, ViaSSO: true},
+	})
+}
+
+// ssoAuditActor is the audit actor of a change the identity provider
+// caused: no admin did it, and the account's own holder did not ask.
+const ssoAuditActor = "sso"
 
 // ssoUsernameHint is the name an identity asks to be known by: its
 // preferred_username, else its email.
