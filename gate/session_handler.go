@@ -41,8 +41,11 @@ type sessionResponse struct {
 	// Passkeys reports the caller's own passkey count and whether this
 	// deployment can offer passkeys, and why not -- a frontend explains
 	// an unavailable state from it rather than hiding the feature.
-	// Omitted while unauthenticated, and whenever the application has no
-	// passkeys at all (Deps.Passkeys nil).
+	// Omitted while unauthenticated, except when passkey-alone sign-in is
+	// on and ready (#77): then it is there so a login page knows to show
+	// "Sign in with a passkey", with Count 0, Status ready, Origin and
+	// SignIn. Omitted whenever the application has no passkeys at all
+	// (Deps.Passkeys nil).
 	Passkeys *sessionPasskeysInfo `json:"passkeys,omitempty"`
 	// SignedInSince is the current session's IssuedAt, RFC3339 --
 	// present only while Authenticated.
@@ -63,6 +66,11 @@ type sessionPasskeysInfo struct {
 	Status gauntlet.PasskeyStatus `json:"status"`
 	// Origin is set only when Status is ready.
 	Origin string `json:"origin,omitempty"`
+	// SignIn is true when signing in with a passkey alone is on and the
+	// relying party is ready (Config.PasskeySignIn, #77): the routes
+	// /api/auth/login/passkey/begin and /api/auth/login/passkey work.
+	// Absent otherwise.
+	SignIn bool `json:"signIn,omitempty"`
 }
 
 // handleSession always answers 200: it reports state, it does not gate
@@ -89,6 +97,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 				Count:  g.deps.Users.PasskeyCount(user.ID),
 				Status: g.deps.Passkeys.Status(),
 				Origin: g.deps.Passkeys.Origin(),
+				SignIn: g.passkeySignInOn(),
 			}
 		}
 		// sessionUser already validated the cookie once; re-reading it
@@ -102,6 +111,9 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if !resp.Authenticated {
 		_, _, resp.Resumable = g.resumableSession(r, now)
+		if g.passkeySignInOn() {
+			resp.Passkeys = &sessionPasskeysInfo{Status: g.deps.Passkeys.Status(), Origin: g.deps.Passkeys.Origin(), SignIn: true}
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

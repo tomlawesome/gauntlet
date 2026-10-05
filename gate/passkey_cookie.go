@@ -9,7 +9,7 @@ import (
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
-// The two passkey ceremony cookies (G8, ADR-0004). Each carries the
+// The three passkey ceremony cookies (G8, ADR-0004; #77, ADR-0012). Each carries the
 // ceremony state gauntlet.PasskeyCeremony's Begin sealed -- gate never
 // reads inside it -- from Begin to the matching Finish, written through
 // writeCookie with its fixed attributes. Named generically ("gate_"),
@@ -29,6 +29,17 @@ const (
 	// uses, and covers both routes.
 	passkeyAssertCookieName = "gate_passkey_assert"
 	passkeyAssertCookiePath = pendingLoginCookiePath
+
+	// passkeySignInCookieName/Path carry a passkey-alone sign-in from
+	// login/passkey/begin to login/passkey, or to reauthenticate when the
+	// passkey resumes a timed-out session (#77). Its own name, and its
+	// own sealing key in gauntlet/passkey, so a second-step login's state
+	// can never finish a sign-in with no password before it. The path is
+	// the /api/auth prefix, as knownBrowserCookiePath is, rather than
+	// /api/auth/login/passkey: the one begin route serves both finishes,
+	// and a browser sends a cookie only to the paths under its own.
+	passkeySignInCookieName = "gate_passkey_signin"
+	passkeySignInCookiePath = "/api/auth"
 
 	// passkeyCeremonyCookieMaxAge is five minutes, matching the expiry
 	// gauntlet/passkey seals into the ceremony state itself (its
@@ -51,6 +62,14 @@ func (g *Gate) setPasskeyAssertCookie(w http.ResponseWriter, sealed string) {
 
 func (g *Gate) clearPasskeyAssertCookie(w http.ResponseWriter) {
 	g.writeCookie(w, passkeyAssertCookieName, "", passkeyAssertCookiePath, -1)
+}
+
+func (g *Gate) setPasskeySignInCookie(w http.ResponseWriter, sealed string) {
+	g.writeCookie(w, passkeySignInCookieName, sealed, passkeySignInCookiePath, int(passkeyCeremonyCookieMaxAge.Seconds()))
+}
+
+func (g *Gate) clearPasskeySignInCookie(w http.ResponseWriter) {
+	g.writeCookie(w, passkeySignInCookieName, "", passkeySignInCookiePath, -1)
 }
 
 // spentRegistrations holds every registration ceremony a finish has

@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -9,9 +10,12 @@ import (
 )
 
 // reauthenticateRequest is the body of POST /api/auth/reauthenticate:
-// the password, and nothing else. The account is the timed-out session's.
+// the password, or -- when passkey sign-in is offered (#77) -- a passkey
+// assertion from POST /api/auth/login/passkey/begin, and nothing else.
+// The account is the timed-out session's.
 type reauthenticateRequest struct {
-	Password string `json:"password"`
+	Password  string          `json:"password"`
+	Assertion json.RawMessage `json:"assertion,omitempty"`
 }
 
 // resumableSession resolves r's session cookie to a session that has
@@ -55,6 +59,14 @@ func (g *Gate) resumableSession(r *http.Request, now time.Time) (gauntlet.Sessio
 // the session secret (the timed-out session's cookie), with the session
 // ID regenerated on re-authentication (ASVS 7.2.4).
 //
+// A passkey that verified the user resumes it too (#77), and is the
+// stronger proof: a multi-factor authenticator where the password is one
+// factor. The body then carries {assertion} from the passkey sign-in
+// begin route instead of {password} -- both is a 400 -- and the user
+// handle must name the timed-out session's own account; another
+// account's passkey resumes nothing. The route answers 404 for an
+// assertion unless passkey sign-in is offered.
+//
 // It is a sign-in attempt for the limiter: the same reservation as a
 // password sign-in (reserveLogin), so the account's lockout and disable,
 // the address ban and limit and the known-browser allowance all apply,
@@ -76,6 +88,18 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var ps gauntlet.PasskeySignIn
+	if len(req.Assertion) > 0 {
+		if req.Password != "" {
+			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "send a password or an assertion, not both", nil)
+			return
+		}
+		var ok bool
+		if ps, ok = g.passkeySignInOrNotFound(w); !ok {
+			return
+		}
+	}
+
 	now := g.now()
 	_, user, ok := g.resumableSession(r, now)
 	if !ok {
@@ -88,10 +112,10 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer g.releaseAfterReset(res)
 
-	// Passkey resume (#77) plugs in here: a verified passkey assertion
-	// with user verification, whose credential belongs to user, resumes
-	// the session in place of the password -- same reservation, same
-	// Resume call below. Nothing is built for it yet.
+	if ps != nil {
+		g.resumeWithPasskey(w, r, ps, user, res, req.Assertion, now)
+		return
+	}
 	authed, err := g.deps.Users.Authenticate(user.Username, req.Password, now)
 	if err != nil && !errors.Is(err, gauntlet.ErrInvalidCredentials) {
 		g.releaseLogin(res, now)
@@ -114,6 +138,73 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 		writeUnauthorized(w, classSignInRequired, "sign in again")
 		return
 	}
+	g.finishResume(w, r, user, res, now)
+}
+
+// resumeWithPasskey is handleReauthenticate's passkey branch (#77), with
+// the reservation res already held for the session's account. The
+// ceremony's lookup accepts only the session's own account's handle, so
+// the signature is never checked for another account's passkey, and
+// checkSignInAssertion requires the user-verified flag.
+//
+// A refusal -- another account's passkey, a wrong credential, no user
+// verification, a clone warning -- keeps the reservation, as a wrong
+// password does, and is recorded as factor_refused with method resume.
+// A dead ceremony (no cookie, expired, already used) checked nothing, so
+// the reservation goes back and the answer is 401 step-expired. The
+// address reservation the begin step took is handed back once the
+// credential is right.
+func (g *Gate) resumeWithPasskey(w http.ResponseWriter, r *http.Request, ps gauntlet.PasskeySignIn, user *gauntlet.User, res loginReservation, assertion json.RawMessage, now time.Time) {
+	dead := func() {
+		g.releaseLogin(res, now)
+		g.endAfterReset(res)
+		g.clearPasskeySignInCookie(w)
+		writeUnauthorized(w, classStepExpired, passkeyStartAgain)
+	}
+	if !g.passkeysReady() {
+		g.releaseLogin(res, now)
+		g.endAfterReset(res)
+		g.writePasskeysNotReady(w)
+		return
+	}
+	cookie, err := r.Cookie(passkeySignInCookieName)
+	if err != nil {
+		dead()
+		return
+	}
+	lookup := func(handle []byte) (*gauntlet.User, bool) {
+		if string(handle) != user.ID {
+			return nil, false
+		}
+		return user, true
+	}
+	_, outcome := g.checkSignInAssertion(r, ps, cookie.Value, assertion, lookup, now)
+	switch outcome {
+	case signInAssertionDead:
+		dead()
+		return
+	case signInAssertionRefused:
+		g.endAfterReset(res)
+		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodResume), res, now)
+		writeUnauthorized(w, classInvalidCredentials, passkeyNotVerified)
+		return
+	case signInAssertionBackendFailed:
+		g.releaseLogin(res, now)
+		g.deps.Limiter.Release(res.ipKey, now)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
+		return
+	}
+	g.clearPasskeySignInCookie(w)
+	g.deps.Limiter.Release(res.ipKey, now) // the begin step's reservation
+	g.finishResume(w, r, user, res, now)
+}
+
+// finishResume is the end of a resume whose credential -- the password
+// or the passkey -- checked out: end the timed-out session, start one
+// for the same account under a new ID, set its cookie, record it and
+// answer. Anything that went wrong since resumableSession is a 401
+// sign-in-required.
+func (g *Gate) finishResume(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, now time.Time) {
 	cookie, _ := r.Cookie(g.sessionCookieName())
 	sess, ok := g.deps.Sessions.Resume(cookie.Value, g.signInClient(r, res.address), now)
 	if !ok {
