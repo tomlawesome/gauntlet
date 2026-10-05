@@ -327,6 +327,7 @@ func TestContractEveryRoute(t *testing.T) {
 	contractPasskeys(t, c)
 	contractUnlockCode(t, c)
 	contractUnusualSignIns(t, c)
+	contractEscapeCode(t, c)
 	c.requireEveryOperationDriven()
 }
 
@@ -391,6 +392,61 @@ func contractUnusualSignIns(t *testing.T, c *contractChecker) {
 		t.Fatalf("login/factor under confirm = %v", challenge)
 	}
 	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 200, nil)
+}
+
+// contractEscapeCode covers the lone admin's escape (#66): blocked from a
+// new browser, the admin gets the escape cookie and the application the
+// code (Config.OnEscapeCode), and POST /api/auth/login/escape lets that
+// attempt through.
+func contractEscapeCode(t *testing.T, c *contractChecker) {
+	users, code := openStore(t, persist.NewMemory())
+	escapes := &escapeCatcher{}
+	g := newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInBlock}
+		cfg.OnEscapeCode = escapes
+	})
+	ts := newTestServer(t, g)
+	u := ts.URL
+	const adminPass = "contract-admin-password"
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+
+	stranger := c.client()
+	resp := c.do(stranger, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 403, nil)
+	if resp.Header.Get("X-Auth-Gate") != "" {
+		t.Errorf("a refused sign-in carries X-Auth-Gate %q", resp.Header.Get("X-Auth-Gate"))
+	}
+	if escapes.last() == "" {
+		t.Fatal("the lone admin's refusal gave the application no escape code")
+	}
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: "not json", bad: true}, 400, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: "AAAA-AAAA-AAAA-AAAA"}}, 401, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: escapes.last()}, noCSRF: true}, 403, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: escapes.last()}}, 200, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/escape", body: escapeCodeRequest{Code: escapes.last()}}, 401, nil)
+}
+
+// escapeCodeRequest is POST /api/auth/login/escape's body.
+type escapeCodeRequest struct {
+	Code string `json:"code"`
+}
+
+// escapeCatcher is a gate.Config.OnEscapeCode keeping the last escape
+// code it was given.
+type escapeCatcher struct {
+	mu   sync.Mutex
+	code string
+}
+
+func (e *escapeCatcher) EscapeCode(_, _, code string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.code = code
+}
+
+func (e *escapeCatcher) last() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.code
 }
 
 // confirmCodeRequest is POST /api/auth/login/confirm's body.
