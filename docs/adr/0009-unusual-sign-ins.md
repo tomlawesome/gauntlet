@@ -2,6 +2,8 @@
 
 **Status:** Accepted (owner decisions 2026-10-04 on #55)
 **Date:** 2026-10-04
+**Amended by:** #65 (the `prove` action, decision 10; owner answers
+2026-10-05)
 **Relates to:** #55 (this change), #44 (the known-browser memory it
 judges against), #53 and ADR-0006 (the sign-in history it adds to),
 #54 and ADR-0008 (the country it judges against), #73 (the
@@ -65,11 +67,11 @@ remembers, and let the application decide what happens next.
    `DecideTimeout` (3 seconds, not configurable, so a function cannot
    quietly make itself the slow path on every login) and may do local
    I/O within that. A panic, an error, a timeout, or an answer that is
-   not one of the four actions refuses the sign-in (`block`): a check
+   not one of the actions (five since #65) refuses the sign-in (`block`): a check
    that lets people in when it breaks would make breaking it the
    attack.
-6. **Four actions.** `off` drops the signal entirely (nothing shown,
-   told or refused, though memory still accumulates). `flag`, the
+6. **Four actions (five since #65, decision 10).** `off` drops the
+   signal entirely (nothing shown, told or refused, though memory still accumulates). `flag`, the
    default, lets the sign-in complete and marks it on the session, the
    sign-in history and the audit record: every local-password account
    already passes a mandatory second factor (#49), so "end this
@@ -110,6 +112,41 @@ remembers, and let the application decide what happens next.
    403 or confirm-challenge responses already confirm to a holder of
    the right credential that a policy exists, which is as much as a
    stranger needs to know and the owner already knows.
+
+10. **Amended by #65: a fifth action, `prove`.** Step-up authentication
+    with a phishing-resistant factor: the sign-in is held, like
+    `confirm`, until the browser answers a passkey assertion for the
+    same account, which a mailed code cannot match (a code can be typed
+    into a look-alike page; an origin-bound key cannot). `prove` ranks
+    between `confirm` and `block`, is settable per signal and
+    returnable from `Decide`, and `New` validates it like the others; it
+    needs nothing wired, since it falls back (below).
+    - **It resolves per sign-in.** A sign-in whose method is `passkey` or
+      `passkey_alone` is already proved and is flagged. An account with
+      no passkey usable at this address (current RP ID, none on hold) is
+      held for a code (`confirm`) when `Config.DeliverConfirmCode` is
+      set, else refused (`block`) -- the owner's answer on #65, not
+      `flag`, since a policy that asks for proof must not fall open.
+      `UnusualSignInCase.CanProve` tells `Decide` which applies.
+    - **It reuses the confirm ticket.** `confirmLoginState` gains
+      `Prove`, with no code hash; the 200 is `{"prove": "passkey",
+      "passkeyOrigin": ...}` where confirm's is `{"confirm": true}`, and
+      the SSO callback redirects with `?prove=1` where confirm's has
+      `?confirm=1`. `POST /api/auth/login/prove/begin` and `POST
+      /api/auth/login/prove {assertion}` run the existing
+      non-discoverable ceremony for that account (`BeginLogin`,
+      `FinishLogin`; user verification preferred, not required:
+      possession of the key is the point, so a security key without a PIN
+      qualifies), the post-verify step #77 extracted
+      (`recordVerifiedAssertion`) and the login limiter as confirm does.
+      A wrong, another account's or failed assertion is handled as a
+      wrong code is: 401, the reservation kept, counted as a failed
+      second factor. Success records `Confirmed` with `action=prove`.
+      The two ticket kinds are not interchangeable.
+    - **The block reason `prove-failed`** is a ticket that could not be
+      made, as `notify-failed` is a code that could not be delivered.
+    - **Standard pattern:** step-up authentication (ASVS 5.0 7.5.3), as
+      ADR-0010's role grant.
 
 ## Rejected options
 

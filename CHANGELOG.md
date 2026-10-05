@@ -6,6 +6,25 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Prove an unusual sign-in with a passkey** (#65, ADR-0009 decision 10).
+  A fifth `UnusualSignInAction`, `prove` (`gate.UnusualSignInProve`),
+  ranked between `confirm` and `block`, settable per signal in
+  `Config.UnusualSignIns` and returnable from `Decide`: the sign-in is held
+  until the browser answers a passkey assertion for the same account.
+  The 200 is `{"prove": "passkey", "passkeyOrigin": ...}` where `confirm`'s
+  is `{"confirm": true}` (the SSO callback redirects with `?prove=1`), and
+  the new `POST /api/auth/login/prove/begin` and `POST
+  /api/auth/login/prove {assertion}` finish it, through the existing
+  non-discoverable ceremony (user verification preferred, not required),
+  the login limiter as `login/confirm` does, and the held sign-in's
+  confirm ticket, which now has two kinds that are not interchangeable.
+  A sign-in that was itself by passkey is already proved and is flagged; an
+  account with no passkey usable at this address is held for a code when
+  `Config.DeliverConfirmCode` is set, else refused. `UnusualSignInCase`
+  gains `CanProve`; a ticket that cannot be made is a block with the new
+  reason `prove-failed`. `gate.New` accepts `prove` with nothing else
+  wired. Additive; the accounts document is unchanged.
+
 - **Sign in with a passkey alone** (#77, ADR-0012). A passkey that verified
   the user (a PIN or a biometric at the authenticator) can be the whole
   sign-in: `POST /api/auth/login/passkey/begin` and `POST

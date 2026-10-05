@@ -354,7 +354,7 @@ type LoginLockoutRecord struct { LockedUntil time.Time; Lockouts int; DisabledAt
 
 type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
 // escape_issued, escape_refused // new (#66, ADR-0011): a lone admin's refused sign-in was given an escape code in the server log (no session yet; a refused row is recorded too) / a wrong escape code; escape_issued is never budgeted, escape_refused is budgeted as any failure
-// refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out and no session yet, confirm_refused is a wrong code. refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
+// refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out (or, under prove, a passkey is owed, #65) and no session yet, confirm_refused is a wrong code (or a refused passkey assertion). refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
 type SignInMethod string  // password, code, passkey, sso
 type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool
     Confirmed bool } // new (#55): the sign-in completed through gate's confirmation-code step
@@ -731,7 +731,9 @@ func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below
 // judged sign-in, fixed-timeout, fail-closed to block.
 type UnusualSignInAction string
 const ( UnusualSignInOff UnusualSignInAction = "off"; UnusualSignInFlag UnusualSignInAction = "flag"
-        UnusualSignInConfirm UnusualSignInAction = "confirm"; UnusualSignInBlock UnusualSignInAction = "block" ) // zero value/"" means flag
+        UnusualSignInConfirm UnusualSignInAction = "confirm"
+        UnusualSignInProve UnusualSignInAction = "prove" // #65: held for a passkey assertion; ranks between confirm and block
+        UnusualSignInBlock UnusualSignInAction = "block" ) // zero value/"" means flag
 type UnusualSignInPolicy struct {
     Action UnusualSignInAction // base for every signal; "" means flag
     NewBrowser, NewCountry, ImpossibleTravel UnusualSignInAction // per-signal override; "" means Action
@@ -739,7 +741,7 @@ type UnusualSignInPolicy struct {
     // and before any session, with the settings' answer in c.Default;
     // its answer replaces that. Runs under ctx, bounded by
     // DecideTimeout; may do local I/O within that. A panic, an error, a
-    // timeout or an answer that is not one of the four actions refuses
+    // timeout or an answer that is not one of the actions refuses
     // the sign-in (block), reasoned decide-failed, decide-timeout or
     // decide-invalid.
     Decide func(ctx context.Context, c UnusualSignInCase) (UnusualSignInAction, error)
@@ -752,6 +754,7 @@ type UnusualSignInCase struct {
     Method           gauntlet.SignInMethod
     Client           gauntlet.SessionClient // resolved address and agent, never the headers
     Default          UnusualSignInAction    // what the settings decided
+    CanProve         bool // #65: the account has a passkey usable here and this sign-in was not itself a passkey one, so prove would hold it for a passkey
 }
 const DecideTimeout = 3 * time.Second // fixed, not configurable: Decide should be a local lookup
 
@@ -785,7 +788,7 @@ type UnusualSignInDetail struct {
     Method     gauntlet.SignInMethod
     Client     gauntlet.SessionClient // address, agent (text) and country
     SessionRef string // flag: the ref the session list shows, so a message can say "end this session"
-    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid or notify-failed
+    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid, notify-failed or prove-failed
 }
 
 // deprecated (#53, kept a minor release, ADR-0002 decision 2): Notices
@@ -938,17 +941,27 @@ account remembers (`SeenCountries`, `LastPlace`, known browsers); every
 other session issue never judges but still remembers
 (`gauntlet.Store.RememberSignIn`), so turning a signal on later starts
 from a baseline. `Config.UnusualSignIns` resolves the signals raised to
-one of `off`, `flag`, `confirm` or `block` -- the strictest of the kept
-signals wins -- and `Decide`, if set, can overrule that answer once,
-fixed at `DecideTimeout` (3 s), failing closed to `block` on a panic,
-an error, a timeout or an answer that is not one of the four. `flag`
+one of `off`, `flag`, `confirm`, `prove` or `block` -- the strictest of
+the kept signals wins -- and `Decide`, if set, can overrule that answer
+once, fixed at `DecideTimeout` (3 s), failing closed to `block` on a
+panic, an error, a timeout or an answer that is not one of the five. `flag`
 lets the sign-in complete, marked on the session, the sign-in history
 and the audit record. `confirm` holds it behind a code
 `Config.DeliverConfirmCode` hands the application synchronously, typed
 into the same sign-in at `POST /api/auth/login/confirm` (sealed ticket
 cookie `gate_confirm_login`, path `/api/auth/login`, 15 minutes); the
 code is eight decimal digits, shown once, kept only as its SHA-256.
-`block` answers 403 `sign-in-refused` (`docs/api/errors.md`), refusing
+`prove` (#65, ADR-0009 decision 10) holds it for a passkey assertion for
+the same account instead: the same ticket cookie, marked `Prove` with no
+code, the answer `{"prove": "passkey", "passkeyOrigin": ...}` (the SSO
+callback redirects with `?prove=1`), and `POST /api/auth/login/prove/begin`
+and `POST /api/auth/login/prove {assertion}`, which run the existing
+non-discoverable ceremony (`BeginLogin`/`FinishLogin`, user verification
+preferred, not required) and the login limiter as confirm does. It
+resolves per sign-in: a passkey sign-in is already proved, so `flag`; an
+account with no passkey usable here is held for a code (`confirm`) when
+`Config.DeliverConfirmCode` is set, else refused (`block`), and
+`UnusualSignInCase.CanProve` tells `Decide` which. `block` answers 403 `sign-in-refused` (`docs/api/errors.md`), refusing
 the one attempt, never the account, and writes nothing to the
 account's memory. One exception (#66, ADR-0011): a refused admin whom
 no other admin can act for (`Store.OtherAdminCanAct`) also gets an
@@ -961,7 +974,7 @@ login limiter. Never for a user or viewer, never on the SSO callback,
 and with neither `Config.Log` nor `Config.OnEscapeCode` nothing is
 issued. `gate.New` refuses an unknown action, `confirm` with
 no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with
-no `Config.Locate`. A `flag` or `block` notice through `Config.Notices`
+no `Config.Locate` (`prove` needs nothing wired). A `flag` or `block` notice through `Config.Notices`
 is rate-limited to once an account per hour; a `confirm` code has no
 limit, since the notice is the code the person is waiting for.
 
@@ -1008,7 +1021,8 @@ four tokens joined by a character base64url never produces, one per
 account, so a browser shared by two accounts is not "new" to whichever
 one is switched to -- a one-token cookie from before this change still
 reads as a list of one; the confirm-login cookie `gate_confirm_login`
-(#55), path `/api/auth/login` (a prefix of `/api/auth/login/confirm`;
+(#55, #65), path `/api/auth/login` (a prefix of `/api/auth/login/confirm`
+and `/api/auth/login/prove`;
 the SSO callback can still set it, since a response sets a cookie for
 any path), `HttpOnly`, `SameSite=Lax`, `Secure` per `SecureCookie`,
 `Max-Age` 15 minutes (`ConfirmCodeLifetime`), sealed under its own
