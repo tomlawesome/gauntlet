@@ -440,6 +440,7 @@ func TestUnusualPolicyChecks(t *testing.T) {
 		{"ok: nothing set, no Locate", UnusualSignInPolicy{}, false, ""},
 		{"ok: off", UnusualSignInPolicy{Action: UnusualSignInOff, NewCountry: UnusualSignInFlag}, true, ""},
 		{"ok: block", UnusualSignInPolicy{Action: UnusualSignInBlock, ImpossibleTravel: UnusualSignInBlock}, true, ""},
+		{"ok: prove needs no delivery (it falls back to block)", UnusualSignInPolicy{Action: UnusualSignInProve, NewBrowser: UnusualSignInProve}, true, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := Config{
@@ -489,6 +490,8 @@ func TestResolveUnusual(t *testing.T) {
 		{"per-signal off drops", UnusualSignInPolicy{NewBrowser: UnusualSignInOff}, nb, "", 0},
 		{"strictest wins", UnusualSignInPolicy{NewBrowser: UnusualSignInFlag, NewCountry: UnusualSignInBlock, ImpossibleTravel: UnusualSignInConfirm}, nb | nc | it, UnusualSignInBlock, nb | nc | it},
 		{"confirm over flag", UnusualSignInPolicy{Action: UnusualSignInConfirm, NewBrowser: UnusualSignInFlag}, nb | it, UnusualSignInConfirm, nb | it},
+		{"prove over confirm", UnusualSignInPolicy{Action: UnusualSignInConfirm, NewBrowser: UnusualSignInProve}, nb | it, UnusualSignInProve, nb | it},
+		{"block over prove", UnusualSignInPolicy{NewBrowser: UnusualSignInProve, NewCountry: UnusualSignInBlock}, nb | nc, UnusualSignInBlock, nb | nc},
 		{"block not raised", UnusualSignInPolicy{NewCountry: UnusualSignInBlock}, nb, UnusualSignInFlag, nb},
 	} {
 		g := &Gate{cfg: Config{UnusualSignIns: c.policy}}
