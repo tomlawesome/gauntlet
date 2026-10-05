@@ -48,6 +48,11 @@ var maxLoginLimiterKeys = 4096
 // new password or a disable running out -- never on a correct password
 // alone, nor on a lockout running out.
 //
+// Separately, failed sign-in attempts are counted per source address and
+// a persistent source is banned for a day (AddressBanned,
+// RecordAddressFailure; addressban.go, #70): memory only, in a map of
+// its own with the same cap and eviction rules.
+//
 // A browser the account remembers (Store.KnowsBrowser) keeps a budget of
 // its own when the ordinary one refuses it (ReserveKnownBrowser), so a
 // stranger cannot lock the owner out by guessing wrong (#44).
@@ -57,6 +62,13 @@ type LoginLimiter struct {
 	accounts  map[string][]time.Time // bucket + account ID
 	threshold int
 	window    time.Duration
+
+	// addresses are the failed-attempt counts and bans per source
+	// address group (addressban.go): memory only, capped at
+	// maxAddressBanKeys, a ban shed only after every count.
+	addresses             map[string]addressRecord
+	lastAddressPressure   time.Time
+	addressPressureLogged bool
 
 	// resetPasses are the address-limit passes AllowAfterReset has
 	// handed out, keyed by resetPassKey. Bounded like the capped map:
@@ -189,6 +201,7 @@ func NewLoginLimiter(threshold int, window time.Duration) (*LoginLimiter, error)
 	return &LoginLimiter{
 		attempts:     make(map[string][]time.Time),
 		accounts:     make(map[string][]time.Time),
+		addresses:    make(map[string]addressRecord),
 		resetPasses:  make(map[string]resetPass),
 		wantLockout:  make(map[string]pendingLockout),
 		mem:          memoryLockouts{states: make(map[string]lockoutState)},

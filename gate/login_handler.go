@@ -78,14 +78,30 @@ type loginReservation struct {
 // username is the account's own username when accountID is set, else
 // the name as typed; method is what the attempt presents. A refusal is
 // recorded (recordSignIn) as locked, disabled or rate_limited.
+//
+// An address that has been banned (AddressBanned) is refused first with
+// the same 429 and rate_limited as the address limit, unless the browser
+// is a known one for the account (see below). Failed attempts are
+// counted toward the ban in recordSignIn, not here.
 func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, method gauntlet.SignInMethod, pendingAfterReset bool, now time.Time) (loginReservation, bool) {
 	address := g.cfg.ClientIP(r)
 	res := loginReservation{ipKey: "ip:" + address, address: address, accountID: accountID, pendingAfterReset: pendingAfterReset}
 	if accountID == "" {
 		res.nameKey = "user:" + strings.ToLower(username)
 	}
-	ok := pendingAfterReset || g.deps.Limiter.Reserve(res.ipKey, now)
-	if !ok && accountID != "" && g.deps.Limiter.AllowAfterReset(res.ipKey, g.deps.Users, accountID, now) {
+	// A banned address (gauntlet.LoginLimiter.AddressBanned, #70) is
+	// refused before anything is reserved, as the address limit refuses
+	// it, unless the browser is one the account remembers: behind a
+	// reverse proxy that hands gauntlet its own address, one attacker's
+	// ban would otherwise be everyone's, the owner's included. Such a
+	// browser goes on to the ordinary path, which may still refuse it
+	// and give it its own allowance below.
+	_, banned := g.deps.Limiter.AddressBanned(address, now)
+	if banned && accountID != "" && g.isKnownBrowser(r, accountID, now) {
+		banned = false
+	}
+	ok := !banned && (pendingAfterReset || g.deps.Limiter.Reserve(res.ipKey, now))
+	if !ok && !banned && accountID != "" && g.deps.Limiter.AllowAfterReset(res.ipKey, g.deps.Users, accountID, now) {
 		ok, res.afterReset = true, true
 	}
 	if ok {
@@ -109,7 +125,7 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 			g.deps.Limiter.ReleaseAfterReset(res.ipKey, accountID)
 		}
 	}
-	if !ok && accountID != "" && g.isKnownBrowser(r, accountID, now) {
+	if !ok && !banned && accountID != "" && g.isKnownBrowser(r, accountID, now) {
 		if d := g.deps.Limiter.ReserveKnownBrowserDecision(g.deps.Users, accountID, now); d.Allowed {
 			// Whatever the ordinary path reserved has been handed back
 			// above, a reset pass included, so this is the only

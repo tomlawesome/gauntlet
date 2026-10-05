@@ -29,6 +29,11 @@ import (
 //     and which the unusual-sign-in policy refused (#55): actor and
 //     target the username; detail the signals, the reason, the method,
 //     whether the application was told, and the address.
+//   - address.banned beside the user.login_failed of the attempt that
+//     was the AddressBanFailures'th from one address (gauntlet
+//     AddressBanned, #70): once per ban. Actor the account tried (or
+//     "unknown"), target the address group (an IPv6 /64 as a prefix),
+//     detail until=, the count and period, and from=.
 //   - account.locked and account.disabled beside the user.login_failed
 //     of the attempt that started a lockout or disabled sign-in. An
 //     attempt that did either but succeeded hands it back
@@ -156,6 +161,15 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 			detail += fmt.Sprintf(" name=%q", ev.Username)
 		}
 		g.auditRecord(name, "user.login_failed", name, detail)
+		// Counted toward the address ban (#70) whichever name was tried,
+		// an unknown one included: that is the point. The SSO callback
+		// is not a guess at a credential here, and is not counted.
+		if ev.Method != gauntlet.SignInMethodSSO && g.deps.Limiter.RecordAddressFailure(ev.Client.Address, now) {
+			g.auditRecord(name, "address.banned", gauntlet.AddressBanGroup(ev.Client.Address), fmt.Sprintf(
+				"until=%s after %d failed sign-ins in %s %s",
+				now.Add(gauntlet.AddressBanDuration).UTC().Format(time.RFC3339),
+				gauntlet.AddressBanFailures, gauntlet.AddressBanDuration, from))
+		}
 		if ev.UserID == "" {
 			return
 		}
