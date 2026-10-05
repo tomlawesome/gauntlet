@@ -652,9 +652,15 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 // user's account -- handleTOTPAdminClear's twin, including refusing the
 // caller's own account: an admin who lost their own factor has no
 // console tool in this module (docs/design.md §1.7). ClearPasskeys drops
-// the recovery codes only when no factor of either kind is left.
+// the recovery codes only when no factor of either kind is left. The
+// caller's own password is asked for again on the request (#72).
 func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
+		return
+	}
+	var req adminStepUpRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	id := r.PathValue("id")
@@ -664,6 +670,9 @@ func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) 
 	}
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
 		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot clear their own passkeys here", nil)
+		return
+	}
+	if !g.recheckAdminPassword(w, r, req.Password, g.now()) {
 		return
 	}
 

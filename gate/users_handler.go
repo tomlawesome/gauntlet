@@ -154,7 +154,9 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 // the deletion if not revoked here.
 //
 // The last admin cannot be deleted (409 last-admin, #67), nor can the
-// caller's own account while other admins exist (409 conflict).
+// caller's own account while other admins exist (409 conflict). The
+// caller's own password is asked for again on the request (#72, ASVS
+// 7.5.3), after those two refusals and before anything is deleted.
 //
 // Divergence from mikroview (gauntlet #15): when RevokeAllCreatedBy
 // fails, mikroview's handleAuthDeleteUser logs it and still answers 200
@@ -167,6 +169,11 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 // exactly as revocable after a 500 as after a 200 -- an admin just has
 // to be told to go do it by hand.
 func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	var req adminStepUpRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
@@ -178,6 +185,10 @@ func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	// answer, so that case is left to it.
 	if caller := UserFromContext(r); caller != nil && caller.ID == id && len(g.deps.Users.Admins()) > 1 {
 		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot delete their own account -- ask another admin to", nil)
+		return
+	}
+
+	if !g.recheckAdminPassword(w, r, req.Password, g.now()) {
 		return
 	}
 
@@ -252,7 +263,16 @@ type resetPasswordResponse struct {
 // bumps SessionsEndedAt (which ends them across processes and
 // restarts) and this drops the ones in memory immediately, the same
 // pattern handleDeleteUser and handleChangePassword use.
+//
+// The caller's own password is asked for again on the request (#72,
+// ASVS 7.5.3): the code this route returns is a way into any other
+// account, and a stolen session cookie must not be enough to get one.
 func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req adminStepUpRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
@@ -264,6 +284,9 @@ func (g *Gate) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := g.now()
+	if !g.recheckAdminPassword(w, r, req.Password, now) {
+		return
+	}
 	user, code, err := g.deps.Users.IssueResetCode(id, now)
 	if err != nil {
 		status, class := http.StatusInternalServerError, classServerError

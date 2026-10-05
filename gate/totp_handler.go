@@ -311,7 +311,16 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 // design.md §1.7 -- the recovery-key CLI stays mikroview's own), so
 // self-clearing here would need its own separate justification this
 // route was never meant to provide.
+//
+// The caller's own password is asked for again on the request (#72,
+// ASVS 7.5.3): stripping a colleague's second factor is exactly what a
+// stolen admin session would be used for.
 func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
+	var req adminStepUpRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
@@ -319,6 +328,10 @@ func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 	}
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
 		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot clear their own authenticator app here", nil)
+		return
+	}
+
+	if !g.recheckAdminPassword(w, r, req.Password, g.now()) {
 		return
 	}
 
