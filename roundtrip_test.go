@@ -43,7 +43,7 @@ import (
 // not hashes of anything: nothing here authenticates. Users are in the
 // username order a save writes them in.
 const accountsFixture = `{
-  "version": 8,
+  "version": 9,
   "seq": 1,
   "users": [
     {
@@ -336,9 +336,9 @@ func fixtureAtVersion(t *testing.T, version int, without ...string) string {
 		}
 		doc = strings.Replace(doc, line, "", 1)
 	}
-	const current = `"version": 8,`
+	const current = `"version": 9,`
 	if !strings.Contains(doc, current) {
-		t.Fatal("the every-field fixture is no longer at version 8")
+		t.Fatal("the every-field fixture is no longer at version 9")
 	}
 	return strings.Replace(doc, current, `"version": `+strconv.Itoa(version)+`,`, 1)
 }
@@ -361,7 +361,7 @@ func openSaveAndCompare(t *testing.T, doc, want string) *Store {
 		t.Fatal(err)
 	}
 	if string(snap.Payload) != want {
-		t.Errorf("a saved older document differs from the fixture at version 8 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
+		t.Errorf("a saved older document differs from the fixture at version 9 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
 			want, snap.Payload)
 	}
 	return s
@@ -377,12 +377,12 @@ func openSaveAndCompare(t *testing.T, doc, want string) *Store {
 // correctly as zero, so no migration code exists. The every-field
 // fixture without them, at version 1, opens with them zero and the
 // session cutoff at passwordChangedAt, and its next save writes exactly
-// the fixture without the others, now at version 8 and seq 1 (stamped
+// the fixture without the others, now at version 9 and seq 1 (stamped
 // from zero).
 func TestAVersion1AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	const sessionsLine = "      \"sessionsEndedAt\": \"2026-01-02T03:06:05Z\",\n"
 	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
-	want := fixtureAtVersion(t, 8, sessionsLine, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, sessionsLine, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v1, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -408,10 +408,10 @@ func TestAVersion1AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // counted either. The every-field fixture without them (or the later
 // versions' knownBrowsers, breachCheckPending and seq), at version 2,
 // opens with both zero, its lockout still in force, and saves back as
-// exactly the fixture without the others at version 8, seq stamped at 1.
+// exactly the fixture without the others at version 9, seq stamped at 1.
 func TestAVersion2AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	v2 := fixtureAtVersion(t, 2, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
-	want := fixtureAtVersion(t, 8, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v2, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -433,12 +433,12 @@ func TestAVersion2AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // a build without the field issued. The every-field fixture without it
 // (or version 5's breachCheckPending and version 6's seq), at version 3,
 // opens with no browser remembered and everything else intact, and
-// saves back as exactly the fixture without the others at version 8,
+// saves back as exactly the fixture without the others at version 9,
 // seq stamped at 1 -- after which a build reading only up to version 3
 // refuses it (errNewerDocument).
 func TestAVersion3AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	v3 := fixtureAtVersion(t, 3, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
-	want := fixtureAtVersion(t, 8, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v3, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -462,7 +462,7 @@ func TestAVersion3AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // that wrote version 4 accepted a password HIBP had not answered for.
 // The every-field fixture without it (or version 6's seq), at version 4,
 // opens with no recheck pending and everything else intact, and saves
-// back as exactly the fixture without them at version 8, seq stamped at
+// back as exactly the fixture without them at version 9, seq stamped at
 // 1 -- after which a build reading only up to version 4 refuses it
 // (errNewerDocument), rather than drop a recheck that is owed. A
 // version-6 document with the mark set opens with it set and round-trips
@@ -470,7 +470,7 @@ func TestAVersion3AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // every-field fixture).
 func TestAVersion4AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	v4 := fixtureAtVersion(t, 4, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
-	want := fixtureAtVersion(t, 8, breachLines, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v4, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -505,7 +505,7 @@ func TestAVersion4AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // docs/design.md §4 describes.
 func TestAVersion5AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	v5 := fixtureAtVersion(t, 5, seqLine, totpPendingLine, heldLines, unusualLines)
-	want := fixtureAtVersion(t, 8, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v5, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -522,12 +522,12 @@ func TestAVersion5AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // which a version-6 document does not carry and which read correctly as
 // zero and nil -- nothing on hold. The every-field fixture without them
 // opens with every other field intact and saves back as exactly the
-// fixture without them at version 8 -- after which a build reading only
+// fixture without them at version 9 -- after which a build reading only
 // up to version 6 refuses it (errNewerDocument), rather than drop an
 // enrolment on hold.
 func TestAVersion6AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	v6 := fixtureAtVersion(t, 6, totpPendingLine, heldLines, unusualLines)
-	want := bumpedSeq(t, fixtureAtVersion(t, 8, totpPendingLine, heldLines, unusualLines))
+	want := bumpedSeq(t, fixtureAtVersion(t, 9, totpPendingLine, heldLines, unusualLines))
 
 	s := openSaveAndCompare(t, v6, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -602,12 +602,12 @@ func assertFixtureCoversEveryField(t *testing.T, fixture string, types ...reflec
 // remembered -- so the first sign-in after the upgrade sets a baseline
 // and raises nothing. The every-field fixture without them opens with
 // every other field intact and saves back as exactly the fixture
-// without them at version 8 -- after which a build reading only up to
+// without them at version 9 -- after which a build reading only up to
 // version 7 refuses it (errNewerDocument), rather than drop what the
 // account remembers.
 func TestAVersion7AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	v7 := fixtureAtVersion(t, 7, unusualLines)
-	want := bumpedSeq(t, fixtureAtVersion(t, 8, unusualLines))
+	want := bumpedSeq(t, fixtureAtVersion(t, 9, unusualLines))
 
 	s := openSaveAndCompare(t, v7, want)
 	admin, ok := s.Get("admin-id-0001")

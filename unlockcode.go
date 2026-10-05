@@ -10,9 +10,10 @@ import (
 
 // The lone-admin unlock code (#44). MaxConsecutiveLoginFailures failed
 // sign-ins in a row disable an account's local sign-in until an admin
-// unlocks it -- and when the account is the admin's own, no other admin
-// exists to do it (this package holds exactly one, ErrSingleAdmin). So
-// when the store opens and finds that admin disabled, it makes a
+// unlocks it -- and when every admin is disabled (a deployment with one
+// admin, or several all locked out; since #67 a second admin is the
+// first remedy, and this code the fallback), no admin remains to do it.
+// So when the store opens and finds that so, it makes a
 // one-time code and announces it in the server's log, as an empty store
 // announces its setup code (setupcode.go): taking the code needs access
 // to the server, not just its address, which is the trust boundary the
@@ -80,11 +81,9 @@ func unlockCodeLogLine(username, code string) string {
 // disabled when no admin account remains that is not -- the case where
 // nobody can use the admin unlock route -- or nil.
 //
-// This package holds exactly one admin, so today that is "the admin, if
-// disabled"; the loop says the rule rather than the cardinality, as
-// HasLocalAdmin does, so a second admin able to unlock the first would
-// mean no code. With several all disabled, the first by username gets
-// it, deterministically.
+// With several admins (#67) any one that is not disabled can unlock the
+// others, so there is no code; with all of them disabled, the first by
+// username gets it, deterministically.
 func (st *storeState) lockedOutAdmin() *User {
 	var out *User
 	for _, u := range st.byID {

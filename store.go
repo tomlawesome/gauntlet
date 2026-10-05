@@ -68,18 +68,28 @@ var (
 	// ErrUserNotFound is returned by SetPassword/Get for an unknown user
 	// ID/username.
 	ErrUserNotFound = errors.New("gauntlet: no such user")
-	// ErrSingleAdmin is returned by CreateUser for a RoleAdmin request.
-	// This package holds exactly one admin; handover is TransferAdmin,
-	// not creating a second one.
+	// ErrSingleAdmin is no longer returned: since #67 a deployment may
+	// hold several admins and CreateUser accepts RoleAdmin. It stays
+	// exported so an application that names it in an errors.Is switch
+	// keeps compiling (ADR-0002); what it used to guard is ErrLastAdmin.
 	ErrSingleAdmin = errors.New("gauntlet: this deployment has a single admin account -- transfer the role instead of creating another admin")
-	// ErrInvalidRole is returned by CreateUser for any role other than
-	// RoleUser or RoleViewer. RoleAdmin is refused separately, as
-	// ErrSingleAdmin above.
-	ErrInvalidRole = errors.New(`gauntlet: role must be "user" or "viewer"`)
-	// ErrCannotDeleteAdmin is returned by DeleteUser for the admin
-	// account. Transfer the role first if the intent is to remove the
-	// person currently holding it.
-	ErrCannotDeleteAdmin = errors.New("gauntlet: the admin account cannot be deleted -- transfer the admin role first")
+	// ErrInvalidRole is returned by CreateUser and SetRole for any role
+	// other than RoleAdmin, RoleUser or RoleViewer.
+	ErrInvalidRole = errors.New(`gauntlet: role must be "admin", "user" or "viewer"`)
+	// ErrLastAdmin is returned by SetRole when the change would leave
+	// the deployment with no admin, and, through ErrCannotDeleteAdmin,
+	// by DeleteUser for the same reason (#67). Add or promote another
+	// admin first. Without one nothing could add accounts, manage
+	// tokens or reach an admin-gated screen again.
+	ErrLastAdmin = errors.New("gauntlet: this is the last admin account -- make another account an admin first")
+	// ErrCannotDeleteAdmin is returned by DeleteUser for the last admin
+	// account. It is the name callers already compare against with ==,
+	// so DeleteUser returns this very value; errors.Is(err,
+	// ErrLastAdmin) is also true of it.
+	ErrCannotDeleteAdmin error = lastAdminDeleteError{}
+	// ErrRoleUnchanged is returned by SetRole when the account already
+	// holds the role asked for, so nothing was written.
+	ErrRoleUnchanged = errors.New("gauntlet: that account already has that role")
 	// ErrTransferToSelf is returned by TransferAdmin when the target is
 	// already the admin.
 	ErrTransferToSelf = errors.New("gauntlet: that account is already the admin")
@@ -97,12 +107,6 @@ var (
 	// a warning is read once and a backup is copied for years.
 	ErrPlaintextAtRest = errors.New("gauntlet: the accounts backend stores the document in the clear, TOTP secrets included -- wrap it in persist.Encrypt, or set Options.AllowPlaintextAtRest to accept that")
 
-	// errMultipleAdmins is the decode error for an accounts document
-	// holding more than one admin. No write in this package produces
-	// one (see CreateUser and TransferAdmin), so it can only come from a
-	// hand edit or a foreign writer, and it is refused the way an
-	// unparseable document is.
-	errMultipleAdmins = errors.New("more than one account holds the admin role; this package allows exactly one")
 	// errNoAdmin is the decode error for an accounts document that holds
 	// accounts but none of them is the admin. See checkAdmins.
 	errNoAdmin = errors.New("accounts document holds accounts but no admin")
@@ -174,13 +178,24 @@ func parseAccounts(data []byte) (storeFile, error) {
 	return file, nil
 }
 
-// checkAdmins refuses a document with more than one admin, and refuses
-// one that holds accounts but none of them admin. An empty document (no
-// users at all) is fine -- that's a deployment before Register. But once
-// accounts exist, losing the admin is a one-way door: Register is closed
-// as soon as Count()>0, CreateUser refuses RoleAdmin, and TransferAdmin
-// needs a current admin to transfer from, so nothing in this package
-// could ever create a new one. Loading such a document anyway would mean
+// lastAdminDeleteError is the type of ErrCannotDeleteAdmin: a comparable
+// value, so an application's `err == ErrCannotDeleteAdmin` keeps
+// working, that also answers errors.Is(err, ErrLastAdmin) (#67).
+type lastAdminDeleteError struct{}
+
+func (lastAdminDeleteError) Error() string {
+	return "gauntlet: the last admin account cannot be deleted -- make another account an admin first"
+}
+
+func (lastAdminDeleteError) Is(target error) bool { return target == ErrLastAdmin }
+
+// checkAdmins refuses a document that holds accounts but none of them
+// admin; any number of admins from one up is fine (#67). An empty
+// document (no users at all) is fine -- that's a deployment before
+// Register. But once accounts exist, losing the last admin is a one-way
+// door: Register is closed as soon as Count()>0, and CreateUser, SetRole
+// and TransferAdmin all need a current admin to act for, so nothing in
+// this package could ever create a new one. Loading such a document anyway would mean
 // a server that answers 403 on every admin route forever, with a backup
 // the only way back -- refusing it at startup says so up front instead.
 //
@@ -198,9 +213,6 @@ func (f storeFile) checkAdmins() error {
 		if u.Role == RoleAdmin {
 			admins++
 		}
-	}
-	if admins > 1 {
-		return fmt.Errorf("%w (found %d)", errMultipleAdmins, admins)
 	}
 	if admins == 0 && len(f.Users) > 0 {
 		if nulls := len(f.Users) - accounts; nulls > 0 {
@@ -530,9 +542,9 @@ func (s *Store) accounts() document[storeState] {
 		decode: func(data []byte) (*storeState, error) {
 			return decodeAccounts(data, s.seq)
 		},
-		// The single-admin rule, checked on the way out as well as on
-		// the way in: an op that broke it would otherwise save a
-		// document the next OpenStore refuses.
+		// The rule that accounts need an admin, checked on the way out
+		// as well as on the way in: an op that broke it would otherwise
+		// save a document the next OpenStore refuses.
 		check: func(st *storeState) error {
 			return storeFile{Users: st.users()}.checkAdmins()
 		},
@@ -839,7 +851,7 @@ func (s *Store) reloadIfStale() {
 	if err != nil && !errors.Is(err, errNewerDocument) &&
 		!errors.Is(err, errStaleDocument) &&
 		!errors.Is(err, errNullDocument) &&
-		!errors.Is(err, errMultipleAdmins) && !errors.Is(err, errNoAdmin) &&
+		!errors.Is(err, errNoAdmin) &&
 		!errors.Is(err, errDuplicateUsername) {
 		return
 	}
@@ -966,22 +978,18 @@ func registrationOpenGuard(s *Store, st *storeState) error {
 // recovery tooling. No guard: unlike Register, this is deliberately
 // callable at any time.
 //
-// role must be RoleUser or RoleViewer. Anything else is refused:
-// RoleAdmin specifically as ErrSingleAdmin, any other value as
-// ErrInvalidRole -- neither is silently coerced to a lesser role, since
+// role must be RoleAdmin, RoleUser or RoleViewer; any other value is
+// refused as ErrInvalidRole rather than coerced to a lesser role, since
 // that would create an account under the name the caller chose with a
-// privilege they did not ask for.
+// privilege they did not ask for. A deployment may hold several admins
+// (#67). Store does not know who is asking: an HTTP caller creating an
+// admin must have re-entered their password and a second factor first,
+// which gate's handler checks before it gets here.
 func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error) {
 	if !s.Persisted() {
 		return nil, ErrNotPersisted
 	}
-	// This package holds exactly one admin at a time. Refused here
-	// rather than only at a caller's own API layer so every caller
-	// inherits the invariant instead of each remembering it.
-	if role == RoleAdmin {
-		return nil, ErrSingleAdmin
-	}
-	if role != RoleUser && role != RoleViewer {
+	if role != RoleAdmin && role != RoleUser && role != RoleViewer {
 		return nil, ErrInvalidRole
 	}
 	// Same as Register: picking up another process's writes first
@@ -995,10 +1003,13 @@ func (s *Store) CreateUser(username, password string, role Role, now time.Time) 
 // clean up what belonged to it (sessions, API tokens). The returned copy
 // has its credentials blanked, as List's are.
 //
-// It refuses to delete the admin. This package holds exactly one admin,
-// and a deployment with none has no way to add accounts, manage tokens,
-// or reach any admin-gated screen. Enforced here rather than only at a
-// caller's own API layer so every caller inherits it.
+// It refuses to delete the last admin (ErrCannotDeleteAdmin, which is
+// also ErrLastAdmin): a deployment with none has no way to add accounts,
+// manage tokens, or reach any admin-gated screen. Any other admin may be
+// deleted. The count is taken inside the write, against the document
+// being saved, so two admins deleted at once cannot both succeed.
+// Enforced here rather than only at a caller's own API layer so every
+// caller inherits it.
 func (s *Store) DeleteUser(id string) (*User, error) {
 	if !s.Persisted() {
 		return nil, ErrNotPersisted
@@ -1019,7 +1030,7 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 		if !ok {
 			return ErrUserNotFound
 		}
-		if u.Role == RoleAdmin {
+		if u.Role == RoleAdmin && st.adminCount() <= 1 {
 			return ErrCannotDeleteAdmin
 		}
 		delete(st.byID, id)
@@ -1044,10 +1055,11 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 // TransferAdmin moves the admin role to toUsername, atomically, and
 // returns both accounts with their credentials blanked, as List's are.
 //
-// This is the only way to change who administers a deployment. There is
-// deliberately no separate promote or demote: either alone would leave
-// the deployment with two admins or none, and the rest of the system
-// assumes neither can happen.
+// It is the console's handover: with several admins it still moves the
+// role from "the admin" (the first by username, as Admin returns) to
+// toUsername, leaving any other admin alone. SetRole is the general
+// change of one account's role. The old admin becomes a user and its
+// sessions end (SessionsEndedAt), as for any downgrade.
 //
 // The whole operation runs under one write lock with the invariant
 // re-checked inside it; doing it as two calls, or checking the current
@@ -1067,13 +1079,7 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 	// only once it is saved.
 	var fromCopy, toCopy User
 	err = s.mutate(func(st *storeState) error {
-		var current *User
-		for _, u := range st.byID {
-			if u.Role == RoleAdmin {
-				current = u
-				break
-			}
-		}
+		current := st.firstAdmin()
 		if current == nil {
 			return ErrNoAdmin
 		}
@@ -1087,6 +1093,7 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 		}
 		current.Role = RoleUser
 		current.RoleChangedAt = now
+		current.SessionsEndedAt = now
 		target.Role = RoleAdmin
 		target.RoleChangedAt = now
 		fromCopy, toCopy = *current, *target
@@ -1102,37 +1109,139 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 	return &fromCopy, &toCopy, nil
 }
 
-// Admin returns the single admin account, or nil if there isn't one yet.
+// adminCount is how many accounts hold RoleAdmin in st.
+func (st *storeState) adminCount() int {
+	n := 0
+	for _, u := range st.byID {
+		if u.Role == RoleAdmin {
+			n++
+		}
+	}
+	return n
+}
+
+// firstAdmin is the admin with the lowest username, or nil: "the" admin
+// for the callers that want one, the same every time (map order is not).
+func (st *storeState) firstAdmin() *User {
+	var out *User
+	for _, u := range st.byID {
+		if u.Role == RoleAdmin && (out == nil || u.Username < out.Username) {
+			out = u
+		}
+	}
+	return out
+}
+
+// Admin returns an admin account -- the first by username when there
+// are several (#67) -- or nil if there isn't one yet. Use Admins for all
+// of them.
 func (s *Store) Admin() *User {
 	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if a := s.storeState.firstAdmin(); a != nil {
+		cp := *a
+		return &cp
+	}
+	return nil
+}
+
+// Admins returns every admin account, sorted by username, with every
+// credential and credential-adjacent field blanked as List's are.
+func (s *Store) Admins() []User {
+	s.reloadIfStale()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []User{}
 	for _, u := range s.byID {
 		if u.Role == RoleAdmin {
 			cp := *u
-			return &cp
+			cp.blankCredentials()
+			out = append(out, cp)
 		}
 	}
-	return nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
+	return out
+}
+
+// SetRole changes one account's role to role -- any of RoleAdmin,
+// RoleUser or RoleViewer, in either direction -- and returns the account
+// with its credentials blanked, as List's are, with the role it held
+// before, for the caller's audit trail (#67, #75). It records
+// RoleChangedAt, and for a downgrade (a lower tier than before) also
+// SessionsEndedAt, which ends every session the account had: a session
+// issued under the higher privilege should not outlive it (OWASP session
+// management: renew the session after a privilege change).
+//
+// The last admin cannot be demoted: ErrLastAdmin. The count is taken
+// inside the write, against the document being saved, so two admins
+// demoting each other at once cannot both succeed and leave none --
+// the check-then-act race TransferAdmin's comment names. An account
+// that already holds role is ErrRoleUnchanged and nothing is written.
+//
+// Store does not know who is asking. Granting RoleAdmin over HTTP needs
+// the caller's password and a second factor re-entered first; gate's
+// handler does that before calling this.
+func (s *Store) SetRole(id string, role Role, now time.Time) (*User, Role, error) {
+	if role != RoleAdmin && role != RoleUser && role != RoleViewer {
+		return nil, "", ErrInvalidRole
+	}
+	s.reloadIfStale()
+
+	// Decided inside the op against the document being saved, and the
+	// results set last, as DeleteUser does: on a replay that document is
+	// the one another process just wrote.
+	var changed User
+	var from Role
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[id]
+		if !ok {
+			return ErrUserNotFound
+		}
+		if u.Role == role {
+			return ErrRoleUnchanged
+		}
+		if u.Role == RoleAdmin && st.adminCount() <= 1 {
+			return ErrLastAdmin
+		}
+		from = u.Role
+		u.Role = role
+		u.RoleChangedAt = now
+		if role.rank() < from.rank() {
+			u.SessionsEndedAt = now
+		}
+		changed = *u
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	changed.blankCredentials()
+	return &changed, from, nil
 }
 
 // HasLocalAdmin reports whether the deployment still has a way in that
 // does not depend on an identity provider: an admin account that can
 // sign in with a local password.
 //
-// This package holds exactly one admin at a time (see CreateUser), so
-// "at least one admin has a local password" and "the admin has a local
-// password" are the same question -- but the name says the rule rather
-// than the current cardinality, so a future second admin would only
-// change this method's body.
+// With several admins (#67) it is true when any one of them has a
+// local password; every admin keeps one on an SSO link
+// (LinkOIDCIdentity), so in practice that is all of them.
 //
 // It reuses User.LocalPassword() rather than re-deriving "has a
 // password" from the stored hash: an unmatchable hash is deliberately
 // indistinguishable from a real one (see FindOrCreateOIDCUser), so
 // HasLocalPassword is the only honest source.
 func (s *Store) HasLocalAdmin() bool {
-	admin := s.Admin()
-	return admin != nil && admin.LocalPassword()
+	s.reloadIfStale()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range s.byID {
+		if u.Role == RoleAdmin && u.LocalPassword() {
+			return true
+		}
+	}
+	return false
 }
 
 // createAccount inserts a new account. guard, when non-nil, is evaluated
@@ -1463,13 +1572,13 @@ func unmatchablePasswordHash() (string, error) {
 // local credentials at once, so there is nothing left standing for
 // either to guard.
 //
-// **The admin keeps its local password and its local second factor,
+// **Every admin keeps its local password and its local second factor,
 // permanently** (mikroview #1252: "the admin must always be able to sign
-// in, even with the identity provider down"). This package assumes at
-// most one admin and never authenticates to the provider on its own
-// behalf, so a provider that cannot answer means nobody gets in at all --
-// the one account that can end that outage is worth the attack surface
-// the paragraph above refuses everybody else.
+// in, even with the identity provider down"; #67 extends "the admin" to
+// each of several). This package never authenticates to the provider on
+// its own behalf, so a provider that cannot answer means nobody gets in
+// at all -- the accounts that can end that outage are worth the attack
+// surface the paragraph above refuses everybody else.
 //
 // A role change afterwards does not re-run this: an admin demoted to
 // user keeps the password and factor it had, and TransferAdmin's own

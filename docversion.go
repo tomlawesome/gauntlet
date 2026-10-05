@@ -50,6 +50,13 @@ import (
 // raised only against something remembered, the first sign-in after
 // the upgrade sets the baseline and raises nothing. A build that reads
 // up to version 7 refuses a version-8 document rather than drop them.
+// Version 9 (#67) added no field: it allows more than one account to
+// hold the admin role, which a build reading up to version 8 refuses at
+// load ("allows exactly one"). A version-8 document reads unchanged, as
+// one with a single admin. A build that reads up to version 8 refuses a
+// version-9 document, so a deployment rolled back to it fails to start
+// with a message naming the version rather than a misleading one about
+// the admin count.
 //
 // The sign-in history (#53, signins.go) is the third document, version 1
 // from its first release: {"version":1,"nextSeq":n,"rows":[...]}, and
@@ -66,7 +73,7 @@ import (
 // version 6, numbered on its own track since the two documents'
 // versions have never moved together.
 const (
-	accountsDocumentVersion = 8
+	accountsDocumentVersion = 9
 	tokensDocumentVersion   = 2
 	signInsDocumentVersion  = 3
 )

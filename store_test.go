@@ -117,10 +117,8 @@ func TestCreateUserAcceptsViewer(t *testing.T) {
 	}
 }
 
-// TestCreateUserRejectsUnknownRole covers the branch ErrSingleAdmin
-// doesn't: a role that is neither RoleAdmin (refused separately as
-// ErrSingleAdmin, see transfer_test.go) nor one of the two CreateUser
-// actually grants.
+// TestCreateUserRejectsUnknownRole: a role that is none of the three
+// CreateUser grants is refused, not coerced to a lesser one.
 func TestCreateUserRejectsUnknownRole(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
@@ -734,7 +732,7 @@ func TestConcurrentRegisterCreatesExactlyOneAdmin(t *testing.T) {
 	}
 }
 
-func TestDeleteUserRefusesTheAdmin(t *testing.T) {
+func TestDeleteUserRefusesTheLastAdmin(t *testing.T) {
 	s := openTestStore(t)
 	admin, _ := s.Register("alice", "password-placeholder-1", time.Now())
 

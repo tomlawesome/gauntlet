@@ -22,8 +22,8 @@ import (
 // gone with the process -- a lost code means restart and read the log
 // again. There is no clock expiry and no CLI to print it: a CLI's own
 // process cannot see the server's code, and CreateUser does not make
-// admins (ErrSingleAdmin), so a CLI opening the store for one command
-// passes an Options.OnSetupCode that does nothing.
+// admins, so a CLI opening the store for one command passes an
+// Options.OnSetupCode that does nothing.
 //
 // The code is checked here, in the store, so every HTTP caller shares
 // one check; Register itself stays the host-side primitive gate calls
