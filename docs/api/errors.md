@@ -66,7 +66,8 @@ named under the class it shares, below.
   password for the timed-out session's account, #71: "incorrect
   password"; it names no account, so there is no pair), `POST /api/auth/login/confirm` (wrong
   confirmation code, #55: "invalid confirmation code", one cause, no
-  pair), `POST /api/auth/login/escape` (wrong escape code, #66: "invalid
+  pair), `POST /api/auth/login/prove` (a refused passkey assertion, #65:
+  that passkey could not be verified; one cause, no pair), `POST /api/auth/login/escape` (wrong escape code, #66: "invalid
   escape code", one cause, no pair), `POST /api/auth/unlock` (wrong admin
   username or unlock code), every route that re-checks the caller's own
   password or second factor before acting (`POST /api/auth/password`,
@@ -139,8 +140,11 @@ named under the class it shares, below.
   /api/auth/recovery-codes/confirm` (the first factor was held for more
   than ten minutes without its recovery codes being confirmed, and has
   been deleted) (#58), and `POST /api/auth/login/confirm` (the confirm
-  cookie: missing, expired, tampered with, already spent, or the account
-  was deleted since; #55), and `POST /api/auth/login/escape` (the escape
+  cookie: missing, expired, tampered with, already spent, held for a
+  passkey instead of a code, or the account was deleted since; #55),
+  `POST /api/auth/login/prove/begin` and `POST /api/auth/login/prove`
+  (the same, held for a code instead of a passkey; and, at `prove`, a
+  dead passkey ceremony; #65), and `POST /api/auth/login/escape` (the escape
   cookie, same causes; #66).
 - A frontend restarts the flow from its first step -- there is nothing
   left for a retry at this step to complete.

@@ -326,6 +326,7 @@ func TestContractEveryRoute(t *testing.T) {
 	contractNoStorage(t, c)
 	contractPasskeys(t, c)
 	contractPasskeySignIn(t, c)
+	contractProve(t, c)
 	contractUnlockCode(t, c)
 	contractUnusualSignIns(t, c)
 	contractEscapeCode(t, c)
@@ -470,6 +471,11 @@ type reauthenticateRequest struct {
 
 // loginPasskeyRequest is POST /api/auth/login/passkey's body.
 type loginPasskeyRequest struct {
+	Assertion json.RawMessage `json:"assertion"`
+}
+
+// loginProveRequest is POST /api/auth/login/prove's body.
+type loginProveRequest struct {
 	Assertion json.RawMessage `json:"assertion"`
 }
 
@@ -1525,6 +1531,98 @@ func passkeySignInGate(t *testing.T, c *contractChecker, publicURL string, on bo
 	admin := c.client()
 	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", code}}, 201, nil)
 	return f, ts, admin
+}
+
+// contractProve drives a sign-in held for a passkey (#65): a gate whose
+// policy proves a new browser, an admin holding a passkey and recovery
+// codes, the code step answering {"prove": "passkey"}, and the two prove
+// routes -- refusals, the replay and the success -- plus both routes on a
+// gate with no passkeys.
+func contractProve(t *testing.T, c *contractChecker) {
+	const adminPass = "contract-admin-password"
+	const publicURL = "https://passkeys.example.org"
+	users, code := openStore(t, persist.NewMemory())
+	rp, err := passkey.New(passkey.Config{PublicURL: publicURL, DisplayName: testProductName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGateWith(t, gate.Deps{Users: users, Passkeys: rp}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInProve}
+	})
+	ts := newTestServer(t, g)
+	u := ts.URL
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+
+	fake := passkeytest.New("passkeys.example.org", publicURL)
+	var creation protocol.CredentialCreation
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{adminPass}}, 200, &creation)
+	regBody, err := fake.RegisterResponse(&creation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registered passkeyRegisterFinishResponse
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(regBody), "key"}}, 200, &registered)
+	c.do(admin, u, call{method: "POST", path: enrolmentConfirmPath}, 200, nil)
+	if len(registered.RecoveryCodes) == 0 {
+		t.Fatal("the admin's first passkey issued no recovery codes")
+	}
+	adminUser, ok := users.ByUsername("admin")
+	if !ok {
+		t.Fatal("admin was not created")
+	}
+	fake.UserHandle = []byte(adminUser.ID)
+
+	// A new browser: the password, then a recovery code, and the answer
+	// is the passkey owed.
+	held := func(recovery string) *http.Client {
+		t.Helper()
+		client := c.client()
+		c.do(client, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+		var challenge map[string]any
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery}}, 200, &challenge)
+		if challenge["prove"] != "passkey" || challenge["passkeyOrigin"] != publicURL || len(challenge) != 2 {
+			t.Fatalf("login/factor under prove = %v", challenge)
+		}
+		return client
+	}
+	begin := func(client *http.Client, who *passkeytest.FakeAuthenticator) json.RawMessage {
+		t.Helper()
+		var options protocol.CredentialAssertion
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/prove/begin"}, 200, &options)
+		body, err := who.AssertionResponse(&options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	newcomer := held(registered.RecoveryCodes[0])
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove/begin", noCSRF: true}, 403, nil)
+	stranger := *fake
+	stranger.RPID = "not-the-relying-party.example"
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{begin(newcomer, &stranger)}}, 401, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: "{", bad: true}, 400, nil)
+	right := begin(newcomer, fake)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}, noCSRF: true}, 403, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}}, 200, nil)
+	var state sessionResponse
+	c.do(newcomer, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if !state.Authenticated || state.Role != "admin" {
+		t.Fatalf("session after the proof = %+v, want the admin signed in", state)
+	}
+	// The ticket is spent.
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}}, 401, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove/begin"}, 401, nil)
+	// A browser holding no ticket, and a code ticket at the prove routes.
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/login/prove/begin"}, 401, nil)
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}}, 401, nil)
+
+	// No passkeys here: neither route exists.
+	none, noneCode := openStore(t, persist.NewMemory())
+	bare := newTestServer(t, newGateWith(t, gate.Deps{Users: none}, nil))
+	c.do(c.client(), bare.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, noneCode}}, 201, nil)
+	c.do(c.client(), bare.URL, call{method: "POST", path: "/api/auth/login/prove/begin"}, 404, nil)
+	c.do(c.client(), bare.URL, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{json.RawMessage(`{}`)}}, 404, nil)
 }
 
 // contractPasskeySignIn drives signing in with a passkey alone and a

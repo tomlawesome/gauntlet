@@ -29,7 +29,7 @@ info:
     - `401` class `sign-in-required` on every route that needs a session
       and has none. Exempt from that: session, register, login,
       login/factor, login/factor/begin, login/passkey/begin,
-      login/passkey, logout, unlock and the two `GET /api/auth/oidc/*`
+      login/passkey, login/prove/begin, login/prove, logout, unlock and the two `GET /api/auth/oidc/*`
       routes.
     - `403` class `forbidden` on a session-gated route when the account's
       role is not one gauntlet knows, or, on the admin routes, when the
@@ -294,8 +294,14 @@ paths:
         also hands back the attempt that begin counted. Shares the login
         rate limit. Sets the session cookie on success. Like `login`, the
         completed sign-in is first judged for unusual-sign-in signals and
-        may be refused (`403` `sign-in-refused`) or held for a
-        confirmation code (`200` `{"confirm": true}`, #55).
+        may be refused (`403` `sign-in-refused`), held for a confirmation
+        code (`200` `{"confirm": true}`, #55) or, when the account holds a
+        passkey usable at this address and the application's policy asks
+        for one, held for a passkey (`200` `{"prove": "passkey",
+        "passkeyOrigin": ...}`, #65; `POST /api/auth/login/prove/begin`
+        and `POST /api/auth/login/prove` finish it). A passkey assertion
+        sent here is already a passkey sign-in and is never held for
+        another.
       security:
         - pendingLoginCookie: []
         - pendingLoginCookie: []
@@ -310,13 +316,14 @@ paths:
               $ref: "#/components/schemas/LoginFactorRequest"
       responses:
         "200":
-          description: Signed in (sets the session cookie), or a confirmation code was sent (#55; sets the confirm cookie, no session cookie).
+          description: Signed in (sets the session cookie), a confirmation code was sent (#55), or a passkey is owed (#65); either sets the confirm cookie and no session cookie.
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/Account"
                   - $ref: "#/components/schemas/ConfirmationChallenge"
+                  - $ref: "#/components/schemas/ProveChallenge"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -362,7 +369,10 @@ paths:
         the dash, surrounding whitespace ignored. Shares the login rate
         limit; a wrong code counts as a failed second factor. The ticket
         is used by exactly one sign-in and lives 15 minutes. Sets the
-        session cookie on success and clears the confirm cookie.
+        session cookie on success and clears the confirm cookie. A ticket
+        that is held for a passkey (#65) is not a code ticket: it is
+        refused here as `step-expired`, as a code ticket is at
+        `login/prove`.
       security:
         - confirmLoginCookie: []
       parameters:
@@ -402,6 +412,136 @@ paths:
                           - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
         "403":
           $ref: "#/components/responses/CSRFRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/login/prove/begin:
+    post:
+      operationId: loginProveBegin
+      summary: Start the passkey a held sign-in owes
+      description: |
+        Answers the W3C request options for `navigator.credentials.get()`
+        for a sign-in the unusual-sign-in policy held for a passkey (#65,
+        ADR-0009): the account's own passkeys registered for the current
+        relying party, user verification preferred (possession of the key
+        is the point, so a security key without a PIN qualifies). Reached
+        with the confirm cookie `login/factor` set and no session; takes
+        no body. Sets the passkey ceremony cookie (sealed, path
+        `/api/auth/login`, five minutes; each challenge is usable once).
+        It takes nothing on the login limit: `login/prove` is what is
+        counted. `404` when the application has no passkeys; `409` while
+        the relying party is not ready or the account has no passkey
+        usable here (one removed since the sign-in was held).
+      security:
+        - confirmLoginCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: The request options; sets the passkey ceremony cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialAssertion"
+        "401":
+          description: The confirm cookie is missing, invalid, expired or already used, is not one held for a passkey, or its account is gone (`step-expired`; the cookie is cleared) -- sign in again from the start.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+        "403":
+          $ref: "#/components/responses/CSRFRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/login/prove:
+    post:
+      operationId: loginProve
+      summary: Finish a held sign-in with a passkey
+      description: |
+        Completes a sign-in the unusual-sign-in policy held for a passkey
+        (#65): `login/factor` or the SSO callback set the confirm cookie,
+        `login/prove/begin` set the ceremony cookie, and `assertion` is the
+        browser's answer to those options. Only the account's own passkey
+        completes it -- another account's, one nobody registered, a
+        suspected clone and a counter that did not advance are all `401`
+        `invalid-credentials`, saying nothing of which. Shares the login
+        rate limit (`429` before the signature is looked at); a refused
+        assertion keeps its reservation, counts as a failed second factor
+        as a wrong confirmation code does, and leaves the ticket and the
+        ceremony open for a corrected one. A dead ceremony (no cookie,
+        expired, already used) is `401` `step-expired`, its cookie is
+        cleared and the ticket stays, so `begin` can be asked again. The
+        ticket is used by exactly one sign-in and lives 15 minutes. Sets
+        the session cookie on success and clears the confirm cookie; the
+        session list, the sign-in history (marked `confirmed`) and the
+        audit record say how the sign-in began (`code`, `password` or
+        `sso`), with `action=prove` in the audit detail.
+      security:
+        - confirmLoginCookie: []
+          passkeyAssertCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginProveRequest"
+      responses:
+        "200":
+          description: Signed in; sets the session cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: The assertion was refused (`invalid-credentials`), or the confirm cookie is missing, invalid, expired, already used, not one held for a passkey, or its account is gone, or the ceremony is dead (`step-expired`) -- begin again, or sign in again from the start.
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                const: Bearer realm="gate"
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        enum:
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+        "403":
+          $ref: "#/components/responses/CSRFRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1464,7 +1604,9 @@ paths:
         (#55) instead redirects to `Config.LoginPath` with `?confirm=1`
         and sets the confirm cookie, no session cookie; the frontend
         asks for the code and posts it to `POST /api/auth/login/confirm`.
-        The
+        One held for a passkey (#65) redirects with `?prove=1` instead,
+        and the frontend runs `POST /api/auth/login/prove/begin` and
+        posts the assertion to `POST /api/auth/login/prove`. The
         flow cookie is cleared on every path. While no account exists
         yet this route answers 503 like every other route except
         session and register: the first account is never an SSO one.
@@ -2207,7 +2349,7 @@ components:
       type: apiKey
       in: cookie
       name: gate_confirm_login
-      description: Set by `POST /api/auth/login`, `POST /api/auth/login/factor` or the SSO callback when an unusual sign-in owes a confirmation code (#55); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in.
+      description: Set by `POST /api/auth/login`, `POST /api/auth/login/factor` or the SSO callback when an unusual sign-in owes a confirmation code (#55) or a passkey (#65); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in. A ticket owing a passkey is read only by `login/prove/begin` and `login/prove`, one owing a code only by `login/confirm`.
     escapeLoginCookie:
       type: apiKey
       in: cookie
@@ -2222,7 +2364,7 @@ components:
       type: apiKey
       in: cookie
       name: gate_passkey_assert
-      description: Set by `POST /api/auth/login/factor/begin`; sealed, path `/api/auth/login`, five minutes.
+      description: Set by `POST /api/auth/login/factor/begin` and `POST /api/auth/login/prove/begin`; sealed, path `/api/auth/login`, five minutes.
     passkeySignInCookie:
       type: apiKey
       in: cookie
@@ -2619,6 +2761,15 @@ components:
           type: object
           additionalProperties: true
           description: The W3C `PublicKeyCredential` JSON `navigator.credentials.get()` produced for the options `login/passkey/begin` gave, for the timed-out session's own account (#77). An open object -- see "Compatibility" above.
+    LoginProveRequest:
+      type: object
+      additionalProperties: false
+      required: [assertion]
+      properties:
+        assertion:
+          type: object
+          additionalProperties: true
+          description: The W3C `PublicKeyCredential` JSON `navigator.credentials.get()` produced for the options `login/prove/begin` gave. An open object -- see "Compatibility" above.
     LoginPasskeyRequest:
       type: object
       additionalProperties: false
@@ -2898,6 +3049,18 @@ components:
           type: boolean
           const: true
           description: A confirmation code was sent through the application; post it to `POST /api/auth/login/confirm`. Says nothing about where it went.
+    ProveChallenge:
+      type: object
+      additionalProperties: false
+      required: [prove, passkeyOrigin]
+      properties:
+        prove:
+          type: string
+          const: passkey
+          description: The sign-in is held until a passkey of this account answers. Run `POST /api/auth/login/prove/begin`, then post the assertion to `POST /api/auth/login/prove`.
+        passkeyOrigin:
+          type: string
+          description: The origin `navigator.credentials.get()` must be run against, as in the second-step answer.
     SecondFactorChallenge:
       type: object
       additionalProperties: false
@@ -3053,8 +3216,9 @@ components:
         limiter refusing it before any credential was checked; `refused`
         every credential right but the attempt refused by the unusual
         sign-in policy; `confirm_sent` every credential right and a
-        confirmation code sent, no session yet; `confirm_refused` a wrong
-        confirmation code; `escape_issued` a refused lone admin's escape
+        confirmation code sent -- or a passkey asked for (#65) -- no
+        session yet; `confirm_refused` a wrong confirmation code or a
+        refused passkey assertion; `escape_issued` a refused lone admin's escape
         code written to the server's log (#66), no session yet (a
         `refused` row is recorded with it); `escape_refused` a wrong
         escape code; `unrecorded` the failed attempts past a
@@ -3129,7 +3293,7 @@ components:
           $ref: "#/components/schemas/UnusualSignals"
         confirmed:
           type: boolean
-          description: True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`) or an escape code (`POST /api/auth/login/escape`, #66). Absent when false.
+          description: True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`), a passkey proof (`POST /api/auth/login/prove`, #65) or an escape code (`POST /api/auth/login/escape`, #66). Absent when false.
     SignInList:
       type: object
       additionalProperties: false
