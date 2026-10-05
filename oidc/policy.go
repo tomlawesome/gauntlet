@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -55,6 +56,25 @@ type Policy struct {
 	// {"tid": ["<tenant-guid>"]}, and a provider inventing its own claim
 	// tomorrow needs no code change.
 	RequiredClaims map[string][]string
+	// RoleFromGroups gives an SSO account a role from the groups claim
+	// (GroupsClaim): group name -> "user" or "viewer", matched like
+	// AllowedGroups (trimmed, case-insensitive). An identity in several
+	// mapped groups gets the highest role. It is applied when the account
+	// is provisioned and at every SSO sign-in, so the identity provider
+	// stays the source of truth (ADR-0013).
+	//
+	// "admin" is never a value, and gate.New refuses one: admin comes
+	// only through the admin role route, so a misconfigured or hostile
+	// provider cannot mint admins. An account that is already an admin is
+	// never changed by this map. The map narrows roles, not access: it
+	// does not count in Restricted, and who may sign in at all stays with
+	// AllowedGroups.
+	RoleFromGroups map[string]string
+	// RoleWithoutGroup is the role for an SSO account in none of the
+	// groups RoleFromGroups names, including one with no groups claim at
+	// all. "" means "viewer"; gate.New accepts "user" or "viewer". Only
+	// read when RoleFromGroups is set.
+	RoleWithoutGroup string
 }
 
 // Restricted reports whether this policy narrows anything at all. Used at
@@ -88,10 +108,7 @@ func (p Policy) Permit(id *Identity) error {
 	}
 
 	if len(p.AllowedGroups) > 0 {
-		claim := p.GroupsClaim
-		if claim == "" {
-			claim = defaultGroupsClaim
-		}
+		claim := p.groupsClaim()
 		got := id.claimValues(claim)
 		if len(got) == 0 {
 			return &ErrNotPermitted{Reason: fmt.Sprintf(
@@ -118,6 +135,47 @@ func (p Policy) Permit(id *Identity) error {
 		}
 	}
 
+	return nil
+}
+
+// Groups returns the values id carries in the groups claim (GroupsClaim,
+// default "groups") -- the same ones Permit reads for AllowedGroups --
+// whether the provider sent a single string or a list. Empty when the
+// claim is absent.
+func (p Policy) Groups(id *Identity) []string {
+	if id == nil {
+		return nil
+	}
+	return id.claimValues(p.groupsClaim())
+}
+
+func (p Policy) groupsClaim() string {
+	if p.GroupsClaim == "" {
+		return defaultGroupsClaim
+	}
+	return p.GroupsClaim
+}
+
+// ValidateRoles checks every RoleFromGroups value, and a non-empty
+// RoleWithoutGroup, against valid, so the caller decides which roles may
+// come from a group. It names the first offender, in sorted order so the
+// message is stable. "admin" is never acceptable: an identity provider
+// does not mint admins (ADR-0013 decision 1), and gate passes a check
+// that accepts only "user" and "viewer".
+func (p Policy) ValidateRoles(valid func(role string) bool) error {
+	groups := make([]string, 0, len(p.RoleFromGroups))
+	for g := range p.RoleFromGroups {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	for _, g := range groups {
+		if role := p.RoleFromGroups[g]; !valid(role) {
+			return fmt.Errorf("oidc: RoleFromGroups maps group %q to role %q, which a group may not give", g, role)
+		}
+	}
+	if p.RoleWithoutGroup != "" && !valid(p.RoleWithoutGroup) {
+		return fmt.Errorf("oidc: RoleWithoutGroup %q is not a role a group may give", p.RoleWithoutGroup)
+	}
 	return nil
 }
 

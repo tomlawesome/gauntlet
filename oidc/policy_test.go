@@ -330,3 +330,47 @@ func TestPolicyStillScopesWithinASelfHostedDirectory(t *testing.T) {
 		t.Error("an account outside the permitted group was allowed in")
 	}
 }
+
+func TestPolicyGroupsReturnsTheClaimValues(t *testing.T) {
+	var p Policy
+	if got := p.Groups(identity(map[string]any{"groups": []any{"a", "b", 7, ""}})); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("list: got %v, want [a b]", got)
+	}
+	if got := p.Groups(identity(map[string]any{"groups": "solo"})); len(got) != 1 || got[0] != "solo" {
+		t.Errorf("string: got %v, want [solo]", got)
+	}
+	if got := p.Groups(identity(map[string]any{"email": "x@example.com"})); len(got) != 0 {
+		t.Errorf("absent: got %v, want none", got)
+	}
+	if got := p.Groups(nil); got != nil {
+		t.Errorf("nil identity: got %v, want nil", got)
+	}
+
+	// GroupsClaim moves where the values are read from, for Permit too.
+	custom := Policy{GroupsClaim: "roles"}
+	if got := custom.Groups(identity(map[string]any{"roles": []any{"r1"}, "groups": []any{"g1"}})); len(got) != 1 || got[0] != "r1" {
+		t.Errorf("custom claim: got %v, want [r1]", got)
+	}
+}
+
+func TestPolicyValidateRoles(t *testing.T) {
+	valid := func(role string) bool { return role == "user" || role == "viewer" }
+
+	ok := Policy{RoleFromGroups: map[string]string{"staff": "user", "guests": "viewer"}, RoleWithoutGroup: "user"}
+	if err := ok.ValidateRoles(valid); err != nil {
+		t.Errorf("valid map refused: %v", err)
+	}
+	if err := (Policy{}).ValidateRoles(valid); err != nil {
+		t.Errorf("zero policy refused: %v", err)
+	}
+	for name, p := range map[string]Policy{
+		"admin value":         {RoleFromGroups: map[string]string{"ops": "admin"}},
+		"unknown value":       {RoleFromGroups: map[string]string{"ops": "root"}},
+		"empty value":         {RoleFromGroups: map[string]string{"ops": ""}},
+		"admin without-group": {RoleFromGroups: map[string]string{"ops": "user"}, RoleWithoutGroup: "admin"},
+	} {
+		if err := p.ValidateRoles(valid); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
