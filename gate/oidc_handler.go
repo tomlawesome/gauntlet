@@ -321,12 +321,12 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.redirectWithSSOError(w, r, "refused")
-		g.notifyUnusualSignIn(r.Context(), notice)
+		g.notify(r.Context(), notice)
 		return
 	}
 	notice := g.completeSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
 	http.Redirect(w, r, "/", http.StatusFound)
-	g.notifyUnusualSignIn(r.Context(), notice)
+	g.notify(r.Context(), notice)
 }
 
 // ssoUsernameHint is the name an identity asks to be known by: its

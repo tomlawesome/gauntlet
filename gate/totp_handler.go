@@ -229,6 +229,10 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	g.audit(r, user.Username, "account.totp_enabled", user.Username, "authenticator app confirmed; existing recovery codes unchanged")
 
 	writeJSON(w, http.StatusOK, totpConfirmResponse{Enabled: true, RecoveryCodes: nil, AlreadyIssued: true})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorAdded, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "totp"},
+	})
 }
 
 // writeTOTPConfirmError answers a refused confirmation: 409 when there
@@ -292,6 +296,10 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 
 	g.audit(r, user.Username, "account.totp_disabled", user.Username, "removed by account owner")
 	writeJSON(w, http.StatusOK, map[string]any{"disabled": true, "signedOut": signedOut})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "totp"},
+	})
 }
 
 // handleTOTPAdminClear lets an admin remove another user's authenticator-
@@ -324,6 +332,11 @@ func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.audit(r, auditActor(r), "user.totp_cleared", target.Username, "authenticator app removed by admin")
+	by := auditActor(r)
+	g.audit(r, by, "user.totp_cleared", target.Username, "authenticator app removed by admin")
 	writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": true})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: target.ID, Username: target.Username, Role: target.Role, At: g.now(), By: by,
+		SecondFactor: &SecondFactorDetail{Method: "totp", All: true},
+	})
 }

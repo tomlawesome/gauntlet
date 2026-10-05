@@ -162,10 +162,18 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 		if res.lockoutStarted {
 			g.auditRecord(name, "account.locked", name, fmt.Sprintf("until=%s lockouts=%d %s",
 				res.lockedUntil.UTC().Format(time.RFC3339), res.lockouts, from))
+			g.notify(r.Context(), &AccountNotice{
+				Kind: NoticeAccountLocked, UserID: ev.UserID, Username: name, At: now,
+				Lockout: &LockoutDetail{Until: res.lockedUntil, Lockouts: res.lockouts, Address: ev.Client.Address},
+			})
 		}
 		if res.disabledNow {
 			g.auditRecord(name, "account.disabled", name, fmt.Sprintf("after %d consecutive failures; %s",
 				gauntlet.MaxConsecutiveLoginFailures, from))
+			g.notify(r.Context(), &AccountNotice{
+				Kind: NoticeSignInDisabled, UserID: ev.UserID, Username: name, At: now,
+				Lockout: &LockoutDetail{Until: res.lockedUntil, Lockouts: res.lockouts, Address: ev.Client.Address},
+			})
 		}
 	}
 }

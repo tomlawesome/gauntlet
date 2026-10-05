@@ -324,7 +324,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeSignInRefused(w)
-		g.notifyUnusualSignIn(r.Context(), notice)
+		g.notify(r.Context(), notice)
 		return
 	}
 
@@ -339,7 +339,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// see revokeReplacedSession).
 	notice := g.completeSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
-	g.notifyUnusualSignIn(r.Context(), notice)
+	g.notify(r.Context(), notice)
 }
 
 type loginFactorRequest struct {
@@ -505,7 +505,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 			return true
 		}
 		writeSignInRefused(w)
-		g.notifyUnusualSignIn(r.Context(), notice)
+		g.notify(r.Context(), notice)
 		return true
 	}
 	g.completeLogin(res, now)
@@ -516,6 +516,6 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// here, not at the password step, which issues no session.
 	notice := g.completeSignIn(w, r, user, res, method, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
-	g.notifyUnusualSignIn(r.Context(), notice)
+	g.notify(r.Context(), notice)
 	return true
 }

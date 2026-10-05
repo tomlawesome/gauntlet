@@ -63,9 +63,9 @@ func validSessionEndReason(reason string) bool {
 // MaxSessionEndReason characters, or holding a control or format character.
 // The body is optional.
 //
-// Once the response is written, Config.Notify, if set, is asked to tell
-// the account's owner (notifySessionsEnded); "notified" in the response
-// says it was asked.
+// Once the response is written, Config.Notices, or the deprecated
+// Config.Notify, if either is set, is asked to tell the account's owner
+// (notifySessionsEnded); "notified" in the response says it was asked.
 func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req adminLogoutAllRequest
@@ -103,7 +103,7 @@ func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 		browsers = "remembered browsers could not be forgotten"
 	}
 
-	notified := g.cfg.Notify != nil
+	notified := g.cfg.Notify != nil || g.cfg.Notices != nil
 	notify := "none"
 	if notified {
 		notify = "requested"
@@ -113,7 +113,7 @@ func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, adminLogoutAllResponse{Username: target.Username, Ended: ended, Notified: notified})
 
 	if notified {
-		g.notifySessionsEnded(r.Context(), SessionsEndedNotice{
+		g.notifySessionsEnded(r.Context(), target.Role, SessionsEndedNotice{
 			UserID:   target.ID,
 			Username: target.Username,
 			EndedBy:  auditActor(r),
