@@ -78,6 +78,17 @@ func (g *Gate) setSessionCookie(w http.ResponseWriter, sessionID string) {
 	g.writeCookie(w, g.sessionCookieName(), sessionID, "/", int(g.sessionCookieMaxAge().Seconds()))
 }
 
+// setResumedSessionCookie is setSessionCookie for a resumed session:
+// the cookie lasts only until the session's original ceiling, not a
+// fresh ceiling from now, so resuming never extends the 24 hours from
+// the sign-in. At least one second, since a Max-Age of zero would mean
+// no limit at all.
+func (g *Gate) setResumedSessionCookie(w http.ResponseWriter, sess gauntlet.Session, now time.Time) {
+	_, ceiling := g.deps.Sessions.Limits()
+	left := int(sess.IssuedAt.Add(ceiling).Sub(now).Seconds())
+	g.writeCookie(w, g.sessionCookieName(), sess.ID, "/", max(left, 1))
+}
+
 func (g *Gate) clearSessionCookie(w http.ResponseWriter) {
 	g.writeCookie(w, g.sessionCookieName(), "", "/", -1)
 }

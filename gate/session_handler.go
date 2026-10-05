@@ -47,6 +47,13 @@ type sessionResponse struct {
 	// SignedInSince is the current session's IssuedAt, RFC3339 --
 	// present only while Authenticated.
 	SignedInSince string `json:"signedInSince,omitempty"`
+	// Resumable is true only while Authenticated is false and the
+	// request's session cookie names a session that timed out through
+	// inactivity inside its 24-hour ceiling and can be resumed with
+	// the password alone (POST /api/auth/reauthenticate, #71). A
+	// frontend then offers "enter your password to continue" instead
+	// of the full sign-in form. Omitted otherwise.
+	Resumable bool `json:"resumable,omitempty"`
 }
 
 // sessionPasskeysInfo is sessionResponse.Passkeys.
@@ -92,6 +99,9 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 				resp.SignedInSince = sess.IssuedAt.Format(time.RFC3339)
 			}
 		}
+	}
+	if !resp.Authenticated {
+		_, _, resp.Resumable = g.resumableSession(r, now)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

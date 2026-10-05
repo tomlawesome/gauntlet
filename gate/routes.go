@@ -5,7 +5,8 @@ import "net/http"
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's
 // paths, request and response bodies (docs/design.md §1.5): session,
 // register, login (single- and second-factor step, and the confirmation
-// code an unusual sign-in may owe, #55), logout, logout-all,
+// code an unusual sign-in may owe, #55), reauthenticate (resume a
+// timed-out session with the password, #71), logout, logout-all,
 // the caller's own session list and end-one-session route, password,
 // the lone-admin unlock-code route (#44),
 // users list/create/delete/reset-password/unlock/logout-all, the
@@ -29,6 +30,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("POST "+loginFactorPath, g.handleLoginFactor)
 	mux.HandleFunc("POST "+loginConfirmPath, g.handleLoginConfirm)
 	mux.HandleFunc("POST "+loginEscapePath, g.handleLoginEscape)
+	mux.HandleFunc("POST "+reauthenticatePath, g.handleReauthenticate)
 	mux.HandleFunc("POST "+logoutPath, g.handleLogout)
 	mux.HandleFunc("POST /api/auth/logout-all", g.handleLogoutAll)
 	mux.HandleFunc("POST "+changePasswordPath, g.handleChangePassword)

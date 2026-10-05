@@ -54,7 +54,8 @@ const (
 )
 
 // SignInMethod is what an attempt presented: a password, a code (TOTP
-// or recovery), a passkey assertion, or a single sign-on callback.
+// or recovery), a passkey assertion, a single sign-on callback, or a
+// password alone to resume a session that timed out (#71).
 type SignInMethod string
 
 const (
@@ -62,6 +63,12 @@ const (
 	SignInMethodCode     SignInMethod = "code"
 	SignInMethodPasskey  SignInMethod = "passkey"
 	SignInMethodSSO      SignInMethod = "sso"
+	// SignInMethodResume is the password-only resume of a session that
+	// timed out through inactivity inside its lifetime ceiling
+	// (POST /api/auth/reauthenticate, #71). A SignInSuccess with this
+	// method issued a new session ID for the same sign-in, not a new
+	// sign-in.
+	SignInMethodResume SignInMethod = "resume"
 )
 
 // SignInEvent is one sign-in attempt as gate reports it (#45, #53).

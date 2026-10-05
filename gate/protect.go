@@ -39,6 +39,10 @@ const (
 	sessionsPath     = "/api/auth/sessions"
 	unlockPath       = "/api/auth/unlock"
 
+	// reauthenticatePath resumes a session that timed out with the
+	// password alone (#71; reauthenticate_handler.go).
+	reauthenticatePath = "/api/auth/reauthenticate"
+
 	// enrolmentConfirmPath is where a held first factor and its
 	// recovery codes are confirmed (#58; recoverycodes_handler.go).
 	enrolmentConfirmPath = "/api/auth/recovery-codes/confirm"
@@ -73,6 +77,12 @@ const (
 // from the server's log (#44): by definition they cannot sign in to
 // reach it. It only lifts the disable; it issues no session. Not in
 // bootstrapExemptPaths: with no account there is nothing to unlock.
+//
+// POST /api/auth/reauthenticate resumes a session that has timed out
+// (#71): by definition the caller has no live session to present, only
+// the timed-out one's cookie, which the handler reads itself. It is
+// session-exempt like login and still needs the CSRF header. Not in
+// bootstrapExemptPaths: with no account there is no session to resume.
 var exemptPaths = map[string]bool{
 	"/api/healthz":       true,
 	sessionPath:          true,
@@ -86,6 +96,7 @@ var exemptPaths = map[string]bool{
 	oidcLoginPath:        true,
 	oidcCallbackPath:     true,
 	unlockPath:           true,
+	reauthenticatePath:   true,
 }
 
 // bootstrapExemptPaths is the narrower set reachable while no account
