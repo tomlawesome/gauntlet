@@ -1033,12 +1033,32 @@ it. The data for all of this lives on `User`.
   app's public URL, two sealed cookies, the spent-challenge set) brings
   `github.com/go-webauthn/webauthn` v0.18.2 (owner, 2026-09-30) and is
   reached from `gate` only through `gauntlet.PasskeyCeremony`
-  ([ADR-0004](adr/0004-passkey-ceremony.md)). Registration is
+  ([ADR-0004](adr/0004-passkey-ceremony.md); ADR-0012 adds the optional
+  `gauntlet.PasskeySignIn` beside it). Registration is
   password-gated at begin, as TOTP enrolment is. Birdcage does not wire it
   and does not link it. A missing or unusable public URL is a reported
   status (`unset`, `ip`, `insecure`), not a startup refusal: the
   ceremony routes answer 409 and the session body says why; mikroview's
   deployments reached by IP keep starting.
+- **A passkey that verified the user can sign in on its own (#77,
+  [ADR-0012](adr/0012-passkey-alone-sign-in.md)), behind
+  `Config.PasskeySignIn` (off by default).** A WebAuthn Level 3
+  discoverable credential login: no username is typed, the passkey names
+  its account through the user handle (the account ID), and user
+  verification is required (800-63B-4: a multi-factor cryptographic
+  authenticator, AAL2). `POST /api/auth/login/passkey/begin` and `POST
+  /api/auth/login/passkey`, through a second optional interface,
+  `gauntlet.PasskeySignIn`, that `gauntlet/passkey`'s relying party
+  implements beside `PasskeyCeremony`; `go list -deps ./gate` still shows
+  no WebAuthn code. Every account keeps its password -- a passkey replaces
+  it at sign-in, never in the account, so the accounts document stays at
+  version 9 -- and every registration asks for a discoverable credential
+  (`residentKey: preferred`). The sign-in is judged like any other
+  (method `passkey_alone` reaches `Decide`; confirm is not skipped), is
+  counted for the account's lockout and the address limit and ban before
+  the signature is checked, and meets the must-change-password door after
+  it. The same passkey resumes a timed-out session (§1.5, #71). Mikroview
+  opts in when its login screen has the button.
 - **The door is always shut: `RequireSecondFactor` is deprecated and
   ignored (#49).** `gate` no longer offers a way to turn the
   forced-enrolment door off -- every local-password account, mikroview's

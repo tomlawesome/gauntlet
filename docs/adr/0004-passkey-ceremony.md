@@ -1,7 +1,9 @@
 # ADR-0004: The passkey ceremony is a leaf package behind a seam in the root
 
 **Status:** Proposed (design by Fable 5.1 on #20; owner decisions of
-2026-09-30 and 2026-10-01 recorded below)
+2026-09-30 and 2026-10-01 recorded below). Decision 5's "no discoverable
+or passwordless login" and its unset resident-key preference are
+superseded by ADR-0012.
 **Date:** 2026-10-02
 **Relates to:** #20 (G8, this change), ADR-0001 (mikroview is the
 reference), ADR-0002 (additive API, apidiff, OpenAPI contract),
@@ -92,7 +94,12 @@ mikroview's fake authenticator copies and this module reuses.
    `AnyPasskeysExist()` (added for this on the owner's answer to #20
    question 5), as mikroview's `passkeyStartupRefusal` does.
 
-5. **Policy, written in code rather than left to defaults:** user
+5. *Superseded by ADR-0012 (#77) as to a discoverable login with no
+   password before it, and the unset resident-key preference: a
+   user-verifying passkey may now sign in on its own, behind
+   `Config.PasskeySignIn`, and every registration asks for `residentKey:
+   preferred`. The rest of this decision stands.* **Policy, written in
+   code rather than left to defaults:** user
    presence required; user verification requested but not required
    (a second factor behind a password; requiring it shuts out
    security keys without a PIN); attestation `none`, not verified, no

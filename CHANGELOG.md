@@ -6,6 +6,36 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Sign in with a passkey alone** (#77, ADR-0012). A passkey that verified
+  the user (a PIN or a biometric at the authenticator) can be the whole
+  sign-in: `POST /api/auth/login/passkey/begin` and `POST
+  /api/auth/login/passkey`, a WebAuthn Level 3 discoverable credential
+  login with no username typed, the account named by the passkey's user
+  handle, user verification required (NIST SP 800-63B-4: a multi-factor
+  cryptographic authenticator, AAL2). Off by default: set
+  `gate.Config.PasskeySignIn` and wire a relying party that implements
+  the new optional `gauntlet.PasskeySignIn` (`passkey.RelyingParty`
+  does); otherwise both routes answer 404 and `POST /api/auth/login` and
+  `login/factor` are exactly as before. Every account keeps its password;
+  the accounts document stays version 9. The sign-in is judged for unusual
+  signals like any other (method `passkey_alone` reaches `Decide`; a
+  confirmation code is not skipped), counted for the account's lockout and
+  disable, the address limit and ban and the known-browser allowance
+  before the signature is checked, and meets the must-change-password door
+  after it; a refused assertion keeps its attempt, and a completed
+  sign-in gives both back. It does not count toward the run of
+  second-factor failures that forces a new password. An account with no
+  local password cannot sign in this way. The same passkey resumes a
+  timed-out session: `POST /api/auth/reauthenticate` takes `{"assertion":
+  ...}` from the same begin route instead of `{"password": ...}`, the user
+  handle must be the session's own account. `GET /api/auth/session`
+  gains `passkeys.signIn: true` when the routes are on and ready, and now
+  sends a `passkeys` block signed out in that case so a login page can
+  offer the button. Sessions, the session list (`method`), the sign-in
+  history and the audit record carry the method `passkey_alone`. Additive
+  Go API: `gauntlet.PasskeySignIn`, `PasskeyAssertion.UserVerified`,
+  `SignInMethodPasskeyAlone`, `SessionClient.Method`, `Config.PasskeySignIn`
+  and `passkey.RelyingParty`'s `BeginSignIn` and `FinishSignIn`.
 - **Resume a timed-out session with the password alone** (#71). A session
   idle past the one-hour timeout but inside its 24-hour ceiling no longer
   forces a full two-factor sign-in (NIST SP 800-63B-4 section 2.2.3).
@@ -215,6 +245,13 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Every passkey registration now asks for a discoverable credential**
+  (#77). The creation options carry `residentKey: "preferred"`
+  (and `requireResidentKey: false`), mikroview's included: W3C's
+  recommendation, harmless where the authenticator cannot hold one
+  (a PIN-less security key still registers, as a second factor), and
+  needed before a passkey can sign in alone. Passkeys registered before
+  this may not be discoverable; they keep working as a second factor.
 - **A token created without an expiry now expires after a year** (#74).
   `TokenStore.Create` and `POST /api/tokens` without `expiresAt` used to
   issue a token that lasted until revoked. Birdcage and mikroview: a
