@@ -1,6 +1,8 @@
 package gauntlet
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -203,5 +205,32 @@ func TestSessionSweepKeepsResumableUntilCeiling(t *testing.T) {
 	}
 	if got := heldSessions(s); got != 2*n+n {
 		t.Errorf("%d sessions held, want the second batch (%d, timed out) and the new %d", got, n, 2*n)
+	}
+}
+
+// TestSessionResumeConcurrentlyOnlyOnce: two browsers presenting the same
+// timed-out cookie at once (or a request racing the password check) may
+// turn it into at most one live session; a second would be a session
+// nobody signed in for.
+func TestSessionResumeConcurrentlyOnlyOnce(t *testing.T) {
+	s := NewSessionStore(time.Hour, 24*time.Hour)
+	t0 := time.Now()
+	sess := s.Create("user-1", t0)
+	at := t0.Add(2 * time.Hour)
+	const n = 16
+	var wg sync.WaitGroup
+	var won atomic.Int32
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok := s.Resume(sess.ID, SessionClient{}, at); ok {
+				won.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := won.Load(); got != 1 {
+		t.Errorf("%d of %d concurrent resumes of one session succeeded, want exactly 1", got, n)
 	}
 }
