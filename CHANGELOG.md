@@ -377,6 +377,10 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- An account created by its first single sign-on is now audited as
+  `user.create` (actor `sso`, the role and the issuer), as an
+  admin-created account is (#78).
+
 Low-severity findings from the v0.2.0 audit (#58):
 
 - `GET /api/auth/session` no longer says `mustEnrolSecondFactor` while

@@ -311,6 +311,12 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := signIn.User
+	// An account this callback created is audited as an admin-created
+	// one is (#78), so the trail says when and how it appeared.
+	if signIn.Created {
+		g.audit(r, ssoAuditActor, "user.create", user.Username,
+			fmt.Sprintf("role=%s; first single sign-on at issuer %q", user.Role, identity.Issuer))
+	}
 	if signIn.RoleBefore != user.Role {
 		g.recordSSORoleChange(r, signIn, identity.Issuer, now)
 	}

@@ -1253,3 +1253,38 @@ func TestSSORolesNeverTouchAnAdmin(t *testing.T) {
 		t.Errorf("%d role notices for an admin's sign-ins, want 0", n)
 	}
 }
+
+// TestSSOFirstSignInAuditsTheCreation (#78): an account the SSO callback
+// creates is audited as user.create, as an admin-created one is, naming
+// the issuer and the role it was given; a later sign-in creates nothing.
+func TestSSOFirstSignInAuditsTheCreation(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"staff": "user"}})
+	creates := func() []auditEntry {
+		rec := f.g.cfg.Audit.(*auditRecorder)
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		var out []auditEntry
+		for _, e := range rec.entries {
+			if e.Action == "user.create" {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+
+	f.signIn(t, "newcomer", []string{"other"})
+	got := creates()
+	if len(got) != 1 {
+		t.Fatalf("%d user.create records after an SSO first sign-in, want 1", len(got))
+	}
+	e := got[0]
+	if e.Actor != "sso" || e.Target != "newcomer" ||
+		!strings.Contains(e.Detail, "role=viewer") || !strings.Contains(e.Detail, f.fp.Issuer()) {
+		t.Errorf("user.create = %+v, want actor sso on newcomer naming role=viewer and the issuer", e)
+	}
+
+	f.signIn(t, "newcomer", []string{"other"})
+	if n := len(creates()); n != 1 {
+		t.Errorf("%d user.create records after a second sign-in, want still 1", n)
+	}
+}
