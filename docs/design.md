@@ -847,6 +847,23 @@ drops the in-memory ones). Audited as `user.role_changed` with actor,
 from and to; `Config.Notices` gets `NoticeRoleChanged`
 (`RoleChangeDetail{From, To}`), also for an admin created over HTTP.
 
+**The admin's password on the other admin routes (#72, ASVS 7.5.3).**
+`POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`,
+`DELETE /api/auth/users/{id}`, `DELETE /api/auth/users/{id}/totp` and
+`DELETE /api/auth/users/{id}/passkeys` each take the calling admin's own
+`password` in the request body, checked by `recheckAdminPassword`
+(`recheckPassword` on the account's `ReserveRecheck` budget, no second
+factor): a missing or wrong one is `401` `invalid-credentials`,
+audited as a failed re-check and counted, `429` once the budget is
+spent. A stolen session cookie then no longer takes over an account,
+mints a token that outlives the session, or strips a second factor. A
+request that is refused for what it asks (the caller's own account, an
+unreadable body) is refused before the password is checked; nothing is
+read or changed until it passes. Only an admin with a session reaches
+`POST /api/tokens` -- a bearer token never gets past `Protect` to these
+routes -- so every caller of it is asked. The body of each `DELETE` is
+JSON, as on `DELETE /api/auth/totp`.
+
 **Unusual sign-ins (#55).** The one-step password path, the
 second-factor step and the SSO callback's sign-in branch each judge a
 completed sign-in (`gauntlet.Store.JudgeSignIn`) against what the

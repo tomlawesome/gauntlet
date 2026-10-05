@@ -173,6 +173,17 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Breaking: five admin routes now take the calling admin's password**
+  (#72, ASVS 7.5.3). `POST /api/auth/users/{id}/reset-password`,
+  `POST /api/tokens`, `DELETE /api/auth/users/{id}`,
+  `DELETE /api/auth/users/{id}/totp` and
+  `DELETE /api/auth/users/{id}/passkeys` need `password` (the caller's
+  own) in the JSON request body, which the three `DELETE`s and
+  `reset-password` did not read before; a request without a readable
+  body is `400`. A missing or wrong password is `401`
+  `invalid-credentials`, counted on the same per-account re-check budget
+  as the self-service routes (`429` once spent). A caller sending the
+  old bodies must add it. `POST /api/auth/users` is unchanged.
 - **The accounts document is now version 9** (#67). No field changed:
   a document with several admins is now legal, which a build reading up
   to version 8 refuses at load as "allows exactly one". A version-8
