@@ -1361,10 +1361,16 @@ paths:
     delete:
       operationId: deleteUser
       summary: Delete an account (admin)
-      description: Deletes the account, then ends its sessions and revokes every token it created. The last admin cannot be deleted (`409` class `last-admin`), and nobody can delete the account they are signed in with (`409` class `conflict`); another admin can be deleted. Takes no body.
+      description: Deletes the account, then ends its sessions and revokes every token it created. The last admin cannot be deleted (`409` class `last-admin`), and nobody can delete the account they are signed in with (`409` class `conflict`); another admin can be deleted. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked after the `409` for the caller's own account and before anything is deleted.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Deleted.
@@ -1383,13 +1389,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/ConflictOrLastAdmin"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           description: |
             `server-error` when the account could not be deleted at all.
@@ -1472,10 +1480,18 @@ paths:
         Issues a single-use reset code for the account, ends its sessions,
         and makes it change its password at next sign-in. The code exists
         only in this response; issuing another kills it. Refused for the
-        caller's own account and for an SSO-only one. Takes no body.
+        caller's own account and for an SSO-only one. Takes the calling admin's
+        own password in the body (a rate-limited re-check, #72); the `409`s
+        for the caller's own account come before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: The code, to read out to the account's owner.
@@ -1497,13 +1513,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1629,10 +1647,16 @@ paths:
     delete:
       operationId: clearUserTOTP
       summary: Remove another account's authenticator app (admin)
-      description: For a lost phone when the owner still has their password. Refused on the caller's own account. Takes no body.
+      description: For a lost phone when the owner still has their password. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Removed.
@@ -1650,13 +1674,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1666,10 +1692,16 @@ paths:
     delete:
       operationId: clearUserPasskeys
       summary: Remove every passkey on another account (admin)
-      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. Takes no body.
+      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Removed.
@@ -1687,13 +1719,15 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1814,7 +1848,7 @@ paths:
     post:
       operationId: createToken
       summary: Issue an API token (admin)
-      description: The raw value is in this response only; the server keeps its SHA-256 hash.
+      description: The raw value is in this response only; the server keeps its SHA-256 hash. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked once the name is known to be well formed. Only an admin signed in with a session reaches it; a bearer token never does.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1824,8 +1858,11 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [name]
+              required: [name, password]
               properties:
+                password:
+                  type: string
+                  description: The calling admin's own password.
                 name:
                   type: string
                   description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
@@ -1847,9 +1884,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
