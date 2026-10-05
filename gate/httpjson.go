@@ -203,6 +203,9 @@ var (
 	// classLastAdmin (#67) is a change refused because it would leave
 	// the deployment with no admin: deleting or demoting the last one.
 	classLastAdmin = problemClass{"last-admin", "Last admin"}
+	// classRoleManagedBySSO (#76) is a user/viewer change refused on an
+	// SSO account whose role the identity provider's groups decide.
+	classRoleManagedBySSO = problemClass{"role-managed-by-sso", "Role managed by single sign-on"}
 )
 
 // writeProblem writes an RFC 9457 application/problem+json body: type

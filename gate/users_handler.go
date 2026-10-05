@@ -473,10 +473,21 @@ type setRoleResponse struct {
 	SessionsEnded bool `json:"sessionsEnded"`
 }
 
+// roleManagedBySSO reports whether the identity provider's groups decide
+// u's role: u is linked to SSO, this deployment maps groups to roles, and
+// u is not an admin (the map never touches one). Computed, not stored, so
+// it follows the configuration and an admin's grant or demotion.
+func (g *Gate) roleManagedBySSO(u *gauntlet.User) bool {
+	return u.OIDCIssuer != "" && len(g.deps.OIDCPolicy.RoleFromGroups) > 0 && u.Role != gauntlet.RoleAdmin
+}
+
 // handleSetRole is the one route for every role change among admin,
 // user and viewer (#67, #75). Granting admin takes the caller's own
 // password and a current second factor (recheckStepUp); any other
-// change takes none. The last admin cannot be demoted (409 last-admin);
+// change takes none. An SSO account whose role the identity provider's
+// groups decide cannot be set to user or viewer (409
+// role-managed-by-sso, #76). The last admin cannot be demoted (409
+// last-admin);
 // an account already holding the role is 409 conflict. A downgrade ends
 // the account's sessions: the store records SessionsEndedAt, which ends
 // them across processes, and this drops the ones held in memory at
@@ -512,6 +523,17 @@ func (g *Gate) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	// request that changes nothing.
 	if target.Role == role {
 		g.writeAuthError(w, r, gauntlet.ErrRoleUnchanged, http.StatusConflict, classConflict)
+		return
+	}
+	// An SSO account whose role the groups decide is not changed here to
+	// user or viewer: the identity provider would overwrite it at the
+	// next sign-in, so the change would be a promise nobody keeps
+	// (ADR-0013 decision 2). Granting admin is not refused -- the map
+	// never touches an admin -- and neither is demoting one. Before the
+	// step-up for the same reason as the check above.
+	if role != gauntlet.RoleAdmin && g.roleManagedBySSO(target) {
+		writeProblem(w, http.StatusConflict, classRoleManagedBySSO,
+			"this account's role comes from its groups at the identity provider; change the group there", nil)
 		return
 	}
 	now := g.now()
