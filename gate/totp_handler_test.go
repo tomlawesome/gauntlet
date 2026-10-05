@@ -385,7 +385,7 @@ func TestAdminCannotClearOwnTOTP(t *testing.T) {
 		t.Fatal("no admin account")
 	}
 
-	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+adminUser.ID+"/totp", nil)
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+adminUser.ID+"/totp", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("an admin clearing their own factor got %d, want 409", resp.StatusCode)
@@ -398,7 +398,7 @@ func TestTOTPAdminClearHappyPath(t *testing.T) {
 	totpEnrolAndConfirm(t, bob, ts)
 	id := totpBobID(t, g)
 
-	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/totp", nil)
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/totp", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -433,7 +433,7 @@ func TestTOTPAdminClearRefusals(t *testing.T) {
 			createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
 		operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
 
-		resp := deleteJSON(t, operator, ts.URL+"/api/auth/users/"+id+"/totp", nil)
+		resp := deleteJSON(t, operator, ts.URL+"/api/auth/users/"+id+"/totp", adminStepUpRequest{Password: testAdminPassword})
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusForbidden {
 			t.Errorf("a user-tier caller got %d, want 403", resp.StatusCode)
@@ -442,7 +442,7 @@ func TestTOTPAdminClearRefusals(t *testing.T) {
 
 	t.Run("no such account", func(t *testing.T) {
 		_, ts, admin := totpFixture(t)
-		resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/not-a-real-user-id/totp", nil)
+		resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/not-a-real-user-id/totp", adminStepUpRequest{Password: testAdminPassword})
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("a nonexistent target got %d, want 404", resp.StatusCode)

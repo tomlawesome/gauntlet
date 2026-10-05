@@ -223,7 +223,7 @@ func TestSignOutEverywhereAndAResetCodeForgetKnownBrowsers(t *testing.T) {
 		t.Errorf("after sign out everywhere the account remembers %d, want 1", len(u.KnownBrowsers))
 	}
 
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	if status, body := readAll(t, resp); status != http.StatusOK {
 		t.Fatalf("reset = %d %s", status, body)
 	}

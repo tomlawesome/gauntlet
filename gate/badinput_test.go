@@ -218,7 +218,7 @@ func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	failing.left = 0
 	g.deps.Tokens = tokens
 
-	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+operator.ID, nil)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+operator.ID, strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
 	req.Header.Set(csrfHeaderName, testCSRFValue)
 	resp, err := client.Do(req)
 	if err != nil {

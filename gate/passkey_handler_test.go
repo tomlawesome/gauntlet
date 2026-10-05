@@ -1104,7 +1104,7 @@ func TestPasskeyAdminClear(t *testing.T) {
 	registerPasskey(t, bilbo, ts, g, "key")
 	id := passkeyBilboID(t, g)
 
-	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/passkeys", nil)
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -1128,12 +1128,12 @@ func TestPasskeyAdminClear(t *testing.T) {
 		t.Error("expected a plain password login to work once the admin cleared every passkey")
 	}
 
-	missing := deleteJSON(t, admin, ts.URL+"/api/auth/users/no-such-id/passkeys", nil)
+	missing := deleteJSON(t, admin, ts.URL+"/api/auth/users/no-such-id/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = missing.Body.Close()
 	if missing.StatusCode != http.StatusNotFound {
 		t.Errorf("clearing an unknown user got %d, want 404", missing.StatusCode)
 	}
-	notAdmin := deleteJSON(t, plain, ts.URL+"/api/auth/users/"+id+"/passkeys", nil)
+	notAdmin := deleteJSON(t, plain, ts.URL+"/api/auth/users/"+id+"/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = notAdmin.Body.Close()
 	if notAdmin.StatusCode != http.StatusForbidden {
 		t.Errorf("a non-admin clearing passkeys got %d, want 403", notAdmin.StatusCode)
@@ -1146,7 +1146,7 @@ func TestPasskeyAdminCannotClearOwnPasskeys(t *testing.T) {
 	if !ok {
 		t.Fatal("no admin account")
 	}
-	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+u.ID+"/passkeys", nil)
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+u.ID+"/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("an admin clearing their own passkeys got %d, want 409", resp.StatusCode)
@@ -1544,7 +1544,7 @@ func TestPasskeyLoginFactorBeginNeedsAPendingLogin(t *testing.T) {
 	}
 
 	// The account is deleted between the password step and begin.
-	gone := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+passkeyBilboID(t, g), nil)
+	gone := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+passkeyBilboID(t, g), adminStepUpRequest{Password: testAdminPassword})
 	_ = gone.Body.Close()
 	if got := postStatus(t, pending, ts.URL+"/api/auth/login/factor/begin"); got != http.StatusUnauthorized {
 		t.Errorf("begin for a deleted account got %d, want 401", got)
@@ -1890,7 +1890,7 @@ func TestPasskeyNotOfferedToAnAccountWithNoLocalPassword(t *testing.T) {
 	if list := passkeysList(t, sam, ts); len(list) != 1 {
 		t.Fatalf("the SSO account lists %d passkeys, want its carried-over one", len(list))
 	}
-	clear := deleteJSON(t, admin, ts.URL+"/api/auth/users/sso-1/passkeys", nil)
+	clear := deleteJSON(t, admin, ts.URL+"/api/auth/users/sso-1/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = clear.Body.Close()
 	if clear.StatusCode != http.StatusOK || g.deps.Users.PasskeyCount("sso-1") != 0 {
 		t.Errorf("admin clear on the SSO account got %d and left %d passkeys, want 200 and none", clear.StatusCode, g.deps.Users.PasskeyCount("sso-1"))
