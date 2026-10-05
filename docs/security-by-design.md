@@ -199,9 +199,9 @@ it says so instead of repeating the reasoning.
 | 6.3.1 controls implemented as documented | 1 | Met | `account_limiter_test.go`, `lockout_escalation_test.go`, `lockout_escalation_api_test.go`, `gate/lockout_escalation_test.go`, `gate/reset_address_limit_test.go`, `knownbrowser_test.go`, `gate/knownbrowser_test.go`, `stall_test.go` |
 | 6.3.2 no default accounts | 1 | Met | Empty store, first admin needs the setup code (`setupcode.go`, ADR-0003) |
 | 6.3.3 MFA or equivalent | 2 | Met | The forced-enrolment door at `gate/protect.go:366` is unconditional (#49): every local-password account must hold a second factor. L3's hardware factor is available (passkeys with user presence, ADR-0004 decision 5) but not mandatory |
-| 6.3.5 notify suspicious attempts | 3 | Not targeted | No notification channel; see 800-63B §4.6 |
+| 6.3.5 notify suspicious attempts | 3 | Met | `gate.Config.Notices` (`AccountNotifier`, #73) is told of an unusual sign-in flagged or blocked, an account lockout and a disable; see 800-63B §4.6 |
 | 6.3.6 email not an authentication factor | 3 | Met | Gauntlet sends nothing and stores no addresses |
-| 6.3.7 notify after credential changes | 3 | Not targeted | Audit record only (`account.password_changed` etc.); see 800-63B §4.6 |
+| 6.3.7 notify after credential changes | 3 | Met | `gate.Config.Notices` is told of a password reset and a second factor added or removed, beside the audit record (`account.password_changed` etc.); see 800-63B §4.6 |
 | 6.3.8 no user enumeration | 3 | Met | One body for unknown name, wrong password and dead reset code (`gate/login_handler.go:140-146`); dummy hash for timing (`password.go:80`, `TestAuthenticateUnknownUserStillRunsTheHash` in `store_test.go`) |
 | 6.4.1 initial secrets random, short-lived, single use, not the long-term password | 1 | Met | Reset code: 80 bits, 24 h, spent by the login that redeems it, `MustChangePassword` forces replacement (`resetcode.go`, `store.go:1454`). Setup code: 80 bits, dies when an account exists or the process ends (`setupcode.go`) |
 | 6.4.2 no hints or secret questions | 1 | Met | None exist |
@@ -559,7 +559,7 @@ stand alone, which these never do.
 |---|---|---|
 | Record of every bound authenticator with event times (§4.1) | Conforms | `TOTPConfirmedAt`, `Passkey.CreatedAt` and `LastUsedAt`, `PasswordChangedAt`. Recovery codes carry no issue time (`GenerateRecoveryCodes` ignores `now`); the audit record `account.recovery_codes_regenerated` holds it. Every binding's audit record carries the source address (`from=`, SHOULD; #45) |
 | Binding an additional authenticator needs authentication at the account's current AAL (§4.1.2.1) | Conforms | TOTP enrol and passkey registration need the session and the password again (`gate/totp_handler.go:70`, `gate/passkey_handler.go:189`); a first factor is enrolled behind the AAL1 session the forced-enrolment door allows, which §4.1.2.1 permits when the account "currently has only AAL1" |
-| Notify the subscriber, independently of the binding transaction (§4.1.2.1, §4.2.3, §4.6) | Deviation | Gauntlet stores no contact addresses and sends nothing; the owner's standing rule forbids its agents from sending mail at all. Every binding, recovery and invalidation is an audit record instead, which the single operator reads. The one hook is an admin ending another account's sessions, which calls the application's `gate.Config.Notify` so it can mail the owner (#53). Documented, not fixed |
+| Notify the subscriber, independently of the binding transaction (§4.1.2.1, §4.2.3, §4.6) | Conforms | Gauntlet stores no contact addresses and sends nothing itself; the owner's standing rule forbids its agents from sending mail at all. `gate.Config.Notices` (`AccountNotifier`, #73, replacing the single-purpose `Config.Notify` of #53) is the hook: told of a password reset, a second factor added or removed, recovery codes regenerated, a lockout, a disable, every session ended and an unusual sign-in flagged or blocked, so the application can mail the account's owner. Every one of those is still an audit record too, which the single operator reads regardless |
 | Encourage two means of authentication (SHOULD) | Conforms | Recovery codes are minted with the first second factor; TOTP and passkeys coexist |
 | Account recovery: an application-specific method is allowed if risk-assessed and documented (§4.2.1) | Conforms, documented here | The method is an admin-issued reset code read out in person or on a trusted call (`resetcode.go` header). It replaces the password only; the second factor is still demanded (`gate/login_handler.go:172`), which is §4.2.2.2's "one recovery code plus one bound single-factor authenticator". An admin clearing the second factor as well is the "interaction with a CSP agent" case. Risk: whoever holds admin can take any account; that is already true of the host |
 | Issued code validity 24 h, throttled, at least six digits (§4.2.1.2) | Conforms | `ResetCodeTTL` 24 h, 80 bits, single use, Argon2id-hashed, counted by the login limiter |
@@ -587,10 +587,13 @@ stand alone, which these never do.
 Conforms on everything above except: the common-password list's data
 (the check is built, #43; the first signed list is #52's owner setup).
 Documented
-deviations: no NFC normalisation, no pepper, no out-of-band
-notifications, the custom-header CSRF defence,
+deviations: no NFC normalisation, no pepper, the custom-header CSRF defence,
 the consumers' session lifetimes (proposed; awaiting the owner's decision),
-and the TOTP acceptance window. Each gap is one issue in the standards-gaps
+and the TOTP acceptance window. Out-of-band notification (§4.1.2.1,
+§4.2.3, §4.6) moved off this list when `gate.Config.Notices` shipped
+(#73): gauntlet still sends nothing itself, but now tells the
+application of every binding, recovery and invalidation so it can.
+Each gap is one issue in the standards-gaps
 list, shared with the ASVS section where both standards ask for it.
 
 Written by Fable 5.1, 2026-10-02.

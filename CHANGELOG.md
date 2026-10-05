@@ -46,6 +46,21 @@ All notable changes to this project are documented in this file.
   stores the key and keeps it out of every log and error; the
   application credits the provider (docs/geoip.md, ADR-0008). Neither
   `gate` nor the root package imports it (#54).
+- `gate.Config.Notices` (`AccountNotifier`): one hook for every account
+  event this module raises -- a password reset, a second factor added
+  or removed, recovery codes regenerated, an account lockout, a disable,
+  every session ended, and an unusual sign-in flagged or blocked -- each
+  carrying a `NoticeKind` and the one typed detail pointer that kind
+  names (`PasswordResetDetail`, `SecondFactorDetail`, `LockoutDetail`,
+  `SessionsEndedDetail`, `UnusualSignInDetail`). Same async contract as
+  the deprecated `Config.Notify` (own goroutine, 10 s, `recover()`,
+  errors logged only, after the response); nil means nobody is told
+  (#73).
+- `gate.Config.DeliverConfirmCode`: hands an unusual sign-in's
+  confirmation code to the application synchronously, before the
+  sign-in is answered -- the opposite contract from `Notices`, which may
+  be queued. A failure refuses the attempt, since no code reached
+  anyone; nil means the confirm action is unavailable (#55, #73).
 
 ### Security
 
@@ -61,6 +76,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `gate.Config.Notify` and `Notifier` are deprecated in favour of
+  `Config.Notices`: kept working for a minor release (ADR-0002 decision
+  2), and `gate.New` refuses a `Config` setting both. An admin ending
+  another account's sessions now goes to `Notices` when it is set, else
+  the deprecated `Notify` (#73).
 - **Breaking for HTTP clients: an account's first second factor is held
   until its recovery codes are confirmed** (#58). The first passkey
   (`register/finish`) or first authenticator app (`totp/confirm`) is

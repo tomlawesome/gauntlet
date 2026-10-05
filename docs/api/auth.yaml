@@ -1439,10 +1439,10 @@ paths:
 
         The body is optional. `reason` is at most 200 characters of plain text
         (no control or format characters); it goes into the audit record
-        and to the application's `Config.Notify`, which may mail the
-        account's owner. `notified` is true when the application was
-        asked -- after this response, in the background -- not that a
-        message was delivered.
+        and to the application's `Config.Notices` (or the deprecated
+        `Config.Notify`), which may mail the account's owner. `notified`
+        is true when the application was asked -- after this response,
+        in the background -- not that a message was delivered.
 
         `409` for the caller's own account: use `POST
         /api/auth/logout-all`, which keeps this browser signed in.

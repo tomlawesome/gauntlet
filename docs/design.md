@@ -581,8 +581,11 @@ type Config struct {
     RequireSecondFactor bool          // deprecated, ignored: see §1.6
     Log                 *slog.Logger
     Audit               Auditor       // nil = no audit
-    Notify              Notifier      // new (#53): told after an admin ends another account's sessions; nil = nobody told
+    Notices             AccountNotifier // told about every account event (#73); nil = nobody told
+    Notify              Notifier      // deprecated: Notices narrowed to one event (#53); New refuses both set
+    DeliverConfirmCode  func(ctx context.Context, c ConfirmCode) error // synchronous; nil = the confirm action is unavailable (#55, #73)
     ClientIP            func(*http.Request) string // limiter key and from= in every audit record (#45); app owns trusted-proxy policy
+    UnusualSignIns      UnusualSignInPolicy // what a new browser, new country or impossible travel does (#55)
     Now                 func() time.Time
 }
 
@@ -617,10 +620,39 @@ func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below min
 
-// new (#53): the application mails the owner; gauntlet sends nothing.
+// #73: the application mails the owner; gauntlet sends nothing. One
+// notice per account event, told apart by Kind, with the one typed
+// detail its Kind names.
+type AccountNotifier interface { AccountEvent(ctx context.Context, n AccountNotice) error }
+type AccountNotice struct {
+    Kind             NoticeKind
+    UserID, Username string
+    Role             gauntlet.Role // zero for a lockout or disable: no account record is loaded for either
+    At               time.Time
+    By               string // the admin's username when an admin caused it; "" for the account's own holder
+    PasswordReset *PasswordResetDetail // password-reset
+    SecondFactor  *SecondFactorDetail  // second-factor-added, second-factor-removed
+    Lockout       *LockoutDetail       // account-locked, sign-in-disabled
+    SessionsEnded *SessionsEndedDetail // sessions-ended
+    UnusualSignIn *UnusualSignInDetail // unusual-sign-in (flag, block -- confirm sends only the code, below)
+}
+const MaxSessionEndReason = 200 // characters
+
+// deprecated (#53, kept a minor release, ADR-0002 decision 2): Notices
+// narrowed to one event. New refuses a Config with both set.
 type Notifier interface { SessionsEnded(ctx context.Context, n SessionsEndedNotice) error }
 type SessionsEndedNotice struct { UserID, Username, EndedBy, Reason string; Ended int; At time.Time }
-const MaxSessionEndReason = 200 // characters
+
+// #55, #73: a confirmation code is handed to the application
+// synchronously -- the opposite contract from AccountNotifier, which may
+// be queued -- and a failure refuses the sign-in.
+DeliverConfirmCode func(ctx context.Context, c ConfirmCode) error
+type ConfirmCode struct {
+    UserID, Username string; Role gauntlet.Role
+    Code string; ExpiresAt time.Time
+    Signals gauntlet.SignInSignals; Method gauntlet.SignInMethod
+    Client gauntlet.SessionClient; At time.Time
+}
 ```
 
 **Sign-in records (#45).** Every sign-in attempt -- the password step,
@@ -666,9 +698,22 @@ browsers -- all or nothing, no per-session admin route and no admin list
 of another account's sessions (owner, 2026-10-02). 409 for the caller's
 own account, 404 for none, 400 for a reason over 200 characters or holding a
 control or format character. Audited as `user.sessions_ended`. Once the
-response is written, `Config.Notify` is called in its own goroutine with
-a 10-second deadline and `recover()`; an error or panic is one log line,
-and the response's `notified` means asked, not delivered.
+response is written, `Config.Notices` (or the deprecated `Config.Notify`)
+is called in its own goroutine with a 10-second deadline and `recover()`;
+an error or panic is one log line, and the response's `notified` means
+asked, not delivered.
+
+**Account notices (#73, folding in #53 and #55).** `Config.Notices`
+(`AccountNotifier`) is the one hook for every account event this module
+raises: a password reset, a second factor added or removed, recovery
+codes regenerated, a lockout, a disable, an admin ending every session,
+an unusual sign-in flagged or blocked. Each call carries one
+`AccountNotice` with a `NoticeKind` and the one typed detail pointer that
+kind names; the async contract (own goroutine, 10 s, `recover()`, errors
+logged only, after the response) is the one `Config.Notify` always had.
+A confirmation code is different on purpose: `Config.DeliverConfirmCode`
+is called synchronously, before the sign-in is answered, and a failure
+there refuses the attempt, since no code reached anyone to use.
 
 The HTTP contract `Routes` serves -- every route, request, response,
 status code and error body, carried over from mikroview's
