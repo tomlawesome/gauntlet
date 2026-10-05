@@ -28,7 +28,7 @@ const newerAccountsDocument = `{"version":10,"users":[` +
 
 // newerTokensDocument is the same for tokens: one token, in a document
 // one format version ahead.
-const newerTokensDocument = `{"version":3,"tokens":[` +
+const newerTokensDocument = `{"version":4,"tokens":[` +
 	`{"id":"t-newer","name":"from-a-newer-build","kind":"api","hashedValue":"fixture-hash","createdAt":"2026-01-01T00:00:00Z"}]}`
 
 // assertNamesBothVersions fails unless err names the document's version
@@ -87,7 +87,7 @@ func TestOpenTokenStoreRefusesANewerTokensDocument(t *testing.T) {
 	if !errors.As(err, &startup) {
 		t.Fatalf("expected a *persist.StartupError, got %T: %v", err, err)
 	}
-	assertNamesBothVersions(t, err, 3, 2)
+	assertNamesBothVersions(t, err, 4, 3)
 }
 
 // TestReloadIfStaleRefusesANewerAccountsDocument: a newer document
@@ -157,12 +157,12 @@ func TestTokenStoreReloadRefusesANewerTokensDocument(t *testing.T) {
 			}
 		}
 	}
-	if n := strings.Count(logs.String(), "version 3"); n != 1 {
+	if n := strings.Count(logs.String(), "version 4"); n != 1 {
 		t.Errorf("expected exactly one log line about the newer document, got %d:\n%s", n, logs.String())
 	}
 
 	_, _, err = s.Create("second", TokenKindAPI, "", nil, time.Now())
-	assertNamesBothVersions(t, err, 3, 2)
+	assertNamesBothVersions(t, err, 4, 3)
 	assertPayload(t, m, newerTokensDocument)
 }
 
@@ -203,7 +203,7 @@ func TestTokenStoreRefusesToWriteOverANewerTokensDocument(t *testing.T) {
 	b.beforeSave = func() { overwrite(t, m, newerTokensDocument) }
 
 	_, _, err = s.Create("second", TokenKindAPI, "", nil, time.Now())
-	assertNamesBothVersions(t, err, 3, 2)
+	assertNamesBothVersions(t, err, 4, 3)
 	assertPayload(t, m, newerTokensDocument)
 }
 
@@ -257,8 +257,8 @@ func TestAV010TokensDocumentLoadsAndIsWrapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 2,\n  \"seq\": 1,\n  \"tokens\": [\n    {\n      \"id\": \"t1\",") {
-		t.Errorf("the saved document is not version 2 stamped at seq 1, wrapping the token:\n%s", snap.Payload)
+	if !strings.HasPrefix(string(snap.Payload), "{\n  \"version\": 3,\n  \"seq\": 1,\n  \"tokens\": [\n    {\n      \"id\": \"t1\",") {
+		t.Errorf("the saved document is not version 3 stamped at seq 1, wrapping the token:\n%s", snap.Payload)
 	}
 }
 
