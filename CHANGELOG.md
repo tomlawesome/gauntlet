@@ -27,6 +27,27 @@ All notable changes to this project are documented in this file.
   a request, and `ListForUser` does not list it), so the store holds up to
   a ceiling's worth of sessions rather than an idle timeout's worth. Both
   caps are unchanged; a restart still ends every session.
+- **API tokens expire, are removed when unused, and start `gnt_`** (#74),
+  GitHub's personal-access-token lifecycle. `Token.ExpiresAt` (zero means
+  never); `POST /api/tokens` takes an optional `expiresAt`, an RFC 3339
+  time in the future or `"never"` (a router's ingest token, say), a `400`
+  otherwise; the response and list show it, left out for a token that
+  never expires. `Authenticate` refuses an expired token exactly as it
+  refuses an unknown one. New `TokenStore.CreateWithExpiry`,
+  `ErrTokenExpiryInvalid`, `TokenPrefix`, `DefaultTokenLifetime`,
+  `TokenUnusedLimit` and `TokenExpiryNoticeWindow`.
+  `Gate.SweepTokens(ctx, now)` is the maintenance call the application
+  makes daily (the library runs no timer): it removes tokens unused for a
+  year, or created a year ago and never used (audit
+  `token.removed_unused`), and tells the creating account, through
+  `Config.Notices`, a week before a token expires, once per token
+  (`NoticeTokenExpiring`, `AccountNotice.TokenExpiring`,
+  `TokenExpiringDetail`; `Token.ExpiryWarnedAt` remembers it). New values
+  start `gnt_`, with a rule for them in the new `.gitleaks.toml`; tokens
+  issued before keep their bare shape and keep working, and keep no
+  expiry. The tokens document is now version 3, which a build reading up
+  to version 2 refuses; older documents open as before.
+
 - **An escape code for a lone admin refused by `block`** (#66,
   ADR-0011). When the unusual-sign-in policy refuses an admin from a new
   browser and no other admin can act, the refusal now writes a one-time
@@ -194,6 +215,14 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **A token created without an expiry now expires after a year** (#74).
+  `TokenStore.Create` and `POST /api/tokens` without `expiresAt` used to
+  issue a token that lasted until revoked. Birdcage and mikroview: a
+  token made the old way keeps working, but one made from now on stops at
+  a year unless its creator passes `expiresAt: "never"` (call
+  `CreateWithExpiry` with the zero time from Go), or the application
+  rotates it first. Call `Gate.SweepTokens` daily so owners hear a week
+  ahead.
 - **Breaking: five admin routes now take the calling admin's password**
   (#72, ASVS 7.5.3). `POST /api/auth/users/{id}/reset-password`,
   `POST /api/tokens`, `DELETE /api/auth/users/{id}`,
