@@ -176,9 +176,9 @@ func TestSessionValidateMovesLastUsedAt(t *testing.T) {
 }
 
 // ListForUser lists only the account's own live sessions, newest
-// first, and evicts the ones it finds dead (idle or past the ceiling)
-// rather than listing them.
-func TestSessionListForUserSkipsAndEvictsExpired(t *testing.T) {
+// first, and evicts the ones past the ceiling; one that only timed out
+// is not listed but kept (resumable).
+func TestSessionListForUserSkipsDeadAndResumable(t *testing.T) {
 	s := NewSessionStore(time.Hour, 3*time.Hour)
 	t0 := time.Now()
 	at := t0.Add(3*time.Hour + time.Minute)
@@ -213,8 +213,13 @@ func TestSessionListForUserSkipsAndEvictsExpired(t *testing.T) {
 	_, idleHeld := s.sessions[idle.ID]
 	_, oldIndexed := s.byUser["user-1"][old.ID]
 	s.mu.Unlock()
-	if oldHeld || idleHeld || oldIndexed {
-		t.Errorf("expired sessions still held after listing: past ceiling %v (indexed %v), idle %v", oldHeld, oldIndexed, idleHeld)
+	if oldHeld || oldIndexed {
+		t.Errorf("a session past the ceiling is still held after listing: held %v, indexed %v", oldHeld, oldIndexed)
+	}
+	// idle timed out inside its ceiling: not listed, but kept so its
+	// owner can resume it (gauntlet#71).
+	if !idleHeld {
+		t.Error("a timed-out session still inside its ceiling was evicted by listing")
 	}
 	if got := s.ListForUser("nobody", at); len(got) != 0 {
 		t.Errorf("an account with no sessions listed %d", len(got))

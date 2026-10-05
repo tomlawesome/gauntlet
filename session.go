@@ -265,8 +265,9 @@ func cleanClientText(s string, maxBytes int) string {
 }
 
 // sweepLocked checks the next sweepBatch entries of order: an ID no
-// longer in the map, or a session Validate would refuse at now, is
-// dropped; a live one goes to the back of order.
+// longer in the map, or a session that can never be used again at now
+// (gone), is dropped; a live one, or a timed-out one that can still be
+// resumed, goes to the back of order.
 func (s *SessionStore) sweepLocked(now time.Time) {
 	for range sweepBatch {
 		id, ok := s.order.pop()
@@ -278,7 +279,7 @@ func (s *SessionStore) sweepLocked(now time.Time) {
 		if !ok {
 			continue
 		}
-		if s.expired(sess, now) {
+		if s.gone(sess, now) {
 			s.removeLocked(sess)
 			continue
 		}
@@ -325,7 +326,8 @@ func (q *idQueue) pop() (string, bool) {
 	return id, true
 }
 
-// expired reports whether Validate would refuse sess at now.
+// expired reports whether Validate would refuse sess at now: idle past
+// its expiry, or past the lifetime ceiling.
 func (s *SessionStore) expired(sess Session, now time.Time) bool {
 	if now.After(sess.ExpiresAt) {
 		return true
@@ -334,11 +336,28 @@ func (s *SessionStore) expired(sess Session, now time.Time) bool {
 	return capped && now.After(deadline)
 }
 
+// gone reports whether sess can never be used again at now, so the store
+// may drop it: past the lifetime ceiling, or idle past its expiry in a
+// store with no ceiling. An idle-expired session inside a ceiling is
+// not gone but resumable (see Resumable), held until the ceiling.
+func (s *SessionStore) gone(sess Session, now time.Time) bool {
+	if deadline, capped := s.deadline(sess); capped {
+		return now.After(deadline)
+	}
+	return now.After(sess.ExpiresAt)
+}
+
+// resumable reports whether sess has timed out through inactivity while
+// still inside its lifetime ceiling.
+func (s *SessionStore) resumable(sess Session, now time.Time) bool {
+	return now.After(sess.ExpiresAt) && !s.gone(sess, now)
+}
+
 // Validate reports whether id is a live session, extending its expiry
 // on success (sliding expiration -- stays alive while actively used,
 // rather than forcing a re-login mid-session at a fixed wall-clock
-// time). An expired session is evicted on the read that finds it,
-// rather than needing a separate sweep.
+// time). A session that can never be used again is evicted on the read
+// that finds it, rather than needing a separate sweep.
 //
 // The renewal is bounded by maxLifetime: a session is refused once it is
 // older than that from IssuedAt, however recently it was used, and the
@@ -346,6 +365,11 @@ func (s *SessionStore) expired(sess Session, now time.Time) bool {
 // second half the ceiling would be checked but not enforced -- a session
 // could sit with an ExpiresAt beyond its own deadline and be accepted by
 // any code reading ExpiresAt rather than calling this.
+//
+// A session idle past its expiry but inside the ceiling is refused but
+// kept: it is "timed out, resumable" (Resumable, Resume), and nothing
+// here ever lets it authenticate a request. Refusing it does not extend
+// it either.
 func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -353,21 +377,84 @@ func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) {
 	if !ok {
 		return Session{}, false
 	}
-	if now.After(sess.ExpiresAt) {
+	if s.gone(sess, now) {
 		s.removeLocked(sess)
 		return Session{}, false
 	}
+	if now.After(sess.ExpiresAt) {
+		return Session{}, false // timed out, resumable
+	}
 	if deadline, capped := s.deadline(sess); capped {
-		if now.After(deadline) {
-			s.removeLocked(sess)
-			return Session{}, false
-		}
 		sess.ExpiresAt = earliest(now.Add(s.ttl), deadline)
 	} else {
 		sess.ExpiresAt = now.Add(s.ttl)
 	}
 	sess.LastUsedAt = now
 	s.sessions[id] = sess
+	return sess, true
+}
+
+// Resumable returns the session id names when it has timed out through
+// inactivity (MaxSessionIdle's job in gate) but is still inside its
+// lifetime ceiling, so its owner may resume it with a password
+// (NIST SP 800-63B-4 section 2.2.3, gauntlet#71). It reports false for
+// a live session, an unknown ID, and one past the ceiling -- which it
+// also evicts. A store with no ceiling has no resumable sessions.
+//
+// It changes nothing else, and the session it returns authenticates
+// nothing: Validate still refuses it. Whether the caller may resume it
+// -- the password, the account's state -- is the caller's to check,
+// then Resume.
+func (s *SessionStore) Resumable(id string, now time.Time) (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return Session{}, false
+	}
+	if s.gone(sess, now) {
+		s.removeLocked(sess)
+		return Session{}, false
+	}
+	if !s.resumable(sess, now) {
+		return Session{}, false
+	}
+	return sess, true
+}
+
+// Resume ends the timed-out session id names and starts a new one for
+// the same account in one step, under the lock, so two requests resuming
+// one session cannot both succeed: the second finds it gone and gets
+// false. The new session has a new ID (ASVS 7.2.4), the old session's
+// IssuedAt -- the lifetime ceiling does not move -- and its unusual-
+// sign-in signals, since it continues a sign-in already judged; its
+// client is client, cleaned as CreateFrom does. Its expiry is now plus
+// the idle timeout, never past the ceiling.
+//
+// It reports false, changing nothing, unless id is Resumable at now.
+func (s *SessionStore) Resume(id string, client SessionClient, now time.Time) (Session, bool) {
+	client = SessionClient{
+		Address:   cleanClientText(client.Address, MaxSessionAddress),
+		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
+		Country:   client.Country,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.sessions[id]
+	if !ok || !s.resumable(old, now) {
+		return Session{}, false
+	}
+	s.removeLocked(old)
+	client.Unusual = old.Client.Unusual
+	deadline, _ := s.deadline(old) // resumable implies a ceiling
+	sess := Session{ID: newID(), UserID: old.UserID, IssuedAt: old.IssuedAt, ExpiresAt: earliest(now.Add(s.ttl), deadline), LastUsedAt: now, Client: client}
+	s.sessions[sess.ID] = sess
+	if s.byUser[sess.UserID] == nil {
+		s.byUser[sess.UserID] = make(map[string]struct{})
+	}
+	s.byUser[sess.UserID][sess.ID] = struct{}{}
+	s.order.push(sess.ID)
+	s.sweepLocked(now)
 	return sess, true
 }
 
@@ -408,9 +495,11 @@ func (s *SessionStore) removeLocked(sess Session) {
 
 // ListForUser returns userID's live sessions, newest IssuedAt first --
 // what a person sees when they list their own sessions (ASVS 7.5.2,
-// gauntlet#48). A session Validate would refuse at now is evicted here
-// rather than listed, the same as Validate evicts one it finds expired,
-// so the list never shows a session that could not be used.
+// gauntlet#48). A session that can never be used again is evicted here
+// rather than listed, the same as Validate evicts one it finds gone,
+// and a timed-out one that can still be resumed (Resumable) is neither
+// listed nor evicted, so the list never shows a session that could not
+// be used.
 //
 // It walks only userID's own entries (byUser), never the whole store,
 // for the reason RevokeAllForUser does. It knows nothing of the account
@@ -421,9 +510,12 @@ func (s *SessionStore) ListForUser(userID string, now time.Time) []Session {
 	var out []Session
 	for id := range s.byUser[userID] {
 		sess := s.sessions[id]
-		if s.expired(sess, now) {
+		if s.gone(sess, now) {
 			s.removeLocked(sess)
 			continue
+		}
+		if s.expired(sess, now) {
+			continue // timed out, resumable: kept, but not a live session
 		}
 		out = append(out, sess)
 	}
