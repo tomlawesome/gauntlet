@@ -287,8 +287,10 @@ func (s Session) Ref() string                                       // new (#48)
 func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore  // new: one constructor; mikroview's two collapse
 func (s *SessionStore) Create(userID string, now time.Time) Session // CreateFrom with an empty client
 func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.Time) Session // new (#48)
-func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime; moves LastUsedAt
-func (s *SessionStore) ListForUser(userID string, now time.Time) []Session // new (#48): live only, newest first; evicts expired
+func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime; moves LastUsedAt; refuses but keeps a session idle past its ttl inside the ceiling (#71)
+func (s *SessionStore) Resumable(id string, now time.Time) (Session, bool) // new (#71): the timed-out session id names, if still inside the ceiling; authenticates nothing
+func (s *SessionStore) Resume(id string, client SessionClient, now time.Time) (Session, bool) // new (#71): ends that session and starts one with a new ID, same account and IssuedAt, in one step
+func (s *SessionStore) ListForUser(userID string, now time.Time) []Session // new (#48): live only, newest first; evicts what is past the ceiling, skips a resumable one
 func (s *SessionStore) RevokeRef(userID, ref string) (Session, bool)       // new (#48): searches userID's sessions only
 func (s *SessionStore) Revoke(id string)
 func (s *SessionStore) RevokeAllForUser(userID string)
@@ -296,12 +298,15 @@ func (s *SessionStore) RevokeAllForUser(userID string)
 type TokenKind string
 const ( TokenKindAPI TokenKind = "api"; TokenKindIngest TokenKind = "ingest" )
 type Token struct { ID, Name string; Kind TokenKind; Device, HashedValue string
-                    CreatedAt, LastUsedAt time.Time; CreatedBy, CreatedByUsername string } // JSON as mikroview token.go
+                    CreatedAt, LastUsedAt, ExpiresAt, ExpiryWarnedAt time.Time; CreatedBy, CreatedByUsername string } // JSON as mikroview token.go; ExpiresAt and ExpiryWarnedAt new (#74), zero = never / not warned; tokens document version 3, an older build refuses it
+const ( TokenPrefix = "gnt_"; DefaultTokenLifetime = 365*24*time.Hour; TokenUnusedLimit = 365*24*time.Hour; TokenExpiryNoticeWindow = 7*24*time.Hour ) // #74
 type TokenOptions struct { Log *slog.Logger; Kinds []TokenKind }          // new: Kinds, default {api, ingest}
 func OpenTokenStore(b persist.Backend, opts TokenOptions) (*TokenStore, error)
 func (s *TokenStore) Persisted() bool
-func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error)
-func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) // SHA-256 lookup; kind must match
+func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) // expires after DefaultTokenLifetime; raw starts gnt_ (#74)
+func (s *TokenStore) CreateWithExpiry(name string, kind TokenKind, device string, creator *User, now, expiresAt time.Time) (raw string, tok *Token, err error) // zero expiresAt = never; not after now is ErrTokenExpiryInvalid
+func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) // SHA-256 lookup; kind must match; an expired token is refused like an unknown one
+func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) // #74: removes tokens unused for a year, marks tokens expiring within a week as warned
 func (s *TokenStore) Revoke(id string) error
 func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error)
 func (s *TokenStore) List() []Token
@@ -695,6 +700,7 @@ func (g *Gate) Exempt(paths ...string)                          // beyond the bu
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's paths,
 // request and response bodies. Mount it under the same Protect.
 func (g *Gate) Routes() http.Handler
+func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, error) // #74: call daily; TokenSweep{Removed, Warned int}
 
 func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
@@ -745,6 +751,7 @@ type AccountNotice struct {
     SessionsEnded *SessionsEndedDetail // sessions-ended
     UnusualSignIn *UnusualSignInDetail // unusual-sign-in (flag, block -- confirm sends only the code, below)
     RoleChanged   *RoleChangeDetail    // role-changed (#67): From (empty for a created admin), To
+    TokenExpiring *TokenExpiringDetail // token-expiring (#74): TokenID, Name, Kind, ExpiresAt; raised by SweepTokens, so By is empty
 }
 const MaxSessionEndReason = 200 // characters
 
@@ -818,6 +825,42 @@ through it newest first, filtered by `user`, `address` and `outcome`,
 `before` a row's `seq`, `limit` 1-200 (default 50); 404 while
 `Deps.SignIns` is nil. Re-checks are not rows: the caller already holds
 a session. Bounds and write cadence are in §4 and ADR-0006.
+
+**Resuming a timed-out session (#71).** A session idle past the idle
+timeout (`MaxSessionIdle`, 1 h) but inside its lifetime ceiling
+(`MaxSessionLifetime`, 24 h from the sign-in) is "timed out, resumable":
+`SessionStore.Validate` refuses it, so it authenticates nothing, but the
+store keeps it until the ceiling (the sweep, logout, `RevokeAllForUser`
+and the password-change cutoff drop it like any other). `POST
+/api/auth/reauthenticate`, `{"password": "..."}`, presented with that
+session's cookie, resumes it: the standard pattern is NIST SP 800-63B-4
+section 2.2.3 (after an inactivity timeout and before the overall
+timeout the verifier MAY accept a password in conjunction with the
+session secret), with the session ID regenerated (ASVS 7.2.4). The
+route is session-exempt like login and needs the CSRF header. It takes
+the same limiter reservation as a password sign-in (`reserveLogin`: the
+account lockout and disable, the address limit and ban, the known-browser
+allowance), a wrong password counting as a failed sign-in. On success
+`SessionStore.Resume` ends the old session and starts one with a new ID,
+the same account and the original `IssuedAt`, so the 24-hour ceiling does
+not move (the cookie's Max-Age is cut to what is left of it); the
+response is login's `{username, role}`. It never asks for a second
+factor, is not judged as an unusual sign-in (#55: the session it
+continues was, and its signals carry over), does not remember the
+browser, and does not reset the account's failure count the way a
+completed sign-in does -- a password alone proves less than the sign-in
+it continues. Anything not resumable -- no cookie, an unknown, live,
+ended or past-ceiling session, an account deleted, with no local password
+(an SSO-only account) or owing a password change -- is the one `401
+sign-in-required`. `GET /api/auth/session` reports `resumable: true` for a
+cookie in that state, which is how a frontend knows to ask for the
+password rather than show the full form; every other gated route still
+answers `sign-in-required`. History row method `resume`; audit
+`user.reauthenticated`. A passkey with user verification may resume a
+session in place of the password once #77 lands: the handler marks where.
+Sessions are in memory, so a restart still ends them, resumable or not;
+holding timed-out sessions to the ceiling raises the map's bound from
+one idle timeout's worth of sessions to one ceiling's worth.
 
 **Admin sign-out (#53).** `POST /api/auth/users/{id}/logout-all` ends
 every gauntlet session the account holds and forgets its remembered
@@ -1300,7 +1343,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Pitfall | Mikroview today | Module keeps |
 |---|---|---|
 | Session fixation / predictable ids | 128-bit `crypto/rand` id, new id per login, never reused | same; `newID` panics rather than degrades if the CSPRNG fails |
-| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51) |
+| Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51). Changed (#71): a session idle past 1h but inside the ceiling can be resumed with the password alone, under a new ID and the same ceiling (`POST /api/auth/reauthenticate`) |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
 | Cookie over plain HTTP | `Secure` on by default, off only with TLS off | kept; birdcage derives the default from its listener. `gate.New` logs one warning when `SecureCookie` is off, and prefixes the cookie name `__Host-` when it is on (#47) |
@@ -1328,6 +1371,7 @@ once, which is the price of sharing and the reason fixes land once.
 | A read token used to write | dispatch to a mux that has no write routes, decided by token kind, never by handler checks | `gate.Handle(kind, mux)`; the app can only register whole muxes |
 | Token kind confusion | `Authenticate(raw, want)` refuses any other kind | kept; unknown kinds in the document are logged and never authenticate |
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
+| A token valid for years, and a leaked one no scanner recognises | no expiry, a bare hex value | new (#74), GitHub's personal-access-token lifecycle: `Token.ExpiresAt`, a year by default, `never` only by asking (a router's ingest token would stop reporting on its expiry day); `Authenticate` refuses an expired token as it refuses an unknown one; `Gate.SweepTokens`, which the application calls daily (no timer in the library), removes tokens unused for a year (`token.removed_unused`) and sends `NoticeTokenExpiring` once per token, seven days ahead; new values start `gnt_` and `.gitleaks.toml` has a rule for them, while the old bare shape still authenticates. Tokens that exist already keep no expiry |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
 | Unseen failures | only successes audited | new (#45): every failed sign-in, and every wrong password or code at an in-session re-check, is `user.login_failed`; a lockout or disable starting, through a known browser too, is `account.locked` or `account.disabled`, and an address ban starting is `address.banned` (#70); every audit record a request writes carries the client address; refused requests and oversize bodies are rated Warn lines (§1.5) |

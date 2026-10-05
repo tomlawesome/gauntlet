@@ -19,6 +19,30 @@ type createTokenRequest struct {
 	// Password is the calling admin's own, entered again (#72, ASVS
 	// 7.5.3): a token outlives the session that minted it.
 	Password string `json:"password"`
+	// ExpiresAt is optional (#74): an RFC 3339 timestamp in the future,
+	// or "never". Omitted means gauntlet.DefaultTokenLifetime from now.
+	ExpiresAt *string `json:"expiresAt"`
+}
+
+// neverExpires is the createTokenRequest.ExpiresAt value that asks for a
+// token with no expiry.
+const neverExpires = "never"
+
+// requestedExpiry reads createTokenRequest.ExpiresAt: the time to expire
+// at (zero for "never"), and whether the request chose one at all. ok is
+// false for a value that is neither "never" nor an RFC 3339 timestamp.
+func requestedExpiry(raw *string) (at time.Time, chosen, ok bool) {
+	if raw == nil {
+		return time.Time{}, false, true
+	}
+	if *raw == neverExpires {
+		return time.Time{}, true, true
+	}
+	at, err := time.Parse(time.RFC3339, *raw)
+	if err != nil {
+		return time.Time{}, true, false
+	}
+	return at, true, true
 }
 
 // tokenResponse mirrors gauntlet.Token but never carries HashedValue --
@@ -31,6 +55,9 @@ type tokenResponse struct {
 	Device     string             `json:"device,omitempty"`
 	CreatedAt  time.Time          `json:"createdAt"`
 	LastUsedAt time.Time          `json:"lastUsedAt,omitzero"`
+	// ExpiresAt is left out for a token that never expires, as
+	// LastUsedAt is for one never used.
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 	// Value is the raw bearer token, set only by handleTokensCreate's
 	// response -- it cannot be recovered afterward, only reissued as a
 	// brand new token.
@@ -56,6 +83,14 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Checked before the password re-check spends any of its budget, as
+	// the name is: a malformed request is the caller's typo.
+	expiresAt, chosen, ok := requestedExpiry(req.ExpiresAt)
+	if !ok {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, `expiresAt must be an RFC 3339 timestamp in the future, or "never"`, nil)
+		return
+	}
+
 	if !g.recheckAdminPassword(w, r, req.Password, g.now()) {
 		return
 	}
@@ -65,7 +100,11 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		kind = gauntlet.TokenKindAPI
 	}
 
-	raw, tok, err := g.deps.Tokens.Create(req.Name, kind, req.Device, UserFromContext(r), g.now())
+	now := g.now()
+	if !chosen {
+		expiresAt = now.Add(gauntlet.DefaultTokenLifetime)
+	}
+	raw, tok, err := g.deps.Tokens.CreateWithExpiry(req.Name, kind, req.Device, UserFromContext(r), now, expiresAt)
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch err {
@@ -76,7 +115,7 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		case gauntlet.ErrTokenKindInvalid, gauntlet.ErrTokenDeviceRequired,
 			gauntlet.ErrTokenDeviceNotAllowed, gauntlet.ErrTokenDeviceInvalid,
-			gauntlet.ErrTokenNameInvalid:
+			gauntlet.ErrTokenNameInvalid, gauntlet.ErrTokenExpiryInvalid:
 			// The caller's request is wrong, not the deployment's state,
 			// and the message is safe to hand back: it names a field,
 			// not anything about existing tokens.
@@ -92,6 +131,11 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	if tok.Device != "" {
 		detail += " device=" + tok.Device
 	}
+	if tok.ExpiresAt.IsZero() {
+		detail += " expires=never"
+	} else {
+		detail += " expires=" + tok.ExpiresAt.UTC().Format(time.RFC3339)
+	}
 	g.audit(r, auditActor(r), "token.create", tok.Name, detail)
 	writeJSON(w, http.StatusCreated, tokenResponse{
 		ID:        tok.ID,
@@ -99,6 +143,7 @@ func (g *Gate) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		Kind:      tok.Kind,
 		Device:    tok.Device,
 		CreatedAt: tok.CreatedAt,
+		ExpiresAt: tok.ExpiresAt,
 		Value:     raw,
 	})
 }
@@ -116,6 +161,7 @@ func (g *Gate) handleTokensList(w http.ResponseWriter, r *http.Request) {
 			Device:     t.Device,
 			CreatedAt:  t.CreatedAt,
 			LastUsedAt: t.LastUsedAt,
+			ExpiresAt:  t.ExpiresAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tokens": out})

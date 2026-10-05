@@ -71,10 +71,15 @@ import (
 //
 // Tokens' version 2 (#59) is the same "seq" addition as accounts'
 // version 6, numbered on its own track since the two documents'
-// versions have never moved together.
+// versions have never moved together. Version 3 (#74) added
+// Token.ExpiresAt and Token.ExpiryWarnedAt; an older document reads
+// them as zero -- never expires, nothing warned -- which is what those
+// tokens were issued as. A build that reads up to version 2 refuses a
+// version-3 document rather than save it back without the expiry, which
+// would turn every token that has one into a token that never expires.
 const (
 	accountsDocumentVersion = 9
-	tokensDocumentVersion   = 2
+	tokensDocumentVersion   = 3
 	signInsDocumentVersion  = 3
 )
 

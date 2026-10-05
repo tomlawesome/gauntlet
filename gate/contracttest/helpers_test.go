@@ -389,6 +389,8 @@ type createTokenRequest struct {
 	Kind     string `json:"kind"`
 	Device   string `json:"device"`
 	Password string `json:"password"`
+	// ExpiresAt is left out of the body when nil (#74).
+	ExpiresAt *string `json:"expiresAt,omitempty"`
 }
 
 type sessionResponse struct {
@@ -463,4 +465,5 @@ type tokenResponse struct {
 	Kind       gauntlet.TokenKind `json:"kind"`
 	Value      string             `json:"value"`
 	LastUsedAt time.Time          `json:"lastUsedAt"`
+	ExpiresAt  time.Time          `json:"expiresAt"`
 }

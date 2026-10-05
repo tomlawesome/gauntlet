@@ -50,9 +50,13 @@ import (
 // and would only add needless CPU cost to every authenticated request
 // (same reasoning GitHub/GitLab personal access tokens use).
 //
-// There is no expiry field: like sessions and accounts, a token stays
-// valid until explicitly revoked (see TokenStore.Revoke) -- no silent-
-// expiry surprises for whatever integration is holding it.
+// A token expires (#74): ExpiresAt, a year after creation unless the
+// creator chose another time or none (see TokenStore.CreateWithExpiry),
+// after which Authenticate refuses it. One that nobody has used for a
+// year is removed outright by Sweep -- GitHub's personal-access-token
+// lifecycle. A token written before ExpiresAt existed reads as never
+// expiring, which is what it was issued as. Revoke still ends one at
+// once.
 type Token struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -75,6 +79,13 @@ type Token struct {
 	HashedValue string    `json:"hashedValue"`
 	CreatedAt   time.Time `json:"createdAt"`
 	LastUsedAt  time.Time `json:"lastUsedAt,omitzero"`
+	// ExpiresAt is when Authenticate stops accepting the token; the zero
+	// time means it never expires (#74). Tokens written before the field
+	// existed read as zero.
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
+	// ExpiryWarnedAt is when Sweep reported this token as about to
+	// expire, so each token is reported once. Zero until then.
+	ExpiryWarnedAt time.Time `json:"expiryWarnedAt,omitzero"`
 	// CreatedBy is the account ID that issued this token, so deleting
 	// that account can revoke it (see RevokeAllCreatedBy).
 	//
@@ -138,6 +149,26 @@ var (
 	// display value in the same places the device id is, and bounded
 	// for the same reasons (see ErrTokenDeviceInvalid).
 	ErrTokenNameInvalid = errors.New("gauntlet: token name must be printable text of at most 64 bytes (fewer characters for non-Latin letters)")
+	// ErrTokenExpiryInvalid is returned by CreateWithExpiry for an expiry
+	// that is not after the time of creation: a token born expired
+	// would be a dead credential the caller believes works.
+	ErrTokenExpiryInvalid = errors.New("gauntlet: a token's expiry must be in the future")
+)
+
+const (
+	// TokenPrefix starts every token value minted since #74, so a
+	// secret scanner (gitleaks, GitHub secret scanning) can recognise a
+	// leaked one. Authenticate hashes the value as presented, so a token
+	// minted before the prefix existed keeps working unchanged.
+	TokenPrefix = "gnt_"
+	// DefaultTokenLifetime is how long Create's token lasts: a year.
+	DefaultTokenLifetime = 365 * 24 * time.Hour
+	// TokenUnusedLimit is how long a token may go unused (from its last
+	// use, or its creation if it never had one) before Sweep removes it.
+	TokenUnusedLimit = 365 * 24 * time.Hour
+	// TokenExpiryNoticeWindow is how far ahead of its expiry Sweep
+	// reports a token.
+	TokenExpiryNoticeWindow = 7 * 24 * time.Hour
 )
 
 // defaultTokenKinds is TokenOptions.Kinds' value when left empty --
@@ -662,7 +693,19 @@ func printableWithin(s string, maxBytes int) bool {
 // scopes an ingest token to one device and must be empty for any other
 // kind -- see Token.Device. name is trimmed and held to the same length
 // and character rules as device (ErrTokenNameInvalid).
+//
+// The token expires DefaultTokenLifetime after now (#74); use
+// CreateWithExpiry to choose another time, or none.
 func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) {
+	return s.CreateWithExpiry(name, kind, device, creator, now, now.Add(DefaultTokenLifetime))
+}
+
+// CreateWithExpiry is Create with the expiry chosen by the caller:
+// expiresAt must be after now (ErrTokenExpiryInvalid), or the zero time
+// for a token that never expires -- what a router's ingest token wants,
+// since it would stop reporting on its expiry day. The raw value starts
+// with TokenPrefix.
+func (s *TokenStore) CreateWithExpiry(name string, kind TokenKind, device string, creator *User, now, expiresAt time.Time) (raw string, tok *Token, err error) {
 	if !s.Persisted() {
 		return "", nil, ErrTokenNotPersisted
 	}
@@ -683,10 +726,13 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 	if !validDeviceID(device) {
 		return "", nil, ErrTokenDeviceInvalid
 	}
+	if !expiresAt.IsZero() && !expiresAt.After(now) {
+		return "", nil, ErrTokenExpiryInvalid
+	}
 
 	// newID's generator -- same 128-bit crypto/rand source Session
 	// already uses for its own unguessable IDs (see id.go).
-	raw = newID()
+	raw = TokenPrefix + newID()
 	hash := hashTokenValue(raw)
 	// Picking up another process's writes first avoids most save
 	// conflicts; correctness does not depend on it -- see mutate.
@@ -710,6 +756,7 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 			Device:      device,
 			HashedValue: hash,
 			CreatedAt:   now,
+			ExpiresAt:   expiresAt,
 		}
 		if creator != nil {
 			t.CreatedBy = creator.ID
@@ -735,7 +782,7 @@ const lastUsedGranularity = time.Hour
 
 // Authenticate validates a raw bearer token value *of kind want*,
 // recording LastUsedAt on success. Returns (nil, false) for an unknown,
-// malformed, or revoked token -- deliberately no distinction between
+// malformed, expired (#74), or revoked token -- deliberately no distinction between
 // those, same as Store.Authenticate's treatment of unknown-username vs.
 // wrong-password -- and equally for a real, valid token of the wrong
 // kind, or one whose kind was never registered with this store (see
@@ -744,7 +791,8 @@ const lastUsedGranularity = time.Hour
 // want is a parameter rather than something the caller inspects
 // afterwards on purpose: requiring the kind up front means "accepted an
 // ingest token wherever it meant to accept a read-only one" cannot be
-// made silently. LastUsedAt is left untouched on a mismatch, so a token
+// made silently. A value is hashed as presented, so tokens minted before
+// TokenPrefix existed authenticate as they always did. LastUsedAt is left untouched on a mismatch, so a token
 // presented at the wrong door does not look like it was used.
 func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) {
 	if raw == "" {
@@ -766,6 +814,11 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 		return nil, false
 	}
 	if t.Kind != want {
+		return nil, false
+	}
+	// Refused exactly as an unknown value is, and without recording a
+	// use: nothing tells an expired token from one that never existed.
+	if !t.ExpiresAt.IsZero() && !now.Before(t.ExpiresAt) {
 		return nil, false
 	}
 	// See mikroview's own comment on this line (kept): persisting only
@@ -856,6 +909,70 @@ func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error) {
 		return 0, err
 	}
 	return removed, nil
+}
+
+// TokenSweepResult is what one TokenStore.Sweep did. HashedValue is
+// zeroed on every token, as List does.
+type TokenSweepResult struct {
+	// Removed are the tokens deleted for going unused for
+	// TokenUnusedLimit.
+	Removed []Token
+	// Expiring are the tokens now marked warned: not yet expired, but
+	// expiring within TokenExpiryNoticeWindow, and not reported before.
+	Expiring []Token
+}
+
+// Sweep is the token store's maintenance pass (#74): the application
+// calls it about once a day, as this package runs no timer of its own.
+// It removes every token unused for more than TokenUnusedLimit -- by
+// LastUsedAt, or CreatedAt for one never used -- and marks every token
+// that expires within TokenExpiryNoticeWindow and has not been reported
+// as warned, so it is reported once. Both changes are saved as one
+// write; on a persistence failure neither happened and the result is
+// empty. An expired token is left in the list (Authenticate already
+// refuses it) for an admin to see and revoke.
+//
+// An unpersisted store holds no tokens, so it sweeps nothing.
+func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) {
+	if !s.Persisted() {
+		return TokenSweepResult{}, nil
+	}
+	s.reloadIfStale()
+	var res TokenSweepResult
+	err := s.mutate(func(st *tokenState) error {
+		// Reset: the op runs again on a conflict replay.
+		res = TokenSweepResult{}
+		for _, t := range st.tokens() {
+			last := t.LastUsedAt
+			if last.IsZero() {
+				last = t.CreatedAt
+			}
+			if now.Sub(last) > TokenUnusedLimit {
+				delete(st.byID, t.ID)
+				delete(st.byHash, t.HashedValue)
+				cp := *t
+				cp.HashedValue = ""
+				res.Removed = append(res.Removed, cp)
+				continue
+			}
+			if t.ExpiresAt.IsZero() || !t.ExpiryWarnedAt.IsZero() ||
+				!t.ExpiresAt.After(now) || t.ExpiresAt.Sub(now) > TokenExpiryNoticeWindow {
+				continue
+			}
+			t.ExpiryWarnedAt = now
+			cp := *t
+			cp.HashedValue = ""
+			res.Expiring = append(res.Expiring, cp)
+		}
+		if len(res.Removed) == 0 && len(res.Expiring) == 0 {
+			return errNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		return TokenSweepResult{}, err
+	}
+	return res, nil
 }
 
 // tokenOlder is the one order List, ByKind and the saved document use:

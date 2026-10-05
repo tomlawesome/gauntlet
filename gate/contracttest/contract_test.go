@@ -328,6 +328,7 @@ func TestContractEveryRoute(t *testing.T) {
 	contractUnlockCode(t, c)
 	contractUnusualSignIns(t, c)
 	contractEscapeCode(t, c)
+	contractResume(t, c)
 	c.requireEveryOperationDriven()
 }
 
@@ -392,6 +393,77 @@ func contractUnusualSignIns(t *testing.T, c *contractChecker) {
 		t.Fatalf("login/factor under confirm = %v", challenge)
 	}
 	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 200, nil)
+}
+
+// contractResume covers POST /api/auth/reauthenticate (#71): a session
+// that timed out through inactivity inside its ceiling reports itself
+// resumable and resumes with the password alone, on a gate whose clock
+// the test moves.
+func contractResume(t *testing.T, c *contractChecker) {
+	users, code := openStore(t, persist.NewMemory())
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); defer mu.Unlock(); now = now.Add(d) }
+	g := newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) { cfg.Now = clock })
+	ts := newTestServer(t, g)
+	u := ts.URL
+	const adminPass = "contract-admin-password"
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+
+	// Live: nothing to resume.
+	session := func(client *http.Client) map[string]any {
+		var state map[string]any
+		c.do(client, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+		return state
+	}
+	if state := session(admin); state["resumable"] != nil {
+		t.Errorf("a live session reports resumable: %v", state)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 401, nil)
+
+	advance(2 * time.Hour)
+	if state := session(admin); state["authenticated"] != false || state["resumable"] != true {
+		t.Errorf("a timed-out session reports %v, want unauthenticated and resumable", state)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: "not json", bad: true}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}, noCSRF: true}, 403, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{"wrong-password-placeholder"}}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 200, nil)
+	if state := session(admin); state["authenticated"] != true || state["resumable"] != nil {
+		t.Errorf("a resumed session reports %v, want authenticated and not resumable", state)
+	}
+
+	// Timed out again: wrong passwords count, and past the original
+	// ceiling nothing resumes it.
+	advance(2 * time.Hour)
+	if state := session(admin); state["resumable"] != true {
+		t.Fatalf("a second timeout reports %v, want resumable", state)
+	}
+	// From a browser the account does not remember (only the session
+	// cookie), five wrong passwords lock the account out.
+	stranger := c.client()
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ck := range admin.Jar.Cookies(parsed) {
+		if ck.Name == testCookieName {
+			stranger.Jar.SetCookies(parsed, []*http.Cookie{ck})
+		}
+	}
+	for range 5 {
+		c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{"wrong-password-placeholder"}}, 401, nil)
+	}
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 429, nil)
+	advance(25 * time.Hour)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 401, nil)
+}
+
+// reauthenticateRequest is POST /api/auth/reauthenticate's body.
+type reauthenticateRequest struct {
+	Password string `json:"password"`
 }
 
 // contractEscapeCode covers the lone admin's escape (#66): blocked from a
@@ -859,6 +931,20 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "", Password: adminPass}}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: strings.Repeat("n", gauntlet.MaxTokenNameLen+1), Password: adminPass}}, 400, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "sensor", Kind: "ingest", Device: "sensor-1", Password: adminPass}}, 201, nil)
+	// expiresAt (#74): a year by default, chosen, or "never" (the key is
+	// then absent from the response, which the document allows).
+	if created.ExpiresAt.IsZero() || !strings.HasPrefix(created.Value, "gnt_") {
+		t.Fatalf("created token = %+v, want a year-out expiresAt and a gnt_ value", created)
+	}
+	empty, never, soon, past := "", "never", time.Now().Add(48*time.Hour).UTC().Format(time.RFC3339), time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	var neverTok, soonTok tokenResponse
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "forever", ExpiresAt: &never, Password: adminPass}}, 201, &neverTok)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "soon", ExpiresAt: &soon, Password: adminPass}}, 201, &soonTok)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "late", ExpiresAt: &past, Password: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/tokens", body: createTokenRequest{Name: "odd", ExpiresAt: &empty, Password: adminPass}}, 400, nil)
+	if !neverTok.ExpiresAt.IsZero() || soonTok.ExpiresAt.IsZero() {
+		t.Fatalf("never = %+v, soon = %+v", neverTok, soonTok)
+	}
 	// Used once, so the list carries lastUsedAt (see alreadyIssued above).
 	used := bearerRequest(t, u, "/api/protected", created.Value)
 	_ = used.Body.Close()
