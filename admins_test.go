@@ -325,16 +325,3 @@ func TestTransferAdminEndsTheOldAdminsSessions(t *testing.T) {
 		t.Errorf("old admin's SessionsEndedAt = %v, want %v", from.SessionsEndedAt, now)
 	}
 }
-
-// With several admins TransferAdmin still moves the role off "the"
-// admin (first by username) and leaves the others alone.
-func TestTransferAdminLeavesOtherAdminsAlone(t *testing.T) {
-	s, _, _, _ := storeWithTwoAdmins(t)
-	if _, _, err := s.TransferAdmin("carol", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	admins := s.Admins()
-	if len(admins) != 2 || admins[0].Username != "bob" || admins[1].Username != "carol" {
-		t.Errorf("Admins() = %+v, want bob and carol", admins)
-	}
-}

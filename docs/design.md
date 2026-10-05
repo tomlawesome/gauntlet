@@ -223,7 +223,7 @@ func (s *Store) CheckUnlockCode(username, code string) (*User, error)           
 func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error) // role may be RoleAdmin since #67; gate step-ups the caller first
 func (s *Store) DeleteUser(id string) (*User, error)                                       // refuses the last admin: ErrCannotDeleteAdmin, also ErrLastAdmin
 func (s *Store) SetRole(id string, role Role, now time.Time) (*User, Role, error)          // new (#67, #75): the user and the role it held; refuses demoting the last admin inside the write (ErrLastAdmin); a downgrade ends the account's sessions; ErrRoleUnchanged when nothing would change
-func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) // console handover: moves the role off Admin()
+func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) // console handover from the one admin; ErrSeveralAdmins with more
 func (s *Store) Admin() *User                                                              // an admin: the first by username (#67)
 func (s *Store) Admins() []User                                                            // new (#67): every admin, by username, credentials blanked
 func (s *Store) HasLocalAdmin() bool                                                       // any admin has a local password
@@ -991,7 +991,8 @@ protected (#67, ADR-0010): it can be neither deleted nor demoted, an
 admin may be granted over HTTP only with the granting admin's password
 and a current second factor re-entered on the same request, and every
 admin keeps a local password when SSO is linked. `TransferAdmin` stays
-for an app's console. Two levels, `admin` includes `user` includes
+for an app's console while there is one admin; with several it refuses
+(`ErrSeveralAdmins`) and the console uses `SetRole`. Two levels, `admin` includes `user` includes
 `viewer`; no finer admin roles -- an app composes `RequireRole` over its
 own routes.
 

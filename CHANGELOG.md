@@ -15,7 +15,8 @@ All notable changes to this project are documented in this file.
   the same locked write as the change, so two admins removed at once
   cannot leave none. A downgrade, `TransferAdmin`'s demotion included,
   ends the account's sessions (`SessionsEndedAt`); every change writes
-  `RoleChangedAt`. `Admin()` returns the first admin by username;
+  `RoleChangedAt`. `TransferAdmin` refuses with `ErrSeveralAdmins` when
+  more than one admin exists. `Admin()` returns the first admin by username;
   `HasLocalAdmin` is true when any admin has a local password; every
   admin keeps its password and second factor when SSO is linked.
 - `PUT /api/auth/users/{id}/role` (#75, #67): the one route for every
@@ -148,8 +149,8 @@ All notable changes to this project are documented in this file.
   to version 8 refuses at load as "allows exactly one". A version-8
   document opens unchanged, and a version-8 build refuses a version-9
   one. A document with accounts and no admin is still refused.
-- **Breaking for HTTP clients:** deleting the last admin now answers `409`
-  class `last-admin` instead of `conflict`, and the caller's own account
+- Deleting the last admin answers `409` class `last-admin` (the
+  `conflict` class it had on `dev` was never released), and the caller's own account
   cannot be deleted while other admins exist (`409` `conflict`).
   `POST /api/auth/users` with `role: admin` is no longer a `400` for
   being an admin; without `adminPassword` and `adminCode` it is a `400`

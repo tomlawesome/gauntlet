@@ -869,6 +869,40 @@ func TestTransferAdminReturnsNoCredentials(t *testing.T) {
 	requireNoCredentials(t, "TransferAdmin (to)", to)
 }
 
+// TestTransferAdminRefusesWithSeveralAdmins: with two admins there is no
+// one account to hand over from, so TransferAdmin must refuse rather
+// than demote whichever admin sorts first, and change nothing (#67).
+func TestTransferAdminRefusesWithSeveralAdmins(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	ids := map[string]string{}
+	for _, c := range []struct {
+		name string
+		role Role
+	}{{"alice", RoleAdmin}, {"bob", RoleAdmin}, {"carol", RoleUser}} {
+		var u *User
+		var err error
+		if c.name == "alice" {
+			u, err = s.Register(c.name, "password-placeholder-1", now)
+		} else {
+			u, err = s.CreateUser(c.name, "password-placeholder-2", c.role, now)
+		}
+		if err != nil {
+			t.Fatalf("creating %s: %v", c.name, err)
+		}
+		ids[c.name] = u.ID
+	}
+
+	if _, _, err := s.TransferAdmin("carol", now); !errors.Is(err, ErrSeveralAdmins) {
+		t.Fatalf("TransferAdmin with two admins: err = %v, want ErrSeveralAdmins", err)
+	}
+	for name, want := range map[string]Role{"alice": RoleAdmin, "bob": RoleAdmin, "carol": RoleUser} {
+		if u, ok := s.Get(ids[name]); !ok || u.Role != want {
+			t.Errorf("after the refused transfer %s is %v, want %v", name, u.Role, want)
+		}
+	}
+}
+
 // TestDeleteUserLeavesTheAccountInPlaceWhenPersistFails: a deletion that
 // cannot be saved must not remove the account from memory either, or a
 // restart before the next good write would bring it back while the

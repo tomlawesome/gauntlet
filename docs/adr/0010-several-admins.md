@@ -70,7 +70,9 @@ the step-up).
    returns (a comparable value that also answers `errors.Is(err,
    ErrLastAdmin)`), so `err == ErrCannotDeleteAdmin` keeps working;
    `Admin()` stays and now returns the first admin by username; new
-   `Admins()` and `SetRole`; `TransferAdmin` stays for the console. The
+   `Admins()` and `SetRole`; `TransferAdmin` stays for the console while there is one admin and
+   refuses with several (`ErrSeveralAdmins`: there is no one account to
+   hand over from, and picking one would demote an admin nobody named). The
    accounts document is version 9: no field changed, but a build that
    reads up to version 8 refuses a two-admin document with a message
    about "exactly one", and ADR-0002's rule is that a document an older

@@ -93,6 +93,10 @@ var (
 	// ErrTransferToSelf is returned by TransferAdmin when the target is
 	// already the admin.
 	ErrTransferToSelf = errors.New("gauntlet: that account is already the admin")
+	// ErrSeveralAdmins is returned by TransferAdmin when more than one
+	// account holds the role: "the admin" to hand over from is no longer
+	// one account, so the caller names each change with SetRole (#67).
+	ErrSeveralAdmins = errors.New("gauntlet: this deployment has several admins -- change each account's role instead of transferring")
 	// ErrNoAdmin is returned by TransferAdmin when no account holds the
 	// role -- nothing to transfer.
 	ErrNoAdmin = errors.New("gauntlet: this deployment has no admin account")
@@ -1055,11 +1059,12 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 // TransferAdmin moves the admin role to toUsername, atomically, and
 // returns both accounts with their credentials blanked, as List's are.
 //
-// It is the console's handover: with several admins it still moves the
-// role from "the admin" (the first by username, as Admin returns) to
-// toUsername, leaving any other admin alone. SetRole is the general
-// change of one account's role. The old admin becomes a user and its
-// sessions end (SessionsEndedAt), as for any downgrade.
+// It is the console's handover from the one admin: with several admins
+// there is no single account to hand over from, and picking one would
+// demote an admin nobody named, so it refuses with ErrSeveralAdmins and
+// the caller uses SetRole, the general change of one account's role.
+// The old admin becomes a user and its sessions end (SessionsEndedAt),
+// as for any downgrade.
 //
 // The whole operation runs under one write lock with the invariant
 // re-checked inside it; doing it as two calls, or checking the current
@@ -1079,6 +1084,9 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 	// only once it is saved.
 	var fromCopy, toCopy User
 	err = s.mutate(func(st *storeState) error {
+		if st.adminCount() > 1 {
+			return ErrSeveralAdmins
+		}
 		current := st.firstAdmin()
 		if current == nil {
 			return ErrNoAdmin
