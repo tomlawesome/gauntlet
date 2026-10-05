@@ -19,6 +19,10 @@
 // never sees a request or a cookie -- gate owns routes, cookies, the
 // login limiter, sessions, recovery codes and audit.
 //
+// Signing in with a passkey alone (gauntlet.PasskeySignIn, #77,
+// docs/adr/0012-passkey-alone-sign-in.md) is the third ceremony, with
+// its own sealing key; the same relying party runs it.
+//
 // Ported from mikroview's internal/api/webauthn.go (NewRelyingParty,
 // webauthnSessionCodec; its spentChallenges became gauntlet's shared
 // internal/spent) and the ceremony half of internal/api/passkey.go (webauthnUser, passkeyToCredential,

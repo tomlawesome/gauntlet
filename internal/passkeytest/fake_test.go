@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
@@ -183,5 +184,54 @@ func TestFakeAuthenticatorCloneWarningOnRegressedSignCount(t *testing.T) {
 	}
 	if afterSecond.Authenticator.SignCount != 5 {
 		t.Fatalf("SignCount after the regressed login = %d, want 5 (unchanged)", afterSecond.Authenticator.SignCount)
+	}
+}
+
+// TestFakeAuthenticatorDiscoverableLoginReportsItsUserHandle: the fake's
+// UserHandle comes back in the assertion and the real library finds the
+// account through it; with the handle unset the library refuses (a
+// discoverable login needs one), and with user verification left out it
+// refuses a login that requires it -- each paired with the same login
+// succeeding when the knob is at its default.
+func TestFakeAuthenticatorDiscoverableLoginReportsItsUserHandle(t *testing.T) {
+	wa := mustLibrary(t)
+	fake := New(testRPID, testOrigin)
+	user := &testUser{id: []byte("user-id-for-discoverable-test-0001")}
+	user.credentials = []webauthn.Credential{*register(t, wa, fake, user)}
+	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
+		if !bytes.Equal(userHandle, user.id) {
+			t.Errorf("handler got user handle %q, want %q", userHandle, user.id)
+		}
+		return user, nil
+	}
+	discoverable := func() error {
+		assertion, session, err := wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+		if err != nil {
+			t.Fatalf("BeginDiscoverableLogin: %v", err)
+		}
+		body, err := fake.AssertionResponse(assertion)
+		if err != nil {
+			t.Fatalf("AssertionResponse: %v", err)
+		}
+		parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
+		if err != nil {
+			t.Fatalf("parsing the assertion: %v", err)
+		}
+		_, _, err = wa.ValidatePasskeyLogin(handler, *session, parsed)
+		return err
+	}
+
+	fake.UserHandle = user.id
+	if err := discoverable(); err != nil {
+		t.Fatalf("a discoverable login with a user handle and UV: %v", err)
+	}
+	fake.NoUserVerification = true
+	if err := discoverable(); err == nil {
+		t.Error("a login requiring UV accepted an assertion without the UV flag")
+	}
+	fake.NoUserVerification = false
+	fake.UserHandle = nil
+	if err := discoverable(); err == nil {
+		t.Error("a discoverable login accepted an assertion with no user handle")
 	}
 }
