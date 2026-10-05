@@ -6,6 +6,22 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **An escape code for a lone admin refused by `block`** (#66,
+  ADR-0011). When the unusual-sign-in policy refuses an admin from a new
+  browser and no other admin can act, the refusal now writes a one-time
+  code to the server's log (or hands it to the new `Config.OnEscapeCode`)
+  and sets a sealed ticket cookie `gate_escape_login` in the refused
+  browser; `POST /api/auth/login/escape` with that code (15 minutes,
+  single use, through the login limiter) lets that one sign-in through
+  and remembers the browser. The `403 sign-in-refused` body is
+  unchanged. Never for users, viewers or the SSO callback; with neither
+  `Config.Log` nor `Config.OnEscapeCode` nothing is issued. Additive API:
+  `gauntlet.NewOneTimeCode` (the setup and unlock codes' generator),
+  `Store.OtherAdminCanAct(userID, now)`, `SignInEscapeIssued` and
+  `SignInEscapeRefused`, `gate.EscapeCodeHandler`, `gate.EscapeCodeFunc`
+  and `gate.EscapeCodeLifetime`. `user.login_refused` gains
+  `escape=issued`, a completed escape records `escape=used` (confirmed),
+  and its notice is a `NoticeUnusualSignIn` with `Reason: "escape"`.
 - **Several admins, the last one protected** (#67, ADR-0010). A
   deployment may hold any number of admins; the last can be neither
   deleted nor demoted. `Store.CreateUser` accepts `RoleAdmin`; new
