@@ -220,11 +220,13 @@ func (s *Store) Count() int
 func (s *Store) Register(username, password string, now time.Time) (*User, error)          // first account only, becomes admin; host-side -- gate checks the setup code first
 func (s *Store) CheckSetupCode(code string) error                                           // new (#37, ADR-0003): the one-time code an empty store announced
 func (s *Store) CheckUnlockCode(username, code string) (*User, error)                       // new (#44): the one-time code a store with its lone admin disabled announced
-func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error)
-func (s *Store) DeleteUser(id string) (*User, error)
-func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error)
-func (s *Store) Admin() *User
-func (s *Store) HasLocalAdmin() bool
+func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error) // role may be RoleAdmin since #67; gate step-ups the caller first
+func (s *Store) DeleteUser(id string) (*User, error)                                       // refuses the last admin: ErrCannotDeleteAdmin, also ErrLastAdmin
+func (s *Store) SetRole(id string, role Role, now time.Time) (*User, Role, error)          // new (#67, #75): the user and the role it held; refuses demoting the last admin inside the write (ErrLastAdmin); a downgrade ends the account's sessions; ErrRoleUnchanged when nothing would change
+func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) // console handover: moves the role off Admin()
+func (s *Store) Admin() *User                                                              // an admin: the first by username (#67)
+func (s *Store) Admins() []User                                                            // new (#67): every admin, by username, credentials blanked
+func (s *Store) HasLocalAdmin() bool                                                       // any admin has a local password
 func (s *Store) Authenticate(username, password string, now time.Time) (*User, error)     // also redeems a live reset code; rechecks a BreachCheckPending account (#43)
 func (s *Store) Get(id string) (*User, bool)
 func (s *Store) ByUsername(username string) (*User, bool)
@@ -377,7 +379,8 @@ const ResetCodeTTL = 24 * time.Hour
 // Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
 // ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
 // ErrPasswordTooShort, ErrPasswordBlocked, ErrPasswordContext (#43), ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
-// ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin,
+// ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin
+// (kept, never returned since #67), ErrLastAdmin and ErrRoleUnchanged (#67),
 // ErrCannotDeleteAdmin, ErrTransferToSelf, ErrOIDCAlreadyLinked, ErrOIDCIdentityTaken,
 // ErrNoLocalPassword, ErrNoPendingTOTP, ErrTOTPAlreadyActive, ErrPasskeyDuplicate,
 // ErrPasskeyLimitReached, ErrPasskeyNotFound, ErrTokenNotFound, ErrTokenKindInvalid,
@@ -965,8 +968,14 @@ gives and birdcage's `api.go` comment already promises.
 
 Roles, as a recommendation: viewer reads; user edits per-canary settings
 and other operational toggles; admin manages accounts, tokens and
-approvals. Mikroview's single-admin rule and `TransferAdmin` come with
-the module and are not reopened here.
+approvals. A deployment may hold several admins and the last one is
+protected (#67, ADR-0010): it can be neither deleted nor demoted, an
+admin may be granted over HTTP only with the granting admin's password
+and a current second factor re-entered on the same request, and every
+admin keeps a local password when SSO is linked. `TransferAdmin` stays
+for an app's console. Two levels, `admin` includes `user` includes
+`viewer`; no finer admin roles -- an app composes `RequireRole` over its
+own routes.
 
 ### 2.2 `requireAuth` replacement
 
