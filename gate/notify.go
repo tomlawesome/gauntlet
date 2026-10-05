@@ -11,7 +11,7 @@ import (
 // AccountNotifier is the one hook an application wires to hear about
 // account events -- a password reset, a second factor added or removed,
 // a lockout or disable, every session ended, an unusual sign-in (#73,
-// folding in #53 and #55) -- so it can tell the account's owner. nil
+// folding in #53 and #55), a role changed (#67) -- so it can tell the account's owner. nil
 // (Config.Notices) means nobody is told; gauntlet sends nothing itself.
 //
 // AccountEvent is called after the response that caused it has been
@@ -36,6 +36,9 @@ const (
 	NoticeSignInDisabled           NoticeKind = "sign-in-disabled"
 	NoticeSessionsEnded            NoticeKind = "sessions-ended"
 	NoticeUnusualSignIn            NoticeKind = "unusual-sign-in"
+	// NoticeRoleChanged (#67, #75): an admin changed an account's role,
+	// or created an account as an admin.
+	NoticeRoleChanged NoticeKind = "role-changed"
 )
 
 // AccountNotice is what an AccountNotifier is told. Exactly one of the
@@ -61,6 +64,16 @@ type AccountNotice struct {
 	Lockout       *LockoutDetail
 	SessionsEnded *SessionsEndedDetail
 	UnusualSignIn *UnusualSignInDetail
+	RoleChanged   *RoleChangeDetail
+}
+
+// RoleChangeDetail is NoticeRoleChanged's detail. By on the notice is
+// the admin who made the change.
+type RoleChangeDetail struct {
+	// From is the role before; "" when the account was created with To.
+	From gauntlet.Role
+	// To is the role the account holds now.
+	To gauntlet.Role
 }
 
 // PasswordResetDetail is NoticePasswordReset's detail. The code itself
