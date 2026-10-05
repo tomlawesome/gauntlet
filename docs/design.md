@@ -1306,7 +1306,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A browser shared by two accounts refused on every switch | the known-browser cookie carries up to four tokens, one per account (#55 change to #44), so switching accounts in one browser is not "new" to the second account |
 | A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
-| The lone admin refused from a new laptop under `block` | documented, not fixed: shipped as designed (owner, 2026-10-04); `Decide` answering `confirm` or `flag` for the admin account is the mitigation (§2.4), and a server-log escape code is tracked as a follow-up (#66) |
+| The lone admin refused from a new laptop under `block` | documented, not fixed: shipped as designed (owner, 2026-10-04). First remedy: add a second admin (#67), who can issue the reset code; then `Decide` answering `confirm` or `flag` for the admin account is the mitigation (§2.4), and a server-log escape code is tracked as a follow-up (#66) |
 
 ### Fail-closed list
 
