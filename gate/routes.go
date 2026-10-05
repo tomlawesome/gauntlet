@@ -5,8 +5,8 @@ import "net/http"
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's
 // paths, request and response bodies (docs/design.md §1.5): session,
 // register, login (single- and second-factor step, and the confirmation
-// code an unusual sign-in may owe, #55), reauthenticate (resume a
-// timed-out session with the password, #71), logout, logout-all,
+// code or passkey an unusual sign-in may owe, #55, #65), reauthenticate (resume a
+// timed-out session with the password, or a user-verifying passkey, #71, #77), logout, logout-all,
 // the caller's own session list and end-one-session route, password,
 // the lone-admin unlock-code route (#44),
 // users list/create/delete/reset-password/unlock/logout-all, the
@@ -15,6 +15,8 @@ import "net/http"
 // confirmation of a held first factor's codes (#58), the passkey
 // list/register/rename/delete routes, the passkey login begin and the
 // admin clear route (G8, ADR-0004; all 404 while Deps.Passkeys is nil),
+// the passkey-alone sign-in begin and finish (#77, ADR-0012; 404 unless
+// Config.PasskeySignIn is set),
 // the OIDC login/callback/link trio, and tokens list/create/revoke.
 //
 // Mount the result under the same Protect that guards the rest of the
@@ -29,6 +31,8 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("POST "+loginPath, g.handleLogin)
 	mux.HandleFunc("POST "+loginFactorPath, g.handleLoginFactor)
 	mux.HandleFunc("POST "+loginConfirmPath, g.handleLoginConfirm)
+	mux.HandleFunc("POST "+loginProveBeginPath, g.handleLoginProveBegin)
+	mux.HandleFunc("POST "+loginProvePath, g.handleLoginProve)
 	mux.HandleFunc("POST "+loginEscapePath, g.handleLoginEscape)
 	mux.HandleFunc("POST "+reauthenticatePath, g.handleReauthenticate)
 	mux.HandleFunc("POST "+logoutPath, g.handleLogout)
@@ -50,6 +54,8 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("PATCH "+passkeysPath+"/{id}", g.handlePasskeyRename)
 	mux.HandleFunc("DELETE "+passkeysPath+"/{id}", g.handlePasskeyDelete)
 	mux.HandleFunc("POST "+loginFactorBeginPath, g.handleLoginFactorBegin)
+	mux.HandleFunc("POST "+loginPasskeyBeginPath, g.handleLoginPasskeyBegin)
+	mux.HandleFunc("POST "+loginPasskeyPath, g.handleLoginPasskey)
 
 	mux.HandleFunc("GET "+oidcLoginPath, g.handleOIDCLogin)
 	mux.HandleFunc("GET "+oidcCallbackPath, g.handleOIDCCallback)

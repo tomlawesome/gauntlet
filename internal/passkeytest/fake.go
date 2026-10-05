@@ -67,6 +67,17 @@ type FakeAuthenticator struct {
 	// exactly what the next assertion reports, including a value that regresses what the
 	// caller already recorded (to prove the clone-warning refusal instead).
 	SignCount uint32
+
+	// UserHandle, when set, is returned as the assertion's userHandle:
+	// what a discoverable credential's authenticator hands back so the
+	// server can tell whose passkey it is (gauntlet uses the account ID).
+	// Left nil, as an authenticator asked about an allowed list may.
+	UserHandle []byte
+
+	// NoUserVerification leaves the user-verified flag out of
+	// assertions (registrations are unaffected): a security key with no
+	// PIN, or a client that skipped the check.
+	NoUserVerification bool
 }
 
 // New generates a fresh ECDSA P-256 key and a random credential ID, and
@@ -177,7 +188,10 @@ func (f *FakeAuthenticator) AssertionResponse(assertion *protocol.CredentialAsse
 	// checks every later assertion still reports the same value ("Backup Eligible flag
 	// inconsistency detected during login validation" otherwise) -- a real synced platform
 	// passkey reports both consistently on every ceremony, and this fake does too.
-	const flags = protocol.FlagUserPresent | protocol.FlagUserVerified | protocol.FlagBackupEligible | protocol.FlagBackupState
+	flags := protocol.FlagUserPresent | protocol.FlagUserVerified | protocol.FlagBackupEligible | protocol.FlagBackupState
+	if f.NoUserVerification {
+		flags &^= protocol.FlagUserVerified
+	}
 
 	authData := f.authenticatorData(flags, f.SignCount, nil)
 
@@ -188,15 +202,20 @@ func (f *FakeAuthenticator) AssertionResponse(assertion *protocol.CredentialAsse
 
 	id := base64.RawURLEncoding.EncodeToString(f.credentialID)
 
+	response := map[string]any{
+		"authenticatorData": base64.RawURLEncoding.EncodeToString(authData),
+		"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientDataJSON),
+		"signature":         base64.RawURLEncoding.EncodeToString(sig),
+	}
+	if len(f.UserHandle) > 0 {
+		response["userHandle"] = base64.RawURLEncoding.EncodeToString(f.UserHandle)
+	}
+
 	return json.Marshal(map[string]any{
-		"id":    id,
-		"rawId": id,
-		"type":  "public-key",
-		"response": map[string]any{
-			"authenticatorData": base64.RawURLEncoding.EncodeToString(authData),
-			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientDataJSON),
-			"signature":         base64.RawURLEncoding.EncodeToString(sig),
-		},
+		"id":       id,
+		"rawId":    id,
+		"type":     "public-key",
+		"response": response,
 	})
 }
 

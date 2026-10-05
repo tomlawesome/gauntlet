@@ -193,7 +193,10 @@ func newOIDCTestServer(t *testing.T) (*oidc.StateCodec, *httptest.Server, *testu
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec, Passkeys: rp})
+	// Roles from groups (#76): the fake provider's default claims carry no
+	// group, so an SSO sign-in lands on the viewer fallback.
+	policy := oidc.Policy{RoleFromGroups: map[string]string{"staff": "user"}}
+	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec, OIDCPolicy: policy, Passkeys: rp})
 	ts := newTestServer(t, g)
 
 	b, err := json.Marshal(registerRequest{"setup-admin", "setup-admin-password", code})
@@ -402,6 +405,7 @@ type sessionResponse struct {
 		Count  int    `json:"count"`
 		Status string `json:"status"`
 		Origin string `json:"origin"`
+		SignIn bool   `json:"signIn"`
 	} `json:"passkeys"`
 }
 

@@ -603,8 +603,50 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 		return refuse(classInvalidCredentials, passkeyNotVerified)
 	}
 
+	switch g.recordVerifiedAssertion(r, user, verified, now) {
+	case assertionRefused:
+		return refuse(classInvalidCredentials, passkeyNotVerified)
+	case assertionBackendFailed:
+		// Both reservations go back -- this request's and the one
+		// login/factor/begin took for the challenge -- or a backend
+		// outage would cost an attempt per try and end in a 429 for an
+		// owner who never guessed wrong.
+		g.releaseLogin(res, now)
+		g.releaseLogin(res, now)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
+		return false
+	}
+
+	g.clearPasskeyAssertCookie(w)
+	return true
+}
+
+// assertionOutcome is how recordVerifiedAssertion ended.
+type assertionOutcome int
+
+const (
+	// assertionAccepted: the count is recorded; the assertion may sign in.
+	assertionAccepted assertionOutcome = iota
+	// assertionRefused: a clone warning, a passkey removed since the
+	// ceremony read the account, or a counter that did not advance.
+	assertionRefused
+	// assertionBackendFailed: the counter could not be saved. Not the
+	// caller's doing: the request is answered 500 and its reservations
+	// handed back.
+	assertionBackendFailed
+)
+
+// recordVerifiedAssertion is what both passkey sign-in paths do once the
+// ceremony has said the signature checked out (verified): refuse a clone
+// warning -- the library's verdict that the counter failed to advance
+// (never for 0 -> 0, how most platform passkeys behave) -- auditing it
+// with both counts and leaving the stored count alone, and otherwise let
+// RecordPasskeyAssertionIfFresh decide and record under the store's lock,
+// so two copies of one assertion cannot both win. It writes no response
+// and touches no reservation: each caller decides what a refusal costs.
+func (g *Gate) recordVerifiedAssertion(r *http.Request, user *gauntlet.User, verified gauntlet.PasskeyAssertion, now time.Time) assertionOutcome {
 	if verified.CloneWarning {
-		// "unknown" when the passkey was removed between FinishLogin's
+		// "unknown" when the passkey was removed between the ceremony's
 		// read of the account and this one.
 		stored := "unknown"
 		for _, pk := range user.Passkeys {
@@ -615,35 +657,27 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 		g.audit(r, user.Username, "account.passkey_clone_suspected", user.Username,
 			fmt.Sprintf("credential=%s presentedCount=%d storedCount=%s",
 				base64.RawURLEncoding.EncodeToString(verified.CredentialID), verified.SignCount, stored))
-		return refuse(classInvalidCredentials, passkeyNotVerified)
+		return assertionRefused
 	}
 
 	accepted, err := g.deps.Users.RecordPasskeyAssertionIfFresh(user.ID, verified.CredentialID, verified.SignCount, now)
 	switch {
 	case errors.Is(err, gauntlet.ErrPasskeyNotFound), errors.Is(err, gauntlet.ErrUserNotFound):
-		// Removed since FinishLogin read the account: nothing to sign in
-		// with any more.
-		return refuse(classInvalidCredentials, passkeyNotVerified)
+		// Removed since the ceremony read the account: nothing to sign
+		// in with any more.
+		return assertionRefused
 	case err != nil:
 		// A counter that could not be saved is refused (accepted is
 		// false), but as the backend failing, not a wrong guess -- the
 		// same stance as the TOTP branch's VerifyAndRecordTOTP error. A
 		// failed save on a 0 -> 0 login never gets here: the store logs
-		// it and accepts. Both reservations go back -- this request's and
-		// the one login/factor/begin took for the challenge -- or a
-		// backend outage would cost an attempt per try and end in a 429
-		// for an owner who never guessed wrong.
-		g.releaseLogin(res, now)
-		g.releaseLogin(res, now)
+		// it and accepts.
 		g.logError("recording passkey assertion for " + user.Username + ": " + err.Error())
-		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
-		return false
+		return assertionBackendFailed
 	case !accepted:
-		return refuse(classInvalidCredentials, passkeyNotVerified)
+		return assertionRefused
 	}
-
-	g.clearPasskeyAssertCookie(w)
-	return true
+	return assertionAccepted
 }
 
 // -- DELETE /api/auth/users/{id}/passkeys ---------------------------------

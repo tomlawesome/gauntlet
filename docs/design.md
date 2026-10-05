@@ -234,6 +234,7 @@ func (s *Store) Get(id string) (*User, bool)
 func (s *Store) ByUsername(username string) (*User, bool)
 func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool)
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (*User, bool, error)
+func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint string, role Role, now time.Time) (OIDCSignIn, error) // new (#76, ADR-0013): role "" leaves it alone; user|viewer creates or moves the account in the sign-in write, never an admin
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
 func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout (no limiter: a CLI)
@@ -353,7 +354,7 @@ type LoginLockoutRecord struct { LockedUntil time.Time; Lockouts int; DisabledAt
 
 type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
 // escape_issued, escape_refused // new (#66, ADR-0011): a lone admin's refused sign-in was given an escape code in the server log (no session yet; a refused row is recorded too) / a wrong escape code; escape_issued is never budgeted, escape_refused is budgeted as any failure
-// refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out and no session yet, confirm_refused is a wrong code. refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
+// refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out (or, under prove, a passkey is owed, #65) and no session yet, confirm_refused is a wrong code (or a refused passkey assertion). refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
 type SignInMethod string  // password, code, passkey, sso
 type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool
     Confirmed bool } // new (#55): the sign-in completed through gate's confirmation-code step
@@ -653,6 +654,25 @@ self-hosted-only policy (`multiTenantIssuers`) moves with it and is not
 made configurable: `docs/decisions/multi-tenant-oidc.md` decided that
 deliberately, and [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md) adopted it for birdcage.
 
+**Roles from groups (#76, [ADR-0013](adr/0013-sso-group-roles.md)).**
+`Policy` gains `RoleFromGroups` (group -> `user` | `viewer`, matched like
+`AllowedGroups`) and `RoleWithoutGroup` (`""` means `viewer`), and the
+methods `Groups(id)` (the claim's values, as `Permit` reads them) and
+`ValidateRoles(valid)`. `gate.New` refuses a value of `admin` or any
+unknown role: an identity provider never mints an admin, and an account
+already holding `admin` is never changed by the map. With a map set,
+every SSO sign-in applies the highest role among the identity's mapped
+groups, or the fallback for none (including an absent groups claim), in
+the same store write that finds or creates the account. A downgrade ends
+the account's other sessions; the change is audited as
+`user.role_changed` with actor `sso` and told to `Config.Notices` as
+`NoticeRoleChanged` with `RoleChangeDetail.ViaSSO`. No stored field is
+added, so the accounts document stays at version 9. On such an account
+the role route refuses `user`/`viewer` changes (409
+`role-managed-by-sso`); the map narrows roles, not access, so
+`Restricted` is unchanged and who may sign in stays with
+`AllowedGroups`.
+
 ### 1.5 `gauntlet/gate`
 
 ```go
@@ -711,7 +731,9 @@ func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below
 // judged sign-in, fixed-timeout, fail-closed to block.
 type UnusualSignInAction string
 const ( UnusualSignInOff UnusualSignInAction = "off"; UnusualSignInFlag UnusualSignInAction = "flag"
-        UnusualSignInConfirm UnusualSignInAction = "confirm"; UnusualSignInBlock UnusualSignInAction = "block" ) // zero value/"" means flag
+        UnusualSignInConfirm UnusualSignInAction = "confirm"
+        UnusualSignInProve UnusualSignInAction = "prove" // #65: held for a passkey assertion; ranks between confirm and block
+        UnusualSignInBlock UnusualSignInAction = "block" ) // zero value/"" means flag
 type UnusualSignInPolicy struct {
     Action UnusualSignInAction // base for every signal; "" means flag
     NewBrowser, NewCountry, ImpossibleTravel UnusualSignInAction // per-signal override; "" means Action
@@ -719,7 +741,7 @@ type UnusualSignInPolicy struct {
     // and before any session, with the settings' answer in c.Default;
     // its answer replaces that. Runs under ctx, bounded by
     // DecideTimeout; may do local I/O within that. A panic, an error, a
-    // timeout or an answer that is not one of the four actions refuses
+    // timeout or an answer that is not one of the actions refuses
     // the sign-in (block), reasoned decide-failed, decide-timeout or
     // decide-invalid.
     Decide func(ctx context.Context, c UnusualSignInCase) (UnusualSignInAction, error)
@@ -732,6 +754,7 @@ type UnusualSignInCase struct {
     Method           gauntlet.SignInMethod
     Client           gauntlet.SessionClient // resolved address and agent, never the headers
     Default          UnusualSignInAction    // what the settings decided
+    CanProve         bool // #65: the account has a passkey usable here and this sign-in was not itself a passkey one, so prove would hold it for a passkey
 }
 const DecideTimeout = 3 * time.Second // fixed, not configurable: Decide should be a local lookup
 
@@ -765,7 +788,7 @@ type UnusualSignInDetail struct {
     Method     gauntlet.SignInMethod
     Client     gauntlet.SessionClient // address, agent (text) and country
     SessionRef string // flag: the ref the session list shows, so a message can say "end this session"
-    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid or notify-failed
+    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid, notify-failed or prove-failed
 }
 
 // deprecated (#53, kept a minor release, ADR-0002 decision 2): Notices
@@ -889,6 +912,10 @@ account's sessions (the store writes `SessionsEndedAt`; the handler
 drops the in-memory ones). Audited as `user.role_changed` with actor,
 from and to; `Config.Notices` gets `NoticeRoleChanged`
 (`RoleChangeDetail{From, To}`), also for an admin created over HTTP.
+On an SSO account whose role the identity provider's groups decide
+(#76, §1.4), a change to `user` or `viewer` is refused, 409 class
+`role-managed-by-sso`, before any step-up; granting or demoting an admin
+is not.
 
 **The admin's password on the other admin routes (#72, ASVS 7.5.3).**
 `POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`,
@@ -914,17 +941,27 @@ account remembers (`SeenCountries`, `LastPlace`, known browsers); every
 other session issue never judges but still remembers
 (`gauntlet.Store.RememberSignIn`), so turning a signal on later starts
 from a baseline. `Config.UnusualSignIns` resolves the signals raised to
-one of `off`, `flag`, `confirm` or `block` -- the strictest of the kept
-signals wins -- and `Decide`, if set, can overrule that answer once,
-fixed at `DecideTimeout` (3 s), failing closed to `block` on a panic,
-an error, a timeout or an answer that is not one of the four. `flag`
+one of `off`, `flag`, `confirm`, `prove` or `block` -- the strictest of
+the kept signals wins -- and `Decide`, if set, can overrule that answer
+once, fixed at `DecideTimeout` (3 s), failing closed to `block` on a
+panic, an error, a timeout or an answer that is not one of the five. `flag`
 lets the sign-in complete, marked on the session, the sign-in history
 and the audit record. `confirm` holds it behind a code
 `Config.DeliverConfirmCode` hands the application synchronously, typed
 into the same sign-in at `POST /api/auth/login/confirm` (sealed ticket
 cookie `gate_confirm_login`, path `/api/auth/login`, 15 minutes); the
 code is eight decimal digits, shown once, kept only as its SHA-256.
-`block` answers 403 `sign-in-refused` (`docs/api/errors.md`), refusing
+`prove` (#65, ADR-0009 decision 10) holds it for a passkey assertion for
+the same account instead: the same ticket cookie, marked `Prove` with no
+code, the answer `{"prove": "passkey", "passkeyOrigin": ...}` (the SSO
+callback redirects with `?prove=1`), and `POST /api/auth/login/prove/begin`
+and `POST /api/auth/login/prove {assertion}`, which run the existing
+non-discoverable ceremony (`BeginLogin`/`FinishLogin`, user verification
+preferred, not required) and the login limiter as confirm does. It
+resolves per sign-in: a passkey sign-in is already proved, so `flag`; an
+account with no passkey usable here is held for a code (`confirm`) when
+`Config.DeliverConfirmCode` is set, else refused (`block`), and
+`UnusualSignInCase.CanProve` tells `Decide` which. `block` answers 403 `sign-in-refused` (`docs/api/errors.md`), refusing
 the one attempt, never the account, and writes nothing to the
 account's memory. One exception (#66, ADR-0011): a refused admin whom
 no other admin can act for (`Store.OtherAdminCanAct`) also gets an
@@ -937,7 +974,7 @@ login limiter. Never for a user or viewer, never on the SSO callback,
 and with neither `Config.Log` nor `Config.OnEscapeCode` nothing is
 issued. `gate.New` refuses an unknown action, `confirm` with
 no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with
-no `Config.Locate`. A `flag` or `block` notice through `Config.Notices`
+no `Config.Locate` (`prove` needs nothing wired). A `flag` or `block` notice through `Config.Notices`
 is rate-limited to once an account per hour; a `confirm` code has no
 limit, since the notice is the code the person is waiting for.
 
@@ -984,7 +1021,8 @@ four tokens joined by a character base64url never produces, one per
 account, so a browser shared by two accounts is not "new" to whichever
 one is switched to -- a one-token cookie from before this change still
 reads as a list of one; the confirm-login cookie `gate_confirm_login`
-(#55), path `/api/auth/login` (a prefix of `/api/auth/login/confirm`;
+(#55, #65), path `/api/auth/login` (a prefix of `/api/auth/login/confirm`
+and `/api/auth/login/prove`;
 the SSO callback can still set it, since a response sets a cookie for
 any path), `HttpOnly`, `SameSite=Lax`, `Secure` per `SecureCookie`,
 `Max-Age` 15 minutes (`ConfirmCodeLifetime`), sealed under its own
@@ -1033,12 +1071,32 @@ it. The data for all of this lives on `User`.
   app's public URL, two sealed cookies, the spent-challenge set) brings
   `github.com/go-webauthn/webauthn` v0.18.2 (owner, 2026-09-30) and is
   reached from `gate` only through `gauntlet.PasskeyCeremony`
-  ([ADR-0004](adr/0004-passkey-ceremony.md)). Registration is
+  ([ADR-0004](adr/0004-passkey-ceremony.md); ADR-0012 adds the optional
+  `gauntlet.PasskeySignIn` beside it). Registration is
   password-gated at begin, as TOTP enrolment is. Birdcage does not wire it
   and does not link it. A missing or unusable public URL is a reported
   status (`unset`, `ip`, `insecure`), not a startup refusal: the
   ceremony routes answer 409 and the session body says why; mikroview's
   deployments reached by IP keep starting.
+- **A passkey that verified the user can sign in on its own (#77,
+  [ADR-0012](adr/0012-passkey-alone-sign-in.md)), behind
+  `Config.PasskeySignIn` (off by default).** A WebAuthn Level 3
+  discoverable credential login: no username is typed, the passkey names
+  its account through the user handle (the account ID), and user
+  verification is required (800-63B-4: a multi-factor cryptographic
+  authenticator, AAL2). `POST /api/auth/login/passkey/begin` and `POST
+  /api/auth/login/passkey`, through a second optional interface,
+  `gauntlet.PasskeySignIn`, that `gauntlet/passkey`'s relying party
+  implements beside `PasskeyCeremony`; `go list -deps ./gate` still shows
+  no WebAuthn code. Every account keeps its password -- a passkey replaces
+  it at sign-in, never in the account, so the accounts document stays at
+  version 9 -- and every registration asks for a discoverable credential
+  (`residentKey: preferred`). The sign-in is judged like any other
+  (method `passkey_alone` reaches `Decide`; confirm is not skipped), is
+  counted for the account's lockout and the address limit and ban before
+  the signature is checked, and meets the must-change-password door after
+  it. The same passkey resumes a timed-out session (§1.5, #71). Mikroview
+  opts in when its login screen has the button.
 - **The door is always shut: `RequireSecondFactor` is deprecated and
   ignored (#49).** `gate` no longer offers a way to turn the
   forced-enrolment door off -- every local-password account, mikroview's

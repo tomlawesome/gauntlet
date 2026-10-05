@@ -18,7 +18,8 @@ import (
 //
 //   - user.login on a completed sign-in, its detail carrying the client
 //     address (from=, quoted: Config.ClientIP may read a header the
-//     client set) and, for the second-factor and SSO paths, how. An
+//     client set) and, for the second-factor, passkey-alone (#77) and
+//     SSO paths, how. An
 //     unusual one (#55) starts with its signals and the action taken:
 //     "unusual=new-browser,new-country; action=flag; ".
 //   - user.reauthenticated instead of user.login when the sign-in was a
@@ -157,6 +158,8 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 			detail = "via confirmation code; " + from
 		case ev.Method == gauntlet.SignInMethodCode, ev.Method == gauntlet.SignInMethodPasskey:
 			detail = "via second factor; " + from
+		case ev.Method == gauntlet.SignInMethodPasskeyAlone:
+			detail = "via passkey; " + from
 		case ev.Method == gauntlet.SignInMethodSSO:
 			detail = "via sso; " + from
 		}

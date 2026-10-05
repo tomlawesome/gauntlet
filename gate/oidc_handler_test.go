@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 	"github.com/tomlawesome/gauntlet/oidc"
 )
@@ -1033,5 +1034,257 @@ func TestOIDCFlowCookiePathCoversItsRoutes(t *testing.T) {
 		if !strings.HasPrefix(route, oidcFlowCookiePath+"/") {
 			t.Errorf("route %q is not under the OIDC flow cookie's Path %q", route, oidcFlowCookiePath)
 		}
+	}
+}
+
+// ssoRolesGate is an SSO gate whose policy maps groups to roles, with an
+// audit recorder and a notice recorder attached (#76, ADR-0013).
+type ssoRolesGate struct {
+	g     *Gate
+	ts    *httptest.Server
+	fp    *testutil.FakeProvider
+	audit *auditRecorder
+	notes *noticeRecorder
+}
+
+func newSSORolesGate(t *testing.T, policy oidc.Policy) *ssoRolesGate {
+	t.Helper()
+	g, ts, fp := newOIDCTestGate(t, policy)
+	f := &ssoRolesGate{g: g, ts: ts, fp: fp, audit: &auditRecorder{}, notes: &noticeRecorder{}}
+	g.cfg.Audit = f.audit
+	g.cfg.Notices = f.notes
+	return f
+}
+
+// signIn runs the SSO callback for subject with groups in the token and
+// returns the session cookie it set, nil if none.
+func (f *ssoRolesGate) signIn(t *testing.T, subject string, groups []string) *http.Cookie {
+	t.Helper()
+	fs, err := oidc.NewFlowState(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := f.fp.DefaultClaims(oidcTestClientID, fs.Nonce)
+	claims.Subject, claims.PreferredUsername, claims.Email, claims.Groups = subject, subject, subject+"@example.com", groups
+	f.fp.NextIDToken = f.fp.SignRS256(t, claims)
+
+	resp, err := noRedirectClient().Do(oidcCallbackRequest(t, f.g, f.ts, fs, "state="+fs.State+"&code=test-code"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if loc := resp.Header.Get("Location"); loc != "/" {
+		t.Fatalf("sign-in of %q redirected to %q, want /", subject, loc)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == testCookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+func (f *ssoRolesGate) role(t *testing.T, subject string) gauntlet.Role {
+	t.Helper()
+	u, ok := f.g.deps.Users.ByOIDCIdentity(f.fp.Issuer(), subject)
+	if !ok {
+		t.Fatalf("no account for %q", subject)
+	}
+	return u.Role
+}
+
+func (f *ssoRolesGate) roleNotices() []AccountNotice {
+	f.notes.mu.Lock()
+	defer f.notes.mu.Unlock()
+	var out []AccountNotice
+	for _, n := range f.notes.notices {
+		if n.Kind == NoticeRoleChanged {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func TestSSORolesHighestOfSeveralGroupsWins(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"staff": "user", "guests": "viewer"}})
+
+	// Both orders, and the group names matched like AllowedGroups.
+	f.signIn(t, "both-a", []string{"guests", "staff"})
+	f.signIn(t, "both-b", []string{" STAFF ", "guests"})
+	f.signIn(t, "guest", []string{"guests", "unmapped"})
+	for subject, want := range map[string]gauntlet.Role{"both-a": gauntlet.RoleUser, "both-b": gauntlet.RoleUser, "guest": gauntlet.RoleViewer} {
+		if got := f.role(t, subject); got != want {
+			t.Errorf("%s: role = %q, want %q", subject, got, want)
+		}
+	}
+}
+
+func TestSSORolesFallbackIsViewerByDefaultAndUserWhenAsked(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"staff": "user"}})
+	f.signIn(t, "stranger", []string{"other"})
+	f.signIn(t, "no-claim", nil) // an absent groups claim is "no group", not a refusal
+	for _, subject := range []string{"stranger", "no-claim"} {
+		if got := f.role(t, subject); got != gauntlet.RoleViewer {
+			t.Errorf("%s: role = %q, want viewer (the default for no mapped group)", subject, got)
+		}
+	}
+
+	f.g.deps.OIDCPolicy.RoleWithoutGroup = "user"
+	f.signIn(t, "stranger-2", []string{"other"})
+	f.signIn(t, "no-claim-2", nil)
+	for _, subject := range []string{"stranger-2", "no-claim-2"} {
+		if got := f.role(t, subject); got != gauntlet.RoleUser {
+			t.Errorf("%s: role = %q, want user with RoleWithoutGroup set", subject, got)
+		}
+	}
+}
+
+func TestSSORolesNoMapLeavesRolesAlone(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{})
+	f.signIn(t, "plain", []string{"guests"})
+	if got := f.role(t, "plain"); got != gauntlet.RoleUser {
+		t.Errorf("role = %q, want user: no map, no change", got)
+	}
+	u, _ := f.g.deps.Users.ByOIDCIdentity(f.fp.Issuer(), "plain")
+	if _, _, err := f.g.deps.Users.SetRole(u.ID, gauntlet.RoleViewer, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.signIn(t, "plain", []string{"staff"})
+	if got := f.role(t, "plain"); got != gauntlet.RoleViewer {
+		t.Errorf("role = %q, want viewer kept: with no map an admin's choice stands", got)
+	}
+	if n := len(f.roleNotices()); n != 0 {
+		t.Errorf("%d role notices, want 0", n)
+	}
+}
+
+func TestSSORolesDowngradeAuditsNotifiesAndEndsOtherSessions(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"staff": "user", "guests": "viewer"}})
+	f.signIn(t, "pat", []string{"staff"})
+	u, _ := f.g.deps.Users.ByOIDCIdentity(f.fp.Issuer(), "pat")
+	other := f.g.deps.Sessions.Create(u.ID, time.Now().Add(-time.Minute))
+	otherCookie := &http.Cookie{Name: testCookieName, Value: other.ID}
+	if got := protectedStatusWithCookie(t, http.DefaultClient, f.ts.URL, otherCookie); got != http.StatusOK {
+		t.Fatalf("test setup: the other session got %d, want 200", got)
+	}
+	if n := len(f.roleNotices()); n != 0 {
+		t.Fatalf("test setup: %d role notices before any change", n)
+	}
+
+	// The group changes at the provider: pat moves from staff to guests.
+	fresh := f.signIn(t, "pat", []string{"guests"})
+
+	if got := f.role(t, "pat"); got != gauntlet.RoleViewer {
+		t.Fatalf("role = %q, want viewer", got)
+	}
+	if got := protectedStatusWithCookie(t, http.DefaultClient, f.ts.URL, otherCookie); got != http.StatusUnauthorized {
+		t.Errorf("the other session got %d after the downgrade, want 401", got)
+	}
+	if fresh == nil {
+		t.Fatal("the downgrading sign-in issued no session")
+	}
+	if got := protectedStatusWithCookie(t, http.DefaultClient, f.ts.URL, fresh); got != http.StatusOK {
+		t.Errorf("the new session got %d, want 200", got)
+	}
+
+	e := findAuditEntry(t, f.g, "user.role_changed")
+	wantDetail := `from=user to=viewer; by group map at issuer "` + f.fp.Issuer() + `"; sessions ended: all; from=`
+	if e.Actor != "sso" || e.Target != "pat" || !strings.HasPrefix(e.Detail, wantDetail) {
+		t.Errorf("audit entry = %+v, want actor sso on pat with detail starting %q", e, wantDetail)
+	}
+	notices := f.roleNotices()
+	if len(notices) != 1 {
+		t.Fatalf("%d role notices, want 1", len(notices))
+	}
+	n := notices[0]
+	if n.By != "" || n.Username != "pat" || n.Role != gauntlet.RoleViewer || n.RoleChanged == nil ||
+		n.RoleChanged.From != gauntlet.RoleUser || n.RoleChanged.To != gauntlet.RoleViewer || !n.RoleChanged.ViaSSO {
+		t.Errorf("notice = %+v (%+v), want a viewer change by nobody, ViaSSO", n, n.RoleChanged)
+	}
+}
+
+func TestSSORolesUpgradeKeepsSessionsAndSaysSo(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"staff": "user", "guests": "viewer"}})
+	f.signIn(t, "sam", []string{"guests"})
+	u, _ := f.g.deps.Users.ByOIDCIdentity(f.fp.Issuer(), "sam")
+	other := f.g.deps.Sessions.Create(u.ID, time.Now().Add(-time.Minute))
+
+	f.signIn(t, "sam", []string{"staff"})
+
+	if got := f.role(t, "sam"); got != gauntlet.RoleUser {
+		t.Fatalf("role = %q, want user", got)
+	}
+	if got := protectedStatusWithCookie(t, http.DefaultClient, f.ts.URL, &http.Cookie{Name: testCookieName, Value: other.ID}); got != http.StatusOK {
+		t.Errorf("the other session got %d after an upgrade, want 200", got)
+	}
+	e := findAuditEntry(t, f.g, "user.role_changed")
+	if strings.Contains(e.Detail, "sessions ended") || !strings.HasPrefix(e.Detail, "from=viewer to=user; ") {
+		t.Errorf("audit detail = %q, want an upgrade with no sessions ended", e.Detail)
+	}
+}
+
+func TestSSORolesCreationAtTheMappedRoleIsNotAChange(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"guests": "viewer"}})
+	f.signIn(t, "new", []string{"guests"})
+	if got := f.role(t, "new"); got != gauntlet.RoleViewer {
+		t.Fatalf("role = %q, want viewer from creation", got)
+	}
+	if n := len(f.roleNotices()); n != 0 {
+		t.Errorf("%d role notices for a creation, want 0", n)
+	}
+}
+
+func TestSSORolesNeverTouchAnAdmin(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"guests": "viewer"}})
+	f.signIn(t, "boss", []string{"guests"})
+	u, _ := f.g.deps.Users.ByOIDCIdentity(f.fp.Issuer(), "boss")
+	if _, _, err := f.g.deps.Users.SetRole(u.ID, gauntlet.RoleAdmin, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.roleNotices())
+
+	f.signIn(t, "boss", []string{"guests"})
+	f.signIn(t, "boss", nil)
+
+	if got := f.role(t, "boss"); got != gauntlet.RoleAdmin {
+		t.Errorf("role = %q, want admin untouched by the map", got)
+	}
+	if n := len(f.roleNotices()) - before; n != 0 {
+		t.Errorf("%d role notices for an admin's sign-ins, want 0", n)
+	}
+}
+
+// TestSSOFirstSignInAuditsTheCreation (#78): an account the SSO callback
+// creates is audited as user.create, as an admin-created one is, naming
+// the issuer and the role it was given; a later sign-in creates nothing.
+func TestSSOFirstSignInAuditsTheCreation(t *testing.T) {
+	f := newSSORolesGate(t, oidc.Policy{RoleFromGroups: map[string]string{"staff": "user"}})
+	creates := func() []auditEntry {
+		rec := f.g.cfg.Audit.(*auditRecorder)
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		var out []auditEntry
+		for _, e := range rec.entries {
+			if e.Action == "user.create" {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+
+	f.signIn(t, "newcomer", []string{"other"})
+	got := creates()
+	if len(got) != 1 {
+		t.Fatalf("%d user.create records after an SSO first sign-in, want 1", len(got))
+	}
+	e := got[0]
+	if e.Actor != "sso" || e.Target != "newcomer" ||
+		!strings.Contains(e.Detail, "role=viewer") || !strings.Contains(e.Detail, f.fp.Issuer()) {
+		t.Errorf("user.create = %+v, want actor sso on newcomer naming role=viewer and the issuer", e)
+	}
+
+	f.signIn(t, "newcomer", []string{"other"})
+	if n := len(creates()); n != 1 {
+		t.Errorf("%d user.create records after a second sign-in, want still 1", n)
 	}
 }

@@ -434,3 +434,81 @@ func TestListUsersDoesNotCheckPasskeysPerAccount(t *testing.T) {
 		t.Errorf("two PasskeyCount = %d, want 2", got)
 	}
 }
+
+// ssoAccount provisions an SSO account at role the way a sign-in would,
+// without a provider: the role route reads only the store and the policy.
+func ssoAccount(t *testing.T, f *adminsFixture, subject string, role gauntlet.Role) string {
+	t.Helper()
+	in, err := f.g.deps.Users.FindOrCreateOIDCUserWithRole("https://idp.example", subject, subject, role, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return in.User.ID
+}
+
+func TestSetRoleRefusesUserViewerChangesOnAnSSOManagedAccount(t *testing.T) {
+	f := newAdminsFixture(t)
+	f.g.deps.OIDCPolicy.RoleFromGroups = map[string]string{"staff": "user", "guests": "viewer"}
+	id := ssoAccount(t, f, "sso-pat", gauntlet.RoleViewer)
+
+	for _, role := range []string{"user", "viewer"} {
+		status, body := f.setRole(t, f.admin, id, setRoleRequest{Role: role})
+		want := http.StatusConflict
+		if role == "viewer" {
+			// Already that role: the plain conflict says so first.
+			if status != want || adminProblemType(t, body) != problemTypeBase+"conflict" {
+				t.Errorf("same role = %d %s, want 409 conflict", status, body)
+			}
+			continue
+		}
+		if status != want || adminProblemType(t, body) != problemTypeBase+"role-managed-by-sso" {
+			t.Errorf("viewer -> %s = %d %s, want 409 role-managed-by-sso", role, status, body)
+		}
+		if !strings.Contains(body, "identity provider") {
+			t.Errorf("body %s does not point at the identity provider", body)
+		}
+	}
+	if r := roleOf(t, f.g, id); r != gauntlet.RoleViewer {
+		t.Errorf("role = %q after refusals, want viewer", r)
+	}
+	// user -> viewer is refused too.
+	userID := ssoAccount(t, f, "sso-sam", gauntlet.RoleUser)
+	if status, body := f.setRole(t, f.admin, userID, setRoleRequest{Role: "viewer"}); status != http.StatusConflict ||
+		adminProblemType(t, body) != problemTypeBase+"role-managed-by-sso" {
+		t.Errorf("user -> viewer = %d %s, want 409 role-managed-by-sso", status, body)
+	}
+}
+
+func TestSetRoleOnAnSSOAccountStillGrantsAndDemotesAdmin(t *testing.T) {
+	f := newAdminsFixture(t)
+	f.g.deps.OIDCPolicy.RoleFromGroups = map[string]string{"staff": "user"}
+	id := ssoAccount(t, f, "sso-pat", gauntlet.RoleUser)
+
+	status, body := f.setRole(t, f.admin, id, setRoleRequest{Role: "admin", Password: selfUnlockAdminPassword, Code: f.code()})
+	if status != http.StatusOK {
+		t.Fatalf("granting admin to a managed account = %d %s, want 200", status, body)
+	}
+	// An admin is not managed: demoting works, and the map takes over at
+	// the account's next SSO sign-in.
+	if status, body := f.setRole(t, f.admin, id, setRoleRequest{Role: "user"}); status != http.StatusOK {
+		t.Errorf("demoting an SSO admin = %d %s, want 200", status, body)
+	}
+	if r := roleOf(t, f.g, id); r != gauntlet.RoleUser {
+		t.Errorf("role = %q, want user", r)
+	}
+}
+
+func TestSetRoleSSOManagementNeedsALinkAndAMap(t *testing.T) {
+	f := newAdminsFixture(t)
+	sso := ssoAccount(t, f, "sso-pat", gauntlet.RoleUser)
+
+	// No map configured: an SSO account's role is an admin's to set.
+	if status, body := f.setRole(t, f.admin, sso, setRoleRequest{Role: "viewer"}); status != http.StatusOK {
+		t.Errorf("SSO account with no map = %d %s, want 200", status, body)
+	}
+	// A map configured: a local account is unaffected.
+	f.g.deps.OIDCPolicy.RoleFromGroups = map[string]string{"staff": "user"}
+	if status, body := f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "viewer"}); status != http.StatusOK {
+		t.Errorf("local account with a map = %d %s, want 200", status, body)
+	}
+}

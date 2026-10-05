@@ -2,6 +2,7 @@ package passkey
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -138,7 +139,13 @@ func (rp *RelyingParty) BeginRegistration(u *gauntlet.User) (json.RawMessage, st
 	for _, cred := range rp.usable(u) {
 		exclude = append(exclude, cred.Descriptor())
 	}
-	creation, sd, err := rp.wa.BeginRegistration(rp.user(u, nil), webauthn.WithExclusions(exclude))
+	// Preferred, never required, on every registration (ADR-0012): a
+	// passkey a platform authenticator makes is discoverable anyway, one
+	// that cannot be still registers as a second factor, and only a
+	// discoverable one can sign in alone.
+	creation, sd, err := rp.wa.BeginRegistration(rp.user(u, nil),
+		webauthn.WithExclusions(exclude),
+		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementPreferred))
 	if err != nil {
 		return nil, "", fmt.Errorf("passkey: beginning registration: %w", err)
 	}
@@ -174,7 +181,8 @@ func (rp *RelyingParty) FinishRegistration(u *gauntlet.User, sealed string, cred
 }
 
 // BeginLogin starts a login ceremony allowing only u's passkeys under
-// the current RP ID -- never a discoverable (passwordless) login.
+// the current RP ID -- the second step behind a password, never a
+// discoverable login (BeginSignIn is that one).
 func (rp *RelyingParty) BeginLogin(u *gauntlet.User) (json.RawMessage, string, error) {
 	if !rp.ready() {
 		return nil, "", ErrNotReady
@@ -203,7 +211,9 @@ func (rp *RelyingParty) BeginLogin(u *gauntlet.User) (json.RawMessage, string, e
 
 // FinishLogin verifies the browser's assertion against the ceremony
 // BeginLogin started. A nil error means the signature checked out for
-// one of u's usable passkeys.
+// one of u's usable passkeys. UserVerified reports whether the
+// authenticator also checked the person; this ceremony asks for that
+// but does not require it.
 //
 // CloneWarning comes from the library: set when the presented counter
 // is at or below the stored one and either is non-zero, never for
@@ -232,6 +242,7 @@ func (rp *RelyingParty) FinishLogin(u *gauntlet.User, sealed string, assertion j
 		CredentialID: cred.ID,
 		SignCount:    parsed.Response.AuthenticatorData.Counter,
 		CloneWarning: cred.Authenticator.CloneWarning,
+		UserVerified: parsed.Response.AuthenticatorData.Flags.HasUserVerified(),
 	}
 	if out.CloneWarning {
 		return out, nil
@@ -240,4 +251,86 @@ func (rp *RelyingParty) FinishLogin(u *gauntlet.User, sealed string, assertion j
 		return gauntlet.PasskeyAssertion{}, fmt.Errorf("passkey: challenge already used: %w", gauntlet.ErrPasskeyCeremonyInvalid)
 	}
 	return out, nil
+}
+
+// BeginSignIn starts a client-side discoverable login (WebAuthn Level 3):
+// no account is named and no credential allowed, so the browser offers
+// whichever passkeys it holds for this relying party, and user
+// verification is required (NIST SP 800-63B-4: a multi-factor
+// cryptographic authenticator, AAL2). Its sealed state is under its own
+// key (signInCodec), so it finishes nothing but FinishSignIn.
+func (rp *RelyingParty) BeginSignIn() (json.RawMessage, string, error) {
+	if !rp.ready() {
+		return nil, "", ErrNotReady
+	}
+	assertion, sd, err := rp.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+	if err != nil {
+		return nil, "", fmt.Errorf("passkey: beginning sign-in: %w", err)
+	}
+	return seal(signInCodec, sd, assertion)
+}
+
+// errUnknownUserHandle is what the library is told when lookup names no
+// account for the assertion's user handle; the caller already knows,
+// from lookup, and it is only ever read from the log.
+var errUnknownUserHandle = errors.New("passkey: the user handle names no account that can sign in")
+
+// FinishSignIn verifies the browser's assertion for a discoverable
+// login. The account is whoever the user handle names: lookup is called
+// with it once the assertion is parsed and before the signature is
+// checked, so gate can apply the account's limits first, and what it
+// returns is the account whose usable passkeys (current RP ID only) the
+// signature is checked against. An assertion with no user handle, or one
+// that did not verify the user, is refused -- the library's session
+// requires it and the flag is read again here from what the
+// authenticator signed.
+//
+// As FinishLogin does: a clone-warned assertion is returned, not spent,
+// for the caller to refuse; every other verified assertion claims its
+// challenge so the same one cannot sign in twice.
+func (rp *RelyingParty) FinishSignIn(lookup func(userHandle []byte) (*gauntlet.User, bool), sealed string, assertion json.RawMessage) (*gauntlet.User, gauntlet.PasskeyAssertion, error) {
+	if !rp.ready() {
+		return nil, gauntlet.PasskeyAssertion{}, ErrNotReady
+	}
+	sd, err := open(signInCodec, sealed)
+	if err != nil {
+		return nil, gauntlet.PasskeyAssertion{}, err
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(assertion)
+	if err != nil {
+		return nil, gauntlet.PasskeyAssertion{}, fmt.Errorf("passkey: parsing the assertion: %w", err)
+	}
+	if len(parsed.Response.UserHandle) == 0 {
+		return nil, gauntlet.PasskeyAssertion{}, errors.New("passkey: the assertion carries no user handle")
+	}
+	var found *gauntlet.User
+	handler := func(_, userHandle []byte) (webauthn.User, error) {
+		u, ok := lookup(userHandle)
+		if !ok || u == nil {
+			return nil, errUnknownUserHandle
+		}
+		found = u
+		return rp.user(u, rp.usable(u)), nil
+	}
+	_, cred, err := rp.wa.ValidatePasskeyLogin(handler, sd, parsed)
+	if err != nil {
+		return nil, gauntlet.PasskeyAssertion{}, fmt.Errorf("passkey: verifying the sign-in assertion: %w", err)
+	}
+	flags := parsed.Response.AuthenticatorData.Flags
+	if !flags.HasUserVerified() {
+		return nil, gauntlet.PasskeyAssertion{}, errors.New("passkey: the sign-in assertion did not verify the user")
+	}
+	out := gauntlet.PasskeyAssertion{
+		CredentialID: cred.ID,
+		SignCount:    parsed.Response.AuthenticatorData.Counter,
+		CloneWarning: cred.Authenticator.CloneWarning,
+		UserVerified: true,
+	}
+	if out.CloneWarning {
+		return found, out, nil
+	}
+	if !spentLoginChallenges.Claim(sd.Challenge, sd.Expires, time.Now()) {
+		return nil, gauntlet.PasskeyAssertion{}, fmt.Errorf("passkey: challenge already used: %w", gauntlet.ErrPasskeyCeremonyInvalid)
+	}
+	return found, out, nil
 }

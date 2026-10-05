@@ -325,6 +325,8 @@ func TestContractEveryRoute(t *testing.T) {
 	contractSSO(t, c)
 	contractNoStorage(t, c)
 	contractPasskeys(t, c)
+	contractPasskeySignIn(t, c)
+	contractProve(t, c)
 	contractUnlockCode(t, c)
 	contractUnusualSignIns(t, c)
 	contractEscapeCode(t, c)
@@ -421,16 +423,16 @@ func contractResume(t *testing.T, c *contractChecker) {
 	if state := session(admin); state["resumable"] != nil {
 		t.Errorf("a live session reports resumable: %v", state)
 	}
-	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Password: adminPass}}, 401, nil)
 
 	advance(2 * time.Hour)
 	if state := session(admin); state["authenticated"] != false || state["resumable"] != true {
 		t.Errorf("a timed-out session reports %v, want unauthenticated and resumable", state)
 	}
 	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: "not json", bad: true}, 400, nil)
-	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}, noCSRF: true}, 403, nil)
-	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{"wrong-password-placeholder"}}, 401, nil)
-	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 200, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Password: adminPass}, noCSRF: true}, 403, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Password: "wrong-password-placeholder"}}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Password: adminPass}}, 200, nil)
 	if state := session(admin); state["authenticated"] != true || state["resumable"] != nil {
 		t.Errorf("a resumed session reports %v, want authenticated and not resumable", state)
 	}
@@ -454,16 +456,27 @@ func contractResume(t *testing.T, c *contractChecker) {
 		}
 	}
 	for range 5 {
-		c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{"wrong-password-placeholder"}}, 401, nil)
+		c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Password: "wrong-password-placeholder"}}, 401, nil)
 	}
-	c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 429, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Password: adminPass}}, 429, nil)
 	advance(25 * time.Hour)
-	c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{adminPass}}, 401, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Password: adminPass}}, 401, nil)
 }
 
 // reauthenticateRequest is POST /api/auth/reauthenticate's body.
 type reauthenticateRequest struct {
-	Password string `json:"password"`
+	Password  string          `json:"password,omitempty"`
+	Assertion json.RawMessage `json:"assertion,omitempty"`
+}
+
+// loginPasskeyRequest is POST /api/auth/login/passkey's body.
+type loginPasskeyRequest struct {
+	Assertion json.RawMessage `json:"assertion"`
+}
+
+// loginProveRequest is POST /api/auth/login/prove's body.
+type loginProveRequest struct {
+	Assertion json.RawMessage `json:"assertion"`
 }
 
 // contractEscapeCode covers the lone admin's escape (#66): blocked from a
@@ -1069,6 +1082,27 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	c.do(first, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 403, nil)
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "carol", Password: "contract-carol-password"}}, 201, nil)
 
+	// The first SSO account's role comes from its groups (#76): it has
+	// none, so it is a viewer, and the role route will not move it.
+	var accounts []userSummary
+	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, &accounts)
+	firstID := ""
+	for _, a := range accounts {
+		if a.Username == "person" {
+			firstID = a.ID
+		}
+	}
+	if firstID == "" {
+		t.Fatal("the first SSO account is not in the user list")
+	}
+	var managed struct {
+		Type string `json:"type"`
+	}
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + firstID + "/role", body: setRoleRequest{Role: "user"}}, 409, &managed)
+	if want := "https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#role-managed-by-sso"; managed.Type != want {
+		t.Errorf("the managed account's refusal has type %q, want %q", managed.Type, want)
+	}
+
 	// carol links her local account to a second identity.
 	carol := c.client()
 	c.do(carol, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"carol", "contract-carol-password"}}, 200, nil)
@@ -1473,4 +1507,264 @@ func contractPasskeys(t *testing.T, c *contractChecker) {
 	c.do(offAdmin, o, call{method: "DELETE", path: "/api/auth/users/" + bobOff.ID + "/passkeys", body: passwordRequest{"contract-admin-password"}}, 404, nil)
 	c.do(anon, o, call{method: "POST", path: "/api/auth/login/factor/begin"}, 404, nil)
 	c.do(anon, o, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Assertion: json.RawMessage(`{"id":"eA"}`)}}, 404, nil)
+}
+
+// passkeySignInGate serves a gate whose relying party is for publicURL
+// ("" for one that is not ready) with Config.PasskeySignIn as given and
+// the clock if one is, and "admin" registered and signed in on the
+// returned client.
+func passkeySignInGate(t *testing.T, c *contractChecker, publicURL string, on bool, clock func() time.Time) (*fixture, *httptest.Server, *http.Client) {
+	t.Helper()
+	users, code := openStore(t, persist.NewMemory())
+	rp, err := passkey.New(passkey.Config{PublicURL: publicURL, DisplayName: testProductName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGateWith(t, gate.Deps{Users: users, Passkeys: rp}, func(cfg *gate.Config) {
+		cfg.PasskeySignIn = on
+		if clock != nil {
+			cfg.Now = clock
+		}
+	})
+	f := &fixture{g: g, users: users, setupCode: code}
+	ts := newTestServer(t, g)
+	admin := c.client()
+	c.do(admin, ts.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", "contract-admin-password", code}}, 201, nil)
+	return f, ts, admin
+}
+
+// contractProve drives a sign-in held for a passkey (#65): a gate whose
+// policy proves a new browser, an admin holding a passkey and recovery
+// codes, the code step answering {"prove": "passkey"}, and the two prove
+// routes -- refusals, the replay and the success -- plus both routes on a
+// gate with no passkeys.
+func contractProve(t *testing.T, c *contractChecker) {
+	const adminPass = "contract-admin-password"
+	const publicURL = "https://passkeys.example.org"
+	users, code := openStore(t, persist.NewMemory())
+	rp, err := passkey.New(passkey.Config{PublicURL: publicURL, DisplayName: testProductName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGateWith(t, gate.Deps{Users: users, Passkeys: rp}, func(cfg *gate.Config) {
+		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInProve}
+	})
+	ts := newTestServer(t, g)
+	u := ts.URL
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+
+	fake := passkeytest.New("passkeys.example.org", publicURL)
+	var creation protocol.CredentialCreation
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{adminPass}}, 200, &creation)
+	regBody, err := fake.RegisterResponse(&creation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registered passkeyRegisterFinishResponse
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(regBody), "key"}}, 200, &registered)
+	c.do(admin, u, call{method: "POST", path: enrolmentConfirmPath}, 200, nil)
+	if len(registered.RecoveryCodes) == 0 {
+		t.Fatal("the admin's first passkey issued no recovery codes")
+	}
+	adminUser, ok := users.ByUsername("admin")
+	if !ok {
+		t.Fatal("admin was not created")
+	}
+	fake.UserHandle = []byte(adminUser.ID)
+
+	// A new browser: the password, then a recovery code, and the answer
+	// is the passkey owed.
+	held := func(recovery string) *http.Client {
+		t.Helper()
+		client := c.client()
+		c.do(client, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
+		var challenge map[string]any
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery}}, 200, &challenge)
+		if challenge["prove"] != "passkey" || challenge["passkeyOrigin"] != publicURL || len(challenge) != 2 {
+			t.Fatalf("login/factor under prove = %v", challenge)
+		}
+		return client
+	}
+	begin := func(client *http.Client, who *passkeytest.FakeAuthenticator) json.RawMessage {
+		t.Helper()
+		var options protocol.CredentialAssertion
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/prove/begin"}, 200, &options)
+		body, err := who.AssertionResponse(&options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	newcomer := held(registered.RecoveryCodes[0])
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove/begin", noCSRF: true}, 403, nil)
+	stranger := *fake
+	stranger.RPID = "not-the-relying-party.example"
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{begin(newcomer, &stranger)}}, 401, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: "{", bad: true}, 400, nil)
+	right := begin(newcomer, fake)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}, noCSRF: true}, 403, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}}, 200, nil)
+	var state sessionResponse
+	c.do(newcomer, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if !state.Authenticated || state.Role != "admin" {
+		t.Fatalf("session after the proof = %+v, want the admin signed in", state)
+	}
+	// The ticket is spent.
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}}, 401, nil)
+	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/prove/begin"}, 401, nil)
+	// A browser holding no ticket, and a code ticket at the prove routes.
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/login/prove/begin"}, 401, nil)
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{right}}, 401, nil)
+
+	// No passkeys here: neither route exists.
+	none, noneCode := openStore(t, persist.NewMemory())
+	bare := newTestServer(t, newGateWith(t, gate.Deps{Users: none}, nil))
+	c.do(c.client(), bare.URL, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, noneCode}}, 201, nil)
+	c.do(c.client(), bare.URL, call{method: "POST", path: "/api/auth/login/prove/begin"}, 404, nil)
+	c.do(c.client(), bare.URL, call{method: "POST", path: "/api/auth/login/prove", body: loginProveRequest{json.RawMessage(`{}`)}}, 404, nil)
+}
+
+// contractPasskeySignIn drives signing in with a passkey alone and a
+// passkey resuming a timed-out session (#77): the two routes, the
+// reauthenticate route's assertion body, the session body's signIn, and
+// the refusals a test can reach, on a gate with it on, one with it off
+// and one whose relying party is not ready.
+func contractPasskeySignIn(t *testing.T, c *contractChecker) {
+	const adminPass = "contract-admin-password"
+	const publicURL = "https://passkeys.example.org"
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); defer mu.Unlock(); now = now.Add(d) }
+	f, ts, admin := passkeySignInGate(t, c, publicURL, true, clock)
+	u := ts.URL
+
+	// The admin's first passkey: held with its codes, then confirmed.
+	fake := passkeytest.New("passkeys.example.org", publicURL)
+	var creation protocol.CredentialCreation
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{adminPass}}, 200, &creation)
+	regBody, err := fake.RegisterResponse(&creation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(regBody), "key"}}, 200, nil)
+	c.do(admin, u, call{method: "POST", path: enrolmentConfirmPath}, 200, nil)
+	adminUser, ok := f.users.ByUsername("admin")
+	if !ok {
+		t.Fatal("admin was not created")
+	}
+	fake.UserHandle = []byte(adminUser.ID)
+
+	// A signed-out page learns that it may offer the passkey.
+	anon := c.client()
+	var state sessionResponse
+	c.do(anon, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if state.Passkeys == nil || !state.Passkeys.SignIn || state.Passkeys.Status != "ready" || state.Passkeys.Origin != publicURL || state.Passkeys.Count != 0 {
+		t.Fatalf("signed-out session passkeys = %+v, want signIn, ready at %s, count 0", state.Passkeys, publicURL)
+	}
+
+	begin := func(client *http.Client, who *passkeytest.FakeAuthenticator) json.RawMessage {
+		t.Helper()
+		var options protocol.CredentialAssertion
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/passkey/begin"}, 200, &options)
+		body, err := who.AssertionResponse(&options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	finish := func(client *http.Client, assertion json.RawMessage, want int) {
+		t.Helper()
+		c.do(client, u, call{method: "POST", path: "/api/auth/login/passkey", body: loginPasskeyRequest{assertion}}, want, nil)
+	}
+
+	// Refusals.
+	c.do(anon, u, call{method: "POST", path: "/api/auth/login/passkey/begin", noCSRF: true}, 403, nil)
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/login/passkey", body: loginPasskeyRequest{json.RawMessage(`{}`)}}, 401, nil) // no ceremony
+	stranger := c.client()
+	body := begin(stranger, fake)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/passkey", body: "{", bad: true}, 400, nil)
+	c.do(stranger, u, call{method: "POST", path: "/api/auth/login/passkey", body: loginPasskeyRequest{body}, noCSRF: true}, 403, nil)
+	noUV := *fake
+	noUV.NoUserVerification = true
+	finish(stranger, begin(stranger, &noUV), 401)
+	// Each refusal keeps its attempts against the address's limit of five
+	// in five minutes; the clock moves on between them.
+	advance(6 * time.Minute)
+	unknown := *fake
+	unknown.UserHandle = []byte("no-such-account")
+	finish(stranger, begin(stranger, &unknown), 401)
+	wrongRPID := *fake
+	wrongRPID.RPID = "not-the-relying-party.example"
+	finish(stranger, begin(stranger, &wrongRPID), 401)
+
+	// Signing in, and the session says how.
+	advance(6 * time.Minute)
+	finish(anon, begin(anon, fake), 200)
+	state = sessionResponse{}
+	c.do(anon, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if !state.Authenticated || state.Role != "admin" {
+		t.Fatalf("session after a passkey sign-in = %+v, want the admin signed in", state)
+	}
+	var sessions struct {
+		Sessions []struct {
+			Current bool   `json:"current"`
+			Method  string `json:"method"`
+		} `json:"sessions"`
+	}
+	c.do(anon, u, call{method: "GET", path: "/api/auth/sessions"}, 200, &sessions)
+	if len(sessions.Sessions) == 0 || !sessions.Sessions[0].Current || sessions.Sessions[0].Method != "passkey_alone" {
+		t.Fatalf("session list = %+v, want the current session's method passkey_alone", sessions)
+	}
+
+	// The same passkey resumes the timed-out session; another's does not.
+	advance(2 * time.Hour)
+	c.do(anon, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if state.Authenticated {
+		t.Fatalf("a timed-out session is still authenticated: %+v", state)
+	}
+	reauth := func(client *http.Client, req reauthenticateRequest, want int, bad bool) {
+		t.Helper()
+		c.do(client, u, call{method: "POST", path: "/api/auth/reauthenticate", body: req, bad: bad}, want, nil)
+	}
+	reauth(anon, reauthenticateRequest{Assertion: begin(anon, &unknown)}, 401, false)
+	reauth(anon, reauthenticateRequest{Password: adminPass, Assertion: json.RawMessage(`{}`)}, 400, true)
+	reauth(anon, reauthenticateRequest{Assertion: begin(anon, fake)}, 200, false)
+	c.do(anon, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if !state.Authenticated {
+		t.Fatalf("session after a passkey resume = %+v, want authenticated", state)
+	}
+
+	// One address cannot mint challenges without limit.
+	advance(6 * time.Minute)
+	limited := false
+	for range 10 {
+		resp, _ := c.send(c.client(), u, call{method: "POST", path: "/api/auth/login/passkey/begin"})
+		if resp.StatusCode == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Error("ten begins from one address never reached the limit")
+	}
+
+	// Off: both routes, and an assertion at reauthenticate, are not there.
+	_, offTS, offAdmin := passkeySignInGate(t, c, publicURL, false, nil)
+	off := offTS.URL
+	state = sessionResponse{}
+	c.do(c.client(), off, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if state.Passkeys != nil {
+		t.Fatalf("signed-out session with sign-in off carries %+v", state.Passkeys)
+	}
+	c.do(c.client(), off, call{method: "POST", path: "/api/auth/login/passkey/begin"}, 404, nil)
+	c.do(c.client(), off, call{method: "POST", path: "/api/auth/login/passkey", body: loginPasskeyRequest{json.RawMessage(`{}`)}}, 404, nil)
+	c.do(offAdmin, off, call{method: "POST", path: "/api/auth/reauthenticate", body: reauthenticateRequest{Assertion: json.RawMessage(`{}`)}}, 404, nil)
+
+	// A relying party that is not ready.
+	_, unreadyTS, _ := passkeySignInGate(t, c, "", true, nil)
+	unready := unreadyTS.URL
+	c.do(c.client(), unready, call{method: "POST", path: "/api/auth/login/passkey/begin"}, 409, nil)
+	c.do(c.client(), unready, call{method: "POST", path: "/api/auth/login/passkey", body: loginPasskeyRequest{json.RawMessage(`{}`)}}, 409, nil)
 }

@@ -131,6 +131,17 @@ type Config struct {
 	// file (geoip.EditionCity). Coordinates are kept only as the
 	// account's last place; no route, notice or record shows them.
 	Locate func(address string) (gauntlet.Location, bool)
+	// PasskeySignIn offers signing in with a passkey alone, no password
+	// first (#77, ADR-0012): POST /api/auth/login/passkey/begin and
+	// /api/auth/login/passkey, a passkey that verified the user as the
+	// whole sign-in, and the same passkey resuming a timed-out session.
+	// Off by default, so an application opts in when its frontend has the
+	// button; while it is off, or Deps.Passkeys cannot do it
+	// (gauntlet.PasskeySignIn), those routes answer 404, and the
+	// passkeys block of the session body does not say signIn. An account
+	// keeps its password either way: a passkey replaces it at sign-in,
+	// never in the account.
+	PasskeySignIn bool
 	// UnusualSignIns is what a sign-in from a new browser, a new country
 	// or an impossible distance away does (#55; unusual.go). The zero
 	// value flags each one: the sign-in completes and is marked on the
@@ -280,6 +291,17 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if deps.OIDC != nil && deps.OIDCState == nil {
 		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
 	}
+	// A group never gives admin (ADR-0013 decision 1): an identity
+	// provider that is misconfigured or compromised must not be able to
+	// mint an account that skips the local password and second factor
+	// every admin keeps (ADR-0010). Refused here, not at the first
+	// sign-in, so the mistake shows at startup.
+	if err := deps.OIDCPolicy.ValidateRoles(func(role string) bool {
+		return role == string(gauntlet.RoleUser) || role == string(gauntlet.RoleViewer)
+	}); err != nil {
+		return nil, fmt.Errorf("gate: Deps.OIDCPolicy: %w (a group may give only %q or %q; see docs/adr/0013-sso-group-roles.md)",
+			err, gauntlet.RoleUser, gauntlet.RoleViewer)
+	}
 	if cfg.Notify != nil && cfg.Notices != nil {
 		return nil, fmt.Errorf("gate: Config.Notify and Config.Notices must not both be set; Notices replaces the deprecated Notify")
 	}
@@ -295,6 +317,11 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 		exempt:       make(map[string]bool),
 		kindHandlers: make(map[gauntlet.TokenKind]http.Handler),
 		notices:      warnRater{interval: &unusualNoticeInterval},
+	}
+	if cfg.PasskeySignIn {
+		if _, ok := deps.Passkeys.(gauntlet.PasskeySignIn); !ok {
+			g.logWarn("gate: Config.PasskeySignIn is set but Deps.Passkeys is nil or does not implement gauntlet.PasskeySignIn; the passkey sign-in routes answer 404")
+		}
 	}
 	// Not a refusal: plain HTTP is what development runs on, and the
 	// application, not gate, knows whether TLS terminates in front of

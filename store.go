@@ -1376,8 +1376,47 @@ func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool) {
 // method creates is RoleUser. Both facts are decided inside the write
 // against the document being saved, not by a separate Count() check.
 func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now time.Time) (user *User, created bool, err error) {
+	in, err := s.FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint, "", now)
+	if err != nil {
+		return nil, false, err
+	}
+	return in.User, in.Created, nil
+}
+
+// OIDCSignIn is what FindOrCreateOIDCUserWithRole resolved.
+type OIDCSignIn struct {
+	// User is the account, with the role it holds after this call.
+	User *User
+	// Created is true when this call provisioned the account.
+	Created bool
+	// RoleBefore is the role the account held before this call; for a
+	// created account, the role it was created with.
+	RoleBefore Role
+	// SessionsEnded is true when the role went down a tier, which set
+	// SessionsEndedAt and so ended every session issued before now. The
+	// caller drops the live ones it holds in memory (as SetRole's
+	// callers do).
+	SessionsEnded bool
+}
+
+// FindOrCreateOIDCUserWithRole is FindOrCreateOIDCUser for a deployment
+// that takes roles from the identity provider (oidc.Policy.RoleFromGroups,
+// ADR-0013). role, when not "", is the role the identity provider says
+// the account should hold: a new account is created with it, and an
+// existing one is moved to it in the same write that records the
+// sign-in, so there is no window between the two. role must be
+// RoleUser or RoleViewer or the call is ErrInvalidRole: an identity
+// provider never gives admin. An account that already holds RoleAdmin is
+// never changed. A role change records RoleChangedAt, and a downgrade
+// also SessionsEndedAt, as SetRole does; an account already holding role
+// causes no write of its own. role "" leaves the role alone, which is
+// what FindOrCreateOIDCUser does.
+func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint string, role Role, now time.Time) (OIDCSignIn, error) {
+	if role != "" && role != RoleUser && role != RoleViewer {
+		return OIDCSignIn{}, ErrInvalidRole
+	}
 	if !s.Persisted() {
-		return nil, false, ErrNotPersisted
+		return OIDCSignIn{}, ErrNotPersisted
 	}
 	s.reloadIfStale()
 
@@ -1398,12 +1437,13 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	// the op below refuses again against the document being saved,
 	// which is the correctness boundary.
 	if empty {
-		return nil, false, ErrSetupRequired
+		return OIDCSignIn{}, ErrSetupRequired
 	}
 	var unmatchable string
 	if !known {
+		var err error
 		if unmatchable, err = unmatchablePasswordHash(); err != nil {
-			return nil, false, err
+			return OIDCSignIn{}, err
 		}
 	}
 
@@ -1411,7 +1451,10 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	defer s.mu.Unlock()
 
 	if id, ok := s.oidcIndex[key]; ok {
-		if u, ok := s.byID[id]; ok {
+		// A role the identity provider wants changed is a strict write
+		// (below), not a bookkeeping one: the account must not go on
+		// signing in at the old role, so it falls through to the op.
+		if u, ok := s.byID[id]; ok && !changesRoleOnSignIn(u, role) {
 			// LastLogin only -- a missed update here costs nothing
 			// worth failing an otherwise-successful SSO login over, so
 			// this is a best-effort write, and like Authenticate's
@@ -1421,7 +1464,7 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 			if now.Sub(s.lastLoginSaved[id]) < lastLoginGranularity {
 				u.LastLogin = now
 				cp := *u
-				return &cp, false, nil
+				return OIDCSignIn{User: &cp, RoleBefore: cp.Role}, nil
 			}
 			s.mutateBestEffortLocked(func(st *storeState) error {
 				u, ok := st.byID[id]
@@ -1433,7 +1476,7 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 			})
 			if u, ok := s.byID[id]; ok {
 				cp := *u
-				return &cp, false, nil
+				return OIDCSignIn{User: &cp, RoleBefore: cp.Role}, nil
 			}
 		}
 	}
@@ -1442,8 +1485,9 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 		// The identity's account was deleted between the read above
 		// and this lock -- rare enough that hashing under the lock here
 		// is cheaper than making every sign-in pay for the hash.
+		var err error
 		if unmatchable, err = unmatchablePasswordHash(); err != nil {
-			return nil, false, err
+			return OIDCSignIn{}, err
 		}
 	}
 
@@ -1461,12 +1505,15 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 	// hinted name since this process looked.
 	id := newID()
 	var result User
-	err = s.mutateLocked(func(st *storeState) error {
+	var created, ended bool
+	var before Role
+	err := s.mutateLocked(func(st *storeState) error {
 		if existingID, ok := st.oidcIndex[key]; ok {
 			if u, ok := st.byID[existingID]; ok {
 				// Another process provisioned this identity first:
 				// sign in to that account rather than make a second.
 				u.LastLogin = now
+				before, ended = applyOIDCRole(u, role, now)
 				result, created = *u, false
 				return nil
 			}
@@ -1477,11 +1524,15 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 		if len(st.byID) == 0 {
 			return ErrSetupRequired
 		}
+		newRole := RoleUser
+		if role != "" {
+			newRole = role
+		}
 		u := &User{
 			ID:           id,
 			Username:     st.uniqueUsername(usernameHint, issuer, subject),
 			PasswordHash: unmatchable,
-			Role:         RoleUser,
+			Role:         newRole,
 			CreatedAt:    now,
 			LastLogin:    now,
 			OIDCIssuer:   issuer,
@@ -1495,13 +1546,37 @@ func (s *Store) FindOrCreateOIDCUser(issuer, subject, usernameHint string, now t
 		st.byID[u.ID] = u
 		st.byName[strings.ToLower(u.Username)] = u.ID
 		st.oidcIndex[key] = u.ID
-		result, created = *u, true
+		result, created, before, ended = *u, true, newRole, false
 		return nil
 	})
 	if err != nil {
-		return nil, false, err
+		return OIDCSignIn{}, err
 	}
-	return &result, created, nil
+	return OIDCSignIn{User: &result, Created: created, RoleBefore: before, SessionsEnded: ended}, nil
+}
+
+// changesRoleOnSignIn reports whether an identity-provider role of role
+// would change u: never when role is "", and never for an admin, whose
+// role only the admin route moves (ADR-0013).
+func changesRoleOnSignIn(u *User, role Role) bool {
+	return role != "" && u.Role != RoleAdmin && u.Role != role
+}
+
+// applyOIDCRole moves u to role when changesRoleOnSignIn says to, as
+// SetRole would: RoleChangedAt, and SessionsEndedAt for a downgrade. It
+// returns the role u held before and whether the sessions were ended.
+func applyOIDCRole(u *User, role Role, now time.Time) (before Role, ended bool) {
+	before = u.Role
+	if !changesRoleOnSignIn(u, role) {
+		return before, false
+	}
+	u.Role = role
+	u.RoleChangedAt = now
+	if role.rank() < before.rank() {
+		u.SessionsEndedAt = now
+		ended = true
+	}
+	return before, ended
 }
 
 // uniqueUsername picks hint if it's non-empty and not already taken in

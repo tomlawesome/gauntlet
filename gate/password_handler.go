@@ -79,6 +79,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// Every session issued before now is dead by SessionCutoff, but
 	// that is only enforced on the next request each one makes -- dropped
 	// here so they are gone immediately.
+	method := g.sessionMethod(r, user.ID, now)
 	g.deps.Sessions.RevokeAllForUser(user.ID)
 
 	detail := "sessions ended: all"
@@ -87,7 +88,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	g.audit(r, user.Username, "account.password_changed", user.Username, detail)
 
-	g.issueSession(w, r, user.ID, now)
+	g.issueSession(w, r, user.ID, method, now)
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "otherSessionsEnded": true})
 }
 

@@ -98,7 +98,7 @@ func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.issueSession(w, r, user.ID, now)
+	g.issueSession(w, r, user.ID, gauntlet.SignInMethodPassword, now)
 	g.audit(r, user.Username, "user.register", user.Username, "role="+string(user.Role))
 	writeJSON(w, http.StatusCreated, map[string]any{"username": user.Username, "role": user.Role})
 }

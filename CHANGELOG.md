@@ -6,6 +6,75 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Prove an unusual sign-in with a passkey** (#65, ADR-0009 decision 10).
+  A fifth `UnusualSignInAction`, `prove` (`gate.UnusualSignInProve`),
+  ranked between `confirm` and `block`, settable per signal in
+  `Config.UnusualSignIns` and returnable from `Decide`: the sign-in is held
+  until the browser answers a passkey assertion for the same account.
+  The 200 is `{"prove": "passkey", "passkeyOrigin": ...}` where `confirm`'s
+  is `{"confirm": true}` (the SSO callback redirects with `?prove=1`), and
+  the new `POST /api/auth/login/prove/begin` and `POST
+  /api/auth/login/prove {assertion}` finish it, through the existing
+  non-discoverable ceremony (user verification preferred, not required),
+  the login limiter as `login/confirm` does, and the held sign-in's
+  confirm ticket, which now has two kinds that are not interchangeable.
+  A sign-in that was itself by passkey is already proved and is flagged; an
+  account with no passkey usable at this address is held for a code when
+  `Config.DeliverConfirmCode` is set, else refused. `UnusualSignInCase`
+  gains `CanProve`; a ticket that cannot be made is a block with the new
+  reason `prove-failed`. `gate.New` accepts `prove` with nothing else
+  wired. Additive; the accounts document is unchanged.
+
+- **Sign in with a passkey alone** (#77, ADR-0012). A passkey that verified
+  the user (a PIN or a biometric at the authenticator) can be the whole
+  sign-in: `POST /api/auth/login/passkey/begin` and `POST
+  /api/auth/login/passkey`, a WebAuthn Level 3 discoverable credential
+  login with no username typed, the account named by the passkey's user
+  handle, user verification required (NIST SP 800-63B-4: a multi-factor
+  cryptographic authenticator, AAL2). Off by default: set
+  `gate.Config.PasskeySignIn` and wire a relying party that implements
+  the new optional `gauntlet.PasskeySignIn` (`passkey.RelyingParty`
+  does); otherwise both routes answer 404 and `POST /api/auth/login` and
+  `login/factor` are exactly as before. Every account keeps its password;
+  the accounts document stays version 9. The sign-in is judged for unusual
+  signals like any other (method `passkey_alone` reaches `Decide`; a
+  confirmation code is not skipped), counted for the account's lockout and
+  disable, the address limit and ban and the known-browser allowance
+  before the signature is checked, and meets the must-change-password door
+  after it; a refused assertion keeps its attempt, and a completed
+  sign-in gives both back. It does not count toward the run of
+  second-factor failures that forces a new password. An account with no
+  local password cannot sign in this way. The same passkey resumes a
+  timed-out session: `POST /api/auth/reauthenticate` takes `{"assertion":
+  ...}` from the same begin route instead of `{"password": ...}`, the user
+  handle must be the session's own account. `GET /api/auth/session`
+  gains `passkeys.signIn: true` when the routes are on and ready, and now
+  sends a `passkeys` block signed out in that case so a login page can
+  offer the button. Sessions, the session list (`method`), the sign-in
+  history and the audit record carry the method `passkey_alone`. Additive
+  Go API: `gauntlet.PasskeySignIn`, `PasskeyAssertion.UserVerified`,
+  `SignInMethodPasskeyAlone`, `SessionClient.Method`, `Config.PasskeySignIn`
+  and `passkey.RelyingParty`'s `BeginSignIn` and `FinishSignIn`.
+- **Roles for SSO accounts from identity-provider groups** (#76,
+  ADR-0013). `oidc.Policy.RoleFromGroups` maps a group to `user` or
+  `viewer`; `RoleWithoutGroup` (default `viewer`, or `user`) covers an
+  account in no mapped group, an absent groups claim included. The role
+  is applied at provisioning and at every SSO sign-in, in the same write
+  that finds or creates the account: the highest role among the mapped
+  groups wins, and a downgrade ends the account's other sessions. Admin
+  is never given by a group (`gate.New` refuses it, and an unknown role,
+  at start-up) and an account already an admin is never changed by the
+  map. The change is audited as `user.role_changed` with actor `sso` and
+  told to `Config.Notices` as `NoticeRoleChanged` with `By` empty and the
+  new `RoleChangeDetail.ViaSSO`. On such an account (linked to SSO, a map
+  configured, not an admin) `PUT /api/auth/users/{id}/role` to `user` or
+  `viewer` is `409` with the new class `role-managed-by-sso`: change the
+  group at the provider. Granting or demoting an admin still works. Not
+  configured, nothing changes. Additive Go API: `Policy.RoleFromGroups`,
+  `Policy.RoleWithoutGroup`, `Policy.Groups`, `Policy.ValidateRoles`,
+  `Store.FindOrCreateOIDCUserWithRole` and `OIDCSignIn`; the accounts
+  document stays at version 9. Birdcage and mikroview: a frontend that
+  branches on the role route's `409` classes should handle the new one.
 - **Resume a timed-out session with the password alone** (#71). A session
   idle past the one-hour timeout but inside its 24-hour ceiling no longer
   forces a full two-factor sign-in (NIST SP 800-63B-4 section 2.2.3).
@@ -215,6 +284,13 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Every passkey registration now asks for a discoverable credential**
+  (#77). The creation options carry `residentKey: "preferred"`
+  (and `requireResidentKey: false`), mikroview's included: W3C's
+  recommendation, harmless where the authenticator cannot hold one
+  (a PIN-less security key still registers, as a second factor), and
+  needed before a passkey can sign in alone. Passkeys registered before
+  this may not be discoverable; they keep working as a second factor.
 - **A token created without an expiry now expires after a year** (#74).
   `TokenStore.Create` and `POST /api/tokens` without `expiresAt` used to
   issue a token that lasted until revoked. Birdcage and mikroview: a
@@ -319,6 +395,10 @@ All notable changes to this project are documented in this file.
   migrates once (ADR-0002, owner 2026-10-03).
 
 ### Fixed
+
+- An account created by its first single sign-on is now audited as
+  `user.create` (actor `sso`, the role and the issuer), as an
+  admin-created account is (#78).
 
 Low-severity findings from the v0.2.0 audit (#58):
 

@@ -123,7 +123,8 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 	g.deps.Sessions.Revoke(sess.ID)
 }
 
-// issueSession starts a session for userID and hands the browser its
+// issueSession starts a session for userID, recording method as how it was
+// signed in (#77), and hands the browser its
 // cookie -- the one way gate issues a session, so the four things every
 // issue must do happen together at every one of them: end the session
 // this browser already held for the account (revokeReplacedSession,
@@ -141,23 +142,45 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 // this request carries, so the session list and the history agree.
 // Address and UserAgent are the client's word, cleaned and capped by
 // CreateFrom.
-func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, now time.Time) {
-	g.issueSignInSession(w, r, userID, g.placeOf(r, ""), 0, now)
+//
+// A route that rotates the session the caller already holds -- a
+// password change, a factor confirmed, sign out everywhere -- passes
+// what sessionMethod read before it ended the old one: the new session
+// continues the same sign-in, as its client does, and the list of
+// sessions keeps saying how it was made.
+func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, method gauntlet.SignInMethod, now time.Time) {
+	g.issueSignInSession(w, r, userID, g.placeOf(r, ""), 0, method, now)
+}
+
+// sessionMethod is the method of the live session r's cookie names, when
+// it belongs to userID: read by the routes that end every session of the
+// account and then issue one for the caller, before they end it. Empty
+// when there is none.
+func (g *Gate) sessionMethod(r *http.Request, userID string, now time.Time) gauntlet.SignInMethod {
+	cookie, err := r.Cookie(g.sessionCookieName())
+	if err != nil {
+		return ""
+	}
+	sess, ok := g.deps.Sessions.Validate(cookie.Value, now)
+	if !ok || sess.UserID != userID {
+		return ""
+	}
+	return sess.Client.Method
 }
 
 // issueSignInSession is issueSession for a sign-in already judged: place
 // is where it came from, looked up once, and signals the unusual-sign-in
-// signals the session carries (#55). The browser, country and place are
+// signals the session carries (#55), and method how it was made (#77). The browser, country and place are
 // remembered first (rememberSignIn); if that write fails, nothing is
 // flagged and the session carries no signals. It returns the session
 // and the signals it carries.
-func (g *Gate) issueSignInSession(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, signals gauntlet.SignInSignals, now time.Time) (gauntlet.Session, gauntlet.SignInSignals) {
+func (g *Gate) issueSignInSession(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, signals gauntlet.SignInSignals, method gauntlet.SignInMethod, now time.Time) (gauntlet.Session, gauntlet.SignInSignals) {
 	g.revokeReplacedSession(r, userID, now)
 	if !g.rememberSignIn(w, r, userID, place, now) {
 		signals = 0
 	}
 	client := place.client
-	client.Unusual = signals
+	client.Unusual, client.Method = signals, method
 	sess := g.deps.Sessions.CreateFrom(userID, client, now)
 	g.setSessionCookie(w, sess.ID)
 	return sess, signals

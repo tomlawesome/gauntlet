@@ -51,15 +51,17 @@ func newSessionCodec() *sessionCodec {
 	return &sessionCodec{aead: aead}
 }
 
-// registerCodec and assertCodec each seal one ceremony's state, under
-// two independently generated keys rather than one shared codec: a value
-// sealed for one ceremony cannot decode as the other, so a
-// registration's state can never be replayed to finish a login (or the
-// other way round). That is a property of the ciphertext, not a rule a
-// caller has to remember.
+// registerCodec, assertCodec and signInCodec each seal one ceremony's
+// state, under three independently generated keys rather than one shared
+// codec: a value sealed for one ceremony cannot decode as another, so a
+// registration's state can never be replayed to finish a login, nor a
+// second-step login's to sign in with a passkey alone (the one ceremony
+// that needs no password before it, #77). That is a property of the
+// ciphertext, not a rule a caller has to remember.
 var (
 	registerCodec = newSessionCodec()
 	assertCodec   = newSessionCodec()
+	signInCodec   = newSessionCodec()
 )
 
 // errUnreadable is every way decode refuses: which one is not worth

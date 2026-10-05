@@ -29,15 +29,19 @@ const (
 	loginPath        = "/api/auth/login"
 	loginFactorPath  = "/api/auth/login/factor"
 	loginConfirmPath = "/api/auth/login/confirm"
-	loginEscapePath  = "/api/auth/login/escape"
-	logoutPath       = "/api/auth/logout"
-	oidcPathPrefix   = "/api/auth/oidc"
-	oidcLoginPath    = "/api/auth/oidc/login"
-	oidcCallbackPath = "/api/auth/oidc/callback"
-	totpEnrolPath    = "/api/auth/totp/enrol"
-	totpConfirmPath  = "/api/auth/totp/confirm"
-	sessionsPath     = "/api/auth/sessions"
-	unlockPath       = "/api/auth/unlock"
+	// loginProveBeginPath and loginProvePath finish a sign-in held for a
+	// passkey (#65, ADR-0009; provelogin.go).
+	loginProveBeginPath = "/api/auth/login/prove/begin"
+	loginProvePath      = "/api/auth/login/prove"
+	loginEscapePath     = "/api/auth/login/escape"
+	logoutPath          = "/api/auth/logout"
+	oidcPathPrefix      = "/api/auth/oidc"
+	oidcLoginPath       = "/api/auth/oidc/login"
+	oidcCallbackPath    = "/api/auth/oidc/callback"
+	totpEnrolPath       = "/api/auth/totp/enrol"
+	totpConfirmPath     = "/api/auth/totp/confirm"
+	sessionsPath        = "/api/auth/sessions"
+	unlockPath          = "/api/auth/unlock"
 
 	// reauthenticatePath resumes a session that timed out with the
 	// password alone (#71; reauthenticate_handler.go).
@@ -51,6 +55,13 @@ const (
 	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"
 	passkeyRegisterFinishPath = "/api/auth/passkeys/register/finish"
 	loginFactorBeginPath      = "/api/auth/login/factor/begin"
+
+	// loginPasskeyBeginPath and loginPasskeyPath are signing in with a
+	// passkey alone (#77, ADR-0012; login_passkey_handler.go). Both
+	// answer 404 unless Config.PasskeySignIn is set and the relying
+	// party can do it.
+	loginPasskeyBeginPath = "/api/auth/login/passkey/begin"
+	loginPasskeyPath      = "/api/auth/login/passkey"
 )
 
 // exemptPaths lists routes reachable without a session once an account
@@ -64,7 +75,14 @@ const (
 // reached with the short-lived pending-login cookie, never a session, so
 // it has to work before one exists, same reasoning as /api/auth/login
 // itself. POST /api/auth/login/factor/begin, which starts the passkey
-// half of that step (G8), is reached the same way for the same reason. GET /api/auth/oidc/login and /callback are a top-level
+// half of that step (G8), is reached the same way for the same reason.
+// POST /api/auth/login/passkey/begin and /api/auth/login/passkey sign in
+// with a passkey alone (#77): no session and no pending login, only the
+// ceremony cookie the begin route set. POST /api/auth/login/prove/begin
+// and /api/auth/login/prove finish a sign-in held for a passkey (#65):
+// only the confirm ticket, as login/confirm has.
+//
+// GET /api/auth/oidc/login and /callback are a top-level
 // browser redirect/navigation the provider issues, not a fetch() an
 // application's frontend controls -- being listed here is what exempts
 // them from requiring an existing session (state/nonce/PKCE, oidc.go, is
@@ -84,19 +102,23 @@ const (
 // session-exempt like login and still needs the CSRF header. Not in
 // bootstrapExemptPaths: with no account there is no session to resume.
 var exemptPaths = map[string]bool{
-	"/api/healthz":       true,
-	sessionPath:          true,
-	registerPath:         true,
-	loginPath:            true,
-	logoutPath:           true,
-	loginFactorPath:      true,
-	loginFactorBeginPath: true,
-	loginConfirmPath:     true,
-	loginEscapePath:      true,
-	oidcLoginPath:        true,
-	oidcCallbackPath:     true,
-	unlockPath:           true,
-	reauthenticatePath:   true,
+	"/api/healthz":        true,
+	sessionPath:           true,
+	registerPath:          true,
+	loginPath:             true,
+	logoutPath:            true,
+	loginFactorPath:       true,
+	loginFactorBeginPath:  true,
+	loginPasskeyBeginPath: true,
+	loginPasskeyPath:      true,
+	loginConfirmPath:      true,
+	loginProveBeginPath:   true,
+	loginProvePath:        true,
+	loginEscapePath:       true,
+	oidcLoginPath:         true,
+	oidcCallbackPath:      true,
+	unlockPath:            true,
+	reauthenticatePath:    true,
 }
 
 // bootstrapExemptPaths is the narrower set reachable while no account

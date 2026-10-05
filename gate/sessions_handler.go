@@ -48,6 +48,12 @@ type sessionRow struct {
 	// Unusual is the unusual-sign-in signals the session arrived with
 	// (#55), as an array of names; absent for an ordinary sign-in.
 	Unusual gauntlet.SignInSignals `json:"unusual,omitzero"`
+	// Method is how the sign-in was made (#77): password and code for a
+	// password then a second-factor code, passkey for a password then a
+	// passkey, passkey_alone for a passkey on its own, sso. Absent when
+	// the session recorded none. A resumed or rotated session keeps the
+	// method of the sign-in it continues.
+	Method gauntlet.SignInMethod `json:"method,omitempty"`
 }
 
 // sessionListResponse is GET /api/auth/sessions's body: an object
@@ -122,6 +128,7 @@ func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 			UserAgent:  sess.Client.UserAgent,
 			Country:    sess.Client.Country,
 			Unusual:    sess.Client.Unusual,
+			Method:     sess.Client.Method,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

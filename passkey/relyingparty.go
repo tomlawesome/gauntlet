@@ -29,8 +29,9 @@ type Config struct {
 }
 
 // RelyingParty is the application's WebAuthn relying party, built once
-// at startup by New. It implements gauntlet.PasskeyCeremony; its fields
-// are deliberately unexported (ADR-0004 decision 2).
+// at startup by New. It implements gauntlet.PasskeyCeremony and
+// gauntlet.PasskeySignIn (ADR-0012); its fields are deliberately
+// unexported (ADR-0004 decision 2).
 type RelyingParty struct {
 	status gauntlet.PasskeyStatus
 	rpID   string
@@ -39,7 +40,10 @@ type RelyingParty struct {
 	wa *webauthn.WebAuthn
 }
 
-var _ gauntlet.PasskeyCeremony = (*RelyingParty)(nil)
+var (
+	_ gauntlet.PasskeyCeremony = (*RelyingParty)(nil)
+	_ gauntlet.PasskeySignIn   = (*RelyingParty)(nil)
+)
 
 // Sealed ceremony state that cannot be used -- expired, tampered with,
 // sealed for the other ceremony or by another process, or already used
@@ -63,13 +67,17 @@ var (
 // library rejects a configuration this function believed well-formed,
 // which would be a bug here rather than a bad setting.
 //
-// Policy is written out rather than left to the library's defaults,
-// with the same result on the wire mikroview gets from those defaults
-// (ADR-0004 decision 5): user verification preferred (asked for, never
-// required -- this is a second factor behind a password, and requiring
-// it would shut out security keys without a PIN), attestation "none"
-// and no metadata service, resident-key preference unset. The library
-// always requires user presence.
+// Policy is written out rather than left to the library's defaults:
+// user verification preferred for a registration and a second-step login
+// (asked for, never required -- this is a second factor behind a
+// password, and requiring it would shut out security keys without a
+// PIN), attestation "none" and no metadata service. Every registration
+// also asks for a discoverable credential, "preferred" (ADR-0012
+// decision 7, superseding ADR-0004 decision 5's "unset"): a PIN-less
+// key that cannot hold one still registers, as a second factor. Signing
+// in with a passkey alone is the one ceremony that requires user
+// verification (BeginSignIn). The library always requires user
+// presence.
 func New(cfg Config) (*RelyingParty, error) {
 	if cfg.DisplayName == "" {
 		return nil, errors.New("passkey: Config.DisplayName is required")

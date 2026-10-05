@@ -124,8 +124,9 @@ func (g *Gate) handleEnrolmentConfirm(w http.ResponseWriter, r *http.Request) {
 
 	// The factor is live from here: no session from before it may ride
 	// along unchallenged.
+	method := g.sessionMethod(r, user.ID, now)
 	g.deps.Sessions.RevokeAllForUser(user.ID)
-	g.issueSession(w, r, user.ID, now)
+	g.issueSession(w, r, user.ID, method, now)
 
 	detail := &SecondFactorDetail{Method: "totp"}
 	if held.Kind == gauntlet.HeldFactorPasskey && held.Passkey != nil {
