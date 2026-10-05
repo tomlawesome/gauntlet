@@ -63,6 +63,9 @@ info:
     or the client's address is at its limit, a browser carrying a value
     the named account remembers keeps a small allowance of its own (the
     limiter's attempts per window), where any other browser gets `429`.
+    A request carrying such a value is also not refused by the address
+    ban (#70: 100 failed sign-ins from one address in a day ban it for 24
+    hours, answered with the same `429`).
     It never signs anyone in by itself, is refused while the account's
     sign-in is disabled, and every failure through it counts toward the
     disable. An account remembers at most three browsers, each for 45
@@ -1440,7 +1443,8 @@ paths:
       operationId: unlockUser
       summary: Lift an account's disabled sign-in or lockout (admin)
       description: |
-        Lifts a disabled sign-in (fifty failed sign-ins in a row, #44),
+        Lifts a disabled sign-in (fifty failed sign-ins in a row, #44; it
+        also lifts itself 24 hours after it began, #70),
         ends any login lockout and clears the count of lockouts, so the
         account signs in as one that never failed, with the password and
         second factor it already has. Nothing else changes. Answers `200`
@@ -1479,7 +1483,9 @@ paths:
                     type: string
                   wasDisabled:
                     type: boolean
-                    description: The account's sign-in had been disabled.
+                    description: |
+                      The account's sign-in was disabled and had not yet
+                      lifted itself (it does, 24 hours after it began).
                   wasLockedOut:
                     type: boolean
                     description: A login lockout was in force.

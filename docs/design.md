@@ -322,6 +322,12 @@ func (l *LoginLimiter) ReserveKnownBrowser(lockouts AccountLockouts, accountID s
 func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, accountID string, now time.Time) AccountDecision // new (#45): Disabled, DisabledNow, Lockouts
 func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID string, now time.Time)
 const MaxConsecutiveLoginFailures = 50                                                             // #44: disables local sign-in
+const LoginDisableDuration = 24 * time.Hour                                                        // new (#70): the disable lifts itself this long after User.LoginDisabledAt
+func (u *User) LoginDisabled(now time.Time) bool                                                   // new (#70): LoginDisabledAt set and not yet lapsed
+const AddressBanFailures = 100; const AddressBanDuration = 24 * time.Hour                          // new (#70): failed sign-ins from one address in a rolling day ban it for a day
+func (l *LoginLimiter) AddressBanned(address string, now time.Time) (until time.Time, banned bool) // new (#70): memory only; IPv6 per /64
+func (l *LoginLimiter) RecordAddressFailure(address string, now time.Time) (banStarted bool)       // new (#70): true once per ban
+func AddressBanGroup(address string) string                                                       // new (#70): the key an address is counted under
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
 func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
@@ -430,17 +436,28 @@ survives a restart, but only as it begins and as it clears: one save as
 a lockout starts and one as the first attempt after it clears it, never
 one per wrong guess.
 
-Lockouts escalate (#44, owner 2026-10-02). Each lasts three times the
-one before, from the attempt that starts it: 5, 15, 45, 135, 405 and
-1215 minutes at 5 attempts per 5 minutes, then 24 hours each (never
-less than one window). Their count, `User.LoginLockoutCount`, is
+Lockouts escalate (#44, owner 2026-10-02), and are capped (#70, owner
+2026-10-05). Each lasts three times the one before, from the attempt
+that starts it: 5, 15 and 45 minutes at 5 attempts per 5 minutes, then
+one hour each (never less than one window). The cap was 24 hours:
+usernames here are the operator's name or `admin`, so a stranger could
+keep the owner out for a day, and mainstream defaults lock for minutes.
+The long penalty falls on the attacking address instead (below).
+Their count, `User.LoginLockoutCount`, is
 written in the same save that starts one. `MaxConsecutiveLoginFailures`
 (50) failures in a row -- each lockout's attempts plus those in the
 window, password and second-factor steps alike -- disable the account's
 local sign-in (`User.LoginDisabledAt`), in that same save: refused with
-exactly the locked response, with no end, until `Store.UnlockLogin`. At
-5 per lockout the fiftieth failure comes after about 102 hours of
-lockouts. The count resets only on a completed sign-in (`SignedIn`,
+exactly the locked response, until `Store.UnlockLogin` or until
+`LoginDisableDuration` (24 hours) after it began, whichever is first. At
+5 per lockout the fiftieth failure comes after about 8 hours of
+lockouts. Nothing is stored for the disable to lift: it is
+`LoginDisabledAt` against the clock (`User.LoginDisabled(now)`). The first
+attempt after it lapses clears the record as `UnlockLogin` does -- the
+count of lockouts included, or the next failure would reach fifty again
+and disable the account at once -- in the write that records that
+attempt; the accounts document version is unchanged. The count
+resets only on a completed sign-in (`SignedIn`,
 called wherever gate issues a session) or a new password (`SetPassword`,
 `IssueResetCode`); not on a correct password alone, and not as a lockout
 runs out. A new password the owner sets does not lift a disable; a
@@ -480,7 +497,10 @@ rate limited on the client address like registration, with one
 identical refusal for every wrong input. It only lifts the disable: no
 session is issued, and the admin signs in as normal with their existing
 password and second factor -- not a password reset, account reset or
-admin transfer (owner, 2026-10-02). A lockout whose save fails
+admin transfer (owner, 2026-10-02). A disable the record still holds
+after it has lapsed and before an attempt clears it still counts for
+the unlock code, since the store has no clock to tell otherwise;
+redeeming it makes the same clear. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A clear whose save fails -- the owner signed in and
 ended a lockout the record still holds -- is retried the same way, but
@@ -504,6 +524,37 @@ between cannot take it; the account's own limit still applies. Other
 names tried from that address stay refused.
 Re-checking a signed-in caller's own password has its own per-account
 budget, memory only.
+
+The address ban (#70, owner 2026-10-05; `addressban.go`) is a
+fail2ban-style source-address ban beside the capped account lockout
+(OWASP Authentication Cheat Sheet; Auth0 brute-force protection). Today's
+per-address limit stays as it was, a short brake with the account's
+threshold and window. Separately each failed sign-in attempt -- wrong
+password or code, in any name, an unknown one included, but not an SSO
+refusal -- is counted per address, and the 100th (`AddressBanFailures`)
+within a rolling 24 hours bans the address for 24 hours
+(`AddressBanDuration`), flat, not escalating, not extended by further
+failures. Only deliberate guessing reaches 100; 100 is NIST SP 800-63B-4
+§3.2.2's figure, applied per address where NIST counts per account. IPv6
+addresses count per /64 and IPv4 by the whole address
+(`AddressBanGroup`); gauntlet normalises the string `ClientIP` returned,
+and one that does not parse counts as itself. An empty address is never
+counted: nothing was resolved, so it would otherwise be one address.
+A banned address gets the address limit's own `429`
+(`rate-limited`, recorded as `rate_limited` and a rated Warn line, no
+audit record), checked before anything is reserved. The ban starting is
+one `address.banned` audit record, once per ban. The count is each
+failure's time, kept for 24 hours and at most 99 per address, the
+simplest structure that gives an exact rolling window; it is dropped
+when the ban starts. Counts and bans are memory only: a restart clears
+them, which costs the guesser nothing they could cause, and the account
+lockout, saved on the account, is the backstop for an attack spread over
+many addresses. They live in a map of their own capped at 4096 addresses
+(`maxAddressBanKeys`) with the attempts map's rules: expired entries
+first, then the least recently active in a batch, logged once per
+window, but counts before bans, so a flood of addresses never lifts a
+ban; a ban is shed only when bans alone fill the map, the oldest
+first. Known browsers pass the ban (below).
 
 The known-browser allowance (#44) keeps a stranger from locking the
 owner out. A browser that completes a sign-in on an account is
@@ -529,9 +580,15 @@ the count back (`ReleaseKnownBrowser`, `SignedIn`). Sign out everywhere
 (`ClearKnownBrowsers`, the calling browser then remembered again) and an
 admin's reset code forget every browser; a signed-in password change, an
 SSO link, an unlock and the forced change after second-factor failures
-do not -- that is when the owner needs the allowance. Nothing is keyed
-on the client's address. A stolen token gains its holder the allowance
-during a lockout, ending at the disable, and never a session. SSO never
+do not -- that is when the owner needs the allowance. Nothing is
+keyed on the client's address. A request carrying a token the named
+account remembers is also not refused by the address ban (#70), so a
+reverse proxy that hides visitor addresses, where one attacker's ban
+would be everyone's, cannot lock the owner out; it then meets the
+ordinary path and its allowance as above. A token for another account,
+or a request naming no account, gets no such pass. A stolen token gains
+its holder the allowance during a lockout, ending at the disable, and
+never a session. SSO never
 reaches the limiter, so the token is harmless there; it is issued all
 the same.
 
@@ -728,8 +785,12 @@ admitted, actor and target the account's username or `unknown`, detail
 (`MaskUnknownUsername`) when no account matched -- the typed name never
 reaches the audit or the log; and `account.locked` (`until=... lockouts=n
 from=...`) or `account.disabled` beside the failure whose limiter
-decision started a lockout or the disable. An attempt that starts one
-but succeeds hands it back and writes neither. A limiter refusal (429)
+decision started a lockout or the disable, and `address.banned`
+(actor the account tried or `unknown`, target the address group, detail
+`until=... after 100 failed sign-ins in 24h0m0s from=...`) beside the
+failure that was the 100th from an address (#70), once per ban. An
+attempt that starts a lockout or disable but succeeds hands it back and
+writes neither. A limiter refusal (429)
 is no audit record but a rated Warn line, as are a missing CSRF header,
 a malformed `Authorization` header, a role refusal on `Routes`' admin
 routes and the two door 403s: at most one line per kind and address per
@@ -1237,8 +1298,8 @@ once, which is the price of sharing and the reason fixes land once.
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
-| Unseen failures | only successes audited | new (#45): every failed sign-in, and every wrong password or code at an in-session re-check, is `user.login_failed`; a lockout or disable starting, through a known browser too, is `account.locked` or `account.disabled`; every audit record a request writes carries the client address; refused requests and oversize bodies are rated Warn lines (§1.5) |
-| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19, #44): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save as it starts and one as it clears, not per guess); each lockout lasts three times the last (5 min up to 24 h) and 50 failures in a row disable sign-in until an unlock; addresses and unknown names keep the capped map, expired keys dropped first. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
+| Unseen failures | only successes audited | new (#45): every failed sign-in, and every wrong password or code at an in-session re-check, is `user.login_failed`; a lockout or disable starting, through a known browser too, is `account.locked` or `account.disabled`, and an address ban starting is `address.banned` (#70); every audit record a request writes carries the client address; refused requests and oversize bodies are rated Warn lines (§1.5) |
+| Brute force | 5 failures per 5 min per IP and per username, bounded key map with batch eviction | changed (#19, #44): an existing account's counter is keyed by its ID, never evicted, and its lockout is saved on the account so a restart does not lift it (one save as it starts and one as it clears, not per guess); each lockout lasts three times the last (5 min up to 1 h, #70) and 50 failures in a row disable sign-in until an unlock or 24 hours, whichever is first; addresses and unknown names keep the capped map, expired keys dropped first. Changed (#70): 100 failed sign-ins from one address (IPv6 per /64) in a day ban it for 24 hours, in memory, known browsers passing it. Birdcage's `ClientIP` is `RemoteAddr` until a trusted-proxy setting exists, so behind a proxy the IP bucket collapses to one -- the account bucket still holds |
 | `golang.org/x/crypto` advisories | all 30 entries are in `ssh`, `ssh/agent` or `openpgp`; none touches `argon2` | import only `argon2`; birdcage already carries this module at 0.57.0 |
 
 ### Second factors (data in v1; ceremonies per §1.6)
