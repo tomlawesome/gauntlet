@@ -727,7 +727,7 @@ func OpenStore(b persist.Backend, opts Options) (*Store, error) {
 	// rule reads the same way here as on a reload.
 	s.mu.Lock()
 	code := s.issueSetupCodeLocked()
-	admin, unlockCode := s.issueUnlockCodeLocked()
+	admin, unlockCode := s.issueUnlockCodeLocked(unlockCodeNow())
 	s.mu.Unlock()
 	s.announceSetupCode(code)
 	s.announceUnlockCode(admin, unlockCode)

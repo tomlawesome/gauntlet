@@ -517,3 +517,45 @@ func TestEscapeIsRefusedByALockoutAndByAnAddressBan(t *testing.T) {
 		}
 	})
 }
+
+// A lone admin held for a passkey -- one who may have lost it -- gets
+// the escape code beside the hold's own ticket, and the held challenge
+// is unchanged; a user held the same way does not.
+func TestEscapeOfferedToALoneAdminHeldForAPasskey(t *testing.T) {
+	for _, role := range []gauntlet.Role{gauntlet.RoleAdmin, gauntlet.RoleUser} {
+		t.Run(string(role), func(t *testing.T) {
+			e := newProveEnv(t)
+			users := e.g.deps.Users
+			if role == gauntlet.RoleAdmin {
+				if _, _, err := users.SetRole(e.id, gauntlet.RoleAdmin, e.clock.now()); err != nil {
+					t.Fatal(err)
+				}
+				admin, ok := users.ByUsername("admin")
+				if !ok {
+					t.Fatal("no fixture admin")
+				}
+				if _, err := users.DeleteUser(admin.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resp, body := e.codeSignIn(t, newBrowserJar(t))
+			want := `{"passkeyOrigin":"` + passkeyTestPublicURL + `","prove":"passkey"}`
+			if resp.StatusCode != http.StatusOK || strings.TrimSpace(body) != want {
+				t.Fatalf("code sign-in = %d %s, want 200 %s", resp.StatusCode, body, want)
+			}
+			if cookieNamed(resp, confirmLoginCookieName) == nil {
+				t.Error("no prove ticket")
+			}
+			issued := false
+			for _, ev := range e.events.all() {
+				if ev.Outcome == gauntlet.SignInEscapeIssued && ev.Client.Unusual == gauntlet.SignalNewBrowser {
+					issued = true
+				}
+			}
+			offered := cookieNamed(resp, escapeLoginCookieName) != nil
+			if lone := role == gauntlet.RoleAdmin; offered != lone || issued != lone {
+				t.Errorf("%s: escape cookie %v, escape_issued row %v; want %v", role, offered, issued, lone)
+			}
+		})
+	}
+}

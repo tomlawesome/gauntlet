@@ -186,19 +186,25 @@ func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) 
 // send once the response is written, nil for none. A confirm whose code
 // could not be delivered is refused as notify-failed: no code reached
 // anyone; a prove whose ticket could not be made, as prove-failed. A
-// block of a lone admin also
-// issues the escape code (refuseSignIn, #66), except on the SSO
-// callback: every admin keeps a local password (ADR-0010).
+// lone admin, refused or held, also gets the escape code (startEscape,
+// #66), except on the SSO callback: every admin keeps a local password
+// (ADR-0010).
 func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (confirmSent bool, notice *AccountNotice) {
 	reason := v.reason
+	// A lone admin held for a passkey they have lost, or for a code that
+	// never arrives, would be held again on every attempt with nobody to
+	// reset them: the escape code is their way out, as it is from a
+	// block. The held challenge is answered as before.
 	switch v.action {
 	case UnusualSignInConfirm:
 		if g.startConfirm(w, r, user, res, method, place, v.signals, now) {
+			g.startEscape(w, r, user, res, method, place, v.signals, now)
 			return true, nil
 		}
 		reason = "notify-failed"
 	case UnusualSignInProve:
 		if g.startProve(w, r, user, res, method, v.signals, now) {
+			g.startEscape(w, r, user, res, method, place, v.signals, now)
 			return true, nil
 		}
 		reason = "prove-failed"
@@ -517,16 +523,38 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	}
 }
 
-// signInRefusedDetail is the sign-in-refused class's one detail. It
-// never says which signal was raised or whether a code would have been
-// sent.
+// signInRefusedDetail is the sign-in-refused class's detail for an
+// account with a local password. Neither text says which signal was
+// raised or whether a code would have been sent.
 const signInRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+
+// signInRefusedDetailSSO is the detail for an account with no local
+// password: the reset route refuses such an account, so it is not
+// offered.
+const signInRefusedDetailSSO = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before"
+
+// signInRefusedDetailFor is the detail for user's refusal: it names only
+// the actions that work for that account.
+func signInRefusedDetailFor(user *gauntlet.User) string {
+	if user.LocalPassword() {
+		return signInRefusedDetail
+	}
+	return signInRefusedDetailSSO
+}
 
 // writeSignInRefused answers a refused sign-in: 403 sign-in-refused,
 // with no X-Auth-Gate header, which marks a session stopped at a door,
-// and no session exists here.
+// and no session exists here. It always offers the reset, so it is for
+// the password and second-factor paths, which only an account with a
+// local password reaches; anywhere else use writeSignInRefusedFor.
 func writeSignInRefused(w http.ResponseWriter) {
 	writeProblem(w, http.StatusForbidden, classSignInRefused, signInRefusedDetail, nil)
+}
+
+// writeSignInRefusedFor is writeSignInRefused with the detail chosen for
+// user's account (signInRefusedDetailFor).
+func writeSignInRefusedFor(w http.ResponseWriter, user *gauntlet.User) {
+	writeProblem(w, http.StatusForbidden, classSignInRefused, signInRefusedDetailFor(user), nil)
 }
 
 // refuseSignIn is block: one attempt refused, never the account. The

@@ -575,7 +575,9 @@ it was issued -- a hash needs no key, unlike gate's per-process
 pending-login codec, so the token survives a deploy, and each browser
 can be forgotten on its own. Each completed sign-in rotates the token,
 dropping the browser's old entry in the same write. An account
-remembers at most three browsers, the oldest evicted, each for 45 days
+remembers at most three browsers, the oldest evicted -- those that have
+never brought their token back (`KnownBrowser.Confirmed` false) before
+those that have, and never the one just added -- each for 45 days
 from its latest sign-in there, checked on the server from `IssuedAt`
 (owner, 2026-10-02). Once the ordinary path refuses an attempt -- the
 account locked out, or the address at its limit -- and the browser's

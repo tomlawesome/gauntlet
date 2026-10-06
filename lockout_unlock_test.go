@@ -246,10 +246,22 @@ func disabledAdminBackend(t *testing.T) (*persist.Memory, string) {
 		t.Fatal(err)
 	}
 	failConsecutively(t, mustNewLoginLimiter(t, 5, 5*time.Minute), s, id, MaxConsecutiveLoginFailures, escalationStart)
-	if mustGet(t, s, id).LoginDisabledAt.IsZero() {
+	disabledAt := mustGet(t, s, id).LoginDisabledAt
+	if disabledAt.IsZero() {
 		t.Fatal("fifty failures did not disable the admin")
 	}
+	// The unlock code reads the disable against its own clock: an hour
+	// in, so it is still in force for the rest of the test.
+	setUnlockCodeNow(t, disabledAt.Add(time.Hour))
 	return m, id
+}
+
+// setUnlockCodeNow sets the unlock code's clock to at for the rest of t.
+func setUnlockCodeNow(t *testing.T, at time.Time) {
+	t.Helper()
+	was := unlockCodeNow
+	unlockCodeNow = func() time.Time { return at }
+	t.Cleanup(func() { unlockCodeNow = was })
 }
 
 // openLockoutBackend is a backend holding openLockoutStore's admin,
@@ -301,6 +313,22 @@ func TestUnlockCodeIssuedOnlyForADisabledAdmin(t *testing.T) {
 	}
 }
 
+// A disable lifts itself LoginDisableDuration after it began (#70): a
+// store opening 25 hours after its admin was disabled issues no code,
+// since the admin can sign in as normal.
+func TestNoUnlockCodeOnceTheDisableHasLifted(t *testing.T) {
+	m, id := disabledAdminBackend(t)
+	s, _, code := openWithUnlockHook(t, m)
+	disabledAt := mustGet(t, s, id).LoginDisabledAt
+	setUnlockCodeNow(t, disabledAt.Add(25*time.Hour))
+	if _, u, c := openWithUnlockHook(t, m); c != "" {
+		t.Errorf("a disable that began 25 hours ago got an unlock code (%q, %q)", u, c)
+	}
+	if code == "" {
+		t.Error("the same store an hour into the disable issued no code")
+	}
+}
+
 // The rule is that no admin able to unlock the account remains: a
 // second admin who can still sign in means no code. The store holds one
 // admin today (ErrSingleAdmin), so this is checked on the state itself.
@@ -308,15 +336,15 @@ func TestNoUnlockCodeWhileAnotherAdminCanSignIn(t *testing.T) {
 	disabled := &User{ID: "a", Username: "alice", Role: RoleAdmin, LoginDisabledAt: escalationStart}
 	other := &User{ID: "b", Username: "bob", Role: RoleAdmin}
 	st := &storeState{byID: map[string]*User{"a": disabled, "b": other}}
-	if got := st.lockedOutAdmin(); got != nil {
+	if got := st.lockedOutAdmin(escalationStart.Add(time.Hour)); got != nil {
 		t.Errorf("with another admin able to sign in, %s is reported locked out", got.Username)
 	}
 	other.LoginDisabledAt = escalationStart
-	if got := st.lockedOutAdmin(); got == nil || got.ID != "a" {
+	if got := st.lockedOutAdmin(escalationStart.Add(time.Hour)); got == nil || got.ID != "a" {
 		t.Errorf("with every admin disabled, lockedOutAdmin = %v, want alice (first by username)", got)
 	}
 	st = &storeState{byID: map[string]*User{"a": {ID: "a", Username: "alice", Role: RoleAdmin}}}
-	if got := st.lockedOutAdmin(); got != nil {
+	if got := st.lockedOutAdmin(escalationStart.Add(time.Hour)); got != nil {
 		t.Error("an admin whose sign-in is not disabled is reported locked out")
 	}
 }
