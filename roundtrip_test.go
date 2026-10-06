@@ -67,7 +67,8 @@ const accountsFixture = `{
       "knownBrowsers": [
         {
           "hash": "fixture-known-browser-hash",
-          "issuedAt": "2026-01-02T04:04:05Z"
+          "issuedAt": "2026-01-02T04:04:05Z",
+          "confirmed": true
         }
       ],
       "seenCountries": [
@@ -237,7 +238,8 @@ const lockoutLines = "      \"loginLockoutCount\": 2,\n" +
 const knownBrowserLines = "      \"knownBrowsers\": [\n" +
 	"        {\n" +
 	"          \"hash\": \"fixture-known-browser-hash\",\n" +
-	"          \"issuedAt\": \"2026-01-02T04:04:05Z\"\n" +
+	"          \"issuedAt\": \"2026-01-02T04:04:05Z\",\n" +
+	"          \"confirmed\": true\n" +
 	"        }\n" +
 	"      ],\n"
 

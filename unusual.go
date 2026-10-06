@@ -310,20 +310,37 @@ func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Locati
 			return ErrUserNotFound
 		}
 		kept := make([]KnownBrowser, 0, len(u.KnownBrowsers)+1)
+		fresh := entry
 		for _, b := range u.KnownBrowsers {
-			if b.Hash == replaced || !b.live(now) {
+			if !b.live(now) {
+				continue
+			}
+			if b.Hash == replaced {
+				// The browser brought its token back: it is one the
+				// account really uses, not a passing sign-in.
+				fresh.Confirmed = true
 				continue
 			}
 			kept = append(kept, b)
 		}
-		kept = append(kept, entry)
-		if len(kept) > MaxKnownBrowsers {
-			// Stable, so of two issued at the same instant the one
-			// already on the record goes first and the new one stays.
-			slices.SortStableFunc(kept, func(a, b KnownBrowser) int { return a.IssuedAt.Compare(b.IssuedAt) })
-			kept = kept[len(kept)-MaxKnownBrowsers:]
+		if len(kept)+1 > MaxKnownBrowsers {
+			// Unconfirmed entries go first, oldest first, then confirmed
+			// ones, so a run of sign-ins that never bring their cookie
+			// back cannot push out the browsers the owner uses every
+			// day. The new entry is never the one evicted: it must be on
+			// the record for its cookie to come back at all.
+			slices.SortStableFunc(kept, func(a, b KnownBrowser) int {
+				if a.Confirmed != b.Confirmed {
+					if a.Confirmed {
+						return 1
+					}
+					return -1
+				}
+				return a.IssuedAt.Compare(b.IssuedAt)
+			})
+			kept = kept[len(kept)+1-MaxKnownBrowsers:]
 		}
-		u.KnownBrowsers = kept
+		u.KnownBrowsers = append(kept, fresh)
 
 		if country != "" {
 			u.SeenCountries = rememberCountry(u.SeenCountries, country, now)
