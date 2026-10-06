@@ -289,10 +289,10 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodPasskeyAlone, place, now)
 	if verdict.stopsSignIn() {
-		// The credential was right, so the attempt is handed back rather
-		// than completed; nothing completed, so the account's count is
-		// not reset.
-		g.releaseLogin(res, now)
+		// The credential was right, but nothing completed: the
+		// reservation is kept, as handleLogin keeps a held sign-in's,
+		// so a held sign-in cannot be repeated without limit, and the
+		// account's count is not reset.
 		g.endAfterReset(res)
 		sent, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPasskeyAlone, place, verdict, now)
 		if sent {

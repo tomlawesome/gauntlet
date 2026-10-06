@@ -590,8 +590,10 @@ fills the budget closes it for one window and adds one lockout's worth
 to `LoginLockoutCount` (which also lengthens the next ordinary lockout),
 so the fiftieth disables as an ordinary failure would. A success hands
 the count back (`ReleaseKnownBrowser`, `SignedIn`). Sign out everywhere
-(`ClearKnownBrowsers`, the calling browser then remembered again) and an
-admin's reset code forget every browser; a signed-in password change, an
+on an account with a local password, which asks for it again
+(`ClearKnownBrowsers`, the calling browser then remembered again), and
+an admin's reset code forget every browser; an SSO-only account's sign
+out everywhere has no password to ask for and keeps them; a signed-in password change, an
 SSO link, an unlock and the forced change after second-factor failures
 do not -- that is when the owner needs the allowance. Nothing is
 keyed on the client's address. A request carrying a token the named
@@ -982,7 +984,10 @@ issued. `gate.New` refuses an unknown action, `confirm` with
 no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with
 no `Config.Locate` (`prove` needs nothing wired). A `flag` or `block` notice through `Config.Notices`
 is rate-limited to once an account per hour; a `confirm` code has no
-limit, since the notice is the code the person is waiting for.
+limit of its own, since the notice is the code the person is waiting
+for, but every held or refused sign-in keeps its login-limiter attempt
+until the window hands it back, so the login limit bounds the codes
+(#79).
 
 **Account notices (#73, folding in #53 and #55).** `Config.Notices`
 (`AccountNotifier`) is the one hook for every account event this module

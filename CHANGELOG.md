@@ -337,6 +337,45 @@ All notable changes to this project are documented in this file.
   line, and does the same for a limiter refusal, as the other in-session
   re-checks do (#79). A run of wrong codes from a stolen session cookie
   against a pending enrolment left no trace.
+- `POST /api/auth/oidc/link` asks for the caller's own password,
+  `{"password": ...}`, on the same rate-limited re-check as TOTP enrol
+  and passkey registration: a wrong or missing one is `401`, a spent
+  budget `429`, and no flow cookie is set (#79). A link is permanent and
+  strips a non-admin of its password and factors, so a stolen session
+  cookie alone could turn into a lasting way in. A frontend that starts
+  a link must now send the password.
+- `POST /api/auth/logout-all` asks an account with a local password for
+  it, `{"password": ...}`, before any session ends (`401`/`429` as on the
+  other re-checks), and an SSO-only account's sign out everywhere no
+  longer forgets its remembered browsers, countries and last place
+  (#79). With only a session cookie, a thief could wipe the account's
+  unusual-sign-in baseline and leave their own browser the only one
+  remembered, so that under `block` the owner was refused on their own
+  devices. An SSO-only account still sends no body; the audit detail
+  says the browsers were kept. A frontend must now send the password
+  for an account that has one.
+- A sign-in the unusual-sign-in policy holds (`confirm`, `prove`) or
+  refuses (`block`) keeps its login-limiter attempt until the window
+  hands it back, as `login/factor/begin` keeps its own, on the password,
+  second-factor and passkey-alone paths (#79). Handed back, someone
+  holding the password could repeat it without limit, flooding the
+  owner with confirmation codes or a lone admin's log with escape codes;
+  the sixth in one window from one address and account is now `429`.
+  Like any kept attempt, a run of them counts toward the account's
+  lockout.
+- The login limiter keys a username that matches no account on a
+  SHA-256 digest of the lowercased name instead of the name itself
+  (#79). A body may hold a 64 KiB name and the limiter keeps thousands
+  of keys, so a credential-free flood of long made-up names could pin
+  hundreds of megabytes. Limiting is unchanged: one name, in any case,
+  is one bucket.
+- The confirmation code (`ConfirmCode.Client`) and the unusual-sign-in
+  and block notices carry the client cleaned and cut as a session's is,
+  not the raw `User-Agent` (#79): someone holding the password could put
+  line breaks, a made-up line or a huge header into the message the
+  service sends the real owner. The rule is exported as
+  `gauntlet.SessionClient.Clean`, which `CreateFrom`, `CreateContinuing`
+  and `Resume` now use too. Additive.
 
 ### Changed
 
