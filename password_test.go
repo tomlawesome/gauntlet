@@ -145,3 +145,32 @@ func TestVerifyPasswordRejectsOutOfRangeThreadCount(t *testing.T) {
 		t.Fatal("VerifyPassword blocked waiting for a hash slot -- the oversized thread count was not refused before hashing")
 	}
 }
+
+// Valid bounds the cost from above as well as below: a damaged or edited
+// lock document must not be able to drive DeriveKey into a gigabytes-wide
+// allocation or a pass count that holds a hash slot for minutes.
+func TestKDFParamsValidBounds(t *testing.T) {
+	ok := DefaultKDFParams()
+	cases := []struct {
+		name string
+		p    KDFParams
+		want bool
+	}{
+		{"default", ok, true},
+		{"memory at floor", KDFParams{Memory: 8 * 1024, Time: 1, Threads: 1}, true},
+		{"memory below floor", KDFParams{Memory: 8*1024 - 1, Time: 1, Threads: 1}, false},
+		{"memory at ceiling", KDFParams{Memory: 1 << 20, Time: ok.Time, Threads: ok.Threads}, true},
+		{"memory over ceiling", KDFParams{Memory: 1<<20 + 1, Time: ok.Time, Threads: ok.Threads}, false},
+		{"time zero", KDFParams{Memory: ok.Memory, Time: 0, Threads: ok.Threads}, false},
+		{"time at ceiling", KDFParams{Memory: ok.Memory, Time: 64, Threads: ok.Threads}, true},
+		{"time over ceiling", KDFParams{Memory: ok.Memory, Time: 65, Threads: ok.Threads}, false},
+		{"threads zero", KDFParams{Memory: ok.Memory, Time: ok.Time, Threads: 0}, false},
+		{"threads at ceiling", KDFParams{Memory: ok.Memory, Time: ok.Time, Threads: 32}, true},
+		{"threads over ceiling", KDFParams{Memory: ok.Memory, Time: ok.Time, Threads: 33}, false},
+	}
+	for _, c := range cases {
+		if got := c.p.Valid(); got != c.want {
+			t.Errorf("%s: %+v.Valid() = %v, want %v", c.name, c.p, got, c.want)
+		}
+	}
+}
