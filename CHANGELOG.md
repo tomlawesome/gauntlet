@@ -315,7 +315,12 @@ All notable changes to this project are documented in this file.
   (#79). A server and an application's CLI share the store, and the CLI
   is run with `sudo`: after one root save the server could no longer
   read or replace its own file. A `chown` refused with permission
-  denied is ignored; any other failure fails the write.
+  denied is ignored; any other failure fails the write. The `.lock` file
+  beside the store takes the store's owner when the server creates it.
+  Upgrade note: a `.lock` file an earlier release left root-owned
+  cannot be repaired by the server; the save error now says so, and
+  the fix is to `chown` it to the server's user or delete it while the
+  server is stopped.
 - A forced password change refuses the password the account already
   has (#79). It asks for no current password, so a caller could lift
   `MustChangePassword` by setting the same one, the very password
@@ -387,8 +392,8 @@ All notable changes to this project are documented in this file.
   The first attempt afterwards clears the account's count of lockouts as
   `UnlockLogin` does, so the next failure does not disable it again at
   once. The admin unlock answer's `wasDisabled` is false for a disable
-  that has lapsed. The one-time unlock code is still issued for a disable
-  the record holds that has lapsed and no attempt has cleared yet.
+  that has lapsed. The one-time unlock code follows the same clock since
+  the v0.3.0 audit (#79): a lapsed disable issues none.
 
 - `gate.Config.Notify` and `Notifier` are deprecated in favour of
   `Config.Notices`: kept working for a minor release (ADR-0002 decision

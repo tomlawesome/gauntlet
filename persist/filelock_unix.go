@@ -5,6 +5,7 @@ package persist
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -45,6 +46,13 @@ func lockFile(ctx context.Context, path string) (*fileLock, error) {
 		}
 	case errors.Is(err, fs.ErrExist):
 		f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if errors.Is(err, fs.ErrPermission) {
+			// A lock made before this check existed, by a CLI run with
+			// sudo, belongs to root and nothing this process can do
+			// repairs it: say what to do rather than fail every save
+			// with a bare "permission denied".
+			return nil, fmt.Errorf("persist: cannot open the lock file %s (%w): it belongs to another user, probably after a CLI run with sudo -- give it to the user this server runs as, or delete it while the server is stopped", path, err)
+		}
 		if err != nil {
 			return nil, err
 		}
