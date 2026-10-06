@@ -55,6 +55,11 @@ import (
 // matched no account.
 const unknownAccount = "unknown"
 
+// proveActionNote is the part of a held sign-in's note
+// (completeHeldSignIn) saying a passkey answered the hold rather than a
+// confirmation code, so its user.login says "via passkey proof".
+const proveActionNote = "action=" + string(UnusualSignInProve) + "; "
+
 // signInClient is the address, browser and country (#54) r came from,
 // as the application resolves the address (Config.ClientIP) and the
 // country (Config.Country). address, when set, is the one the
@@ -154,6 +159,8 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 		switch {
 		case ev.Confirmed && strings.Contains(note, escapeUsedNote):
 			detail = "via escape code; " + from
+		case ev.Confirmed && strings.Contains(note, proveActionNote):
+			detail = "via passkey proof; " + from
 		case ev.Confirmed:
 			detail = "via confirmation code; " + from
 		case ev.Method == gauntlet.SignInMethodCode, ev.Method == gauntlet.SignInMethodPasskey:
