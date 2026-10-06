@@ -13,8 +13,9 @@
 # variables only the owner sets; nothing here sets them, and without them
 # the job never runs.
 #
-# Renovate (#63) runs in the `maintenance` stage, only in the pipeline the
-# weekly `renovate` schedule starts; see the job at the end of the file.
+# Renovate (#63) runs in the `maintenance` stage, only in the pipelines the
+# weekly `renovate` and daily `renovate-security` schedules start; see the
+# job at the end of the file.
 #
 # Runner lane (ai/agent-infra#3): `light` is 4 CPU / 6 GB, which is ample
 # for a dependency-free Go module. `big` is not needed here. The two

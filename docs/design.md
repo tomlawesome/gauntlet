@@ -882,8 +882,8 @@ sign-in-required`. `GET /api/auth/session` reports `resumable: true` for a
 cookie in that state, which is how a frontend knows to ask for the
 password rather than show the full form; every other gated route still
 answers `sign-in-required`. History row method `resume`; audit
-`user.reauthenticated`. A passkey with user verification may resume a
-session in place of the password once #77 lands: the handler marks where.
+`user.reauthenticated`. A passkey with user verification resumes a
+session in place of the password (#77, ADR-0012).
 Sessions are in memory, so a restart still ends them, resumable or not;
 holding timed-out sessions to the ceiling raises the map's bound from
 one idle timeout's worth of sessions to one ceiling's worth.
