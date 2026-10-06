@@ -30,6 +30,16 @@ func TestFileBackendSaveWithoutPathErrors(t *testing.T) {
 	}
 }
 
+// An empty path would otherwise read as a missing file, which Load
+// reports as a fresh install: the operator who forgot to configure the
+// path would see a setup page that then refuses the save.
+func TestFileBackendLoadWithoutPathErrors(t *testing.T) {
+	b := newFileBackend("")
+	if _, err := b.Load(context.Background()); err == nil {
+		t.Fatal("Load with no path configured succeeded, want an error")
+	}
+}
+
 // Save holds path+".lock" for its whole read-compare-write, so a
 // concurrent Save (here, another goroutine, but flock does not
 // distinguish that from another process) must wait for it rather than
