@@ -285,36 +285,40 @@ func TestAllowIssuerRefusesMultiTenantIssuers(t *testing.T) {
 	}
 }
 
-// TestAllowIssuerWithPolicyNeedsTheTenantClaim pins ADR-0014: a shared
-// issuer is accepted only when RequiredClaims names that provider's
-// tenant claim with a value -- any other narrowing, or the other
-// provider's claim, still lets strangers at that provider in -- and a
-// provider with no tenant claim is refused whatever the Policy says.
+// TestAllowIssuerWithPolicyNeedsTheTenantClaim pins ADR-0014: Google is
+// accepted only when RequiredClaims names "hd" with a value -- any other
+// narrowing, or another claim, still lets strangers at that provider in
+// -- and every other shared issuer is refused whatever the Policy says.
+// Entra's shared endpoints are refused even with "tid" pinned, because
+// go-oidc cannot discover them; the error points at the single-tenant
+// issuer instead.
 func TestAllowIssuerWithPolicyNeedsTheTenantClaim(t *testing.T) {
 	hd := Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}}}
 	tid := Policy{RequiredClaims: map[string][]string{"tid": {"00000000-0000-0000-0000-000000000000"}}}
+	const singleTenant = "https://login.microsoftonline.com/<tenant-guid>/v2.0"
 	both := Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}, "tid": {"00000000-0000-0000-0000-000000000000"}}}
 	cases := []struct {
 		name      string
 		issuer    string
 		policy    Policy
-		wantClaim string // "" means the issuer must be accepted
+		wantClaim string // "" means accepted; "-" means refused, naming no claim
+		wantText  string // the refusal must contain this, if set
 	}{
-		{"google with hd", "https://accounts.google.com", hd, ""},
-		{"google scheme-less with hd", "accounts.google.com.", hd, ""},
-		{"google without a policy", "https://accounts.google.com", Policy{}, "hd"},
-		{"google with tid only", "https://accounts.google.com", tid, "hd"},
-		{"google with a blank hd", "https://accounts.google.com", Policy{RequiredClaims: map[string][]string{"hd": {" "}}}, "hd"},
-		{"google with an email domain only", "https://accounts.google.com", Policy{AllowedEmailDomains: []string{"example.com"}}, "hd"},
-		{"entra common with tid", "https://login.microsoftonline.com/common/v2.0", tid, ""},
-		{"entra organizations with tid", "https://login.microsoftonline.com/organizations/v2.0", tid, ""},
-		{"entra consumers with tid", "https://login.microsoftonline.com/consumers/v2.0", tid, ""},
-		{"entra common without a policy", "https://login.microsoftonline.com/common/v2.0", Policy{}, "tid"},
-		{"entra common with hd only", "https://login.microsoftonline.com/common/v2.0", hd, "tid"},
-		{"entra single tenant without a policy", "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0", Policy{}, ""},
-		{"self-hosted without a policy", "https://authentik.example.com/application/o/gauntlet/", Policy{}, ""},
-		{"apple with both claims", "https://appleid.apple.com", both, "-"},
-		{"microsoft personal with both claims", "https://login.live.com", both, "-"},
+		{"google with hd", "https://accounts.google.com", hd, "", ""},
+		{"google scheme-less with hd", "accounts.google.com.", hd, "", ""},
+		{"google without a policy", "https://accounts.google.com", Policy{}, "hd", ""},
+		{"google with tid only", "https://accounts.google.com", tid, "hd", ""},
+		{"google with a blank hd", "https://accounts.google.com", Policy{RequiredClaims: map[string][]string{"hd": {" "}}}, "hd", ""},
+		{"google with an email domain only", "https://accounts.google.com", Policy{AllowedEmailDomains: []string{"example.com"}}, "hd", ""},
+		{"entra common with tid", "https://login.microsoftonline.com/common/v2.0", tid, "-", singleTenant},
+		{"entra organizations with tid", "https://login.microsoftonline.com/organizations/v2.0", tid, "-", singleTenant},
+		{"entra consumers with tid", "https://login.microsoftonline.com/consumers/v2.0", tid, "-", singleTenant},
+		{"entra common without a policy", "https://login.microsoftonline.com/common/v2.0", Policy{}, "-", singleTenant},
+		{"entra common with hd only", "https://login.microsoftonline.com/common/v2.0", hd, "-", singleTenant},
+		{"entra single tenant without a policy", "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0", Policy{}, "", ""},
+		{"self-hosted without a policy", "https://authentik.example.com/application/o/gauntlet/", Policy{}, "", ""},
+		{"apple with both claims", "https://appleid.apple.com", both, "-", ""},
+		{"microsoft personal with both claims", "https://login.live.com", both, "-", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -328,6 +332,8 @@ func TestAllowIssuerWithPolicyNeedsTheTenantClaim(t *testing.T) {
 				t.Errorf("AllowIssuerWithPolicy(%q) = %v, want ErrMultiTenantIssuer", tc.issuer, err)
 			case tc.wantClaim != "-" && !strings.Contains(err.Error(), `"`+tc.wantClaim+`"`):
 				t.Errorf("AllowIssuerWithPolicy(%q) = %v, want it to name the %q claim", tc.issuer, err, tc.wantClaim)
+			case !strings.Contains(err.Error(), tc.wantText):
+				t.Errorf("AllowIssuerWithPolicy(%q) = %v, want it to mention %q", tc.issuer, err, tc.wantText)
 			}
 		})
 	}
@@ -335,15 +341,13 @@ func TestAllowIssuerWithPolicyNeedsTheTenantClaim(t *testing.T) {
 
 // TestPermitRefusesAnotherTenantAtASharedIssuer is the other half of
 // ADR-0014: once a shared issuer is accepted, the tenant pin is enforced
-// on every sign-in, so an account at the same provider but in another
-// tenant -- or with no tenant claim at all, like a personal Google
-// account -- is refused.
+// on every sign-in, so a Google account in another Workspace -- or with
+// no hd claim at all, a personal account -- is refused.
 func TestPermitRefusesAnotherTenantAtASharedIssuer(t *testing.T) {
 	cases := []struct {
 		issuer, claim, want, other string
 	}{
 		{"https://accounts.google.com", "hd", "example.com", "evil.example"},
-		{"https://login.microsoftonline.com/common/v2.0", "tid", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"},
 	}
 	for _, tc := range cases {
 		p := Policy{RequiredClaims: map[string][]string{tc.claim: {tc.want}}}

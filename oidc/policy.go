@@ -231,8 +231,9 @@ func intersects(got, allowed []string) bool {
 // multiTenantIssuers are providers where a validating ID token proves
 // only "this is a real account somewhere at this provider" -- which is
 // no restriction at all. Each maps to its multi-tenant path prefixes
-// (nil meaning "the whole host") and the claim that names the tenant an
-// account belongs to ("" where the provider has none).
+// (nil meaning "the whole host"), the claim that names the tenant an
+// account belongs to ("" where none can be pinned), and, where there is
+// none, what the refusal tells the operator.
 //
 // This list is a safety net over a general mechanism, not the mechanism
 // itself: Policy is provider-agnostic, and an unlisted public provider
@@ -242,11 +243,16 @@ func intersects(got, allowed []string) bool {
 var multiTenantIssuers = map[string]struct {
 	prefixes    []string
 	tenantClaim string
+	refusal     string
 }{
-	"accounts.google.com":       {nil, "hd"},
-	"appleid.apple.com":         {nil, ""},
-	"login.live.com":            {nil, ""},
-	"login.microsoftonline.com": {[]string{"/common", "/organizations", "/consumers"}, "tid"},
+	"accounts.google.com": {nil, "hd", ""},
+	"appleid.apple.com":   {nil, "", "has no tenant claim a Policy could pin"},
+	"login.live.com":      {nil, "", "has no tenant claim a Policy could pin"},
+	// Entra's shared endpoints publish a templated issuer
+	// (".../{tenantid}/v2.0") that go-oidc's discovery refuses, so no
+	// tenant pin could make them start; ADR-0014 leaves them refused.
+	"login.microsoftonline.com": {[]string{"/common", "/organizations", "/consumers"}, "",
+		"is not supported; use the single-tenant issuer https://login.microsoftonline.com/<tenant-guid>/v2.0"},
 }
 
 // ErrMultiTenantIssuer is returned by AllowIssuerWithPolicy for a
@@ -259,23 +265,24 @@ var ErrMultiTenantIssuer = errors.New("oidc: multi-tenant issuers are not suppor
 // AllowIssuerWithPolicy reports whether SSO may be enabled against issuer
 // with p as the sign-in policy (docs/adr/0014-shared-issuers.md).
 //
-// A self-hosted issuer always passes. A shared one passes only when
-// p.RequiredClaims names its tenant claim with at least one value --
-// "hd" for accounts.google.com, "tid" for Entra's common, organizations
-// and consumers endpoints -- because without it any account at that
-// provider could sign itself in here. Apple and Microsoft personal
-// accounts carry no tenant claim, so they are always refused. The check
-// is at startup so a missing pin is a refusal to start, never a silently
-// open door; Permit then refuses each token whose claim is absent or
-// carries another tenant.
+// A self-hosted issuer always passes, as does a single Entra tenant
+// (.../<tenant-guid>/v2.0). accounts.google.com passes only when
+// p.RequiredClaims names "hd" with at least one value, because without
+// it any Google account could sign itself in here. Apple and Microsoft
+// personal accounts carry no tenant claim, and Entra's common,
+// organizations and consumers endpoints cannot pass go-oidc's discovery,
+// so all of those are always refused. The check is at startup so a
+// missing pin is a refusal to start, never a silently open door; Permit
+// then refuses each token whose claim is absent or names another domain.
 func AllowIssuerWithPolicy(issuer string, p Policy) error {
 	host, shared := multiTenantHost(issuer)
 	if !shared {
 		return nil
 	}
-	claim := multiTenantIssuers[host].tenantClaim
+	entry := multiTenantIssuers[host]
+	claim := entry.tenantClaim
 	if claim == "" {
-		return fmt.Errorf("%w: %s has no tenant claim a Policy could pin", ErrMultiTenantIssuer, issuer)
+		return fmt.Errorf("%w: %s %s", ErrMultiTenantIssuer, issuer, entry.refusal)
 	}
 	for _, v := range p.RequiredClaims[claim] {
 		if strings.TrimSpace(v) != "" {
