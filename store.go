@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tomlawesome/gauntlet/persist"
 )
@@ -44,6 +45,15 @@ import (
 // for every local-password account (#49), so the password is never the
 // only factor, and 8 conforms unconditionally.
 const minPasswordLength = 8
+
+// passwordTooShort reports whether password is under minPasswordLength
+// characters. Characters, not bytes: NIST SP 800-63B-4 counts each
+// Unicode code point as one, and ErrPasswordTooShort says
+// "characters", so eight letters of a non-Latin script -- two or three
+// bytes each in UTF-8 -- count as eight, not as up to twenty-four.
+func passwordTooShort(password string) bool {
+	return utf8.RuneCountInString(password) < minPasswordLength
+}
 
 var (
 	// ErrNotPersisted is returned by Register/CreateUser when no backend
@@ -1309,7 +1319,7 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 	if err := ValidateLocalUsername(username); err != nil {
 		return nil, err
 	}
-	if len(password) < minPasswordLength {
+	if passwordTooShort(password) {
 		return nil, ErrPasswordTooShort
 	}
 	breachPending, err := s.checkNewPassword(username, password)
@@ -1388,7 +1398,7 @@ func (s *Store) ValidateNewAccount(username, password string) error {
 	if err := ValidateLocalUsername(username); err != nil {
 		return err
 	}
-	if len(password) < minPasswordLength {
+	if passwordTooShort(password) {
 		return ErrPasswordTooShort
 	}
 	s.reloadIfStale()
@@ -2004,7 +2014,7 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 // tool runs in a different process from the live server, so it has no
 // way to reach into that server's in-memory SessionStore directly.
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
-	if len(newPassword) < minPasswordLength {
+	if passwordTooShort(newPassword) {
 		return ErrPasswordTooShort
 	}
 	breachPending, err := s.checkNewPassword(username, newPassword)

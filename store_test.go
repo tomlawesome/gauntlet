@@ -86,6 +86,30 @@ func TestPasswordTooShortRejectedOnRegisterCreateAndReset(t *testing.T) {
 	}
 }
 
+// The minimum length counts characters, not bytes: seven Greek letters
+// are fourteen bytes of UTF-8 but still seven characters, and refused;
+// eight are accepted. Both paths that set a password count the same way.
+func TestPasswordLengthCountsCharactersNotBytes(t *testing.T) {
+	const seven, eight = "ξενοδοχ", "ξενοδοχε"
+	s := openTestStore(t)
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.CreateUser("second", seven, RoleUser, time.Now()); err != ErrPasswordTooShort {
+		t.Errorf("CreateUser with 7 characters (%d bytes) = %v, want ErrPasswordTooShort", len(seven), err)
+	}
+	if _, err := s.CreateUser("second", eight, RoleUser, time.Now()); err != nil {
+		t.Errorf("CreateUser with 8 characters: %v", err)
+	}
+	if err := s.SetPassword("admin", seven, time.Now()); err != ErrPasswordTooShort {
+		t.Errorf("SetPassword with 7 characters (%d bytes) = %v, want ErrPasswordTooShort", len(seven), err)
+	}
+	if err := s.SetPassword("admin", eight, time.Now()); err != nil {
+		t.Errorf("SetPassword with 8 characters: %v", err)
+	}
+}
+
 func TestCreateUserAddsAdditionalAccounts(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
