@@ -121,10 +121,11 @@ func TestExpiryAndWarningSurviveAReopen(t *testing.T) {
 	s, _ := OpenTokenStore(m, TokenOptions{})
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	at := now.Add(3 * 24 * time.Hour)
-	if _, _, err := s.CreateWithExpiry("soon", TokenKindAPI, "", nil, now, at); err != nil {
+	_, tok, err := s.CreateWithExpiry("soon", TokenKindAPI, "", nil, now, at)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Sweep(now); err != nil {
+	if err := s.MarkExpiryWarned([]string{tok.ID}, now); err != nil {
 		t.Fatal(err)
 	}
 	s2, err := OpenTokenStore(m, TokenOptions{})
@@ -191,7 +192,16 @@ func TestSweepRemovesOnlyTheUnused(t *testing.T) {
 	}
 }
 
-func TestSweepWarnsOncePerToken(t *testing.T) {
+// expiringIDs is the ids of a sweep's Expiring list.
+func expiringIDs(res TokenSweepResult) []string {
+	var ids []string
+	for _, e := range res.Expiring {
+		ids = append(ids, e.ID)
+	}
+	return ids
+}
+
+func TestSweepWarnsOncePerMarkedToken(t *testing.T) {
 	s := newTestTokenStore(t)
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	week := 7 * 24 * time.Hour
@@ -218,6 +228,9 @@ func TestSweepWarnsOncePerToken(t *testing.T) {
 			t.Errorf("warned about %q", e.Name)
 		}
 	}
+	if err := s.MarkExpiryWarned(expiringIDs(res), now); err != nil {
+		t.Fatal(err)
+	}
 	res, err = s.Sweep(now)
 	if err != nil {
 		t.Fatal(err)
@@ -235,11 +248,48 @@ func TestSweepWarnsOncePerToken(t *testing.T) {
 	}
 }
 
-func TestSweepOfAnUnpersistedStoreDoesNothing(t *testing.T) {
-	s, _ := OpenTokenStore(nil, TokenOptions{})
-	res, err := s.Sweep(time.Now())
-	if err != nil || len(res.Removed)+len(res.Expiring) != 0 {
-		t.Errorf("Sweep = %+v, %v", res, err)
+// Sweep only lists a token about to expire: the warning is recorded by
+// MarkExpiryWarned once it has gone out, so one that never went out is
+// listed again by the next sweep rather than lost.
+func TestSweepListsAnUnmarkedTokenAgain(t *testing.T) {
+	s := newTestTokenStore(t)
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	_, tok, err := s.CreateWithExpiry("soon", TokenKindAPI, "", nil, now.Add(-time.Hour), now.Add(48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		res, err := s.Sweep(now.Add(time.Duration(i) * time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Expiring) != 1 || res.Expiring[0].ID != tok.ID || !res.Expiring[0].ExpiryWarnedAt.IsZero() {
+			t.Fatalf("sweep %d expiring = %+v, want the unmarked token", i+1, res.Expiring)
+		}
+	}
+	if l := s.List(); len(l) != 1 || !l[0].ExpiryWarnedAt.IsZero() {
+		t.Errorf("listed = %+v, want it still unmarked", l)
+	}
+}
+
+func TestMarkExpiryWarnedIgnoresMissingAndKeepsTheFirstTime(t *testing.T) {
+	s := newTestTokenStore(t)
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	_, tok, err := s.CreateWithExpiry("soon", TokenKindAPI, "", nil, now.Add(-time.Hour), now.Add(48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkExpiryWarned([]string{"no-such-token", tok.ID}, now); err != nil {
+		t.Fatalf("MarkExpiryWarned: %v", err)
+	}
+	if err := s.MarkExpiryWarned([]string{tok.ID}, now.Add(time.Hour)); err != nil {
+		t.Fatalf("second MarkExpiryWarned: %v", err)
+	}
+	if l := s.List(); len(l) != 1 || !l[0].ExpiryWarnedAt.Equal(now) {
+		t.Errorf("listed = %+v, want warned at %v", l, now)
+	}
+	if err := s.MarkExpiryWarned(nil, now); err != nil {
+		t.Errorf("nothing to mark: %v", err)
 	}
 }
 
@@ -281,5 +331,13 @@ func TestRemoveOrphansTakesOnlyTokensOfMissingAccounts(t *testing.T) {
 	// Nothing left to do: no write, nothing returned.
 	if gone, err := s.RemoveOrphans(exists, now); err != nil || gone != nil {
 		t.Errorf("second RemoveOrphans = %+v, %v", gone, err)
+	}
+}
+
+func TestSweepOfAnUnpersistedStoreDoesNothing(t *testing.T) {
+	s, _ := OpenTokenStore(nil, TokenOptions{})
+	res, err := s.Sweep(time.Now())
+	if err != nil || len(res.Removed)+len(res.Expiring) != 0 {
+		t.Errorf("Sweep = %+v, %v", res, err)
 	}
 }

@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -329,5 +330,74 @@ func TestSweepTokensRemovesTokensWhoseCreatorIsGone(t *testing.T) {
 	if len(audited) != 1 || audited[0].Actor != "system" || audited[0].Target != "bob-integration" ||
 		!strings.Contains(audited[0].Detail, "id="+orphan) {
 		t.Errorf("audit entries = %+v, want one token.removed_orphaned by system for %s", audited, orphan)
+	}
+}
+
+// A warning is recorded only once it was delivered: a notifier that
+// fails leaves the token unmarked, and the next sweep offers it again.
+func TestSweepTokensMarksAWarningOnlyOnceSent(t *testing.T) {
+	f := newSweepFixture(t)
+	now := time.Now()
+	soon := f.mint(t, "soon", f.admin, now.Add(-24*time.Hour), now.Add(5*24*time.Hour))
+	warnedAt := func() time.Time {
+		for _, tok := range f.g.deps.Tokens.List() {
+			if tok.ID == soon {
+				return tok.ExpiryWarnedAt
+			}
+		}
+		t.Fatal("the token is gone")
+		return time.Time{}
+	}
+
+	f.notes.fail = func(context.Context) error { return errors.New("mail relay down") }
+	res, err := f.g.SweepTokens(context.Background(), now)
+	if err != nil {
+		t.Fatalf("SweepTokens: %v", err)
+	}
+	if res.Warned != 0 || !warnedAt().IsZero() || len(f.notes.all()) != 1 {
+		t.Fatalf("failed send: result %+v, warned at %v, %d notices; want unmarked after one attempt",
+			res, warnedAt(), len(f.notes.all()))
+	}
+
+	f.notes.mu.Lock()
+	f.notes.fail = nil
+	f.notes.mu.Unlock()
+	later := now.Add(24 * time.Hour)
+	res, err = f.g.SweepTokens(context.Background(), later)
+	if err != nil {
+		t.Fatalf("second SweepTokens: %v", err)
+	}
+	if res.Warned != 1 || !warnedAt().Equal(later) || len(f.notes.all()) != 2 {
+		t.Fatalf("retry: result %+v, warned at %v, %d notices; want marked at %v after a second send",
+			res, warnedAt(), len(f.notes.all()), later)
+	}
+
+	res, err = f.g.SweepTokens(context.Background(), later.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("third SweepTokens: %v", err)
+	}
+	if res != (TokenSweep{}) || len(f.notes.all()) != 2 {
+		t.Errorf("third sweep = %+v with %d notices, want nothing new", res, len(f.notes.all()))
+	}
+}
+
+// A notifier still running at the deadline counts as not delivered.
+func TestSweepTokensTreatsASlowNotifierAsNotSent(t *testing.T) {
+	f := newSweepFixture(t)
+	old := notifyTimeout
+	notifyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { notifyTimeout = old })
+	now := time.Now()
+	f.mint(t, "soon", f.admin, now.Add(-24*time.Hour), now.Add(5*24*time.Hour))
+
+	// It ignores its context and only returns, successfully, once the
+	// sweep is over: the sweep must not wait for it.
+	release := make(chan struct{})
+	f.notes.fail = func(context.Context) error { <-release; return nil }
+	res, err := f.g.SweepTokens(context.Background(), now)
+	close(release)
+	f.g.notifying.Wait()
+	if err != nil || res.Warned != 0 {
+		t.Errorf("SweepTokens = %+v, %v; want nothing marked", res, err)
 	}
 }

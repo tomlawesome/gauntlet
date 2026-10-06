@@ -83,8 +83,9 @@ type Token struct {
 	// time means it never expires (#74). Tokens written before the field
 	// existed read as zero.
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
-	// ExpiryWarnedAt is when Sweep reported this token as about to
-	// expire, so each token is reported once. Zero until then.
+	// ExpiryWarnedAt is when the warning that this token is about to
+	// expire was sent (MarkExpiryWarned), so each token is reported once.
+	// Zero until then.
 	ExpiryWarnedAt time.Time `json:"expiryWarnedAt,omitzero"`
 	// CreatedBy is the account ID that issued this token, so deleting
 	// that account can revoke it (see RevokeAllCreatedBy).
@@ -962,18 +963,23 @@ type TokenSweepResult struct {
 	// Removed are the tokens deleted for going unused for
 	// TokenUnusedLimit.
 	Removed []Token
-	// Expiring are the tokens now marked warned: not yet expired, but
-	// expiring within TokenExpiryNoticeWindow, and not reported before.
+	// Expiring are the tokens to warn about: not yet expired, but
+	// expiring within TokenExpiryNoticeWindow, and not marked warned
+	// yet. Sweep does not mark them; the caller does, with
+	// MarkExpiryWarned, once each warning has gone out.
 	Expiring []Token
 }
 
 // Sweep is the token store's maintenance pass (#74): the application
 // calls it about once a day, as this package runs no timer of its own.
 // It removes every token unused for more than TokenUnusedLimit -- by
-// LastUsedAt, or CreatedAt for one never used -- and marks every token
-// that expires within TokenExpiryNoticeWindow and has not been reported
-// as warned, so it is reported once. Both changes are saved as one
-// write; on a persistence failure neither happened and the result is
+// LastUsedAt, or CreatedAt for one never used -- and lists every token
+// that expires within TokenExpiryNoticeWindow and has not been marked
+// warned. It does not mark them: a warning marked before it is sent is
+// lost for good when the send fails, so the caller sends first and then
+// calls MarkExpiryWarned with the ones that went out. A token is listed
+// again by every sweep until it is marked. The removals are saved as
+// one write; on a persistence failure none happened and the result is
 // empty. An expired token is left in the list (Authenticate already
 // refuses it) for an admin to see and revoke.
 //
@@ -1004,12 +1010,12 @@ func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) {
 				!t.ExpiresAt.After(now) || t.ExpiresAt.Sub(now) > TokenExpiryNoticeWindow {
 				continue
 			}
-			t.ExpiryWarnedAt = now
 			cp := *t
 			cp.HashedValue = ""
 			res.Expiring = append(res.Expiring, cp)
 		}
-		if len(res.Removed) == 0 && len(res.Expiring) == 0 {
+		if len(res.Removed) == 0 {
+			// Only removals are written; the listing alone needs no write.
 			return errNoChange
 		}
 		return nil
@@ -1018,6 +1024,35 @@ func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) {
 		return TokenSweepResult{}, err
 	}
 	return res, nil
+}
+
+// MarkExpiryWarned records, in one write, that the expiry warning for
+// each token in ids has been sent, so Sweep stops listing it. An id
+// that is not in the store (revoked or removed since) is ignored, and a
+// token already marked keeps its first time. Nothing to mark is no
+// write.
+//
+// An unpersisted store holds no tokens, so it marks nothing.
+func (s *TokenStore) MarkExpiryWarned(ids []string, now time.Time) error {
+	if !s.Persisted() || len(ids) == 0 {
+		return nil
+	}
+	s.reloadIfStale()
+	return s.mutate(func(st *tokenState) error {
+		changed := false
+		for _, id := range ids {
+			t, ok := st.byID[id]
+			if !ok || !t.ExpiryWarnedAt.IsZero() {
+				continue
+			}
+			t.ExpiryWarnedAt = now
+			changed = true
+		}
+		if !changed {
+			return errNoChange
+		}
+		return nil
+	})
 }
 
 // tokenOlder is the one order List, ByKind and the saved document use:
