@@ -23,6 +23,9 @@ import (
 // Typing the code into that browser -- POST /api/auth/login/escape --
 // lets that one sign-in through. It is the confirm step (confirmlogin.go)
 // with the code delivered to the log instead of Config.DeliverConfirmCode.
+// A lone admin held for a code or a passkey (confirm, prove) gets one
+// too, beside the hold's own ticket: one who has lost the passkey, or
+// whose code never arrives, would otherwise be held on every attempt.
 
 // escapeLoginCookieName carries a refused lone admin's sign-in, which
 // has proven every credential and owes the escape code. Generic
@@ -123,8 +126,9 @@ func escapeCodeMatches(typed, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-// escapeOffered reports whether a refusal of user's sign-in may carry an
-// escape code: an admin, on the local password or factor path (never the
+// escapeOffered reports whether a refusal of user's sign-in, or a hold
+// of it for a confirmation code or a passkey, may carry an escape code:
+// an admin, on the local password or factor path (never the
 // SSO callback, ADR-0010), with something that can announce the code and
 // no other admin able to act (Store.OtherAdminCanAct).
 func (g *Gate) escapeOffered(user *gauntlet.User, method gauntlet.SignInMethod, now time.Time) bool {
@@ -137,8 +141,8 @@ func (g *Gate) escapeOffered(user *gauntlet.User, method gauntlet.SignInMethod, 
 	return !g.deps.Users.OtherAdminCanAct(user.ID, now)
 }
 
-// startEscape mints an escape code and its ticket for user's refused
-// sign-in when escapeOffered, announces the code (Config.OnEscapeCode,
+// startEscape mints an escape code and its ticket for user's refused or
+// held (confirm, prove) sign-in when escapeOffered, announces the code (Config.OnEscapeCode,
 // else one Warn line on Config.Log), and only then sets the ticket cookie
 // and records escape_issued with the signals. Nothing is written to the
 // account. It reports whether a code was issued; when not, no ticket or
