@@ -11,7 +11,12 @@
 # pass. An exception for a package whose licence is genuinely outside
 # this list is instead an exact entry under allow-dependencies-licenses,
 # in the form `pkg:golang/<module>@<version>`, with a comment giving the
-# reason and a review date.
+# reason and a review date. scripts/licence-check.sh skips that one
+# module's licence in `go-licenses check` and prints the entry, comment
+# and all. It fails on an entry whose version is not the one the build
+# has, so a bump brings the licence back for review, and on one whose
+# module path is the start of another module's in the build, which
+# go-licenses would skip too.
 #
 # G1 has no dependencies at all (persist is stdlib-only). BSD-3-Clause and
 # Apache-2.0 are listed ahead of need, for the three modules the owner has
