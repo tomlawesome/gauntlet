@@ -331,6 +331,32 @@ func TestSetPasswordMarksTheAccountAsHavingALocalPassword(t *testing.T) {
 	}
 }
 
+// PasswordMatches only compares: the right password is true, a wrong
+// one or an unknown account false, and nothing about the account moves.
+func TestPasswordMatchesComparesWithoutSideEffects(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.Get(u.ID)
+
+	if !s.PasswordMatches(u.ID, "password-placeholder-1") {
+		t.Error("the current password does not match")
+	}
+	if s.PasswordMatches(u.ID, "password-placeholder-2") {
+		t.Error("a wrong password matches")
+	}
+	if s.PasswordMatches("no-such-id", "password-placeholder-1") {
+		t.Error("an unknown account matches")
+	}
+	after, _ := s.Get(u.ID)
+	if !after.LastLogin.Equal(before.LastLogin) || !after.LoginLockedUntil.Equal(before.LoginLockedUntil) {
+		t.Errorf("PasswordMatches changed the account: LastLogin %v -> %v, LoginLockedUntil %v -> %v",
+			before.LastLogin, after.LastLogin, before.LoginLockedUntil, after.LoginLockedUntil)
+	}
+}
+
 func TestSetPasswordUnknownUserReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
 	if err := s.SetPassword("nobody", "irrelevant", time.Now()); err != ErrUserNotFound {

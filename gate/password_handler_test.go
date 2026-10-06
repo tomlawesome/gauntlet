@@ -203,3 +203,38 @@ func TestSSOOnlyAdminSetsAFirstLocalPassword(t *testing.T) {
 			door.StatusCode, authGateHeader, door.Header.Get(authGateHeader), authGateMustEnrolFactor)
 	}
 }
+
+// A forced change asks for no current password, so the handler has none
+// to compare the new one with: the stored hash answers instead. Setting
+// the same password again is refused; a different one is accepted and
+// lifts the flag.
+func TestForcedPasswordChangeRefusesTheSamePassword(t *testing.T) {
+	g := newTestGate(t)
+	g.deps.Users = primeMustChangePasswordAdmin(t)
+	ts := newTestServer(t, g)
+
+	client := &http.Client{Jar: mustCookieJar(t)}
+	login := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
+	_ = login.Body.Close()
+	if login.StatusCode != http.StatusOK {
+		t.Fatalf("login got %d, want 200", login.StatusCode)
+	}
+
+	same := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "password-placeholder-1"})
+	status, body := readAll(t, same)
+	if status != http.StatusBadRequest || !strings.Contains(body, "same as the current one") {
+		t.Errorf("resubmitting the current password under a forced change = %d %s, want 400 naming it", status, body)
+	}
+	if u, _ := g.deps.Users.Get("admin-1"); !u.MustChangePassword {
+		t.Fatal("the refused change lifted MustChangePassword")
+	}
+
+	changed := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "a-new-password"})
+	_ = changed.Body.Close()
+	if changed.StatusCode != http.StatusOK {
+		t.Fatalf("a different password under a forced change got %d, want 200", changed.StatusCode)
+	}
+	if u, _ := g.deps.Users.Get("admin-1"); u.MustChangePassword {
+		t.Error("MustChangePassword is still set after a new password")
+	}
+}

@@ -64,6 +64,16 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "the new password is the same as the current one", nil)
 			return
 		}
+	} else if user.MustChangePassword && g.deps.Users.PasswordMatches(user.ID, req.NewPassword) {
+		// No current password was asked for, so there is none to compare
+		// with above; the stored hash answers instead. After a run of
+		// failed second-factor steps, or a sign-in that found the
+		// password in a breach, the password is presumed known to
+		// someone else, and setting it again would lift the flag while
+		// changing nothing. (After an admin reset the stored hash is
+		// unmatchable, so this never fires there.)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "the new password is the same as the current one", nil)
+		return
 	}
 	if g.refuseProductName(w, r, req.NewPassword) {
 		return

@@ -1065,6 +1065,9 @@ paths:
         re-checks the caller's password will work (those answer `409` until
         it has).
 
+        A `newPassword` the same as the current password is `400`, under a
+        forced change too.
+
         A new password is refused with `400`, and a plain-text reason, when
         it is under 8 characters; on the common-password list, in any
         case; found in a known breach by the live Have I Been Pwned check,

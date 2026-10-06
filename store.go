@@ -2030,6 +2030,25 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	})
 }
 
+// PasswordMatches reports whether password is the current password of
+// the account with ID id. It only compares against the stored hash
+// (VerifyPassword, which takes a hash slot like any other check): no
+// lockout is counted, no breach check is made, nothing is recorded or
+// written. It is for refusing a forced password change that sets the
+// same password again, where no current password is asked for and so
+// none is there to compare with. An unknown id is false.
+func (s *Store) PasswordMatches(id, password string) bool {
+	s.reloadIfStale()
+	s.mu.RLock()
+	u, ok := s.byID[id]
+	var hash string
+	if ok {
+		hash = u.PasswordHash
+	}
+	s.mu.RUnlock()
+	return ok && VerifyPassword(password, hash)
+}
+
 // List returns every account, sorted by username, with every credential
 // and credential-adjacent field blanked.
 func (s *Store) List() []User {
