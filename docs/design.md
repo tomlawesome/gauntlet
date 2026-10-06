@@ -25,9 +25,11 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 5 (#28, #44, #43) and
-  tokens as version 1, and a document newer than the running build is
-  refused. Because a
+  version 1 unchanged, gauntlet writes accounts as version 9
+  (#28, #44, #43, #59, #58, #55, #67), tokens as version 3 (#59, #74)
+  and the sign-in history as version 3 (#53, #54, #55), with what each
+  version added in `docversion.go`, and a document newer than the
+  running build is refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
   `User` must carry *every* field mikroview stores today -- including
   TOTP, recovery codes, reset codes and passkeys -- or mikroview's move
