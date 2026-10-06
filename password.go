@@ -179,11 +179,24 @@ func DefaultKDFParams() KDFParams {
 	return KDFParams{Memory: argon2Memory, Time: argon2Time, Threads: argon2Threads}
 }
 
+// Ceilings on a KDFParams Valid accepts. They exist to refuse a damaged
+// or edited lock document, which could otherwise drive DeriveKey into a
+// huge allocation or hold a hash slot for minutes; they are not a limit
+// on a deliberate future profile, which raises these constants with it.
+const (
+	maxKDFMemory  = 1 << 20 // KiB: 1 GiB
+	maxKDFTime    = 64
+	maxKDFThreads = 32
+)
+
 // Valid reports whether p is usable. Zero values would silently produce
 // a derivation far weaker than the documented one, so a lock document
-// that arrives with them is refused rather than opened cheaply.
+// that arrives with them is refused rather than opened cheaply. One
+// over the maxKDF ceilings is refused rather than run.
 func (p KDFParams) Valid() bool {
-	return p.Memory >= 8*1024 && p.Time >= 1 && p.Threads >= 1
+	return p.Memory >= 8*1024 && p.Memory <= maxKDFMemory &&
+		p.Time >= 1 && p.Time <= maxKDFTime &&
+		p.Threads >= 1 && p.Threads <= maxKDFThreads
 }
 
 // DeriveKey turns a passphrase into 32 bytes of key material under p.

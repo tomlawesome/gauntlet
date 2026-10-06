@@ -30,9 +30,10 @@ type EncryptedFileBackend struct {
 }
 
 // NewEncryptedFileBackend wraps the file at path so every read decrypts
-// and every write encrypts under key. It refuses a key shorter than
-// MinKeyBytes rather than derive a weaker cipher key from it, and copies
-// key so the caller may reuse or clear its own slice afterwards.
+// and every write encrypts under key. It refuses an empty path, and a
+// key shorter than MinKeyBytes rather than derive a weaker cipher key
+// from it, and copies key so the caller may reuse or clear its own slice
+// afterwards.
 func NewEncryptedFileBackend(path string, key []byte) (*EncryptedFileBackend, error) {
 	return newEncryptedFileBackendForPath(path, path, key)
 }
@@ -46,6 +47,11 @@ func NewEncryptedFileBackend(path string, key []byte) (*EncryptedFileBackend, er
 // AAD it must match is the logical path mikroview's own code sealed it
 // under.
 func newEncryptedFileBackendForPath(realPath, logicalPath string, key []byte) (*EncryptedFileBackend, error) {
+	// Refused here rather than left for the first Save, so a store with
+	// no path configured fails at startup instead of after setup.
+	if realPath == "" {
+		return nil, errNoPath
+	}
 	enc, err := newEncrypted(newFileBackend(realPath), key, []byte(logicalPath), true, false)
 	if err != nil {
 		return nil, err
