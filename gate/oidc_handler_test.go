@@ -417,7 +417,7 @@ func TestOIDCLinkStartRefusesAlreadyConnectedAccount(t *testing.T) {
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
 	// Link once, successfully.
-	fs := oidcCompleteLinkFlow(t, g, ts, admin, fp)
+	fs := oidcCompleteLinkFlow(t, g, ts, admin, testAdminPassword, fp)
 	_ = fs
 
 	// A second attempt is refused before any provider round trip.
@@ -425,6 +425,38 @@ func TestOIDCLinkStartRefusesAlreadyConnectedAccount(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("starting a second link got %d, want 409", resp.StatusCode)
+	}
+}
+
+// TestOIDCLinkStartAsksForThePassword: a link is permanent and strips a
+// non-admin of its password and factors, so the session cookie alone
+// must not start one. No password, or a wrong one, is 401 and seals no
+// flow state; the right one goes on to the provider.
+func TestOIDCLinkStartAsksForThePassword(t *testing.T) {
+	_, ts, _ := newEmptyOIDCTestGate(t, oidc.Policy{})
+	admin := registerAdmin(t, ts, "admin", testAdminPassword)
+
+	for name, body := range map[string]any{
+		"no body field":  map[string]any{},
+		"wrong password": oidcLinkStartRequest{Password: "not-the-password"},
+	} {
+		resp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: link start got %d, want 401", name, resp.StatusCode)
+		}
+		if cookieNamed(resp, oidcFlowCookieName) != nil {
+			t.Errorf("%s: link start sealed a flow cookie", name)
+		}
+	}
+
+	resp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("link start with the right password got %d, want 200", resp.StatusCode)
+	}
+	if cookieNamed(resp, oidcFlowCookieName) == nil {
+		t.Error("link start with the right password sealed no flow cookie")
 	}
 }
 
@@ -457,7 +489,7 @@ func TestOIDCLinkRevokesEarlierSessionsInMemory(t *testing.T) {
 	other := g.deps.Sessions.Create(adminUser.ID, time.Now().Add(-time.Minute))
 	otherCookie := &http.Cookie{Name: testCookieName, Value: other.ID}
 
-	oidcCompleteLinkFlow(t, g, ts, admin, fp)
+	oidcCompleteLinkFlow(t, g, ts, admin, testAdminPassword, fp)
 
 	linked, ok := g.deps.Users.Get(adminUser.ID)
 	if !ok || linked.SessionsEndedAt.IsZero() {
@@ -478,10 +510,11 @@ func TestOIDCLinkRevokesEarlierSessionsInMemory(t *testing.T) {
 }
 
 // oidcCompleteLinkFlow drives handleOIDCLinkStart + the callback for
-// client (already signed in) end to end, returning the FlowState used.
-func oidcCompleteLinkFlow(t *testing.T, g *Gate, ts *httptest.Server, client *http.Client, fp *testutil.FakeProvider) oidc.FlowState {
+// client (already signed in, with password) end to end, returning the
+// FlowState used.
+func oidcCompleteLinkFlow(t *testing.T, g *Gate, ts *httptest.Server, client *http.Client, password string, fp *testutil.FakeProvider) oidc.FlowState {
 	t.Helper()
-	startResp := postJSON(t, client, ts.URL+"/api/auth/oidc/link", map[string]any{})
+	startResp := postJSON(t, client, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: password})
 	defer func() { _ = startResp.Body.Close() }()
 	if startResp.StatusCode != http.StatusOK {
 		t.Fatalf("link start returned %d", startResp.StatusCode)
@@ -539,7 +572,7 @@ func TestOIDCLinkCallbackRefusesIdentityAlreadyLinkedElsewhere(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
+	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
 	defer func() { _ = startResp.Body.Close() }()
 	var flowCookie *http.Cookie
 	for _, c := range startResp.Cookies() {
@@ -583,7 +616,7 @@ func TestOIDCLinkCallbackSessionChangedRefused(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
+	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
 	defer func() { _ = startResp.Body.Close() }()
 	var flowCookie *http.Cookie
 	for _, c := range startResp.Cookies() {
@@ -631,7 +664,7 @@ func TestOIDCLinkNonAdminLosesLocalPassword(t *testing.T) {
 	operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
 	enrolTOTPFactor(t, operator, ts, "operator-password-placeholder") // POST /api/auth/oidc/link is not an enrolment route
 
-	oidcCompleteLinkFlow(t, g, ts, operator, fp)
+	oidcCompleteLinkFlow(t, g, ts, operator, "operator-password-placeholder", fp)
 
 	u, ok := g.deps.Users.ByUsername("operator")
 	if !ok || u.LocalPassword() {
@@ -720,7 +753,7 @@ func TestOIDCLinkHappyPath(t *testing.T) {
 	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
 	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
+	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
 	defer func() { _ = startResp.Body.Close() }()
 	if startResp.StatusCode != http.StatusOK {
 		t.Fatalf("link start returned %d", startResp.StatusCode)
@@ -878,7 +911,7 @@ func TestOIDCCallbackFailuresAreLogged(t *testing.T) {
 	// when withSession is set.
 	linkCallback := func(t *testing.T, g *Gate, ts *httptest.Server, fp *testutil.FakeProvider, admin *http.Client, withSession bool) *http.Request {
 		t.Helper()
-		startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", map[string]any{})
+		startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
 		_ = startResp.Body.Close()
 		var flowCookie *http.Cookie
 		for _, c := range startResp.Cookies() {

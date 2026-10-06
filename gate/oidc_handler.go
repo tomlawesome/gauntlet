@@ -92,6 +92,12 @@ func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, g.deps.OIDC.AuthCodeURL(fs.State, fs.Nonce, fs.CodeVerifier), http.StatusFound)
 }
 
+// oidcLinkStartRequest is POST /api/auth/oidc/link's body: the caller's
+// own password.
+type oidcLinkStartRequest struct {
+	Password string `json:"password"`
+}
+
 // handleOIDCLinkStart begins linking the signed-in account to an SSO
 // identity. It returns the provider URL as JSON for the caller to
 // navigate to, rather than issuing a redirect itself.
@@ -106,6 +112,15 @@ func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 // The target account is taken from the session and sealed into the flow
 // state, never from the request body -- the caller does not get to say
 // which account a link applies to.
+//
+// Password-gated through recheckPassword, as TOTP enrolment and passkey
+// registration are (ASVS 7.5.1): a link is permanent, and for anyone
+// but an admin it removes the password and every local factor, so a
+// stolen session cookie that could start one would become a way in that
+// outlives the session. The password is the one thing a cookie does not
+// carry. Checked here, before the provider round trip and before any
+// flow state is sealed; the two 409s come first, since they check no
+// credential and an account with no local password has none to give.
 func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	if g.deps.OIDC == nil {
 		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
@@ -129,8 +144,16 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusConflict, classConflict, "this account is already connected to your identity provider", nil)
 		return
 	}
-
+	var req oidcLinkStartRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
 	now := g.now()
+	if _, ok := g.recheckPassword(w, r, caller, req.Password, "incorrect password", now); !ok {
+		return
+	}
+
 	fs, err := oidc.NewFlowState(now)
 	if err != nil {
 		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())

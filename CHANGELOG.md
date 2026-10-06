@@ -337,6 +337,13 @@ All notable changes to this project are documented in this file.
   line, and does the same for a limiter refusal, as the other in-session
   re-checks do (#79). A run of wrong codes from a stolen session cookie
   against a pending enrolment left no trace.
+- `POST /api/auth/oidc/link` asks for the caller's own password,
+  `{"password": ...}`, on the same rate-limited re-check as TOTP enrol
+  and passkey registration: a wrong or missing one is `401`, a spent
+  budget `429`, and no flow cookie is set (#79). A link is permanent and
+  strips a non-admin of its password and factors, so a stolen session
+  cookie alone could turn into a lasting way in. A frontend that starts
+  a link must now send the password.
 
 ### Changed
 

@@ -1048,7 +1048,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	// SSO is off on this gate.
 	c.do(anon, u, call{method: "GET", path: "/api/auth/oidc/login"}, 404, nil)
 	c.do(anon, u, call{method: "GET", path: "/api/auth/oidc/callback?state=x&code=y"}, 404, nil)
-	c.do(admin, u, call{method: "POST", path: "/api/auth/oidc/link"}, 404, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/oidc/link", body: passwordRequest{adminPass}}, 404, nil)
 
 	// Last, because it exhausts this client address's login budget.
 	limited := false
@@ -1074,7 +1074,7 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	// The first admin is local (newOIDCTestServer registered "setup-admin"
 	// with the setup code); the first SSO sign-in is an ordinary user.
 	first := c.client()
-	contractSSOSignIn(t, c, codec, fp, first, u, "/api/auth/oidc/login", "/")
+	contractSSOSignIn(t, c, codec, fp, first, u, "/api/auth/oidc/login", nil, "/")
 	// An SSO-provisioned account has no local password: no passkey.
 	c.do(first, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{"anything"}}, 409, nil)
 	admin := c.client()
@@ -1110,8 +1110,9 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	carol := c.client()
 	c.do(carol, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"carol", "contract-carol-password"}}, 200, nil)
 	enrolTOTPFactor(t, c, u, carol, "contract-carol-password") // POST /api/auth/oidc/link is not an enrolment route
-	contractSSOSignIn(t, c, codec, fp, carol, u, "/api/auth/oidc/link", "/?ssoLinked=1")
-	c.do(carol, u, call{method: "POST", path: "/api/auth/oidc/link"}, 409, nil)
+	c.do(carol, u, call{method: "POST", path: "/api/auth/oidc/link", body: passwordRequest{"wrong"}}, 401, nil)
+	contractSSOSignIn(t, c, codec, fp, carol, u, "/api/auth/oidc/link", passwordRequest{"contract-carol-password"}, "/?ssoLinked=1")
+	c.do(carol, u, call{method: "POST", path: "/api/auth/oidc/link", body: passwordRequest{"contract-carol-password"}}, 409, nil)
 
 	// A callback with no flow cookie goes back to the login page.
 	resp := c.do(c.client(), u, call{method: "GET", path: "/api/auth/oidc/callback?state=x&code=y"}, 302, nil)
@@ -1120,15 +1121,16 @@ func contractSSO(t *testing.T, c *contractChecker) {
 	}
 }
 
-// contractSSOSignIn starts a flow at start (the SSO login or link route),
-// has the fake provider answer for the next subject, and finishes it at
-// the callback, which must redirect to wantLocation.
-func contractSSOSignIn(t *testing.T, c *contractChecker, codec *oidc.StateCodec, fp *testutil.FakeProvider, client *http.Client, base, start, wantLocation string) {
+// contractSSOSignIn starts a flow at start (the SSO login or link route,
+// the link sent body), has the fake provider answer for the next
+// subject, and finishes it at the callback, which must redirect to
+// wantLocation.
+func contractSSOSignIn(t *testing.T, c *contractChecker, codec *oidc.StateCodec, fp *testutil.FakeProvider, client *http.Client, base, start string, body any, wantLocation string) {
 	t.Helper()
 	if start == "/api/auth/oidc/login" {
 		c.do(client, base, call{method: "GET", path: start}, 302, nil)
 	} else {
-		c.do(client, base, call{method: "POST", path: start}, 200, nil)
+		c.do(client, base, call{method: "POST", path: start, body: body}, 200, nil)
 	}
 	target, err := http.NewRequest(http.MethodGet, base+"/api/auth/oidc/callback", nil)
 	if err != nil {

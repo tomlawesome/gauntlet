@@ -1663,9 +1663,18 @@ paths:
         Sets the flow cookie and returns the provider URL for the browser
         to navigate to; `GET /api/auth/oidc/callback` finishes it. A
         completed link removes the local password of every account except
-        an admin's: every admin keeps theirs (#67). Takes no body.
+        an admin's: every admin keeps theirs (#67). Password-gated
+        (rate-limited re-check), checked before the flow cookie is set;
+        `409` for an account that is already SSO-only or already linked
+        comes first.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Navigate the browser to `url`.
@@ -1678,14 +1687,18 @@ paths:
                 properties:
                   url:
                     type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
