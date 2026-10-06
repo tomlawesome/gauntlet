@@ -354,6 +354,15 @@ All notable changes to this project are documented in this file.
   devices. An SSO-only account still sends no body; the audit detail
   says the browsers were kept. A frontend must now send the password
   for an account that has one.
+- A sign-in the unusual-sign-in policy holds (`confirm`, `prove`) or
+  refuses (`block`) keeps its login-limiter attempt until the window
+  hands it back, as `login/factor/begin` keeps its own, on the password,
+  second-factor and passkey-alone paths (#79). Handed back, someone
+  holding the password could repeat it without limit, flooding the
+  owner with confirmation codes or a lone admin's log with escape codes;
+  the sixth in one window from one address and account is now `429`.
+  Like any kept attempt, a run of them counts toward the account's
+  lockout.
 
 ### Changed
 

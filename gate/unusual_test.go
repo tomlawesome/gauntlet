@@ -900,8 +900,9 @@ func TestUnusualBlockOneStep(t *testing.T) {
 	before, _ := e.g.deps.Users.Get(e.bobID)
 	sessionsBefore := len(e.g.deps.Sessions.ListForUser(e.bobID, e.clock.now()))
 
-	// Six refusals in a row from one address: each attempt is handed
-	// back, so none is ever 429.
+	// Six refusals in a row from one address: each keeps its attempt,
+	// so the fifth fills the window and starts a lockout, and the sixth
+	// goes ahead only on the known browser's own allowance.
 	for i := range 6 {
 		resp := postJSON(t, b.at(addrParis), e.ts.URL+"/api/auth/login",
 			credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
@@ -915,8 +916,8 @@ func TestUnusualBlockOneStep(t *testing.T) {
 		t.Errorf("a refusal issued a session: %d, was %d", n, sessionsBefore)
 	}
 	after, _ := e.g.deps.Users.Get(e.bobID)
-	if after.LoginLockoutCount != before.LoginLockoutCount {
-		t.Errorf("lockout count %d after refusals, was %d: a refusal reset it", after.LoginLockoutCount, before.LoginLockoutCount)
+	if after.LoginLockoutCount != before.LoginLockoutCount+1 {
+		t.Errorf("lockout count %d after refusals, was %d: want the one lockout the kept attempts started", after.LoginLockoutCount, before.LoginLockoutCount)
 	}
 	if len(after.SeenCountries) != 1 || after.SeenCountries[0].Code != "GB" || len(after.KnownBrowsers) != 1 {
 		t.Errorf("a refusal was remembered: %+v %+v", after.SeenCountries, after.KnownBrowsers)
@@ -942,7 +943,9 @@ func TestUnusualBlockOneStep(t *testing.T) {
 		t.Errorf("a completed sign-in left the lockout count at %d", u.LoginLockoutCount)
 	}
 
-	// After an admin's reset code, the refused place sets the baseline.
+	// After an admin's reset code, the refused place sets the baseline,
+	// once the window its refusals filled has passed.
+	e.advance(6 * time.Minute)
 	admin := e.adminNow(t)
 	resp := postJSON(t, admin, e.ts.URL+"/api/auth/users/"+e.bobID+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	status, body := readAll(t, resp)
@@ -1136,6 +1139,27 @@ func TestUnusualConfirmSendsACode(t *testing.T) {
 	}
 }
 
+// A held sign-in keeps its limiter reservation: it is an attempt in
+// flight, and the window hands it back. Released, someone holding the
+// password could sign in from a new place without limit and flood the
+// owner with confirmation codes. Six held sign-ins in one window from
+// one address: the sixth is 429 and no sixth code is delivered.
+func TestUnusualHeldSignInsAreLimited(t *testing.T) {
+	e, rec, _ := confirmEnv(t)
+	for i := 1; i <= 5; i++ {
+		status, body := e.signIn(t, newTestBrowser(t), addrParis)
+		if status != http.StatusOK || strings.TrimSpace(body) != `{"confirm":true}` {
+			t.Fatalf("held sign-in %d = %d %s, want 200 {\"confirm\":true}", i, status, body)
+		}
+	}
+	if status, body := e.signIn(t, newTestBrowser(t), addrParis); status != http.StatusTooManyRequests {
+		t.Errorf("the sixth held sign-in in one window = %d %s, want 429", status, body)
+	}
+	if got := len(rec.allCodes()); got != 5 {
+		t.Errorf("%d confirmation codes delivered, want 5", got)
+	}
+}
+
 // The code completes the same sign-in, in any of its spellings, once.
 func TestUnusualConfirmCompletes(t *testing.T) {
 	for name, spell := range map[string]func(string) string{
@@ -1196,6 +1220,9 @@ func TestUnusualConfirmWrongCodes(t *testing.T) {
 	if wrong == code {
 		wrong = "11111111"
 	}
+	// The held sign-in keeps its attempt in the window; once that has
+	// passed, the five wrong codes below are the window's whole budget.
+	e.advance(6 * time.Minute)
 	for i := range 5 {
 		_, status, body := e.postConfirm(t, b, addrParis, wrong)
 		if status != http.StatusUnauthorized || problemType(t, body) != "invalid-credentials" || decodeProblem(t, []byte(body)).Detail != "invalid confirmation code" {

@@ -274,7 +274,8 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Only a success releases, so ordinary repeated logins never
 	// accumulate toward the threshold: releaseLogin for a password that
 	// still owes a second factor, completeLogin for a sign-in it
-	// completes.
+	// completes. A sign-in the unusual-sign-in policy holds or refuses
+	// keeps its reservation (below).
 
 	// A correct password on an account holding an active second factor
 	// must NOT create a session -- see docs/design.md §1.6 and the
@@ -328,10 +329,13 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodPassword, place, now)
 	if verdict.stopsSignIn() {
-		// Confirm or block: the credential was right, so the attempt is
-		// handed back rather than completed; nothing completed, so the
-		// account's count is not reset.
-		g.releaseLogin(res, now)
+		// Confirm, prove or block: the credential was right, but nothing
+		// completed, so the reservation is kept, as login/factor/begin
+		// keeps its own -- an attempt in flight, which the window hands
+		// back -- and the account's count is not reset. Handed back,
+		// someone holding the password could repeat a held sign-in
+		// without limit and flood the owner with confirmation codes, or
+		// a lone admin's log with escape codes.
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
 		sent, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
@@ -433,8 +437,10 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 			// hands that back too, so a passkey sign-in costs none of
 			// the budget a wrong guess is limited by. completeLoginFactor
 			// releases this request's own; begin's goes back only once
-			// the sign-in has actually completed, so a replay refused
-			// there keeps both.
+			// every credential has been accepted, so a replay refused
+			// there keeps both. A held or refused sign-in keeps this
+			// request's and hands back begin's: one attempt, as on the
+			// code path.
 			if g.completeLoginFactor(w, r, user, res, st, method, now) {
 				g.releaseLogin(res, now)
 			}
@@ -504,7 +510,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // It also reports true when the unusual-sign-in policy refused the
 // sign-in or held it for a confirmation code (#55): every credential
 // was right, so the passkey begin step's reservation is handed back as
-// for a success.
+// for a success. This request's own is kept, as handleLogin keeps a
+// held sign-in's: an attempt in flight, which the window hands back.
 func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) bool {
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
@@ -519,8 +526,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	if verdict.stopsSignIn() {
 		// The pending login is already spent above, so one correct code
 		// yields one refusal or one confirmation code, never that and
-		// then a session.
-		g.releaseLogin(res, now)
+		// then a session. The reservation is kept (see handleLogin).
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
 		sent, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)

@@ -984,7 +984,10 @@ issued. `gate.New` refuses an unknown action, `confirm` with
 no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with
 no `Config.Locate` (`prove` needs nothing wired). A `flag` or `block` notice through `Config.Notices`
 is rate-limited to once an account per hour; a `confirm` code has no
-limit, since the notice is the code the person is waiting for.
+limit of its own, since the notice is the code the person is waiting
+for, but every held or refused sign-in keeps its login-limiter attempt
+until the window hands it back, so the login limit bounds the codes
+(#79).
 
 **Account notices (#73, folding in #53 and #55).** `Config.Notices`
 (`AccountNotifier`) is the one hook for every account event this module
