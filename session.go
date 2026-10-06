@@ -611,12 +611,42 @@ func (s *SessionStore) RevokeAllForUser(userID string) {
 // a new session this sign-out never claimed to touch. A caller that
 // counted first and revoked after (gauntlet#58 R5, the admin sign-out's
 // "ended" response) could report one short when a login raced it.
+//
+// The count includes sessions that had already timed out but were kept
+// as resumable, which no session list shows.
+//
+// Deprecated: use EndSessionsForUser, which counts only the sessions
+// that were still live, so the number agrees with the account's own
+// list of sessions.
 func (s *SessionStore) RevokeAllForUserCount(userID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.byUser[userID])
 	for id := range s.byUser[userID] {
 		s.revokeVisits++
+		delete(s.sessions, id)
+	}
+	delete(s.byUser, userID)
+	return n
+}
+
+// EndSessionsForUser ends every session belonging to userID, as
+// RevokeAllForUser does, and reports how many of them were live at now:
+// the number a person would have seen in their own list of sessions
+// (ListForUser) just before. Sessions that had timed out but could
+// still be resumed, or that were past their ceiling and not yet swept,
+// are ended too but not counted -- reporting them as sessions ended
+// would claim more than the list ever showed. Counted and ended under
+// one lock, for the reason RevokeAllForUserCount gives.
+func (s *SessionStore) EndSessionsForUser(userID string, now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id := range s.byUser[userID] {
+		s.revokeVisits++
+		if sess, ok := s.sessions[id]; ok && !s.expired(sess, now) {
+			n++
+		}
 		delete(s.sessions, id)
 	}
 	delete(s.byUser, userID)

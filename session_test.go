@@ -472,3 +472,28 @@ func TestSessionCreateContinuingWithNoCeiling(t *testing.T) {
 		t.Error("the continued session was refused")
 	}
 }
+
+// EndSessionsForUser ends every session of the account, as
+// RevokeAllForUser does, but counts only the live ones: a session that
+// timed out and is kept only to be resumed is not in the person's own
+// list, so reporting it as one ended would disagree with that list.
+func TestSessionEndSessionsForUserCountsOnlyLiveSessions(t *testing.T) {
+	s := NewSessionStore(time.Hour, 24*time.Hour)
+	t0 := time.Now()
+	idle := s.Create("u1", t0)
+	now := t0.Add(2 * time.Hour)
+	live := s.Create("u1", now)
+	if _, ok := s.Resumable(idle.ID, now); !ok {
+		t.Fatal("the idle session is not resumable; the test needs it to be")
+	}
+
+	if n := s.EndSessionsForUser("u1", now); n != 1 {
+		t.Errorf("EndSessionsForUser = %d, want 1 live session", n)
+	}
+	if _, ok := s.Validate(live.ID, now); ok {
+		t.Error("the live session survived")
+	}
+	if _, ok := s.Resumable(idle.ID, now); ok {
+		t.Error("the timed-out session survived and can still be resumed")
+	}
+}
