@@ -508,10 +508,10 @@ rate limited on the client address like registration, with one
 identical refusal for every wrong input. It only lifts the disable: no
 session is issued, and the admin signs in as normal with their existing
 password and second factor -- not a password reset, account reset or
-admin transfer (owner, 2026-10-02). A disable the record still holds
-after it has lapsed and before an attempt clears it still counts for
-the unlock code, since the store has no clock to tell otherwise;
-redeeming it makes the same clear. A lockout whose save fails
+admin transfer (owner, 2026-10-02). The unlock code follows
+`User.LoginDisabled`, as every other check does: a disable that has
+lapsed (#70) issues no code, even while the record still holds it, and
+an outstanding code stops working once its disable lapses. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A clear whose save fails -- the owner signed in and
 ended a lockout the record still holds -- is retried the same way, but
