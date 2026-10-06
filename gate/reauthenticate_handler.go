@@ -152,8 +152,8 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 // password does, and is recorded as factor_refused with method resume.
 // A dead ceremony (no cookie, expired, already used) checked nothing, so
 // the reservation goes back and the answer is 401 step-expired. The
-// address reservation the begin step took is handed back once the
-// credential is right.
+// reservation the begin step took (passkeyBeginKey) is handed back once
+// the credential is right.
 func (g *Gate) resumeWithPasskey(w http.ResponseWriter, r *http.Request, ps gauntlet.PasskeySignIn, user *gauntlet.User, res loginReservation, assertion json.RawMessage, now time.Time) {
 	dead := func() {
 		g.releaseLogin(res, now)
@@ -190,12 +190,12 @@ func (g *Gate) resumeWithPasskey(w http.ResponseWriter, r *http.Request, ps gaun
 		return
 	case signInAssertionBackendFailed:
 		g.releaseLogin(res, now)
-		g.deps.Limiter.Release(res.ipKey, now)
+		g.deps.Limiter.Release(passkeyBeginKey(res.address), now) // the begin step's reservation
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	}
 	g.clearPasskeySignInCookie(w)
-	g.deps.Limiter.Release(res.ipKey, now) // the begin step's reservation
+	g.deps.Limiter.Release(passkeyBeginKey(res.address), now) // the begin step's reservation
 	g.finishResume(w, r, user, res, now)
 }
 
