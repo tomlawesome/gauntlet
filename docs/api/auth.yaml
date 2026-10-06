@@ -668,9 +668,12 @@ paths:
         /api/auth/login/passkey` and a passkey resume at `POST
         /api/auth/reauthenticate`.
 
-        Nothing names an account yet, so it takes one attempt on the
-        client address's login limit and keeps it until a sign-in
-        completes; a banned address or one at its limit is `429`. The
+        Nothing names an account yet, so it takes one attempt on a limit
+        of its own for the client address -- the same size as the login
+        limit, but not shared with it, so challenges a browser asks for and
+        never uses spend none of the address's sign-in attempts -- and
+        keeps it until a sign-in completes; a banned address or one at
+        that limit is `429`. The
         known-browser allowance, which belongs to an account, applies at
         `login/passkey`. `404` unless passkey sign-in is on; `409` while
         the relying party is not ready.

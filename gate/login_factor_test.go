@@ -523,3 +523,40 @@ func TestAWrongCodeDoesNotSpendThePendingLogin(t *testing.T) {
 		t.Errorf("the right code after a wrong one on the same pending login got %d, want 200 and a session", right.StatusCode)
 	}
 }
+
+// An assertion sent while the relying party is not ready is answered
+// 409 before anything is reserved, so retrying it spends none of the
+// budget a wrong guess is limited by.
+func TestLoginFactorPasskeyNotReadySpendsNoAttempts(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	fake, _ := registerPasskey(t, bilbo, ts, g, "YubiKey")
+	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	assertion := passkeyLoginFactorBegin(t, pending, ts)
+
+	const threshold = 3
+	g.deps.Limiter = mustNewLoginLimiter(t, threshold, time.Minute)
+	g.deps.Passkeys = mustRelyingParty(t, "")
+	for i := range threshold {
+		resp := submitPasskeyAssertion(t, pending, ts, fake, assertion)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("attempt %d got %d, want 409", i+1, resp.StatusCode)
+		}
+	}
+
+	now := time.Now()
+	id := passkeyBilboID(t, g)
+	for i := range threshold {
+		if !g.deps.Limiter.Reserve("ip:198.51.100.1", now) {
+			t.Errorf("address: only %d of %d attempts left after %d not-ready answers, want all of them", i, threshold, threshold)
+			break
+		}
+	}
+	for i := range threshold {
+		if !g.deps.Limiter.ReserveAccount(g.deps.Users, id, now) {
+			t.Errorf("account: only %d of %d attempts left after %d not-ready answers, want all of them", i, threshold, threshold)
+			break
+		}
+	}
+}

@@ -271,10 +271,12 @@ func (g *Gate) completeHeldSignIn(w http.ResponseWriter, r *http.Request, user *
 	_, signals := g.issueSignInSession(w, r, user.ID, place, st.Signals, st.Method, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, st.Method)
 	ev.Client.Unusual, ev.Confirmed = signals, true
-	note := ""
-	if signals != 0 {
-		note = fmt.Sprintf("unusual=%s; action=%s; ", signals, action)
-	}
+	// The note names what was judged -- the ticket's signals -- and how
+	// the hold was answered, whatever remembering the browser did to the
+	// session's signals: the audit says how this sign-in was completed
+	// (recordSignInNote reads the action), and a failed remember write
+	// must not lose that.
+	note := fmt.Sprintf("unusual=%s; action=%s; ", st.Signals, action)
 	g.recordSignInNote(r, ev, res, note, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 }

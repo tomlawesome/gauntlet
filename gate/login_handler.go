@@ -411,6 +411,14 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	method := gauntlet.SignInMethodCode
 	if len(req.Assertion) > 0 {
 		method = gauntlet.SignInMethodPasskey
+		// Checked before anything is reserved: the 409 checks no
+		// credential, so nothing would hand the reservation back, and an
+		// owner retrying while the relying party is not ready would spend
+		// attempts toward a 429 and a lockout without a single guess.
+		if !g.passkeysReady() {
+			g.writePasskeysNotReady(w)
+			return
+		}
 	}
 	res, ok := g.reserveLogin(w, r, user.ID, user.Username, method, st.AfterReset, now)
 	if !ok {

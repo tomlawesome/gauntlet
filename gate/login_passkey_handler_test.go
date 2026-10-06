@@ -289,6 +289,12 @@ func TestPasskeySignInGivesBothReservationsBack(t *testing.T) {
 			break
 		}
 	}
+	for i := range threshold {
+		if !e.g.deps.Limiter.Reserve(passkeyBeginKey("198.51.100.1"), now) {
+			t.Errorf("begin: %d of %d attempts left after a successful passkey sign-in, want all", i, threshold)
+			break
+		}
+	}
 }
 
 // Begin reserves one attempt on the address, so one address cannot mint
@@ -320,6 +326,30 @@ func TestPasskeySignInBeginIsRateLimited(t *testing.T) {
 	wantStatusClass(t, resp, string(raw), http.StatusTooManyRequests, classRateLimited)
 }
 
+// A browser asks for a challenge on every load of a login page with
+// passkey autofill and after every dismissed prompt, so begin has a
+// budget of its own: begins that are never finished leave the address's
+// sign-in attempts alone, and are still bounded.
+func TestPasskeySignInBeginSpendsNoSignInAttempts(t *testing.T) {
+	e := newAloneEnv(t)
+	for i := range 5 { // newTestGate's limiter threshold
+		resp := e.signInBegin(t, newBrowserJar(t))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("begin %d returned %d, want 200", i+1, resp.StatusCode)
+		}
+	}
+	// A browser this account has never used, so only the address's
+	// ordinary budget can admit it.
+	if status := signInFrom(t, newBrowserJar(t), e.ts, passkeyBilboUsername, passkeyBilboPassword); status != http.StatusOK {
+		t.Errorf("a password sign-in after five unfinished begins got %d, want 200", status)
+	}
+	resp := e.signInBegin(t, newBrowserJar(t))
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	wantStatusClass(t, resp, string(raw), http.StatusTooManyRequests, classRateLimited)
+}
+
 // -- refusals ---------------------------------------------------------------
 
 // An assertion that did not verify the user is refused, keeps the
@@ -343,11 +373,19 @@ func TestPasskeySignInWithoutUserVerificationIsRefusedAndCounted(t *testing.T) {
 		t.Errorf("event = %+v, want it on bilbo's account", ev)
 	}
 
-	// The reservations stayed: a second attempt's begin takes the
-	// address's third, and its finish finds none left.
-	e.fake.NoUserVerification = false
-	resp, body = e.signIn(t, newBrowserJar(t), e.fake)
-	wantStatusClass(t, resp, body, http.StatusTooManyRequests, classRateLimited)
+	// The reservations stayed: the finish holds one of the address's
+	// three attempts and one of the account's.
+	now := e.clock.now()
+	for i := range 3 {
+		if ok := e.g.deps.Limiter.Reserve("ip:198.51.100.1", now); ok != (i < 2) {
+			t.Errorf("address attempt %d after the refusal admitted = %v, want only two of three left", i+1, ok)
+		}
+	}
+	for i := range 3 {
+		if ok := e.g.deps.Limiter.ReserveAccount(e.g.deps.Users, e.id, now); ok != (i < 2) {
+			t.Errorf("account attempt %d after the refusal admitted = %v, want only two of three left", i+1, ok)
+		}
+	}
 }
 
 // The same ceremony, finished again with user verification, signs in.
@@ -865,7 +903,7 @@ func TestPasskeySignInKnownBrowserPassesTheAddressLimit(t *testing.T) {
 	knownOptions, _ := e.mustBegin(t, known)
 	strangerClient := newBrowserJar(t)
 	strangerOptions, _ := e.mustBegin(t, strangerClient)
-	for range 3 { // the two begins hold two of the five; fill the rest
+	for range 5 { // the begins hold none of the address's five; fill them
 		e.g.deps.Limiter.Reserve("ip:198.51.100.1", e.clock.now())
 	}
 	resp, body := e.finish(t, strangerClient, signInAssertionBody(t, e.fake, strangerOptions))
@@ -1060,8 +1098,8 @@ func TestAUserVerifyingPasskeyResumesATimedOutSession(t *testing.T) {
 		t.Errorf("resumed session list = %d %+v, want method passkey_alone kept", status, list.Sessions)
 	}
 	wantEvents(t, e.events.all(), "success/resume")
-	if rec := auditEntries(e.audit, "user.reauthenticated"); len(rec) != 1 {
-		t.Errorf("user.reauthenticated records = %+v, want one", rec)
+	if rec := auditEntries(e.audit, "user.reauthenticated"); len(rec) != 1 || rec[0].Detail != "session resumed with passkey"+fixtureFromSuffix {
+		t.Errorf("user.reauthenticated records = %+v, want one, resumed with passkey", rec)
 	}
 	// The old ID is dead.
 	if r, _ := withCookie(t, e.ts, http.MethodGet, "/api/protected", old, nil); r.StatusCode != http.StatusUnauthorized {
