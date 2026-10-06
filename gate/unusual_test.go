@@ -847,29 +847,6 @@ func TestUnusualFailedRememberTellsNobody(t *testing.T) {
 // design words it.
 const wantRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
 
-// The refusal names only actions that work for the account: an account
-// with no local password is not told to ask for a reset the reset route
-// would refuse.
-func TestSignInRefusedDetailFitsTheAccount(t *testing.T) {
-	for _, c := range []struct {
-		name  string
-		local bool
-		want  string
-	}{
-		{"local password", true, wantRefusedDetail},
-		{"SSO only", false, "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			writeSignInRefusedFor(rec, &gauntlet.User{Username: "bob", HasLocalPassword: c.local})
-			p := decodeProblem(t, rec.Body.Bytes())
-			if rec.Code != http.StatusForbidden || p.Type != problemTypeBase+"sign-in-refused" || p.Detail != c.want {
-				t.Errorf("%d %+v, want 403 sign-in-refused %q", rec.Code, p, c.want)
-			}
-		})
-	}
-}
-
 // cookieNamed is the cookie resp sets under name, or nil.
 func cookieNamed(resp *http.Response, name string) *http.Cookie {
 	for _, c := range resp.Cookies() {

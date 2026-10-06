@@ -176,13 +176,14 @@ named under the class it shares, below.
   Retrying from the same browser and place changes nothing; the account
   itself is not locked.
 - Returned by `POST /api/auth/login` and `POST /api/auth/login/factor`.
-  The SSO callback redirects with `ssoError=refused` instead.
-- `detail` is "this sign-in was refused by the account's sign-in
+  The SSO callback redirects with `ssoError=refused` instead. An
+  SSO-only account refused there has no administrator remedy in this
+  release (the reset code needs a local password): the way back is a
+  browser or place the account has signed in from before.
+- `detail` is always "this sign-in was refused by the account's sign-in
   policy -- use a browser or place this account has signed in from
-  before, or ask an administrator to reset the account" for an account
-  with a local password. For an account with none (SSO only), which the
-  reset route refuses, it stops at "... signed in from before". It never
-  says which signal was raised, or whether a code would have been sent.
+  before, or ask an administrator to reset the account". It never says
+  which signal was raised, or whether a code would have been sent.
 - No `X-Auth-Gate` header: that header marks a session stopped at a
   door, and no session exists here.
 - For an admin no other admin can act for, the response also sets the

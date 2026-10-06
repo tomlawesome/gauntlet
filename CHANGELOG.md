@@ -531,13 +531,12 @@ Behaviour changes and deprecations from the v0.3.0 release audit (#79):
   the new entry is never the one evicted; before, three cookie-less
   sign-ins pushed the owner's everyday browser out. An unconfirmed
   entry is still known.
-- The sign-in-refused text names only the actions that work for the
-  account, on the password, factor and passkey paths alike (#79). An
-  account with no local password is no longer told to ask an
-  administrator for a reset the reset route refuses; its text stops at
-  "use a browser or place this account has signed in from before".
-  ADR-0009 records that an SSO-only account under `block` has no
-  administrator remedy yet.
+- The sign-in-refused text and the SSO-refusal docs now name only
+  actions that work (#79). The `403` text, which only an account with a
+  local password receives, is unchanged; `docs/api/errors.md` and
+  ADR-0009 now say that an SSO-only account refused at the SSO callback
+  (`ssoError=refused`) has no administrator remedy in this release, and
+  that its way back is a browser or place it has signed in from before.
 - The restart unlock code honours the 24-hour self-lift (#79). A
   restart after a disable had lifted itself no longer logs "locked out"
   and prints a live break-glass code for an admin who can sign in, and
