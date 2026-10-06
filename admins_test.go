@@ -305,12 +305,64 @@ func TestHasLocalAdminCountsAnyAdmin(t *testing.T) {
 	if !s.HasLocalAdmin() {
 		t.Error("an admin with a password exists but HasLocalAdmin = false")
 	}
+	// Demoting the one with the password, which used to leave only the
+	// SSO-only admin, is now refused (TestLastLocalAdminCannotBeDemotedOrDeleted).
 	setup, _ := s.ByUsername("setup-admin")
-	if _, _, err := s.SetRole(setup.ID, RoleUser, time.Now()); err != nil {
+	if _, _, err := s.SetRole(setup.ID, RoleUser, time.Now()); !errors.Is(err, ErrLastLocalAdmin) {
+		t.Fatalf("demoting the last admin with a password = %v, want ErrLastLocalAdmin", err)
+	}
+	if !s.HasLocalAdmin() {
+		t.Error("a refused demotion lost the local way in")
+	}
+}
+
+// Every admin keeps a local password (owner decision on #79): while the
+// other admins sign in only through SSO, the last admin with a password
+// can be neither demoted nor deleted. The SSO-only admin itself may go,
+// and once another admin has a password, so may the first.
+func TestLastLocalAdminCannotBeDemotedOrDeleted(t *testing.T) {
+	s := openTestStoreWithAdmin(t) // setup-admin keeps a password
+	if _, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-c", "carol", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if s.HasLocalAdmin() {
-		t.Error("only an SSO-only admin remains but HasLocalAdmin = true")
+	if _, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-d", "dave", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	carol, _ := s.ByUsername("carol")
+	dave, _ := s.ByUsername("dave")
+	for _, id := range []string{carol.ID, dave.ID} {
+		if _, _, err := s.SetRole(id, RoleAdmin, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup, _ := s.ByUsername("setup-admin")
+
+	for _, role := range []Role{RoleUser, RoleViewer} {
+		if _, _, err := s.SetRole(setup.ID, role, time.Now()); err != ErrLastLocalAdmin {
+			t.Errorf("demoting the last admin with a password to %s = %v, want ErrLastLocalAdmin", role, err)
+		}
+	}
+	if _, err := s.DeleteUser(setup.ID); err != ErrLastLocalAdmin {
+		t.Errorf("deleting the last admin with a password = %v, want ErrLastLocalAdmin", err)
+	}
+	if u, ok := s.Get(setup.ID); !ok || u.Role != RoleAdmin {
+		t.Fatalf("setup-admin after the refusals = %+v, want an admin still", u)
+	}
+
+	// An SSO-only admin is no one's local way in.
+	if _, _, err := s.SetRole(carol.ID, RoleUser, time.Now()); err != nil {
+		t.Errorf("demoting an SSO-only admin: %v", err)
+	}
+	if _, err := s.DeleteUser(carol.ID); err != nil {
+		t.Errorf("deleting an SSO-only (now plain) account: %v", err)
+	}
+
+	// Once dave has a password, setup-admin is no longer the last.
+	if err := s.SetPassword("dave", "correct-horse-battery-staple", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteUser(setup.ID); err != nil {
+		t.Errorf("deleting setup-admin once another admin has a password: %v", err)
 	}
 }
 

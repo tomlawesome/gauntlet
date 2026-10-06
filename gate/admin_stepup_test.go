@@ -5,8 +5,11 @@ package gate
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // stepUpRoute is one of the five routes: send makes the request with
@@ -146,5 +149,57 @@ func TestRecheckAdminPasswordRefusesWithNoCaller(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+// An SSO-only admin has no password to re-enter: every step-up route
+// answers 409 telling it to set one, and none of those requests spends
+// its re-check budget, however many there are.
+func TestStepUpRoutesTellAnSSOOnlyAdminToSetAPassword(t *testing.T) {
+	g, ts, _, bilboID := stepUpFixture(t)
+	id, admin := ssoOnlyAdmin(t, g, ts, "subject-ann")
+
+	routes := stepUpRoutes()
+	routes = append(routes,
+		stepUpRoute{
+			name: "create admin",
+			send: func(t *testing.T, ts *httptest.Server, admin *http.Client, _ string, _ any) *http.Response {
+				return postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{
+					Username: "sam", Password: "password-placeholder-9", Role: "admin",
+					AdminPassword: "anything-at-all", AdminCode: "123456",
+				})
+			},
+			effect: func(g *Gate, _ string) bool { _, ok := g.deps.Users.ByUsername("sam"); return ok },
+		},
+		stepUpRoute{
+			name: "grant admin",
+			send: func(t *testing.T, ts *httptest.Server, admin *http.Client, id string, _ any) *http.Response {
+				return doJSON(t, admin, http.MethodPut, ts.URL+"/api/auth/users/"+id+"/role",
+					setRoleRequest{Role: "admin", Password: "anything-at-all", Code: "123456"})
+			},
+			effect: func(g *Gate, id string) bool {
+				u, ok := g.deps.Users.Get(id)
+				return ok && u.Role == gauntlet.RoleAdmin
+			},
+		},
+	)
+	for _, route := range routes {
+		for range 2 {
+			resp := route.send(t, ts, admin, bilboID, adminStepUpRequest{Password: "anything-at-all"})
+			status, body := readAll(t, resp)
+			if status != http.StatusConflict || !strings.Contains(body, "local password") {
+				t.Errorf("%s by an SSO-only admin = %d %s, want 409 naming the local password", route.name, status, body)
+			}
+		}
+		if route.effect(g, bilboID) {
+			t.Errorf("%s took effect for an SSO-only admin", route.name)
+		}
+	}
+
+	// Fourteen refusals, and the whole budget is still there.
+	for i := range 5 {
+		if !g.deps.Limiter.ReserveRecheck(id, time.Now()) {
+			t.Fatalf("re-check reservation %d refused: the 409s spent the budget", i+1)
+		}
 	}
 }

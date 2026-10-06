@@ -267,6 +267,9 @@ named under the class it shares, below.
 - The request would leave the deployment with no admin account (#67):
   deleting the last admin, or demoting them to `user` or `viewer`. Make
   another account an admin first, then retry. Nothing was changed.
+  The same class refuses deleting or demoting the last admin that has a
+  local password while other admins remain (#79): they would all depend
+  on the identity provider. Give another admin a local password first.
 - Returned by `DELETE /api/auth/users/{id}` (the last admin; deleting
   the caller's own account while other admins exist is `conflict`
   instead) and `PUT /api/auth/users/{id}/role`. Before #67 deleting the
@@ -274,7 +277,10 @@ named under the class it shares, below.
   branch on this class too.
 - `detail` is "this is the last admin account -- make another account
   an admin first", or, for a delete, "the last admin account cannot be
-  deleted -- make another account an admin first".
+  deleted -- make another account an admin first", or, for the last
+  admin with a local password, "this is the last admin that can sign in
+  without the identity provider -- give another admin a local password
+  first".
 
 ## role-managed-by-sso
 

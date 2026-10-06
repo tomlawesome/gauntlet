@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -130,5 +133,73 @@ func TestChangePasswordStoreFailureIsLogged(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "save refused") {
 		t.Errorf("the store's error is not in the server log; log = %q", logs.String())
+	}
+}
+
+// ssoOnlyAdmin provisions an account through SSO, as a sign-in would,
+// promotes it to admin, and returns its ID and a client holding a
+// session for it. The account has no local password.
+func ssoOnlyAdmin(t *testing.T, g *Gate, ts *httptest.Server, subject string) (string, *http.Client) {
+	t.Helper()
+	u, _, err := g.deps.Users.FindOrCreateOIDCUser("https://idp.example", subject, subject, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := g.deps.Users.SetRole(u.ID, gauntlet.RoleAdmin, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sess := g.deps.Sessions.Create(u.ID, time.Now())
+	return u.ID, sessionClient(t, ts.URL, sess.ID)
+}
+
+// Every admin keeps a local password (ADR-0010), so an SSO-only admin
+// may set one with nothing but the new password; an SSO-only user still
+// may not. Once it has one, the forced second-factor enrolment door
+// holds it like any other local account.
+func TestSSOOnlyAdminSetsAFirstLocalPassword(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
+
+	frodo, _, err := g.deps.Users.FindOrCreateOIDCUser("https://idp.example", "subject-frodo", "frodo", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := sessionClient(t, ts.URL, g.deps.Sessions.Create(frodo.ID, time.Now()).ID)
+	refused := postJSON(t, user, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "new-password-1"})
+	_ = refused.Body.Close()
+	if refused.StatusCode != http.StatusConflict {
+		t.Errorf("an SSO-only user setting a password got %d, want 409", refused.StatusCode)
+	}
+
+	id, admin := ssoOnlyAdmin(t, g, ts, "subject-ann")
+	if got := protectedStatusWithCookie(t, admin, ts.URL, nil); got != http.StatusOK {
+		t.Fatalf("the SSO-only admin's session got %d before setting a password, want 200", got)
+	}
+	resp := postJSON(t, admin, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "new-password-1"})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("an SSO-only admin setting a first password got %d, want 200", resp.StatusCode)
+	}
+	u, _ := g.deps.Users.Get(id)
+	if !u.LocalPassword() {
+		t.Error("the admin still has no local password")
+	}
+	if _, err := g.deps.Users.Authenticate(u.Username, "new-password-1", time.Now()); err != nil {
+		t.Errorf("the new password does not sign in: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/protected", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	door, err := admin.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = door.Body.Close()
+	if door.StatusCode != http.StatusForbidden || door.Header.Get(authGateHeader) != authGateMustEnrolFactor {
+		t.Errorf("after setting a password: %d %s=%q, want 403 at the %s door",
+			door.StatusCode, authGateHeader, door.Header.Get(authGateHeader), authGateMustEnrolFactor)
 	}
 }

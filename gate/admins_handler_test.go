@@ -361,6 +361,31 @@ func TestLastAdminCannotBeDemotedOrDeleted(t *testing.T) {
 	}
 }
 
+// The last admin with a local password cannot be demoted while the
+// other admins sign in only through SSO (#79): 409 last-admin, with a
+// message saying what to do instead -- whether it demotes itself or an
+// SSO-only admin, who needs no step-up to demote, tries. (Deleting it
+// over HTTP cannot get that far: the only admin able to pass the
+// delete's step-up is itself, and nobody deletes their own account.
+// The store's own test covers the delete.)
+func TestLastLocalAdminCannotBeDemoted(t *testing.T) {
+	f := newAdminsFixture(t)
+	_, ann := ssoOnlyAdmin(t, f.g, f.ts, "subject-ann")
+
+	for name, client := range map[string]*http.Client{"itself": f.admin, "an SSO-only admin": ann} {
+		status, body := f.setRole(t, client, f.adminID, setRoleRequest{Role: "user"})
+		if status != http.StatusConflict || adminProblemType(t, body) != problemTypeBase+"last-admin" {
+			t.Errorf("%s demoting the last admin with a password = %d %s, want 409 last-admin", name, status, body)
+		}
+		if !strings.Contains(body, "local password") {
+			t.Errorf("message = %s", body)
+		}
+	}
+	if r := roleOf(t, f.g, f.adminID); r != gauntlet.RoleAdmin {
+		t.Errorf("admin's role = %q, want admin", r)
+	}
+}
+
 func TestAdminMayDemoteThemselvesWhenAnotherAdminExists(t *testing.T) {
 	f := newAdminsFixture(t)
 	f.grantBob(t)
