@@ -9,11 +9,9 @@
 // Moved unchanged from mikroview's internal/oidc (oidc.go, policy.go,
 // state.go -- mikroview issue #43), as docs/design.md §1.4 and
 // docs/adr/0001-shared-auth-module.md record: mikroview's own move onto
-// this package (#1202) is expected to see no functional difference. The
-// self-hosted-only policy in policy.go (AllowIssuer, IsMultiTenantIssuer)
-// is deliberately not made configurable -- mikroview's
-// docs/decisions/multi-tenant-oidc.md decided that, and it moves as a
-// fixed decision, not a knob a future caller can turn on.
+// this package (#1202) is expected to see no functional difference. A
+// shared public issuer is refused unless the Policy pins the tenant
+// (AllowIssuerWithPolicy, docs/adr/0014-shared-issuers.md).
 package oidc
 
 import (
@@ -55,6 +53,11 @@ type Config struct {
 	// mainly so tests can shrink it rather than wait out the real
 	// default against a deliberately slow fake provider.
 	HTTPTimeout time.Duration
+	// Policy is the sign-in policy the application will enforce with
+	// this client. New reads it only to decide whether a shared issuer
+	// is pinned to one tenant (AllowIssuerWithPolicy); pass the same
+	// value to gate's Deps.OIDCPolicy, which checks it again.
+	Policy Policy
 }
 
 // Identity is the only data this package trusts out of a verified ID
@@ -112,6 +115,7 @@ func (i *Identity) claimValues(name string) []string {
 // (the .well-known document + JWKS) happens once, in New, not per
 // request.
 type Client struct {
+	issuer       string
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
 	httpClient   *http.Client
@@ -125,11 +129,11 @@ type Client struct {
 // verification path over it.
 func New(ctx context.Context, cfg Config) (*Client, error) {
 	// Enforced here too, not just left to the caller's own startup check
-	// (AllowIssuer stays exported for that): this library exists so the
-	// self-hosted-only fix lands once, and an app that forgets its own
-	// call must not fall back to letting any account at a public
-	// provider sign itself in.
-	if err := AllowIssuer(cfg.IssuerURL); err != nil {
+	// (AllowIssuerWithPolicy stays exported for that): this library
+	// exists so the shared-issuer rule lands once, and an app that
+	// forgets its own call must not fall back to letting any account at
+	// a public provider sign itself in.
+	if err := AllowIssuerWithPolicy(cfg.IssuerURL, cfg.Policy); err != nil {
 		return nil, fmt.Errorf("oidc: %w", err)
 	}
 
@@ -143,6 +147,22 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: discovering provider at %s: %w", cfg.IssuerURL, err)
+	}
+
+	// go-oidc refuses a discovery document naming another issuer unless
+	// the caller opted out with its InsecureIssuerURLContext, so this is
+	// normally cfg.IssuerURL again. Checked as well so a configured URL
+	// that only fronts a shared issuer is caught, and kept for Issuer,
+	// which gate's own startup check reads.
+	issuer := cfg.IssuerURL
+	var discovered struct {
+		Issuer string `json:"issuer"`
+	}
+	if err := provider.Claims(&discovered); err == nil && discovered.Issuer != "" {
+		issuer = discovered.Issuer
+	}
+	if err := AllowIssuerWithPolicy(issuer, cfg.Policy); err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
 	}
 
 	scopes := cfg.Scopes
@@ -162,6 +182,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	return &Client{
+		issuer:     issuer,
 		httpClient: httpClient,
 		oauth2Config: oauth2.Config{
 			ClientID:     cfg.ClientID,
@@ -184,6 +205,12 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		}),
 	}, nil
 }
+
+// Issuer returns the issuer the provider named in its discovery
+// document -- Config.IssuerURL, unless the caller used go-oidc's
+// InsecureIssuerURLContext -- so gate can check it against the Policy it
+// enforces. Empty for a Client not built by New.
+func (c *Client) Issuer() string { return c.issuer }
 
 // AuthCodeURL builds the URL to redirect the browser to for login --
 // state is an opaque CSRF token, nonce defends against ID token replay,
