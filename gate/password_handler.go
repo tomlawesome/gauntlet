@@ -32,7 +32,15 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// An SSO-only account has no local password to change, and inventing
 	// one here would quietly create a second way into an account whose
 	// owner believes it is federated.
-	if !user.LocalPassword() {
+	//
+	// An admin is the exception: every admin keeps a local way in, so
+	// the deployment is not locked out when the identity provider is
+	// down (ADR-0010). An SSO-only account promoted to admin sets its
+	// first password here, with no current one to check because there
+	// is none. Once it has a password the forced second-factor enrolment
+	// door (Protect) applies to it like any other local account.
+	firstLocalPassword := !user.LocalPassword() && user.Role == gauntlet.RoleAdmin
+	if !user.LocalPassword() && !firstLocalPassword {
 		writeProblem(w, http.StatusConflict, classConflict, "this account signs in through your identity provider and has no local password to change", nil)
 		return
 	}
@@ -46,7 +54,7 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// in the same write that sets the flag, so the caller got here
 	// through a sign-in made since -- with the reset code, or with the
 	// password and a second factor.
-	if !user.MustChangePassword {
+	if !user.MustChangePassword && !firstLocalPassword {
 		// Throttled and re-checked by recheckPassword.
 		if _, ok := g.recheckPassword(w, r, user, req.CurrentPassword, "current password is incorrect", now); !ok {
 			return
@@ -56,6 +64,16 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "the new password is the same as the current one", nil)
 			return
 		}
+	} else if user.MustChangePassword && g.deps.Users.PasswordMatches(user.ID, req.NewPassword) {
+		// No current password was asked for, so there is none to compare
+		// with above; the stored hash answers instead. After a run of
+		// failed second-factor steps, or a sign-in that found the
+		// password in a breach, the password is presumed known to
+		// someone else, and setting it again would lift the flag while
+		// changing nothing. (After an admin reset the stored hash is
+		// unmatchable, so this never fires there.)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "the new password is the same as the current one", nil)
+		return
 	}
 	if g.refuseProductName(w, r, req.NewPassword) {
 		return
@@ -135,17 +153,36 @@ type adminStepUpRequest struct {
 // caller's own password, entered again on the request itself, so a
 // stolen session cookie alone cannot do any of them. A missing password
 // is a wrong one -- 401 and counted on the same re-check budget -- not a
-// separate 400, as on every other re-check route. Call it after the
-// request has been checked for being well formed and before it reads or
-// changes any account. Writes every refusal itself.
+// separate 400, as on every other re-check route. A caller with no
+// local password is 409 instead (refuseWithoutLocalPassword). Call it
+// after the request has been checked for being well formed and before
+// it reads or changes any account. Writes every refusal itself.
 func (g *Gate) recheckAdminPassword(w http.ResponseWriter, r *http.Request, password string, now time.Time) bool {
 	caller := UserFromContext(r)
 	if caller == nil {
 		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return false
 	}
+	if refuseWithoutLocalPassword(w, caller) {
+		return false
+	}
 	_, ok := g.recheckPassword(w, r, caller, password, "incorrect password", now)
 	return ok
+}
+
+// refuseWithoutLocalPassword writes a 409, and reports true, when caller
+// has no local password to re-check: an SSO-only account promoted to
+// admin. Its password could never match, so a 401 would send it round
+// a loop that only spends its re-check budget; the 409 says what to do
+// instead -- set a local password first, as every admin must
+// (ADR-0010). The budget is left untouched.
+func refuseWithoutLocalPassword(w http.ResponseWriter, caller *gauntlet.User) bool {
+	if caller.LocalPassword() {
+		return false
+	}
+	writeProblem(w, http.StatusConflict, classConflict,
+		"this account signs in through your identity provider and must set a local password first (POST /api/auth/password) before it can do this", nil)
+	return true
 }
 
 // recheckSecondFactor is recheckPassword for a signed-in caller's

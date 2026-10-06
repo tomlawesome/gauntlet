@@ -122,3 +122,8 @@ the step-up).
 - The `/api/auth/users` routes still need only the session for
   everything but a grant, as before; ASVS 7.5.3 is met for role grants
   only, not for reset codes, token creation and the other admin routes.
+- Every admin keeps a local password (owner decision on #79,
+  2026-10-06): an SSO-only account promoted to admin may set one through
+  `POST /api/auth/password`; until it does, every step-up route answers
+  409 telling it to; and the last admin holding a local password can be
+  neither demoted nor deleted (`ErrLastLocalAdmin`, 409 `last-admin`).

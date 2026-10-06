@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tomlawesome/gauntlet/persist"
 )
@@ -44,6 +45,15 @@ import (
 // for every local-password account (#49), so the password is never the
 // only factor, and 8 conforms unconditionally.
 const minPasswordLength = 8
+
+// passwordTooShort reports whether password is under minPasswordLength
+// characters. Characters, not bytes: NIST SP 800-63B-4 counts each
+// Unicode code point as one, and ErrPasswordTooShort says
+// "characters", so eight letters of a non-Latin script -- two or three
+// bytes each in UTF-8 -- count as eight, not as up to twenty-four.
+func passwordTooShort(password string) bool {
+	return utf8.RuneCountInString(password) < minPasswordLength
+}
 
 var (
 	// ErrNotPersisted is returned by Register/CreateUser when no backend
@@ -87,6 +97,14 @@ var (
 	// so DeleteUser returns this very value; errors.Is(err,
 	// ErrLastAdmin) is also true of it.
 	ErrCannotDeleteAdmin error = lastAdminDeleteError{}
+	// ErrLastLocalAdmin is returned by SetRole and DeleteUser when the
+	// change would leave no admin that can sign in with a local
+	// password (ADR-0010; owner decision on #79). Every other admin
+	// signs in only through the identity provider, so losing this one
+	// would leave the deployment locked out the day the provider is
+	// down or misconfigured. Give another admin a local password first
+	// -- an SSO-only admin may set one (POST /api/auth/password).
+	ErrLastLocalAdmin = errors.New("gauntlet: this is the last admin that can sign in without the identity provider -- give another admin a local password first")
 	// ErrRoleUnchanged is returned by SetRole when the account already
 	// holds the role asked for, so nothing was written.
 	ErrRoleUnchanged = errors.New("gauntlet: that account already has that role")
@@ -1009,8 +1027,9 @@ func (s *Store) CreateUser(username, password string, role Role, now time.Time) 
 //
 // It refuses to delete the last admin (ErrCannotDeleteAdmin, which is
 // also ErrLastAdmin): a deployment with none has no way to add accounts,
-// manage tokens, or reach any admin-gated screen. Any other admin may be
-// deleted. The count is taken inside the write, against the document
+// manage tokens, or reach any admin-gated screen. Nor the last admin
+// with a local password (ErrLastLocalAdmin): the others would all
+// depend on the identity provider. Any other admin may be deleted. The count is taken inside the write, against the document
 // being saved, so two admins deleted at once cannot both succeed.
 // Enforced here rather than only at a caller's own API layer so every
 // caller inherits it.
@@ -1036,6 +1055,9 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 		}
 		if u.Role == RoleAdmin && st.adminCount() <= 1 {
 			return ErrCannotDeleteAdmin
+		}
+		if st.isLastLocalAdmin(u) {
+			return ErrLastLocalAdmin
 		}
 		delete(st.byID, id)
 		delete(st.byName, strings.ToLower(u.Username))
@@ -1128,6 +1150,23 @@ func (st *storeState) adminCount() int {
 	return n
 }
 
+// isLastLocalAdmin reports whether u is an admin with a local password
+// and no other admin in st has one: demoting or deleting it would leave
+// every remaining admin dependent on the identity provider
+// (ErrLastLocalAdmin). Taken inside the write, like adminCount, so two
+// such changes at once cannot both succeed.
+func (st *storeState) isLastLocalAdmin(u *User) bool {
+	if u.Role != RoleAdmin || !u.LocalPassword() {
+		return false
+	}
+	for _, other := range st.byID {
+		if other.ID != u.ID && other.Role == RoleAdmin && other.LocalPassword() {
+			return false
+		}
+	}
+	return true
+}
+
 // firstAdmin is the admin with the lowest username, or nil: "the" admin
 // for the callers that want one, the same every time (map order is not).
 func (st *storeState) firstAdmin() *User {
@@ -1181,7 +1220,9 @@ func (s *Store) Admins() []User {
 // issued under the higher privilege should not outlive it (OWASP session
 // management: renew the session after a privilege change).
 //
-// The last admin cannot be demoted: ErrLastAdmin. The count is taken
+// The last admin cannot be demoted: ErrLastAdmin; nor can the last
+// admin with a local password, while other admins remain:
+// ErrLastLocalAdmin. The count is taken
 // inside the write, against the document being saved, so two admins
 // demoting each other at once cannot both succeed and leave none --
 // the check-then-act race TransferAdmin's comment names. An account
@@ -1212,6 +1253,9 @@ func (s *Store) SetRole(id string, role Role, now time.Time) (*User, Role, error
 		if u.Role == RoleAdmin && st.adminCount() <= 1 {
 			return ErrLastAdmin
 		}
+		if st.isLastLocalAdmin(u) {
+			return ErrLastLocalAdmin
+		}
 		from = u.Role
 		u.Role = role
 		u.RoleChangedAt = now
@@ -1233,8 +1277,11 @@ func (s *Store) SetRole(id string, role Role, now time.Time) (*User, Role, error
 // sign in with a local password.
 //
 // With several admins (#67) it is true when any one of them has a
-// local password; every admin keeps one on an SSO link
-// (LinkOIDCIdentity), so in practice that is all of them.
+// local password. An account that is already an admin when it is
+// linked to SSO keeps its password (LinkOIDCIdentity), but one
+// provisioned by SSO and promoted later has none until it sets one, so
+// not every admin need have one. SetRole and DeleteUser refuse to
+// remove the last admin that does (ErrLastLocalAdmin).
 //
 // It reuses User.LocalPassword() rather than re-deriving "has a
 // password" from the stored hash: an unmatchable hash is deliberately
@@ -1272,7 +1319,7 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 	if err := ValidateLocalUsername(username); err != nil {
 		return nil, err
 	}
-	if len(password) < minPasswordLength {
+	if passwordTooShort(password) {
 		return nil, ErrPasswordTooShort
 	}
 	breachPending, err := s.checkNewPassword(username, password)
@@ -1332,6 +1379,37 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 	s.setupCodeHash = nil
 	s.mu.Unlock()
 	return &created, nil
+}
+
+// ValidateNewAccount runs the checks CreateUser makes of username and
+// password before it writes anything -- ValidateLocalUsername, the
+// minimum length, whether the username is taken, and the password
+// policy (checkNewPassword: context, the common-password list, the
+// breach check) -- and returns the first error, as CreateUser would. It
+// writes nothing.
+//
+// It is for a caller that must do something costly or irreversible
+// between taking the request and creating the account -- gate spends a
+// recovery code on the step-up for creating an admin -- so a typo is
+// refused before that, not after. CreateUser still makes every check
+// itself, inside the write where it matters: the username may be taken
+// in between.
+func (s *Store) ValidateNewAccount(username, password string) error {
+	if err := ValidateLocalUsername(username); err != nil {
+		return err
+	}
+	if passwordTooShort(password) {
+		return ErrPasswordTooShort
+	}
+	s.reloadIfStale()
+	s.mu.RLock()
+	_, taken := s.byName[strings.ToLower(username)]
+	s.mu.RUnlock()
+	if taken {
+		return ErrUsernameTaken
+	}
+	_, err := s.checkNewPassword(username, password)
+	return err
 }
 
 // ByOIDCIdentity looks up the user linked to the given (issuer,
@@ -1936,7 +2014,7 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 // tool runs in a different process from the live server, so it has no
 // way to reach into that server's in-memory SessionStore directly.
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
-	if len(newPassword) < minPasswordLength {
+	if passwordTooShort(newPassword) {
 		return ErrPasswordTooShort
 	}
 	breachPending, err := s.checkNewPassword(username, newPassword)
@@ -1991,6 +2069,25 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		u.LoginLockoutCount = 0
 		return nil
 	})
+}
+
+// PasswordMatches reports whether password is the current password of
+// the account with ID id. It only compares against the stored hash
+// (VerifyPassword, which takes a hash slot like any other check): no
+// lockout is counted, no breach check is made, nothing is recorded or
+// written. It is for refusing a forced password change that sets the
+// same password again, where no current password is asked for and so
+// none is there to compare with. An unknown id is false.
+func (s *Store) PasswordMatches(id, password string) bool {
+	s.reloadIfStale()
+	s.mu.RLock()
+	u, ok := s.byID[id]
+	var hash string
+	if ok {
+		hash = u.PasswordHash
+	}
+	s.mu.RUnlock()
+	return ok && VerifyPassword(password, hash)
 }
 
 // List returns every account, sorted by username, with every credential

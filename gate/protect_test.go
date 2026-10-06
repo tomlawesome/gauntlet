@@ -624,3 +624,30 @@ func TestAuthSessionEmitsFalseBooleans(t *testing.T) {
 		}
 	}
 }
+
+// An SSO-only account has no password to change, and the one route the
+// must-change door admits refuses it, so the door would shut it out of
+// everything. The store no longer sets the flag on such an account, but
+// a document written before that may carry it: the door lets it by.
+func TestMustChangePasswordDoorSkipsAnSSOOnlyAccount(t *testing.T) {
+	hash, err := gauntlet.HashPassword("password-placeholder-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGate(t)
+	g.deps.Users = openStoreWithUsers(t,
+		gauntlet.User{
+			ID: "admin-1", Username: "admin", PasswordHash: hash, Role: gauntlet.RoleAdmin,
+			CreatedAt: time.Now(), HasLocalPassword: true,
+		},
+		gauntlet.User{
+			ID: "frodo-1", Username: "frodo", PasswordHash: hash, Role: gauntlet.RoleUser,
+			CreatedAt: time.Now(), OIDCIssuer: "https://idp.example", OIDCSubject: "subject-frodo",
+			HasLocalPassword: false, MustChangePassword: true,
+		})
+	ts := newTestServer(t, g)
+	sess := g.deps.Sessions.Create("frodo-1", time.Now())
+	if got := protectedStatusWithCookie(t, sessionClient(t, ts.URL, sess.ID), ts.URL, nil); got != http.StatusOK {
+		t.Errorf("an SSO-only account carrying MustChangePassword got %d, want 200", got)
+	}
+}

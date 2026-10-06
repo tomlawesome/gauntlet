@@ -415,7 +415,14 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// knows the password (gauntlet.LoginLimiter.SecondFactorFailed,
 		// #44). The account carries no record of which, so the message
 		// names neither.
-		if user.MustChangePassword && path != changePasswordPath {
+		//
+		// Only for an account with a local password: one that signs in
+		// through its identity provider has no password to change, and
+		// the one route this door admits refuses it, so the door would
+		// shut it out of everything. The store no longer sets the flag on
+		// such an account, but a document written before that may carry
+		// it.
+		if user.MustChangePassword && user.LocalPassword() && path != changePasswordPath {
 			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustChangePassword))
 			writeForcedAuthGate(w, authGateMustChangePassword, "this account's password must be changed -- set a new password before going any further")
 			return
