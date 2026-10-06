@@ -104,6 +104,32 @@ func TestCreateUserAddsAdditionalAccounts(t *testing.T) {
 
 // TestCreateUserAcceptsViewer: RoleViewer is a valid role for
 // CreateUser, same as RoleUser.
+// ValidateNewAccount answers what CreateUser would for the same
+// username and password, and creates nothing.
+func TestValidateNewAccountAnswersAsCreateUserWould(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		username, password string
+		want               error
+	}{
+		{"second", "password-placeholder-2", nil},
+		{"ADMIN", "password-placeholder-2", ErrUsernameTaken},
+		{"second", "short", ErrPasswordTooShort},
+		{"second@example.com", "password-placeholder-2", ErrUsernameIsEmail},
+		{"second", "password", ErrPasswordBlocked},
+	} {
+		if err := s.ValidateNewAccount(c.username, c.password); err != c.want {
+			t.Errorf("ValidateNewAccount(%q, %q) = %v, want %v", c.username, c.password, err, c.want)
+		}
+	}
+	if s.Count() != 1 {
+		t.Errorf("%d accounts after validating, want 1", s.Count())
+	}
+}
+
 func TestCreateUserAcceptsViewer(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "password-placeholder-1", time.Now())

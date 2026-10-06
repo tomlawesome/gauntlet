@@ -1371,6 +1371,37 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 	return &created, nil
 }
 
+// ValidateNewAccount runs the checks CreateUser makes of username and
+// password before it writes anything -- ValidateLocalUsername, the
+// minimum length, whether the username is taken, and the password
+// policy (checkNewPassword: context, the common-password list, the
+// breach check) -- and returns the first error, as CreateUser would. It
+// writes nothing.
+//
+// It is for a caller that must do something costly or irreversible
+// between taking the request and creating the account -- gate spends a
+// recovery code on the step-up for creating an admin -- so a typo is
+// refused before that, not after. CreateUser still makes every check
+// itself, inside the write where it matters: the username may be taken
+// in between.
+func (s *Store) ValidateNewAccount(username, password string) error {
+	if err := ValidateLocalUsername(username); err != nil {
+		return err
+	}
+	if len(password) < minPasswordLength {
+		return ErrPasswordTooShort
+	}
+	s.reloadIfStale()
+	s.mu.RLock()
+	_, taken := s.byName[strings.ToLower(username)]
+	s.mu.RUnlock()
+	if taken {
+		return ErrUsernameTaken
+	}
+	_, err := s.checkNewPassword(username, password)
+	return err
+}
+
 // ByOIDCIdentity looks up the user linked to the given (issuer,
 // subject) pair, if any.
 func (s *Store) ByOIDCIdentity(issuer, subject string) (*User, bool) {

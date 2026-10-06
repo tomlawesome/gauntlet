@@ -83,11 +83,17 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
 	// The step-up is the last check before the write, after every
 	// refusal that costs the caller nothing, so a recovery code is not
-	// spent on a request that was always going to be refused.
+	// spent on a request that was always going to be refused. That
+	// includes the new account's own username and password:
+	// ValidateNewAccount makes CreateUser's checks of them up front.
 	if role == gauntlet.RoleAdmin {
 		caller := UserFromContext(r)
 		if caller == nil {
 			writeUnauthorized(w, classSignInRequired, "sign in first")
+			return
+		}
+		if err := g.deps.Users.ValidateNewAccount(req.Username, req.Password); err != nil {
+			g.writeCreateUserError(w, r, err)
 			return
 		}
 		if !g.recheckStepUp(w, r, caller, req.AdminPassword, req.AdminCode, now,
@@ -97,18 +103,7 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := g.deps.Users.CreateUser(req.Username, req.Password, role, now)
 	if err != nil {
-		status, class := http.StatusInternalServerError, classServerError
-		switch err {
-		case gauntlet.ErrUsernameTaken:
-			status, class = http.StatusConflict, classConflict
-		case gauntlet.ErrNotPersisted:
-			status, class = http.StatusServiceUnavailable, classNotPersisted
-		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
-			gauntlet.ErrInvalidRole,
-			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
-			status, class = http.StatusBadRequest, classInvalidRequest
-		}
-		g.writeAuthError(w, r, err, status, class)
+		g.writeCreateUserError(w, r, err)
 		return
 	}
 	detail := "role=" + string(user.Role)
@@ -123,6 +118,23 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			RoleChanged: &RoleChangeDetail{To: user.Role},
 		})
 	}
+}
+
+// writeCreateUserError answers an error from CreateUser, or from
+// ValidateNewAccount ahead of it, with its status and class.
+func (g *Gate) writeCreateUserError(w http.ResponseWriter, r *http.Request, err error) {
+	status, class := http.StatusInternalServerError, classServerError
+	switch err {
+	case gauntlet.ErrUsernameTaken:
+		status, class = http.StatusConflict, classConflict
+	case gauntlet.ErrNotPersisted:
+		status, class = http.StatusServiceUnavailable, classNotPersisted
+	case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
+		gauntlet.ErrInvalidRole,
+		gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
+		status, class = http.StatusBadRequest, classInvalidRequest
+	}
+	g.writeAuthError(w, r, err, status, class)
 }
 
 // handleListUsers backs the admin-facing account list. Admin-only (via
