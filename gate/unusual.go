@@ -542,17 +542,11 @@ func signInRefusedDetailFor(user *gauntlet.User) string {
 	return signInRefusedDetailSSO
 }
 
-// writeSignInRefused answers a refused sign-in: 403 sign-in-refused,
+// writeSignInRefusedFor answers a refused sign-in: 403 sign-in-refused,
 // with no X-Auth-Gate header, which marks a session stopped at a door,
-// and no session exists here. It always offers the reset, so it is for
-// the password and second-factor paths, which only an account with a
-// local password reaches; anywhere else use writeSignInRefusedFor.
-func writeSignInRefused(w http.ResponseWriter) {
-	writeProblem(w, http.StatusForbidden, classSignInRefused, signInRefusedDetail, nil)
-}
-
-// writeSignInRefusedFor is writeSignInRefused with the detail chosen for
-// user's account (signInRefusedDetailFor).
+// and no session exists here. The detail is chosen for user's account
+// (signInRefusedDetailFor), so an account with no local password is
+// not sent to a reset it cannot have.
 func writeSignInRefusedFor(w http.ResponseWriter, user *gauntlet.User) {
 	writeProblem(w, http.StatusForbidden, classSignInRefused, signInRefusedDetailFor(user), nil)
 }
