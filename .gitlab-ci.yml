@@ -325,7 +325,10 @@ blocklist:build:
           - .gitlab-ci.yml
       paths:
         - .gocache/
-    - key: blocklist-checkpoint-$CI_PIPELINE_ID
+    # Prefixed like every other cache key: a pipeline on an unprotected
+    # branch must never seed the checkpoint the protected monthly build
+    # resumes from, whatever the project's cache-separation setting.
+    - key: $CI_COMMIT_REF_PROTECTED-blocklist-checkpoint-$CI_PIPELINE_ID
       paths:
         - .blocklist/
       when: always
