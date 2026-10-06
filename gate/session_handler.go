@@ -89,7 +89,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp.Role = string(user.Role)
 		resp.HasLocalPassword = user.LocalPassword()
 		resp.SSOConnected = user.OIDCSubject != ""
-		resp.MustChangePassword = user.MustChangePassword
+		resp.MustChangePassword = user.MustChangePassword && user.LocalPassword()
 		resp.MustEnrolSecondFactor = !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor()
 		resp.HasTOTP = user.HasActiveTOTP()
 		if g.deps.Passkeys != nil {

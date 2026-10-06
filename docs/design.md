@@ -355,7 +355,7 @@ type AccountLockoutRecords interface {                              // new: a ho
 type LoginLockoutRecord struct { LockedUntil time.Time; Lockouts int; DisabledAt time.Time }
 
 type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
-// escape_issued, escape_refused // new (#66, ADR-0011): a lone admin's refused sign-in was given an escape code in the server log (no session yet; a refused row is recorded too) / a wrong escape code; escape_issued is never budgeted, escape_refused is budgeted as any failure
+// escape_issued, escape_refused // new (#66, ADR-0011): a lone admin's refused or held sign-in was given an escape code in the server log (no session yet; the refused or confirm_sent row is recorded too) / a wrong escape code; escape_issued is never budgeted, escape_refused is budgeted as any failure
 // refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out (or, under prove, a passkey is owed, #65) and no session yet, confirm_refused is a wrong code (or a refused passkey assertion). refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
 type SignInMethod string  // password, code, passkey, sso
 type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool
@@ -693,7 +693,7 @@ type Config struct {
     Notices             AccountNotifier // told about every account event (#73); nil = nobody told
     Notify              Notifier      // deprecated: Notices narrowed to one event (#53); New refuses both set
     DeliverConfirmCode  func(ctx context.Context, c ConfirmCode) error // synchronous; nil = the confirm action is unavailable (#55, #73)
-    OnEscapeCode        EscapeCodeHandler // #66: takes a refused lone admin's escape code; nil = a Warn line on Log; both nil = none issued
+    OnEscapeCode        EscapeCodeHandler // #66: takes a lone admin's escape code (refused or held sign-in); nil = a Warn line on Log; both nil = none issued
     ClientIP            func(*http.Request) string // limiter key and from= in every audit record (#45); app owns trusted-proxy policy
     UnusualSignIns      UnusualSignInPolicy // what a new browser, new country or impossible travel does (#55)
     Now                 func() time.Time
@@ -968,7 +968,7 @@ account with no passkey usable here is held for a code (`confirm`) when
 `Config.DeliverConfirmCode` is set, else refused (`block`), and
 `UnusualSignInCase.CanProve` tells `Decide` which. `block` answers 403 `sign-in-refused` (`docs/api/errors.md`), refusing
 the one attempt, never the account, and writes nothing to the
-account's memory. One exception (#66, ADR-0011): a refused admin whom
+account's memory. One exception (#66, ADR-0011): a refused or held admin whom
 no other admin can act for (`Store.OtherAdminCanAct`) also gets an
 escape code -- written to the server's log, or handed to
 `Config.OnEscapeCode`, never answered -- and a sealed ticket cookie
@@ -1509,7 +1509,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A browser shared by two accounts refused on every switch | the known-browser cookie carries up to four tokens, one per account (#55 change to #44), so switching accounts in one browser is not "new" to the second account |
 | A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
-| The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual |
+| The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual. Since the v0.3.0 audit (#79) the code is also issued when the admin's sign-in is held for a code or a passkey (`confirm`, `prove`), so a lost passkey or an undelivered code has the same way out |
 | A log-written escape code that an attacker reads | someone who can read the log already owns the host and holds the setup and unlock codes; without the log, a thief holding the password and second factor has the ticket but no code, and the code without that browser's ticket is nothing. Eighty bits behind the login limiter, one outstanding per refused attempt, single use, gone at expiry or restart |
 
 ### Fail-closed list

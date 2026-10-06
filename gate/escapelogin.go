@@ -68,7 +68,7 @@ func (f EscapeCodeFunc) EscapeCode(username, address, code string) { f(username,
 // browser's cookie can sign in -- but only with the password and second
 // factor that browser already proved.
 func escapeCodeLogLine(username, address, code string) string {
-	return fmt.Sprintf("sign-in for the admin account %q from %s was refused by the unusual-sign-in policy, and no other admin can act -- "+
+	return fmt.Sprintf("sign-in for the admin account %q from %s was stopped by the unusual-sign-in policy (refused, or held for a code or passkey), and no other admin can act -- "+
 		"let that attempt through with escape code %s (valid %d minutes, in the browser that was refused; "+
 		"it then signs in with the password and second factor it already proved)",
 		username, address, code, int(EscapeCodeLifetime/time.Minute))

@@ -377,3 +377,25 @@ func TestTransferAdminEndsTheOldAdminsSessions(t *testing.T) {
 		t.Errorf("old admin's SessionsEndedAt = %v, want %v", from.SessionsEndedAt, now)
 	}
 }
+
+func TestTransferAdminRefusesAnSSOOnlyTargetFromTheLastLocalAdmin(t *testing.T) {
+	s := openTestStoreWithAdmin(t) // setup-admin keeps a password
+	if _, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-c", "carol", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.TransferAdmin("carol", time.Now()); err != ErrLastLocalAdmin {
+		t.Fatalf("transferring the only admin role to an SSO-only account = %v, want ErrLastLocalAdmin", err)
+	}
+	setup, _ := s.ByUsername("setup-admin")
+	if setup.Role != RoleAdmin {
+		t.Fatalf("setup-admin after the refusal = %s, want admin still", setup.Role)
+	}
+	// With a password of her own, carol is a local way in and the
+	// transfer goes through.
+	if err := s.SetPassword("carol", "correct-horse-battery-staple", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.TransferAdmin("carol", time.Now()); err != nil {
+		t.Fatalf("transferring to an account with a password: %v", err)
+	}
+}

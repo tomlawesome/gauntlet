@@ -246,7 +246,9 @@ paths:
         for may also set the escape cookie (#66): the code that lets that
         one attempt through is in the server's log, not in any response,
         and `POST /api/auth/login/escape` redeems it. The `403` body is
-        the same either way.
+        the same either way. A sign-in held for such an admin (`200` with
+        `confirm` or `prove`) sets the cookie too, so a lost passkey or an
+        undelivered code has the same way out.
       security:
         - {}
       parameters:

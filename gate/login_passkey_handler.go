@@ -299,7 +299,7 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, g.heldChallenge(verdict))
 			return
 		}
-		writeSignInRefused(w)
+		writeSignInRefusedFor(w, user)
 		g.notify(r.Context(), notice)
 		return
 	}
