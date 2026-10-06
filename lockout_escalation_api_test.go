@@ -346,3 +346,26 @@ func TestSecondFactorRunIgnoresAChangeDateUnderALockout(t *testing.T) {
 			u.MustChangePassword, u.SessionsEndedAt, fifth)
 	}
 }
+
+// An SSO-only account has no password to change: five second-factor
+// failures end its sessions but do not set MustChangePassword, which
+// would shut it out behind a door that refuses it.
+func TestSecondFactorFailuresOnAnSSOOnlyAccountEndSessionsOnly(t *testing.T) {
+	s, _ := openLockoutStore(t, persist.NewMemory())
+	u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-frodo", "frodo", escalationStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+	for i := 1; i <= 5; i++ {
+		l.SecondFactorFailed(s, u.ID, escalationStart.Add(time.Duration(i)*time.Minute))
+	}
+	fifth := escalationStart.Add(5 * time.Minute)
+	got := mustGet(t, s, u.ID)
+	if got.MustChangePassword {
+		t.Error("five second-factor failures required an SSO-only account to change a password it has not got")
+	}
+	if !got.SessionsEndedAt.Equal(fifth) {
+		t.Errorf("SessionsEndedAt = %v, want %v", got.SessionsEndedAt, fifth)
+	}
+}
