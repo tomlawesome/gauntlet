@@ -905,7 +905,8 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	// current-password check below can reach the handler at all.
 	enrolTOTPFactor(t, c, u, bob, bobPass+"-2")
 	c.do(bob, u, call{method: "POST", path: "/api/auth/password", body: changePasswordRequest{CurrentPassword: "wrong", NewPassword: bobPass}}, 401, nil)
-	c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all"}, 200, nil)
+	c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all", body: passwordRequest{"wrong"}}, 401, nil)
+	c.do(bob, u, call{method: "POST", path: "/api/auth/logout-all", body: passwordRequest{bobPass + "-2"}}, 200, nil)
 
 	// The caller's own sessions (#48). Sign out everywhere left bob one
 	// session, listed with the address and agent the closed row schema

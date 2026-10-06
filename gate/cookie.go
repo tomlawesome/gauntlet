@@ -177,8 +177,8 @@ func (g *Gate) callerSession(r *http.Request, userID string, now time.Time) (gau
 }
 
 // issueContinuedSession is issueSession for a route that rotates the
-// caller's session without asking for a credential -- sign out
-// everywhere. The new session continues old, the caller's session read
+// caller's session without a whole sign-in -- sign out everywhere, which
+// asks at most for the password again. The new session continues old, the caller's session read
 // before every session of the account was ended
 // (gauntlet.SessionStore.CreateContinuing): it keeps old's IssuedAt,
 // signals and method, and its cookie lasts only to old's ceiling

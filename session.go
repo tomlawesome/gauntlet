@@ -254,9 +254,9 @@ func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.
 // already. Its client is client, cleaned as CreateFrom does. Its expiry
 // is now plus the idle timeout, never past the ceiling.
 //
-// It is the one way a route that rotates a session without asking for a
-// credential -- sign out everywhere -- keeps the sign-in's lifetime
-// ceiling. Issuing through CreateFrom there would start the ceiling
+// It is the one way a route that rotates a session without a whole
+// sign-in -- sign out everywhere, which asks at most for the password
+// again -- keeps the sign-in's lifetime ceiling. Issuing through CreateFrom there would start the ceiling
 // again from now, so anyone holding a live cookie could call the route
 // once an idle period and keep a session for ever. It does not check or
 // end from; the caller has already done whatever it needs to.

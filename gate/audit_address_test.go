@@ -31,7 +31,7 @@ func TestEveryAuditRecordCarriesTheAddress(t *testing.T) {
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	_, _, _ = totpEnrolAndConfirm(t, bob, ts)
 	_ = postJSON(t, bob, ts.URL+"/api/auth/recovery-codes", recoveryCodesRegenerateRequest{Password: totpBobPassword}).Body.Close()
-	_ = postJSON(t, bob, ts.URL+"/api/auth/logout-all", nil).Body.Close()
+	_ = postJSON(t, bob, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword}).Body.Close()
 	_ = postJSON(t, bob, ts.URL+changePasswordPath, changePasswordRequest{CurrentPassword: totpBobPassword, NewPassword: "a-new-bob-password-9"}).Body.Close()
 	_ = deleteJSON(t, bob, ts.URL+"/api/auth/totp", totpDeleteRequest{Password: "a-new-bob-password-9"}).Body.Close()
 

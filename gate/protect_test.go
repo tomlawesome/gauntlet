@@ -370,7 +370,7 @@ func TestLogoutAllEndsEverySessionButTheCallers(t *testing.T) {
 	deviceA := sessionClient(t, ts.URL, g.deps.Sessions.Create(admin.ID, now).ID)
 	deviceB := sessionClient(t, ts.URL, g.deps.Sessions.Create(admin.ID, now).ID)
 
-	callResp := postJSON(t, deviceA, ts.URL+"/api/auth/logout-all", map[string]any{})
+	callResp := postJSON(t, deviceA, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: testAdminPassword})
 	_ = callResp.Body.Close()
 	if callResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected sign-out-everywhere to succeed, got %d", callResp.StatusCode)

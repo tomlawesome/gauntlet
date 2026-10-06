@@ -590,8 +590,10 @@ fills the budget closes it for one window and adds one lockout's worth
 to `LoginLockoutCount` (which also lengthens the next ordinary lockout),
 so the fiftieth disables as an ordinary failure would. A success hands
 the count back (`ReleaseKnownBrowser`, `SignedIn`). Sign out everywhere
-(`ClearKnownBrowsers`, the calling browser then remembered again) and an
-admin's reset code forget every browser; a signed-in password change, an
+on an account with a local password, which asks for it again
+(`ClearKnownBrowsers`, the calling browser then remembered again), and
+an admin's reset code forget every browser; an SSO-only account's sign
+out everywhere has no password to ask for and keeps them; a signed-in password change, an
 SSO link, an unlock and the forced change after second-factor failures
 do not -- that is when the owner needs the allowance. Nothing is
 keyed on the client's address. A request carrying a token the named

@@ -74,6 +74,7 @@ named under the class it shares, below.
   `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST
   /api/auth/recovery-codes`, `POST /api/auth/passkeys/register/begin`,
   `DELETE /api/auth/passkeys/{id}`, `POST /api/auth/oidc/link`, `POST
+  /api/auth/logout-all` for an account with a local password, `POST
   /api/auth/users/{id}/unlock` on the caller's own account, and `POST
   /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant
   the admin role, #67), and `gate.

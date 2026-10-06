@@ -344,6 +344,16 @@ All notable changes to this project are documented in this file.
   strips a non-admin of its password and factors, so a stolen session
   cookie alone could turn into a lasting way in. A frontend that starts
   a link must now send the password.
+- `POST /api/auth/logout-all` asks an account with a local password for
+  it, `{"password": ...}`, before any session ends (`401`/`429` as on the
+  other re-checks), and an SSO-only account's sign out everywhere no
+  longer forgets its remembered browsers, countries and last place
+  (#79). With only a session cookie, a thief could wipe the account's
+  unusual-sign-in baseline and leave their own browser the only one
+  remembered, so that under `block` the owner was refused on their own
+  devices. An SSO-only account still sends no body; the audit detail
+  says the browsers were kept. A frontend must now send the password
+  for an account that has one.
 
 ### Changed
 

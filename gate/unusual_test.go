@@ -405,7 +405,7 @@ func TestUnusualOnlySignInsJudge(t *testing.T) {
 	}
 	e.advance(time.Hour)
 	// Sign out everywhere from New York: forgets, then remembers New York.
-	if status, body := readAll(t, postJSON(t, b.at(addrNewYork), e.ts.URL+"/api/auth/logout-all", nil)); status != http.StatusOK {
+	if status, body := readAll(t, postJSON(t, b.at(addrNewYork), e.ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword + "-2"})); status != http.StatusOK {
 		t.Fatalf("logout-all = %d %s", status, body)
 	}
 	if got := e.newestSession(t).Client.Unusual; got != 0 {
