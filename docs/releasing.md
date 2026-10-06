@@ -187,10 +187,12 @@ monthly interval (for example `17 3 2 * *`, 03:17 UTC on the 2nd), and
 a variable `BLOCKLIST_BUILD` = `true`.
 
 Each run downloads 20-40 GB
-from HIBP over about four hours. Optionally, under
-[Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries),
-refuse duplicate generic packages, so a dated GitLab version can never
-be uploaded twice.
+from HIBP over about four hours. Leave duplicate generic packages
+allowed under
+[Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries):
+each run uploads the list again to the `current` version, which is
+overwritten every month by design, so refusing duplicates would fail
+the second month's publish.
 
 **6. The first run.** Press the schedule's play button. The pipeline
 has three jobs: `blocklist:build`, `blocklist:sign` and
