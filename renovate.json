@@ -4,7 +4,7 @@
     "config:recommended"
   ],
   "description": [
-    "Renovate for gauntlet on gitlab.tomlawson.io (ai/gauntlet), copied from orbit's renovate.json and cut down to what gauntlet pins (#63): the Go modules in both go.mod files, the pipeline's images, and the Go tools .gitlab-ci.yml and scripts/ install at fixed versions. It runs once a week from the renovate job in .gitlab-ci.yml; docs/releasing.md has the owner's one-time setup.",
+    "Renovate for gauntlet on gitlab.tomlawson.io (ai/gauntlet), copied from orbit's renovate.json and cut down to what gauntlet pins (#63): the Go modules in both go.mod files, the pipeline's images, and the Go tools .gitlab-ci.yml and scripts/ install at fixed versions. It runs once a week from the renovate job in .gitlab-ci.yml, and daily for security fixes only with renovate-security.json added on top; docs/releasing.md has the owner's one-time setup.",
     "Go module versions are looked up from each module's own Git host, never through proxy.golang.org: the renovate job sets GOPROXY=direct, and GOPRIVATE for the owner's own modules. A first lookup through the public proxy records a version permanently, so the global rule is never to let one happen by accident.",
     "Not watched, on purpose: golang.org/x/exp/cmd/apidiff, pinned by pseudo-version in scripts/apidiff.sh (CI-only, approved at that pin, owner 2026-09-30, AGENTS.md). golang.org/x/exp has no releases, only commits, and no manager here can rewrite a Go pseudo-version, so this file names it instead of pretending to cover it. It never ships: it only reads gauntlet's exported API in lint:apidiff. Bump it by hand when lint:apidiff fails to load the module under a new Go release, and look at it in each version's release audit.",
     "The dependency dashboard is off, as on orbit (owner, 2026-09-08): a bot-written issue that never reaches a done state and is stale between runs.",
@@ -104,7 +104,7 @@
     }
   ],
   "vulnerabilityAlerts": {
-    "description": "Security fixes do not wait for Monday. GitLab CE has no dependency-alert API for Renovate to read, so osvVulnerabilityAlerts above supplies the advisories, from the OSV database, and this lets a fix for one open outside the weekly window.",
+    "description": "Security fixes do not wait for Monday. GitLab CE has no dependency-alert API for Renovate to read, so osvVulnerabilityAlerts above supplies the advisories, from the OSV database. Renovate ignores the schedule for a vulnerability fix, but it can only open one when it runs, so a second pipeline schedule runs it daily with renovate-security.json on top, which turns every other update off: a fix opens on the first daily run after its advisory reaches OSV.",
     "enabled": true,
     "schedule": [
       "at any time"

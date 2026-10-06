@@ -1,0 +1,24 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "The daily security-only run (#79). The renovate job in .gitlab-ci.yml reads this file on top of renovate.json, as RENOVATE_ADDITIONAL_CONFIG_FILE, only when the pipeline schedule sets RENOVATE_SECURITY_ONLY=true. Everything else -- managers, lookups, groups, the GOPROXY rule -- comes from renovate.json, so there is one place to change it; this file only turns ordinary updates off.",
+    "The shape is Renovate's own security:only-security-updates preset at the pinned 44.83.2: one package rule matching every package with enabled false, vulnerabilityAlerts enabled, and osvVulnerabilityAlerts on. A fix for an OSV advisory still opens, because Renovate appends its vulnerability rules after every configured one and forces vulnerabilityAlerts' settings over them.",
+    "Renovate merges the repository's own renovate.json after this, appending its packageRules. None of those sets enabled to true; one that did, for a broad match, would turn ordinary updates back on in this run."
+  ],
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [
+      "at any time"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Every ordinary update is off in this run; only vulnerability fixes, which override this, open merge requests.",
+      "matchPackageNames": [
+        "*"
+      ],
+      "enabled": false
+    }
+  ]
+}
