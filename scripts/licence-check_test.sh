@@ -210,4 +210,53 @@ gate pass "test-only, unlinked and unembedded files pass" "third_party/unused/ (
 grep -qF "badge.svg (not embedded by linked code)" "$WORK/out" || { echo "FAIL: badge.svg not listed" >&2; cat "$WORK/out" >&2; exit 1; }
 echo "ok: files that ship nowhere are listed"
 
+# except ENTRY...: allow-dependencies-licenses entries, appended to the
+# policy policy() wrote. With no ENTRY, the empty list the real policy
+# carries today.
+except() {
+  if [ $# -eq 0 ]; then
+    printf '\nallow-dependencies-licenses: []\n' >> "$C/policy.yml"
+  else
+    printf '\nallow-dependencies-licenses:\n' >> "$C/policy.yml"
+    for e in "$@"; do printf '  - %s\n' "$e" >> "$C/policy.yml"; done
+  fi
+}
+
+# A per-module exception: the policy documented the key long before the
+# gate read it, so recording one changed nothing.
+new_case excepted
+printf '%s\n' "$ISC" > "$C/dep/LICENSE"
+policy MIT
+except
+gate fail "a dependency under a licence outside the allow-list fails, with the empty exception list" "ISC"
+policy MIT
+except "pkg:golang/example.com/dep@v1.0.0  # ISC, owner decision, reviewed 2026-10-06"
+gate pass "an exact exception lets that module through, printed with its reason" \
+  "excepted example.com/dep@v1.0.0 by allow-dependencies-licenses: pkg:golang/example.com/dep@v1.0.0  # ISC, owner decision, reviewed 2026-10-06"
+policy MIT
+except "pkg:golang/example.com/dep@v0.9.0  # reviewed at the old version"
+gate fail "an exception naming another version is stale and fails" \
+  "stale allow-dependencies-licenses entry: the build has example.com/dep at v1.0.0, the entry names v0.9.0"
+policy MIT
+except "pkg:golang/example.com/dep@v1.0.0" "pkg:golang/example.com/gone@v1.0.0  # module since dropped"
+gate fail "an exception for a module the build does not have is stale and fails" "example.com/gone at no version"
+policy MIT
+except "example.com/dep v1.0.0"
+gate fail "an exception not in pkg:golang/<module>@<version> form fails" "is not pkg:golang/<module>@<version>"
+
+# go-licenses' --ignore is a string prefix, so an exception for
+# example.com/dep would pass example.com/depx's licence unread.
+new_case prefix
+printf '%s\n' "$ISC" > "$C/dep/LICENSE"
+mkdir -p "$C/depx"
+printf 'module example.com/depx\n\ngo 1.27.0\n' > "$C/depx/go.mod"
+printf '%s\n' "$ISC" > "$C/depx/LICENSE"
+printf 'package depx\n' > "$C/depx/depx.go"
+printf 'require example.com/depx v1.0.0\n\nreplace example.com/depx => ../depx\n' >> "$C/main/go.mod"
+printf 'example.com/depx\n' >> "$C/imports"
+policy MIT
+except "pkg:golang/example.com/dep@v1.0.0  # ISC, reviewed 2026-10-06"
+gate fail "an exception whose path prefixes another module fails" \
+  "allow-dependencies-licenses entry for example.com/dep would also except example.com/depx"
+
 echo "licence-check_test.sh: all cases passed"
