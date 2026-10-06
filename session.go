@@ -246,6 +246,44 @@ func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.
 	return sess
 }
 
+// CreateContinuing starts a new session for from.UserID that continues
+// from rather than starting a new sign-in: a new ID, but from's IssuedAt,
+// so the lifetime ceiling does not move, and from's unusual-sign-in
+// signals and method, since the sign-in they describe was judged once
+// already. Its client is client, cleaned as CreateFrom does. Its expiry
+// is now plus the idle timeout, never past the ceiling.
+//
+// It is the one way a route that rotates a session without asking for a
+// credential -- sign out everywhere -- keeps the sign-in's lifetime
+// ceiling. Issuing through CreateFrom there would start the ceiling
+// again from now, so anyone holding a live cookie could call the route
+// once an idle period and keep a session for ever. It does not check or
+// end from; the caller has already done whatever it needs to.
+func (s *SessionStore) CreateContinuing(from Session, client SessionClient, now time.Time) Session {
+	client = SessionClient{
+		Address:   cleanClientText(client.Address, MaxSessionAddress),
+		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
+		Country:   client.Country,
+		Unusual:   from.Client.Unusual,
+		Method:    from.Client.Method,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expires := now.Add(s.ttl)
+	if deadline, capped := s.deadline(from); capped {
+		expires = earliest(expires, deadline)
+	}
+	sess := Session{ID: newID(), UserID: from.UserID, IssuedAt: from.IssuedAt, ExpiresAt: expires, LastUsedAt: now, Client: client}
+	s.sessions[sess.ID] = sess
+	if s.byUser[sess.UserID] == nil {
+		s.byUser[sess.UserID] = make(map[string]struct{})
+	}
+	s.byUser[sess.UserID][sess.ID] = struct{}{}
+	s.order.push(sess.ID)
+	s.sweepLocked(now)
+	return sess
+}
+
 // cleanClientText is CreateFrom's rule for one SessionClient field: the
 // characters printableWithin (token.go) refuses in a token name are
 // dropped rather than refused -- a session is never refused for what a

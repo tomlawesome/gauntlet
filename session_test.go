@@ -423,3 +423,52 @@ func TestSessionPerUserIndexFollowsEveryRemoval(t *testing.T) {
 		t.Errorf("index holds %d users (%d live sessions) for %d sessions, want only the live user's", len(s.byUser), len(s.byUser["live"]), len(s.sessions))
 	}
 }
+
+// CreateContinuing is how a route that rotates a session without a
+// credential (sign out everywhere) issues the new one: it keeps the
+// sign-in's IssuedAt, so the ceiling it was under does not move, and
+// its signals and method, while the client is the one given now.
+func TestSessionCreateContinuingKeepsTheCeiling(t *testing.T) {
+	const ttl = time.Hour
+	const maxLifetime = 24 * time.Hour
+	s := NewSessionStore(ttl, maxLifetime)
+	start := time.Now()
+	old := s.CreateFrom("u1", SessionClient{Address: "203.0.113.1", Unusual: SignalNewBrowser, Method: SignInMethodPassword}, start)
+
+	at := start.Add(23*time.Hour + 30*time.Minute)
+	sess := s.CreateContinuing(old, SessionClient{Address: "203.0.113.2\x1b", Unusual: 0, Method: SignInMethodPasskey}, at)
+
+	if sess.ID == old.ID || sess.UserID != "u1" {
+		t.Fatalf("continued session = %+v, want a new ID for u1", sess)
+	}
+	if !sess.IssuedAt.Equal(old.IssuedAt) {
+		t.Errorf("IssuedAt = %v, want the original %v", sess.IssuedAt, old.IssuedAt)
+	}
+	if want := start.Add(maxLifetime); !sess.ExpiresAt.Equal(want) {
+		t.Errorf("ExpiresAt = %v after the start, want the ceiling at %v", sess.ExpiresAt.Sub(start), maxLifetime)
+	}
+	if got := sess.Client; got.Address != "203.0.113.2" || got.Unusual != SignalNewBrowser || got.Method != SignInMethodPassword {
+		t.Errorf("client = %+v, want the new address cleaned and the old signals and method", got)
+	}
+	if _, ok := s.Validate(sess.ID, start.Add(maxLifetime).Add(-time.Minute)); !ok {
+		t.Fatal("the continued session was refused inside the ceiling")
+	}
+	if _, ok := s.Validate(sess.ID, start.Add(maxLifetime).Add(time.Second)); ok {
+		t.Error("the continued session outlived the original sign-in's ceiling")
+	}
+}
+
+// With no ceiling a continued session simply runs for the idle timeout.
+func TestSessionCreateContinuingWithNoCeiling(t *testing.T) {
+	s := NewSessionStore(time.Hour, 0)
+	start := time.Now()
+	old := s.Create("u1", start)
+	at := start.Add(48 * time.Hour)
+	sess := s.CreateContinuing(old, SessionClient{}, at)
+	if !sess.ExpiresAt.Equal(at.Add(time.Hour)) {
+		t.Errorf("ExpiresAt = %v, want now plus the idle timeout", sess.ExpiresAt.Sub(at))
+	}
+	if _, ok := s.Validate(sess.ID, at); !ok {
+		t.Error("the continued session was refused")
+	}
+}
