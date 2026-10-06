@@ -12,6 +12,7 @@
 // cleared only when the account's last second factor of either kind
 // goes -- see ClearTOTP (totp.go) and DeletePasskey/ClearPasskeys
 // (passkeys.go), which own that clearing rule from each side.
+
 package gauntlet
 
 import (

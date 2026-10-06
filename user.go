@@ -1,29 +1,3 @@
-// Package gauntlet implements local username/password authentication:
-// user accounts and roles (this file), Argon2id password hashing
-// (password.go), username validation (username.go), and random id
-// generation (id.go). It also owns OIDC/SSO identity storage and
-// just-in-time provisioning (Store.FindOrCreateOIDCUser) -- the OIDC
-// protocol itself lives in the separate gauntlet/oidc package, which
-// this package doesn't import.
-//
-// The types here start from mikroview's internal/auth/store.go, with
-// its names kept (docs/adr/0001-shared-auth-module.md decision 3;
-// docs/design.md §1.3), plus what gauntlet added: User.clone for the
-// copy-then-save writes (Store.mutate) and the unexported
-// totpSecretBlanked mark and blankedPasskeyCount count that let a
-// blanked copy still answer HasActiveTOTP, HasSecondFactor and
-// PasskeyCount. The stored fields are
-// mikroview's, byte for byte, plus gauntlet's own that mikroview's
-// documents lack and read as zero: loginLockedUntil (#19),
-// sessionsEndedAt (#28), loginLockoutCount, loginDisabledAt and
-// knownBrowsers (#44), and totpPendingSince and heldEnrolment (#58).
-// User carries every field mikroview's own User carries -- including TOTP, recovery codes, reset codes and
-// passkeys -- because Store persists the whole document on every save
-// (docs/design.md Summary): a field this package didn't know about would
-// be silently dropped on the first write. The methods that generate, verify or
-// clear those fields live beside them: totp.go, recoverycodes.go,
-// resetcode.go and passkeys.go; the predicates docs/design.md §1.3
-// lists (LocalPassword, HasActiveTOTP, HasSecondFactor) are below.
 package gauntlet
 
 import (

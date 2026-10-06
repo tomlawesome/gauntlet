@@ -13,6 +13,7 @@
 //     package hard-coding it. A token whose kind is not registered is
 //     kept in the document (never dropped on save) and logged, but can
 //     never authenticate -- see OpenTokenStore below.
+
 package gauntlet
 
 import (

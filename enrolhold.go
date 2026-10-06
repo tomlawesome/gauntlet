@@ -21,6 +21,7 @@
 // with ErrEnrolmentHeld. A later factor, on an account that already has
 // a live one, is never held: it is added live, without codes, since an
 // account keeps one set of recovery codes across all its factors.
+
 package gauntlet
 
 import (
