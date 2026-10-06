@@ -53,6 +53,11 @@ var (
 	// stored passkeys -- covers both "never existed" and "already
 	// removed"; a caller has no legitimate reason to tell those apart.
 	ErrPasskeyNotFound = errors.New("gauntlet: no such passkey on this account")
+	// ErrNoPasskeys is returned by ClearPasskeys when the account has no
+	// passkey to remove, on the account or on hold. Nothing is written,
+	// so a caller can answer without auditing or notifying a removal
+	// that never happened.
+	ErrNoPasskeys = errors.New("gauntlet: this account has no passkeys")
 	// ErrPasskeyLimitReached is returned by AddPasskey once an account
 	// already holds maxPasskeysPerAccount credentials.
 	ErrPasskeyLimitReached = fmt.Errorf("gauntlet: an account may hold at most %d passkeys -- remove one before adding another", maxPasskeysPerAccount)
@@ -539,6 +544,9 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 // if the account still has an active authenticator-app factor, and are
 // cleared only if this was the account's last second factor. A passkey
 // on hold (#58) goes too, with the codes held for it.
+//
+// Returns ErrNoPasskeys, writing nothing, when there is no passkey to
+// remove, on the account or on hold.
 func (s *Store) ClearPasskeys(userID string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -550,8 +558,14 @@ func (s *Store) ClearPasskeys(userID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
+		heldPasskey := u.HeldEnrolment != nil && u.HeldEnrolment.Kind == HeldFactorPasskey
+		// Not errNoChange, which mutate answers with nil: the caller
+		// must hear that nothing was removed, not a success.
+		if len(u.Passkeys) == 0 && !heldPasskey {
+			return ErrNoPasskeys
+		}
 		u.Passkeys = nil
-		if u.HeldEnrolment != nil && u.HeldEnrolment.Kind == HeldFactorPasskey {
+		if heldPasskey {
 			u.HeldEnrolment = nil
 		}
 		if !u.HasSecondFactor() {

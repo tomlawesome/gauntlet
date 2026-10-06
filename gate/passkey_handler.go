@@ -687,7 +687,9 @@ func (g *Gate) recordVerifiedAssertion(r *http.Request, user *gauntlet.User, ver
 // caller's own account: an admin who lost their own factor has no
 // console tool in this module (docs/design.md §1.7). ClearPasskeys drops
 // the recovery codes only when no factor of either kind is left. The
-// caller's own password is asked for again on the request (#72).
+// caller's own password is asked for again on the request (#72). An
+// account with no passkeys is answered 200 with cleared false, and
+// nothing is recorded or sent.
 func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -716,6 +718,13 @@ func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := g.deps.Users.ClearPasskeys(id); err != nil {
+		// The account is already in the state asked for, so this is a
+		// success, but one that changed nothing: no record and no notice
+		// of a removal that did not happen.
+		if errors.Is(err, gauntlet.ErrNoPasskeys) {
+			writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": false})
+			return
+		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}

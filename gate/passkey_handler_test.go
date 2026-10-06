@@ -2363,3 +2363,25 @@ func TestARespelledRegisterCookieIsRefusedAfterTheOwnersFinish(t *testing.T) {
 		}
 	})
 }
+
+// Clearing the passkeys of an account that has none changes nothing:
+// 200 with cleared false, no record, no notice, no session ended.
+func TestPasskeysAdminClearWithNothingToClearChangesNothing(t *testing.T) {
+	g, ts, admin := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	audit, rec := &auditRecorder{}, &noticeRecorder{}
+	g.cfg.Audit, g.cfg.Notices = audit, rec
+
+	status, body := readAll(t, deleteJSON(t, admin, ts.URL+"/api/auth/users/"+passkeyBilboID(t, g)+"/passkeys", adminStepUpRequest{Password: testAdminPassword}))
+	var out map[string]any
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("admin clear = %d %s: %v", status, body, err)
+	}
+	if status != http.StatusOK || out["username"] != passkeyBilboUsername || out["cleared"] != false {
+		t.Errorf("admin clear with no passkeys = %d %v, want 200 cleared=false", status, out)
+	}
+	wantNothingRecordedOrSent(t, g, audit, rec)
+	if !sessionOf(t, bilbo, ts).Authenticated {
+		t.Error("bilbo was signed out by a clear that removed nothing")
+	}
+}

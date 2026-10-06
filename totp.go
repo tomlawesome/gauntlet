@@ -79,6 +79,12 @@ var (
 	// it already finished. Confirming is what activates a factor, so
 	// there is nothing safe to do with a code that arrives without one.
 	ErrNoPendingTOTP = errors.New("gauntlet: no authenticator-app enrolment is waiting to be confirmed")
+	// ErrNoTOTP is returned by ClearTOTP when the account has no
+	// authenticator app to remove: no secret, pending or confirmed, and
+	// none on hold. Nothing is written. A caller tells this apart from a
+	// removal so that a second "Disable" click does not audit, notify or
+	// sign anyone out over a change that never happened.
+	ErrNoTOTP = errors.New("gauntlet: this account has no authenticator app")
 )
 
 // GenerateTOTPSecret returns a fresh 20-byte shared secret from
@@ -468,6 +474,9 @@ func (s *Store) VerifyAndRecordTOTP(userID, code string, now time.Time) (ok bool
 // the same rule applied from the passkey side. An authenticator app on
 // hold (#58) goes too, with the codes held for it; a held passkey is
 // left alone.
+//
+// Returns ErrNoTOTP, writing nothing, when there is no authenticator app
+// to remove.
 func (s *Store) ClearTOTP(userID string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -484,7 +493,13 @@ func (s *Store) ClearTOTP(userID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		if u.HeldEnrolment != nil && u.HeldEnrolment.Kind == HeldFactorTOTP {
+		heldTOTP := u.HeldEnrolment != nil && u.HeldEnrolment.Kind == HeldFactorTOTP
+		// Not errNoChange, which mutate answers with nil: the caller
+		// must hear that nothing was removed, not a success.
+		if u.TOTPSecret == "" && !heldTOTP {
+			return ErrNoTOTP
+		}
+		if heldTOTP {
 			u.HeldEnrolment = nil
 		}
 		clearTOTPFields(u)

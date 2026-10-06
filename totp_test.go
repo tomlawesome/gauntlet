@@ -397,6 +397,24 @@ func TestClearTOTPUnknownUserReturnsNotFound(t *testing.T) {
 	}
 }
 
+// TestClearTOTPWithNothingToClearWritesNothing: an account with no
+// authenticator app answers ErrNoTOTP, and the store makes no write --
+// the backend here has no saves left, so a write would fail instead.
+func TestClearTOTPWithNothingToClearWritesNothing(t *testing.T) {
+	budget := &saveBudgetBackend{left: 1}
+	s, err := OpenStore(budget, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearTOTP(u.ID); !errors.Is(err, ErrNoTOTP) {
+		t.Errorf("ClearTOTP with no app = %v, want %v", err, ErrNoTOTP)
+	}
+}
+
 // TestClearTOTPLeavesStateWhenPersistFails follows the same
 // restore-on-failure contract every other credential-changing method in
 // this package documents (SetPassword, IssueResetCode, ...): a clear

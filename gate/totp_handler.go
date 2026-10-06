@@ -265,7 +265,8 @@ type totpEnrolRequest struct {
 // handleTOTPDelete turns off the signed-in caller's own authenticator-
 // app factor, gated by their password -- the one self-service way to
 // remove it; the admin route at the end of this file is the only other
-// path, for when the password is what's lost instead.
+// path, for when the password is what's lost instead. An account with
+// no authenticator app is answered 404, and nothing else happens.
 func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
@@ -286,6 +287,14 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.deps.Users.ClearTOTP(user.ID); err != nil {
+		// Nothing to remove is the 404 passkey delete answers, and comes
+		// before every revoke, record and notice below: a second click on
+		// "Disable" must not sign the owner out everywhere or tell them a
+		// factor was removed when none was.
+		if errors.Is(err, gauntlet.ErrNoTOTP) {
+			writeProblem(w, http.StatusNotFound, classNotFound, "this account has no authenticator app", nil)
+			return
+		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
@@ -323,6 +332,9 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 // The caller's own password is asked for again on the request (#72,
 // ASVS 7.5.3): stripping a colleague's second factor is exactly what a
 // stolen admin session would be used for.
+//
+// An account with no authenticator app is answered 200 with cleared
+// false, and nothing is recorded or sent.
 func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 	var req adminStepUpRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
@@ -349,6 +361,13 @@ func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := g.deps.Users.ClearTOTP(id); err != nil {
+		// The account is already in the state asked for, so this is a
+		// success, but one that changed nothing: no record and no notice
+		// of a removal that did not happen.
+		if errors.Is(err, gauntlet.ErrNoTOTP) {
+			writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": false})
+			return
+		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}

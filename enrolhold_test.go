@@ -363,8 +363,8 @@ func TestClearingAFactorClearsItsHold(t *testing.T) {
 		if _, _, err := s.HoldFirstPasskey(id, testPasskey(1, "k"), now); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.ClearTOTP(id); err != nil {
-			t.Fatal(err)
+		if err := s.ClearTOTP(id); !errors.Is(err, ErrNoTOTP) {
+			t.Fatalf("clearing an app that is not there: %v, want ErrNoTOTP", err)
 		}
 		if u, _ := s.Get(id); u.HeldEnrolment == nil {
 			t.Error("clearing the app dropped a held passkey")
@@ -384,8 +384,8 @@ func TestClearingAFactorClearsItsHold(t *testing.T) {
 		if _, err := s.HoldFirstTOTP(id, testTOTPSecret, 1, now); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.ClearPasskeys(id); err != nil {
-			t.Fatal(err)
+		if err := s.ClearPasskeys(id); !errors.Is(err, ErrNoPasskeys) {
+			t.Fatalf("clearing passkeys that are not there: %v, want ErrNoPasskeys", err)
 		}
 		if u, _ := s.Get(id); u.HeldEnrolment == nil {
 			t.Error("clearing passkeys dropped a held app")

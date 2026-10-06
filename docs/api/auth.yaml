@@ -1229,7 +1229,9 @@ paths:
       description: |
         Password-gated (rate-limited re-check). When this leaves the
         account with no second factor, every session on it ends, this one
-        included, and `signedOut` is true.
+        included, and `signedOut` is true. With no authenticator app on
+        the account the answer is `404` and nothing changes: no session
+        ends, nothing is recorded and no notice is sent.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1258,6 +1260,8 @@ paths:
           $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -2044,7 +2048,7 @@ paths:
     delete:
       operationId: clearUserTOTP
       summary: Remove another account's authenticator app (admin)
-      description: For a lost phone when the owner still has their password. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
+      description: For a lost phone when the owner still has their password. Refused on the caller's own account. With no authenticator app to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2056,7 +2060,7 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          description: Removed.
+          description: Removed, or nothing there to remove.
           content:
             application/json:
               schema:
@@ -2067,7 +2071,8 @@ paths:
                   username:
                     type: string
                   cleared:
-                    const: true
+                    type: boolean
+                    description: False when the account had nothing to remove; nothing changed.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2089,7 +2094,7 @@ paths:
     delete:
       operationId: clearUserPasskeys
       summary: Remove every passkey on another account (admin)
-      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
+      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. With no passkey to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2101,7 +2106,7 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          description: Removed.
+          description: Removed, or nothing there to remove.
           content:
             application/json:
               schema:
@@ -2112,7 +2117,8 @@ paths:
                   username:
                     type: string
                   cleared:
-                    const: true
+                    type: boolean
+                    description: False when the account had nothing to remove; nothing changed.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
