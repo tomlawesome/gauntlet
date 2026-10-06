@@ -19,11 +19,11 @@ const defaultGroupsClaim = "groups"
 // authentic, which the verifier has already settled by the time this
 // runs.
 //
-// The issuer URL is already the primary access control -- this package
-// only supports self-hosted issuers (see AllowIssuer), so configuring
-// one restricts login to accounts in a directory the operator runs, and
-// an empty Policy is the correct and complete answer for most
-// deployments.
+// For a self-hosted issuer the issuer URL is already the primary access
+// control: configuring one restricts login to accounts in a directory
+// the operator runs, and an empty Policy is the correct and complete
+// answer for most deployments. A shared public issuer is accepted only
+// when RequiredClaims pins the tenant (see AllowIssuerWithPolicy).
 //
 // This exists for scoping *within* that directory: an Authentik that
 // also serves other household members, other tenants or other
@@ -77,9 +77,12 @@ type Policy struct {
 	RoleWithoutGroup string
 }
 
-// Restricted reports whether this policy narrows anything at all. Used at
-// startup to refuse a combination that can't be safe -- see
-// IsMultiTenantIssuer.
+// Restricted reports whether this policy narrows anything at all.
+//
+// Deprecated: nothing calls it, and "narrows anything" is not the test
+// for a shared issuer -- a group allowlist does not stop strangers at
+// that provider. Use AllowIssuerWithPolicy, which asks for the tenant
+// claim instead.
 func (p Policy) Restricted() bool {
 	return len(p.AllowedGroups) > 0 ||
 		len(p.AllowedEmails) > 0 ||
@@ -227,53 +230,69 @@ func intersects(got, allowed []string) bool {
 
 // multiTenantIssuers are providers where a validating ID token proves
 // only "this is a real account somewhere at this provider" -- which is
-// no restriction at all. Configuring one of these without a Policy is
-// refused at startup rather than warned about, because the resulting
-// deployment lets any account at that provider sign itself in as a
-// user here (the first account, the admin, is local since #37, but a
-// user account is still a way in).
+// no restriction at all. Each maps to its multi-tenant path prefixes
+// (nil meaning "the whole host") and the claim that names the tenant an
+// account belongs to ("" where the provider has none).
 //
 // This list is a safety net over a general mechanism, not the mechanism
 // itself: Policy is provider-agnostic, and an unlisted public provider
 // is still fully restrictable. Being absent from this list means the
 // startup check won't catch that mistake for you, not that the tools are
 // missing.
-var multiTenantIssuers = map[string][]string{
-	// host: multi-tenant path prefixes, or nil meaning "the whole host"
-	"accounts.google.com":       nil,
-	"appleid.apple.com":         nil,
-	"login.live.com":            nil,
-	"login.microsoftonline.com": {"/common", "/organizations", "/consumers"},
+var multiTenantIssuers = map[string]struct {
+	prefixes    []string
+	tenantClaim string
+}{
+	"accounts.google.com":       {nil, "hd"},
+	"appleid.apple.com":         {nil, ""},
+	"login.live.com":            {nil, ""},
+	"login.microsoftonline.com": {[]string{"/common", "/organizations", "/consumers"}, "tid"},
 }
 
-// ErrMultiTenantIssuer is returned by AllowIssuer for a provider whose
-// user population is the general public. Callers should treat it the
-// same as any other "SSO unavailable" startup condition: log it and
-// leave SSO off, never downgrade it to a warning and continue.
+// ErrMultiTenantIssuer is returned by AllowIssuerWithPolicy for a
+// provider whose user population is the general public and a Policy that
+// does not pin the tenant. Callers should treat it the same as any other
+// "SSO unavailable" startup condition: log it and leave SSO off, never
+// downgrade it to a warning and continue.
 var ErrMultiTenantIssuer = errors.New("oidc: multi-tenant issuers are not supported")
 
-// AllowIssuer reports whether SSO may be enabled against issuer.
+// AllowIssuerWithPolicy reports whether SSO may be enabled against issuer
+// with p as the sign-in policy (docs/adr/0014-shared-issuers.md).
 //
-// Multi-tenant providers are refused unconditionally -- deliberately
-// *not* rescuable by configuring a Policy, even though a correctly
-// configured one would in fact restrict access safely. This package is
-// built for self-hosters running their own IdP, where the issuer URL is
-// already the access control; supporting public providers means the
-// safety of every deployment rests on an operator getting an extra claim
-// restriction exactly right, and a misconfiguration there hands admin to
-// the first stranger who reaches the login page. The narrower promise is
-// the one worth keeping.
-//
-// This is mikroview's docs/decisions/multi-tenant-oidc.md decision,
-// carried over unchanged and deliberately not made configurable (see
-// docs/design.md §1.4, docs/adr/0001-shared-auth-module.md) -- see that
-// document for the full reasoning and the exact change that would
-// reverse it, if that trade is ever revisited.
-func AllowIssuer(issuer string) error {
-	if IsMultiTenantIssuer(issuer) {
-		return fmt.Errorf("%w: %s", ErrMultiTenantIssuer, issuer)
+// A self-hosted issuer always passes. A shared one passes only when
+// p.RequiredClaims names its tenant claim with at least one value --
+// "hd" for accounts.google.com, "tid" for Entra's common, organizations
+// and consumers endpoints -- because without it any account at that
+// provider could sign itself in here. Apple and Microsoft personal
+// accounts carry no tenant claim, so they are always refused. The check
+// is at startup so a missing pin is a refusal to start, never a silently
+// open door; Permit then refuses each token whose claim is absent or
+// carries another tenant.
+func AllowIssuerWithPolicy(issuer string, p Policy) error {
+	host, shared := multiTenantHost(issuer)
+	if !shared {
+		return nil
 	}
-	return nil
+	claim := multiTenantIssuers[host].tenantClaim
+	if claim == "" {
+		return fmt.Errorf("%w: %s has no tenant claim a Policy could pin", ErrMultiTenantIssuer, issuer)
+	}
+	for _, v := range p.RequiredClaims[claim] {
+		if strings.TrimSpace(v) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s is shared by every account at that provider; Policy.RequiredClaims must name %q with the tenant to admit",
+		ErrMultiTenantIssuer, issuer, claim)
+}
+
+// AllowIssuer reports whether SSO may be enabled against issuer with an
+// empty Policy, so it refuses every shared issuer.
+//
+// Deprecated: use AllowIssuerWithPolicy with the Policy the deployment
+// enforces; a shared issuer is accepted once that Policy pins the tenant.
+func AllowIssuer(issuer string) error {
+	return AllowIssuerWithPolicy(issuer, Policy{})
 }
 
 // IsMultiTenantIssuer reports whether issuer is a known provider whose
@@ -284,10 +303,17 @@ func AllowIssuer(issuer string) error {
 // does scope logins to one organisation) and the shared endpoints, which
 // don't.
 func IsMultiTenantIssuer(issuer string) bool {
+	_, shared := multiTenantHost(issuer)
+	return shared
+}
+
+// multiTenantHost returns issuer's normalised host and whether issuer is
+// one of multiTenantIssuers' shared endpoints.
+func multiTenantHost(issuer string) (string, bool) {
 	issuer = strings.TrimSpace(issuer)
 	u, err := url.Parse(issuer)
 	if err != nil {
-		return false
+		return "", false
 	}
 	// A scheme-less string parses with an empty Hostname and the whole
 	// value in Path, so "login.microsoftonline.com/common/v2.0" matched
@@ -298,25 +324,25 @@ func IsMultiTenantIssuer(issuer string) bool {
 	if u.Hostname() == "" {
 		u, err = url.Parse("https://" + issuer)
 		if err != nil {
-			return false
+			return "", false
 		}
 	}
 	// "accounts.google.com." is the same host as "accounts.google.com"
 	// to DNS and to TLS, but not to a map lookup: without the trim a
 	// trailing root dot would slip a listed provider past this check.
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	prefixes, known := multiTenantIssuers[host]
+	entry, known := multiTenantIssuers[host]
 	if !known {
-		return false
+		return "", false
 	}
-	if prefixes == nil {
-		return true
+	if entry.prefixes == nil {
+		return host, true
 	}
 	path := strings.ToLower(strings.TrimSuffix(u.Path, "/"))
-	for _, p := range prefixes {
+	for _, p := range entry.prefixes {
 		if path == p || strings.HasPrefix(path, p+"/") {
-			return true
+			return host, true
 		}
 	}
-	return false
+	return "", false
 }

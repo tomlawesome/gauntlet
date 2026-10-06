@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -263,14 +264,10 @@ func TestPolicyRestricted(t *testing.T) {
 	}
 }
 
-// TestAllowIssuerRefusesMultiTenantUnconditionally pins the decision in
-// mikroview's docs/decisions/multi-tenant-oidc.md, carried over
-// unchanged (docs/design.md §1.4). The earlier design let a
-// correctly-configured Policy rescue a public issuer, and that rescue was
-// removed deliberately -- so a *restricted* policy must not bring it
-// back. This is the acceptance test for issue #6: it fails if someone
-// reintroduces the clause without also revisiting the decision.
-func TestAllowIssuerRefusesMultiTenantUnconditionally(t *testing.T) {
+// TestAllowIssuerRefusesMultiTenantIssuers: the deprecated AllowIssuer
+// is AllowIssuerWithPolicy with an empty Policy, which pins no tenant, so
+// every shared issuer is still refused through it.
+func TestAllowIssuerRefusesMultiTenantIssuers(t *testing.T) {
 	for _, issuer := range []string{
 		"https://accounts.google.com",
 		"https://login.microsoftonline.com/common/v2.0",
@@ -288,21 +285,86 @@ func TestAllowIssuerRefusesMultiTenantUnconditionally(t *testing.T) {
 	}
 }
 
-// TestAllowIssuerIgnoresPolicyForMultiTenantIssuers proves the refusal is
-// unconditional even when the caller has configured a Policy that would,
-// in fact, narrow access safely -- the "not rescuable by configuring a
-// Policy" property AllowIssuer's doc comment promises.
-func TestAllowIssuerIgnoresPolicyForMultiTenantIssuers(t *testing.T) {
-	restricted := Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}}}
-	if !restricted.Restricted() {
-		t.Fatal("test setup: policy should report itself restricted")
+// TestAllowIssuerWithPolicyNeedsTheTenantClaim pins ADR-0014: a shared
+// issuer is accepted only when RequiredClaims names that provider's
+// tenant claim with a value -- any other narrowing, or the other
+// provider's claim, still lets strangers at that provider in -- and a
+// provider with no tenant claim is refused whatever the Policy says.
+func TestAllowIssuerWithPolicyNeedsTheTenantClaim(t *testing.T) {
+	hd := Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}}}
+	tid := Policy{RequiredClaims: map[string][]string{"tid": {"00000000-0000-0000-0000-000000000000"}}}
+	both := Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}, "tid": {"00000000-0000-0000-0000-000000000000"}}}
+	cases := []struct {
+		name      string
+		issuer    string
+		policy    Policy
+		wantClaim string // "" means the issuer must be accepted
+	}{
+		{"google with hd", "https://accounts.google.com", hd, ""},
+		{"google scheme-less with hd", "accounts.google.com.", hd, ""},
+		{"google without a policy", "https://accounts.google.com", Policy{}, "hd"},
+		{"google with tid only", "https://accounts.google.com", tid, "hd"},
+		{"google with a blank hd", "https://accounts.google.com", Policy{RequiredClaims: map[string][]string{"hd": {" "}}}, "hd"},
+		{"google with an email domain only", "https://accounts.google.com", Policy{AllowedEmailDomains: []string{"example.com"}}, "hd"},
+		{"entra common with tid", "https://login.microsoftonline.com/common/v2.0", tid, ""},
+		{"entra organizations with tid", "https://login.microsoftonline.com/organizations/v2.0", tid, ""},
+		{"entra consumers with tid", "https://login.microsoftonline.com/consumers/v2.0", tid, ""},
+		{"entra common without a policy", "https://login.microsoftonline.com/common/v2.0", Policy{}, "tid"},
+		{"entra common with hd only", "https://login.microsoftonline.com/common/v2.0", hd, "tid"},
+		{"entra single tenant without a policy", "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0", Policy{}, ""},
+		{"self-hosted without a policy", "https://authentik.example.com/application/o/gauntlet/", Policy{}, ""},
+		{"apple with both claims", "https://appleid.apple.com", both, "-"},
+		{"microsoft personal with both claims", "https://login.live.com", both, "-"},
 	}
-	// AllowIssuer takes no Policy argument at all -- there is no way for
-	// a caller to pass one, which is the point. This test exists so a
-	// future signature change that adds one back is caught by its
-	// description, not discovered by accident.
-	if err := AllowIssuer("https://accounts.google.com"); !errors.Is(err, ErrMultiTenantIssuer) {
-		t.Errorf("AllowIssuer = %v, want ErrMultiTenantIssuer regardless of any policy a caller might want to apply", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := AllowIssuerWithPolicy(tc.issuer, tc.policy)
+			switch {
+			case tc.wantClaim == "":
+				if err != nil {
+					t.Errorf("AllowIssuerWithPolicy(%q) = %v, want accepted", tc.issuer, err)
+				}
+			case !errors.Is(err, ErrMultiTenantIssuer):
+				t.Errorf("AllowIssuerWithPolicy(%q) = %v, want ErrMultiTenantIssuer", tc.issuer, err)
+			case tc.wantClaim != "-" && !strings.Contains(err.Error(), `"`+tc.wantClaim+`"`):
+				t.Errorf("AllowIssuerWithPolicy(%q) = %v, want it to name the %q claim", tc.issuer, err, tc.wantClaim)
+			}
+		})
+	}
+}
+
+// TestPermitRefusesAnotherTenantAtASharedIssuer is the other half of
+// ADR-0014: once a shared issuer is accepted, the tenant pin is enforced
+// on every sign-in, so an account at the same provider but in another
+// tenant -- or with no tenant claim at all, like a personal Google
+// account -- is refused.
+func TestPermitRefusesAnotherTenantAtASharedIssuer(t *testing.T) {
+	cases := []struct {
+		issuer, claim, want, other string
+	}{
+		{"https://accounts.google.com", "hd", "example.com", "evil.example"},
+		{"https://login.microsoftonline.com/common/v2.0", "tid", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"},
+	}
+	for _, tc := range cases {
+		p := Policy{RequiredClaims: map[string][]string{tc.claim: {tc.want}}}
+		if err := AllowIssuerWithPolicy(tc.issuer, p); err != nil {
+			t.Fatalf("test setup: AllowIssuerWithPolicy(%q) = %v", tc.issuer, err)
+		}
+		signIn := func(claims map[string]any) error {
+			id := identity(claims)
+			id.Issuer = tc.issuer
+			return p.Permit(id)
+		}
+		if err := signIn(map[string]any{tc.claim: tc.want}); err != nil {
+			t.Errorf("%s: an account in the pinned tenant was refused: %v", tc.issuer, err)
+		}
+		var denied *ErrNotPermitted
+		if err := signIn(map[string]any{tc.claim: tc.other}); !errors.As(err, &denied) {
+			t.Errorf("%s: an account in another tenant got %v, want ErrNotPermitted", tc.issuer, err)
+		}
+		if err := signIn(map[string]any{"email": "someone@gmail.example"}); !errors.As(err, &denied) {
+			t.Errorf("%s: an account with no %q claim got %v, want ErrNotPermitted", tc.issuer, tc.claim, err)
+		}
 	}
 }
 

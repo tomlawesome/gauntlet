@@ -650,9 +650,10 @@ AuthCodeURL/Exchange/VerifyIDToken`, `VerifyNonce`, `Identity`,
 `Policy.Permit/Restricted`, `AllowIssuer`, `IsMultiTenantIssuer`,
 `FlowState`, `NewFlowState`, `StateCodec.Encode/Decode`. It is already a
 leaf package with plain-field config and no mikroview imports. The
-self-hosted-only policy (`multiTenantIssuers`) moves with it and is not
-made configurable: `docs/decisions/multi-tenant-oidc.md` decided that
-deliberately, and [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md) adopted it for birdcage.
+self-hosted-only policy (`multiTenantIssuers`) moves with it, as
+`docs/decisions/multi-tenant-oidc.md` decided and [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md) adopted it for birdcage;
+[ADR-0014](adr/0014-shared-issuers.md) since accepts a shared issuer
+when the policy pins the tenant.
 
 **Roles from groups (#76, [ADR-0013](adr/0013-sso-group-roles.md)).**
 `Policy` gains `RoleFromGroups` (group -> `user` | `viewer`, matched like
@@ -1279,9 +1280,11 @@ code, `Decide` can answer `confirm` for the admin account alone -- the
 mitigation for the lone-admin-under-`block` risk in §4's pitfalls
 table -- and `flag` for everyone else.
 
-Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
-listening, as mikroview's `main.go:1723` does -- `oidc.New` refuses it
-as well, so this call is belt-and-braces, not the only check. Login
+Startup: `oidc.AllowIssuerWithPolicy` refuses a multi-tenant issuer
+whose policy does not pin the tenant ([ADR-0014](adr/0014-shared-issuers.md))
+before listening, as mikroview's `main.go:1723` does -- `oidc.New` and
+`gate.New` refuse it as well, so this call is belt-and-braces, not the
+only check. Login
 limiter: 5 per 5
 minutes per IP and per username (mikroview's constants). Client IP:
 `RemoteAddr` host until birdcage has a trusted-proxy setting (§5, slice
@@ -1415,7 +1418,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Code interception / replay | Authorization Code + PKCE S256, `state` and `nonce` compared constant-time, verifier held in an AES-256-GCM cookie the browser cannot read or forge | all of it; the flow-state key is per process |
 | Algorithm confusion (`alg:none`, HS256 with the public key) | explicit allowlist RS256/ES256/PS256 on the verifier | kept explicit rather than relying on go-oidc's default |
 | Account takeover by email match | identity is (issuer, subject); email and `preferred_username` are display hints only | kept; the index is a struct key |
-| Public IdP hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | multi-tenant refusal kept; since #37 SSO never creates the first account -- the first admin is local, created with the setup code from the server's log (ADR-0003) |
+| Public IdP hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | multi-tenant issuers refused unless the policy pins the tenant ([ADR-0014](adr/0014-shared-issuers.md)); since #37 SSO never creates the first account -- the first admin is local, created with the setup code from the server's log (ADR-0003) |
 | Redirect URL from `Host` | built from `publicBaseUrl` only | birdcage: `BIRDCAGE_PUBLIC_URL` |
 | Slow or hung IdP blocks login or startup | 10 s HTTP timeout on discovery, JWKS and exchange | kept |
 | Group/claim policy failing open | every missing or unreadable claim is a refusal; policy re-checked on every login | kept |
@@ -1565,7 +1568,8 @@ once G4 is tagged.
   full mikroview `User` document round-trips and `Authenticate` redeems
   a reset code exactly once.
 - **G5 `oidc`.** Package moved with its fake provider. *Done when:* the
-  ported tests pass and `AllowIssuer` refuses the multi-tenant list.
+  ported tests pass and a multi-tenant issuer is refused (unless the
+  policy pins the tenant, [ADR-0014](adr/0014-shared-issuers.md)).
 - **G6 `gate`.** Middleware and handlers with `Config`/`Deps`; the
   built-in exempt and bootstrap sets; audit hook. *Done when:* an
   httptest server over `persist.Memory` passes the ported

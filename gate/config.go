@@ -291,6 +291,15 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if deps.OIDC != nil && deps.OIDCState == nil {
 		return nil, fmt.Errorf("%w: Deps.OIDCState (required when Deps.OIDC is set)", errMissingDep)
 	}
+	// oidc.New checked the issuer against its own Config.Policy, but the
+	// policy enforced at every sign-in is this one. A shared issuer
+	// without its tenant pinned here would let any account at that
+	// provider in, so it is refused at startup (ADR-0014).
+	if deps.OIDC != nil {
+		if err := oidc.AllowIssuerWithPolicy(deps.OIDC.Issuer(), deps.OIDCPolicy); err != nil {
+			return nil, fmt.Errorf("gate: Deps.OIDCPolicy: %w (see docs/adr/0014-shared-issuers.md)", err)
+		}
+	}
 	// A group never gives admin (ADR-0013 decision 1): an identity
 	// provider that is misconfigured or compromised must not be able to
 	// mint an account that skips the local password and second factor

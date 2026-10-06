@@ -2,10 +2,15 @@ package gate
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	gooidc "github.com/coreos/go-oidc/v3/oidc"
 
 	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/oidc"
@@ -187,5 +192,54 @@ func TestNewRefusesAGroupThatGivesAdminOrAnUnknownRole(t *testing.T) {
 	deps.OIDCPolicy = oidc.Policy{RoleFromGroups: map[string]string{"staff": "user", "guests": "viewer"}, RoleWithoutGroup: "user"}
 	if _, err := New(validConfig(), deps); err != nil {
 		t.Errorf("a user/viewer map was refused: %v", err)
+	}
+}
+
+// TestNewRefusesASharedIssuerItsPolicyDoesNotPin pins ADR-0014 at the
+// gate: the tenant pin must be in the policy gate enforces, so a client
+// built for a shared issuer is refused when Deps.OIDCPolicy leaves the
+// tenant open, even though oidc.New accepted it under its own policy.
+func TestNewRefusesASharedIssuerItsPolicyDoesNotPin(t *testing.T) {
+	const google = "https://accounts.google.com"
+	// A discovery document naming the shared issuer, served locally so
+	// the test never dials the real provider.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 google,
+			"authorization_endpoint": google + "/authorize",
+			"token_endpoint":         google + "/token",
+			"jwks_uri":               google + "/jwks",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	pinned := oidc.Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}}}
+	client, err := oidc.New(gooidc.InsecureIssuerURLContext(context.Background(), google), oidc.Config{
+		IssuerURL:   srv.URL,
+		ClientID:    "test-client",
+		RedirectURL: "https://app.example/callback",
+		Policy:      pinned,
+	})
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+	codec, err := oidc.NewStateCodec()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deps := validDeps(t)
+	deps.OIDC, deps.OIDCState = client, codec
+	_, err = New(validConfig(), deps)
+	if !errors.Is(err, oidc.ErrMultiTenantIssuer) {
+		t.Fatalf("New with an empty Deps.OIDCPolicy = %v, want oidc.ErrMultiTenantIssuer", err)
+	}
+	if !strings.Contains(err.Error(), "0014") {
+		t.Errorf("error %q does not name ADR-0014", err)
+	}
+
+	deps.OIDCPolicy = pinned
+	if _, err := New(validConfig(), deps); err != nil {
+		t.Errorf("a shared issuer with its tenant pinned was refused: %v", err)
 	}
 }
