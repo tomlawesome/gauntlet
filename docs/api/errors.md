@@ -233,11 +233,14 @@ named under the class it shares, below.
 ## not-found
 
 - **Status:** 404. **Title:** Not found.
-- No account, token, session or passkey has the id or ref given; or the
+- No account, token, session or passkey has the id or ref given; the
+  caller asked to remove an authenticator app their account does not
+  have; or the
   application does not offer this feature at all (`Deps.Passkeys`,
   `Deps.OIDC` or `Deps.SignIns` is nil). `detail` is absent for the
   feature-off cases and named for the rest ("no such user", "no such
   session", "no such token", "no such passkey on this account",
+  "this account has no authenticator app",
   "sign-in history is not configured").
 - Not the same as `about:blank`: this class is for a *route that exists*
   answering "nothing here has that id"; `about:blank` is for a path or

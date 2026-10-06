@@ -432,6 +432,24 @@ func TestClearPasskeysRemovesAllAndAppliesTheSameConditionalRule(t *testing.T) {
 	}
 }
 
+// TestClearPasskeysWithNothingToClearWritesNothing: an account with no
+// passkeys answers ErrNoPasskeys, and the store makes no write -- the
+// backend here has no saves left, so a write would fail instead.
+func TestClearPasskeysWithNothingToClearWritesNothing(t *testing.T) {
+	budget := &saveBudgetBackend{left: 1}
+	s, err := OpenStore(budget, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearPasskeys(u.ID); !errors.Is(err, ErrNoPasskeys) {
+		t.Errorf("ClearPasskeys with no passkeys = %v, want %v", err, ErrNoPasskeys)
+	}
+}
+
 func TestClearPasskeysUnknownUserReturnsNotFound(t *testing.T) {
 	s := openTestStore(t)
 	if err := s.ClearPasskeys("no-such-user"); !errors.Is(err, ErrUserNotFound) {

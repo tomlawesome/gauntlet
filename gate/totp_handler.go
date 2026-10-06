@@ -191,12 +191,19 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// cookie, so without it a stolen cookie could guess the six digits
 	// without limit while the owner's enrolment is pending -- and a hit
 	// plants a factor and hands over the recovery codes.
+	//
+	// Both refusals are recorded as every other in-session re-check's
+	// are (recheckPassword, recheckSecondFactor): a run of wrong codes
+	// here is the same guessing from a stolen cookie, and would otherwise
+	// leave no audit line and no Warn for anyone to notice.
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		g.recheckRefused(r, user)
 		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
 	}
 	matched, ok := gauntlet.VerifyTOTP(current.TOTPSecret, req.Code, now, current.TOTPLastCounter)
 	if !ok {
+		g.recheckFailed(r, user, gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode)
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "that code didn't match -- check your authenticator app's clock and try again", nil)
 		return
 	}
@@ -258,7 +265,8 @@ type totpEnrolRequest struct {
 // handleTOTPDelete turns off the signed-in caller's own authenticator-
 // app factor, gated by their password -- the one self-service way to
 // remove it; the admin route at the end of this file is the only other
-// path, for when the password is what's lost instead.
+// path, for when the password is what's lost instead. An account with
+// no authenticator app is answered 404, and nothing else happens.
 func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
@@ -279,6 +287,14 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.deps.Users.ClearTOTP(user.ID); err != nil {
+		// Nothing to remove is the 404 passkey delete answers, and comes
+		// before every revoke, record and notice below: a second click on
+		// "Disable" must not sign the owner out everywhere or tell them a
+		// factor was removed when none was.
+		if errors.Is(err, gauntlet.ErrNoTOTP) {
+			writeProblem(w, http.StatusNotFound, classNotFound, "this account has no authenticator app", nil)
+			return
+		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
@@ -316,6 +332,9 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 // The caller's own password is asked for again on the request (#72,
 // ASVS 7.5.3): stripping a colleague's second factor is exactly what a
 // stolen admin session would be used for.
+//
+// An account with no authenticator app is answered 200 with cleared
+// false, and nothing is recorded or sent.
 func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 	var req adminStepUpRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
@@ -342,6 +361,13 @@ func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := g.deps.Users.ClearTOTP(id); err != nil {
+		// The account is already in the state asked for, so this is a
+		// success, but one that changed nothing: no record and no notice
+		// of a removal that did not happen.
+		if errors.Is(err, gauntlet.ErrNoTOTP) {
+			writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": false})
+			return
+		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
