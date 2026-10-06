@@ -2,6 +2,7 @@ package gauntlet
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -383,8 +384,15 @@ func TestTransferAdminRefusesAnSSOOnlyTargetFromTheLastLocalAdmin(t *testing.T) 
 	if _, _, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-c", "carol", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.TransferAdmin("carol", time.Now()); err != ErrLastLocalAdmin {
+	// ErrLastLocalAdmin's own advice -- give another admin a local
+	// password -- cannot be followed with one admin, so the error says
+	// how instead, and still answers errors.Is.
+	_, _, err := s.TransferAdmin("carol", time.Now())
+	if !errors.Is(err, ErrLastLocalAdmin) {
 		t.Fatalf("transferring the only admin role to an SSO-only account = %v, want ErrLastLocalAdmin", err)
+	}
+	if !strings.Contains(err.Error(), "role route") {
+		t.Errorf("error %q does not say how to proceed with a single admin", err)
 	}
 	setup, _ := s.ByUsername("setup-admin")
 	if setup.Role != RoleAdmin {

@@ -1126,8 +1126,13 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 		// leave the deployment with no admin that can sign in while the
 		// identity provider is down (ADR-0010): the same rule SetRole
 		// and DeleteUser apply through isLastLocalAdmin.
+		//
+		// ErrLastLocalAdmin's own advice, give another admin a local
+		// password first, cannot be followed here: there is no other
+		// admin. So the error says how instead, wrapped so errors.Is
+		// still matches it.
 		if st.isLastLocalAdmin(current) && !target.LocalPassword() {
-			return ErrLastLocalAdmin
+			return fmt.Errorf("%w: make the account an admin with the role route, let it set a local password, then change your own role", ErrLastLocalAdmin)
 		}
 		current.Role = RoleUser
 		current.RoleChangedAt = now
