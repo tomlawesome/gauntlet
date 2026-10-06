@@ -209,6 +209,45 @@ func TestTOTPEnrollmentURIEscapesUsername(t *testing.T) {
 	}
 }
 
+// TestTOTPEnrollmentURIEscapesProductName: a product name holding a
+// space and a colon comes back unchanged from the label and the issuer
+// when each is split on its one literal separator and percent-decoded
+// as a path is -- which, unlike form decoding, leaves a '+' as a '+',
+// the way an authenticator app reads it.
+func TestTOTPEnrollmentURIEscapesProductName(t *testing.T) {
+	const product, username = "Home Router: Lab", "bob smith"
+	uri := TOTPEnrollmentURI(product, username, []byte("12345678901234567890"))
+
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("TOTPEnrollmentURI = %q, does not parse as a URI: %v", uri, err)
+	}
+	label := strings.TrimPrefix(parsed.EscapedPath(), "/")
+	issuerPart, accountPart, ok := strings.Cut(label, ":")
+	if !ok || strings.Contains(accountPart, ":") {
+		t.Errorf("label %q does not hold exactly one literal colon", label)
+	} else {
+		for _, part := range []struct{ escaped, want string }{
+			{issuerPart, product},
+			{accountPart, username},
+		} {
+			if got, err := url.PathUnescape(part.escaped); err != nil || got != part.want {
+				t.Errorf("label part %q decodes to %q (%v), want %q", part.escaped, got, err, part.want)
+			}
+		}
+	}
+
+	var issuer string
+	for _, pair := range strings.Split(parsed.RawQuery, "&") {
+		if v, found := strings.CutPrefix(pair, "issuer="); found {
+			issuer = v
+		}
+	}
+	if got, err := url.PathUnescape(issuer); err != nil || got != product {
+		t.Errorf("issuer %q decodes to %q (%v), want %q", issuer, got, err, product)
+	}
+}
+
 func TestVerifyTOTPAcceptsCurrentAndAdjacentSteps(t *testing.T) {
 	secret, err := GenerateTOTPSecret()
 	if err != nil {

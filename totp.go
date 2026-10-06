@@ -39,7 +39,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -165,18 +164,21 @@ func totpLabelEscape(s string) string {
 // otpauth://totp/<productName>:<username>?secret=…&issuer=<productName>.
 //
 // productName replaces mikroview's hard-coded "MikroView" -- see this
-// file's package comment. username is escaped by totpLabelEscape rather
-// than left to a generic URL escaper, specifically so a username
+// file's package comment. productName and username are both escaped by
+// totpLabelEscape rather than left to a generic URL escaper, so a name
 // holding a space or a colon still produces a URI an app parses the way
-// we intend -- see that function's comment. secret and productName go
-// through url.Values, which escapes the query string correctly on its
-// own.
+// we intend -- see that function's comment.
+//
+// The query is built by hand, not with url.Values: url.Values encodes a
+// space as '+', the HTML form convention, which the Key URI format does
+// not define, so an issuer of "Home Router" reached apps as
+// "Home+Router" or failed to scan at all. totpLabelEscape writes a
+// space as %20, which every app decodes. The secret needs no escaping:
+// base32 is letters and digits only.
 func TOTPEnrollmentURI(productName, username string, secret []byte) string {
-	label := productName + ":" + totpLabelEscape(username)
-	v := url.Values{}
-	v.Set("secret", EncodeTOTPSecret(secret))
-	v.Set("issuer", productName)
-	return "otpauth://totp/" + label + "?" + v.Encode()
+	issuer := totpLabelEscape(productName)
+	label := issuer + ":" + totpLabelEscape(username)
+	return "otpauth://totp/" + label + "?secret=" + EncodeTOTPSecret(secret) + "&issuer=" + issuer
 }
 
 // totpCounter returns the RFC 6238 time-step counter for t: the number
