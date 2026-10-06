@@ -1,4 +1,4 @@
-# ADR-0014: A shared SSO issuer is accepted when the policy pins the tenant
+# ADR-0014: A shared SSO issuer is accepted when the policy pins the tenant (Google only for now)
 
 **Status:** Accepted (owner decision on #79, 2026-10-06)
 **Date:** 2026-10-06
@@ -27,11 +27,16 @@ shared, so the tenant claim is the access control, as Microsoft's
 guidance for multi-tenant apps and Google's `hd` check both describe.
 
 1. `oidc.AllowIssuerWithPolicy(issuer, policy)` accepts a self-hosted
-   issuer as before. A shared issuer is accepted only when
-   `policy.RequiredClaims` names its tenant claim with at least one
-   value: `hd` for Google, `tid` for the Entra shared endpoints. Apple
-   and Microsoft personal accounts carry no tenant claim and are always
-   refused. The error names the missing claim.
+   issuer, or a single Entra tenant, as before. `accounts.google.com` is
+   accepted only when `policy.RequiredClaims` names `hd` with at least
+   one value; the error names the missing claim. Apple and Microsoft
+   personal accounts carry no tenant claim and are always refused.
+   Entra's `common`, `organizations` and `consumers` endpoints stay
+   refused too, with an error naming the single-tenant issuer
+   (`https://login.microsoftonline.com/<tenant-guid>/v2.0`) as the
+   supported way: their discovery document publishes a templated issuer
+   (`.../{tenantid}/v2.0`) that go-oidc refuses, so no `tid` pin could
+   make them start.
 2. It is checked at startup, twice: `oidc.New` checks `Config.Policy`
    against the configured URL and the issuer the discovery document
    names, and `gate.New` checks `Client.Issuer()` against
@@ -44,8 +49,8 @@ guidance for multi-tenant apps and Google's `hd` check both describe.
 ## Rejected options
 
 - **Keep the blanket refusal.** It contradicts `Policy`'s documented
-  purpose, and leaves operators on Google Workspace or Entra with no
-  supported way in.
+  purpose, and leaves operators on Google Workspace with no supported
+  way in.
 - **Accept a shared issuer under any restricting policy** (what
   `Restricted` measured). An email-domain or group rule is not a tenant
   pin: a personal account at a shared provider can hold a verified
@@ -55,11 +60,12 @@ guidance for multi-tenant apps and Google's `hd` check both describe.
 
 ## Consequences
 
-- An operator using a shared issuer must pin the tenant in
-  `RequiredClaims`, and pass the same policy to `oidc.Config.Policy` and
-  `gate.Deps.OIDCPolicy`.
+- An operator using Google must pin `hd` in `RequiredClaims`, and pass
+  the same policy to `oidc.Config.Policy` and `gate.Deps.OIDCPolicy`.
 - A missing or misnamed claim is a refusal to start, not a silently open
   door; a token from another tenant is a refused sign-in.
-- Pinning a value that itself covers the public -- the Entra tenant id
-  shared by all personal Microsoft accounts -- is accepted as written:
-  the check confirms a tenant is named, not which one.
+- Entra's shared endpoints stay refused in this release. Supporting
+  them needs go-oidc's issuer-check bypass (`InsecureIssuerURLContext`)
+  together with a `tid` check on every token; that is a follow-up for
+  the owner to decide. An Entra organisation uses its single-tenant
+  issuer meanwhile.

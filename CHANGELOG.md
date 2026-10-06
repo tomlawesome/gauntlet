@@ -459,17 +459,19 @@ Behaviour changes and deprecations from the v0.3.0 release audit (#79):
   password while other admins remain, with the new `ErrLastLocalAdmin`
   (`409` `last-admin` over HTTP). `GET /api/auth/session` reports
   `mustChangePassword` only for an account with a local password.
-- **Shared SSO issuers are accepted when the policy pins the tenant**
-  (#79, ADR-0014). `oidc.AllowIssuer` refused `accounts.google.com` and
-  Entra's `common`, `organizations` and `consumers` endpoints whatever
-  the policy said, so an operator following `Policy`'s own documentation
-  got a start-up refusal. `oidc.AllowIssuerWithPolicy` accepts one only
-  when `RequiredClaims` names its tenant claim (`hd` for Google, `tid`
-  for Entra) with a value; Apple and Microsoft personal accounts have no
-  tenant claim and stay refused. `oidc.Config.Policy` is checked by
-  `oidc.New` against both the configured URL and the issuer the
-  discovery document names, and `gate.New` checks `Client.Issuer`
-  against `Deps.OIDCPolicy`. `AllowIssuer` and `Policy.Restricted` are
+- **Google's shared SSO issuer is accepted when the policy pins `hd`**
+  (#79, ADR-0014). `oidc.AllowIssuer` refused `accounts.google.com`
+  whatever the policy said, so an operator following `Policy`'s own
+  documentation got a start-up refusal. `oidc.AllowIssuerWithPolicy`
+  accepts it only when `RequiredClaims` names `hd` with a value. Apple
+  and Microsoft personal accounts have no tenant claim and stay refused;
+  Entra's `common`, `organizations` and `consumers` endpoints stay
+  refused too, because go-oidc cannot discover their templated issuer,
+  and the error names the single-tenant issuer
+  (`https://login.microsoftonline.com/<tenant-guid>/v2.0`) to use
+  instead. `oidc.Config.Policy` is checked by `oidc.New` against both
+  the configured URL and the issuer the discovery document names, and
+  `gate.New` checks `Client.Issuer` against `Deps.OIDCPolicy`. `AllowIssuer` and `Policy.Restricted` are
   deprecated (nothing called `Restricted`).
 - `SessionStore.EndSessionsForUser` ends every session as before but
   counts only those still live, so an admin's sign-out of another
