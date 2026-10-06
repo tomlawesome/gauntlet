@@ -15,9 +15,11 @@ func (g *Gate) handleLogout(w http.ResponseWriter, r *http.Request) {
 // handleLogoutAll ends every session the caller holds, on every device
 // ("sign out everywhere"), then issues a fresh session and cookie so the
 // device the call was made from is not itself logged out by it --
-// mikroview's #677/handleAuthLogoutAll. User-tier: it acts only on the
-// caller's own sessions, resolved from the session cookie, never from a
-// body field naming someone else.
+// mikroview's #677/handleAuthLogoutAll. The fresh session continues the
+// caller's (issueContinuedSession): no credential is asked for here, so
+// it keeps the original sign-in's lifetime ceiling. User-tier: it acts
+// only on the caller's own sessions, resolved from the session cookie,
+// never from a body field naming someone else.
 //
 // It also forgets every browser the account remembers
 // (gauntlet.Store.ClearKnownBrowsers, #44): someone signing out
@@ -34,7 +36,15 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	method := g.sessionMethod(r, user.ID, now)
+	// Read before the sessions end: the new session continues this one,
+	// keeping its sign-in time, so this route can never push the
+	// lifetime ceiling back. Gone already means another request ended it
+	// since sessionUser read it, and nothing is issued then.
+	old, ok := g.callerSession(r, user.ID, now)
+	if !ok {
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
 	g.deps.Sessions.RevokeAllForUser(user.ID)
 	detail := "sessions ended: all, via sign out everywhere; remembered browsers forgotten"
 	if err := g.deps.Users.ClearKnownBrowsers(user.ID); err != nil {
@@ -43,6 +53,6 @@ func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	}
 	g.audit(r, user.Username, "account.sessions_ended", user.Username, detail)
 
-	g.issueSession(w, r, user.ID, method, now)
+	g.issueContinuedSession(w, r, old, now)
 	writeJSON(w, http.StatusOK, map[string]any{"signedOutEverywhere": true})
 }

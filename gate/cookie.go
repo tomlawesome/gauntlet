@@ -105,11 +105,12 @@ func (g *Gate) clearSessionCookie(w http.ResponseWriter) {
 // it does not own.
 //
 // Called only through issueSession, so every path that issues a
-// session runs it. Where the path has already ended every session of the
-// account (password change, factor enrolment, SSO link, sign out
-// everywhere) the cookie's session is gone and this finds nothing; at
-// first-account registration no session can belong to the new account
-// yet. Both are harmless, and one route through issueSession means a
+// session runs it -- except sign out everywhere, which issues through
+// issueContinuedSession after ending every session itself. Where the
+// path has already ended every session of the account (password
+// change, factor enrolment, SSO link) the cookie's session is gone and
+// this finds nothing; at first-account registration no session can
+// belong to the new account yet. Both are harmless, and one route through issueSession means a
 // new sign-in path cannot forget it.
 func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Time) {
 	cookie, err := r.Cookie(g.sessionCookieName())
@@ -143,11 +144,11 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 // Address and UserAgent are the client's word, cleaned and capped by
 // CreateFrom.
 //
-// A route that rotates the session the caller already holds -- a
-// password change, a factor confirmed, sign out everywhere -- passes
-// what sessionMethod read before it ended the old one: the new session
-// continues the same sign-in, as its client does, and the list of
-// sessions keeps saying how it was made.
+// A route that rotates the session the caller already holds after
+// asking for a credential -- a password change, a factor confirmed --
+// passes what sessionMethod read before it ended the old one: the new
+// session continues the same sign-in, as its client does, and the list
+// of sessions keeps saying how it was made.
 func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, method gauntlet.SignInMethod, now time.Time) {
 	g.issueSignInSession(w, r, userID, g.placeOf(r, ""), 0, method, now)
 }
@@ -157,15 +158,40 @@ func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID strin
 // account and then issue one for the caller, before they end it. Empty
 // when there is none.
 func (g *Gate) sessionMethod(r *http.Request, userID string, now time.Time) gauntlet.SignInMethod {
+	sess, _ := g.callerSession(r, userID, now)
+	return sess.Client.Method
+}
+
+// callerSession is the live session r's cookie names, when it belongs to
+// userID, and whether there is one.
+func (g *Gate) callerSession(r *http.Request, userID string, now time.Time) (gauntlet.Session, bool) {
 	cookie, err := r.Cookie(g.sessionCookieName())
 	if err != nil {
-		return ""
+		return gauntlet.Session{}, false
 	}
 	sess, ok := g.deps.Sessions.Validate(cookie.Value, now)
 	if !ok || sess.UserID != userID {
-		return ""
+		return gauntlet.Session{}, false
 	}
-	return sess.Client.Method
+	return sess, true
+}
+
+// issueContinuedSession is issueSession for a route that rotates the
+// caller's session without asking for a credential -- sign out
+// everywhere. The new session continues old, the caller's session read
+// before every session of the account was ended
+// (gauntlet.SessionStore.CreateContinuing): it keeps old's IssuedAt,
+// signals and method, and its cookie lasts only to old's ceiling
+// (setResumedSessionCookie). Issued as a new sign-in, it would restart
+// the lifetime ceiling, and a stolen cookie used on that route once an
+// hour would never expire. The browser is remembered as issueSession
+// remembers it. There is no session to replace: the caller has ended
+// them all already.
+func (g *Gate) issueContinuedSession(w http.ResponseWriter, r *http.Request, old gauntlet.Session, now time.Time) {
+	place := g.placeOf(r, "")
+	g.rememberSignIn(w, r, old.UserID, place, now)
+	sess := g.deps.Sessions.CreateContinuing(old, place.client, now)
+	g.setResumedSessionCookie(w, sess, now)
 }
 
 // issueSignInSession is issueSession for a sign-in already judged: place
