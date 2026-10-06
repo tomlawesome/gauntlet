@@ -37,9 +37,11 @@ const (
 	ipinfoURL = "https://ipinfo.io/data/ipinfo_lite.mmdb"
 )
 
+// fetchTimeout bounds a whole download: headers, body and extraction,
+// whichever client made the request. A var only so a test can shorten it.
+var fetchTimeout = 2 * time.Minute
+
 const (
-	// fetchTimeout bounds a whole download with the default client.
-	fetchTimeout = 2 * time.Minute
 	// maxFileBytes caps both what is read off the wire and what one
 	// decompressed database may grow to. Both sources' files are well
 	// under it; it bounds a hostile or broken download.
@@ -188,6 +190,13 @@ func (e errStatus) Error() string { return fmt.Sprintf("unexpected status %d", i
 // download fetches req and writes the extracted .mmdb bytes to dst.
 // Every error it returns has been through cleanErr or redact.
 func (m *Manager) download(ctx context.Context, req request, dst io.Writer) (response, error) {
+	// Bounded here, not only by the default client's Timeout: a caller's
+	// HTTPClient may have none, and a provider that stops answering --
+	// before the headers or partway through the body -- would otherwise
+	// hang the refresher for good. The request carries ctx, so this also
+	// cuts off the body read inside extraction.
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
 	hr, err := http.NewRequestWithContext(ctx, http.MethodGet, req.url, nil)
 	if err != nil {
 		return response{}, errors.New(cleanErr(err, m.secrets))
