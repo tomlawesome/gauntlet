@@ -4,7 +4,10 @@ package persist
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -26,9 +29,26 @@ type fileLock struct {
 // when the lock call eventually returns, it closes the file at once, so
 // an abandoned lock is not held forever and the handle never leaks; the
 // caller gets ctx.Err() without waiting for that to happen.
+//
+// A lock file this call creates takes the owner and group of the store
+// it guards (path without ".lock"), when that exists, for the same
+// reason writeFileAtomic keeps the store's: created root-owned 0600 by
+// an app's CLI run with sudo, it could never be opened again by the
+// server sharing the store, and every save there would fail.
 func lockFile(ctx context.Context, path string) (*fileLock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	switch {
+	case err == nil:
+		if err := ownLikeStore(f, strings.TrimSuffix(path, ".lock")); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	case errors.Is(err, fs.ErrExist):
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, err
+		}
+	default:
 		return nil, err
 	}
 	acquired := make(chan error, 1)
@@ -48,6 +68,20 @@ func lockFile(ctx context.Context, path string) (*fileLock, error) {
 		}()
 		return nil, ctx.Err()
 	}
+}
+
+// ownLikeStore gives a just-created lock file the owner and group of the
+// store at store, if there is one yet; a first save has nothing to copy
+// and leaves the lock as its writer made it.
+func ownLikeStore(f *os.File, store string) error {
+	info, err := os.Stat(store)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return copyOwner(f, info)
 }
 
 // unlock releases the lock by closing the file handle: an flock lives on
