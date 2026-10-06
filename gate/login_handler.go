@@ -1,6 +1,8 @@
 package gate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -56,6 +58,18 @@ type loginReservation struct {
 	lockedUntil    time.Time
 }
 
+// unknownNameKey is the limiter key for a typed name that matches no
+// account: a SHA-256 digest of the lowercased name, in hex, rather than
+// the name itself. The name is the caller's to choose, up to the 64 KiB
+// a body may hold, and the limiter keeps thousands of keys; keyed on the
+// name, a credential-free flood of long made-up names would pin hundreds
+// of megabytes. The digest is the same size for every name, and one
+// name, in any case, is still one bucket.
+func unknownNameKey(username string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(username)))
+	return "user:" + hex.EncodeToString(sum[:])
+}
+
 // reserveLogin reserves one attempt on both buckets, or neither, and
 // writes the 429 itself when it is neither. accountID is "" for a name
 // that matches no account.
@@ -87,7 +101,7 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 	address := g.cfg.ClientIP(r)
 	res := loginReservation{ipKey: "ip:" + address, address: address, accountID: accountID, pendingAfterReset: pendingAfterReset}
 	if accountID == "" {
-		res.nameKey = "user:" + strings.ToLower(username)
+		res.nameKey = unknownNameKey(username)
 	}
 	// A banned address (gauntlet.LoginLimiter.AddressBanned, #70) is
 	// refused before anything is reserved, as the address limit refuses

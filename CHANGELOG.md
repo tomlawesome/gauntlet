@@ -363,6 +363,12 @@ All notable changes to this project are documented in this file.
   the sixth in one window from one address and account is now `429`.
   Like any kept attempt, a run of them counts toward the account's
   lockout.
+- The login limiter keys a username that matches no account on a
+  SHA-256 digest of the lowercased name instead of the name itself
+  (#79). A body may hold a 64 KiB name and the limiter keeps thousands
+  of keys, so a credential-free flood of long made-up names could pin
+  hundreds of megabytes. Limiting is unchanged: one name, in any case,
+  is one bucket.
 
 ### Changed
 
