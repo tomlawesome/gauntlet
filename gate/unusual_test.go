@@ -1139,6 +1139,46 @@ func TestUnusualConfirmSendsACode(t *testing.T) {
 	}
 }
 
+// The confirmation code goes to the account's owner with the browser
+// that asked for it, and that browser is the caller's own word: it
+// reaches the hook cleaned and cut as a session's is, so a newline, a
+// made-up line or a huge header never lands in the message the owner
+// receives.
+func TestUnusualConfirmCodeCarriesTheCleanedClient(t *testing.T) {
+	e, rec, _ := confirmEnv(t)
+	agent := "Firefox/131.0\nYour account is safe, reply with the code" + strings.Repeat("x", 5*1024)
+	body, err := json.Marshal(credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Straight to the handler: no HTTP client sends a newline in a
+	// header, but a proxy in front of the application might pass one.
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	req.Header.Set(sessionsTestIPHeader, addrParis)
+	req.Header.Set("User-Agent", agent)
+	w := httptest.NewRecorder()
+	e.ts.Config.Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("held sign-in = %d %s", w.Code, w.Body)
+	}
+	codes := rec.allCodes()
+	if len(codes) != 1 {
+		t.Fatalf("codes = %+v", codes)
+	}
+	got := codes[0].Client
+	if want := (gauntlet.SessionClient{Address: addrParis, UserAgent: agent}).Clean().UserAgent; got.UserAgent != want {
+		t.Errorf("the code's client agent = %q, want %q", got.UserAgent, want)
+	}
+	if strings.ContainsAny(got.UserAgent, "\r\n") || len(got.UserAgent) > gauntlet.MaxSessionUserAgent {
+		t.Errorf("the code's client agent is not cleaned and cut: %d bytes, %q", len(got.UserAgent), got.UserAgent)
+	}
+	if got.Address != addrParis || got.Country != "FR" {
+		t.Errorf("the code's client = %+v", got)
+	}
+}
+
 // A held sign-in keeps its limiter reservation: it is an attempt in
 // flight, and the window hands it back. Released, someone holding the
 // password could sign in from a new place without limit and flood the

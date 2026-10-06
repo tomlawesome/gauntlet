@@ -369,6 +369,13 @@ All notable changes to this project are documented in this file.
   of keys, so a credential-free flood of long made-up names could pin
   hundreds of megabytes. Limiting is unchanged: one name, in any case,
   is one bucket.
+- The confirmation code (`ConfirmCode.Client`) and the unusual-sign-in
+  and block notices carry the client cleaned and cut as a session's is,
+  not the raw `User-Agent` (#79): someone holding the password could put
+  line breaks, a made-up line or a huge header into the message the
+  service sends the real owner. The rule is exported as
+  `gauntlet.SessionClient.Clean`, which `CreateFrom`, `CreateContinuing`
+  and `Resume` now use too. Additive.
 
 ### Changed
 

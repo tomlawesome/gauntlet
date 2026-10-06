@@ -73,6 +73,15 @@ const resumedWithPasskeyNote = "credential=passkey; "
 // address the limiter counted. This is the one place that client is
 // built for a sign-in record and for the session issueSession starts,
 // so the two always agree.
+//
+// The client comes back cleaned and cut (SessionClient.Clean), as a
+// session and a sign-in record keep it, because it also goes where
+// nothing else cleans it: the confirmation code (ConfirmCode.Client) and
+// the unusual-sign-in and block notices carry it to the account's owner,
+// and the raw User-Agent would let anyone holding the password put line
+// breaks, a made-up line or a huge header into that message.
+// The country is looked up from the address as resolved, before it is
+// cut.
 func (g *Gate) signInClient(r *http.Request, address string) gauntlet.SessionClient {
 	if address == "" {
 		address = g.cfg.ClientIP(r)
@@ -83,7 +92,7 @@ func (g *Gate) signInClient(r *http.Request, address string) gauntlet.SessionCli
 			client.Country = code
 		}
 	}
-	return client
+	return client.Clean()
 }
 
 // signInFailed reports whether o is a refused credential or a refused
