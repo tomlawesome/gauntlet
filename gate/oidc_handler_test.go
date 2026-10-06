@@ -839,14 +839,14 @@ func TestOIDCCallbackUsesEmailWhenPreferredUsernameEmpty(t *testing.T) {
 
 // TestAllowIssuerRefusesKnownMultiTenantProviders is a sanity check on
 // the fail-closed startup call an application wiring Deps.OIDC is
-// expected to make (oidc.AllowIssuer, docs/design.md §1.4/§4) --
-// belt-and-braces over oidc.New's own enforcement of the same policy.
-// The enforcement itself lives in the oidc package's own, more
-// exhaustive tests; this pins that gate's own docs are backed by a real
-// assertion.
+// expected to make (oidc.AllowIssuerWithPolicy, ADR-0014) --
+// belt-and-braces over oidc.New's and gate.New's own enforcement of the
+// same rule. The enforcement itself lives in the oidc package's own,
+// more exhaustive tests; this pins that gate's own docs are backed by a
+// real assertion: a shared issuer with no tenant pinned is refused.
 func TestAllowIssuerRefusesKnownMultiTenantProviders(t *testing.T) {
-	if err := oidc.AllowIssuer("https://accounts.google.com"); err == nil {
-		t.Error("expected a known multi-tenant issuer to be refused")
+	if err := oidc.AllowIssuerWithPolicy("https://accounts.google.com", oidc.Policy{}); err == nil {
+		t.Error("expected a shared issuer with no tenant claim pinned to be refused")
 	}
 }
 
