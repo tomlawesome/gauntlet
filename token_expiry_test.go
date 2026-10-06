@@ -242,3 +242,44 @@ func TestSweepOfAnUnpersistedStoreDoesNothing(t *testing.T) {
 		t.Errorf("Sweep = %+v, %v", res, err)
 	}
 }
+
+func TestRemoveOrphansTakesOnlyTokensOfMissingAccounts(t *testing.T) {
+	s := newTestTokenStore(t)
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	alice := &User{ID: "user-alice", Username: "alice"}
+	bob := &User{ID: "user-bob", Username: "bob"}
+	aliceRaw, aliceTok, err := s.Create("alice-integration", TokenKindAPI, "", alice, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobRaw, _, err := s.Create("bob-integration", TokenKindAPI, "", bob, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unattributed: it cannot be tied to any account, so is never an orphan.
+	oldRaw, _, err := s.Create("pre-upgrade", TokenKindAPI, "", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exists := func(id string) bool { return id == bob.ID }
+
+	gone, err := s.RemoveOrphans(exists, now)
+	if err != nil {
+		t.Fatalf("RemoveOrphans: %v", err)
+	}
+	if len(gone) != 1 || gone[0].ID != aliceTok.ID || gone[0].CreatedByUsername != "alice" || gone[0].HashedValue != "" {
+		t.Fatalf("removed = %+v, want alice's token with its hash blanked", gone)
+	}
+	if _, ok := s.Authenticate(aliceRaw, TokenKindAPI, now); ok {
+		t.Error("the orphaned token still authenticates")
+	}
+	for name, raw := range map[string]string{"bob's": bobRaw, "the unattributed": oldRaw} {
+		if _, ok := s.Authenticate(raw, TokenKindAPI, now); !ok {
+			t.Errorf("%s token was removed", name)
+		}
+	}
+	// Nothing left to do: no write, nothing returned.
+	if gone, err := s.RemoveOrphans(exists, now); err != nil || gone != nil {
+		t.Errorf("second RemoveOrphans = %+v, %v", gone, err)
+	}
+}

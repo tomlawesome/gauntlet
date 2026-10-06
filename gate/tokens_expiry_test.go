@@ -287,3 +287,47 @@ func TestSweepTokensStopsOnACancelledContext(t *testing.T) {
 		t.Error("a cancelled context swept anyway")
 	}
 }
+
+// Deleting an account and revoking its tokens are two writes. When the
+// second never happens, the next sweep removes the tokens and audits it.
+func TestSweepTokensRemovesTokensWhoseCreatorIsGone(t *testing.T) {
+	f := newSweepFixture(t)
+	now := time.Now()
+	bob, err := f.g.deps.Users.CreateUser("bob", "password-placeholder-1", gauntlet.RoleUser, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan := f.mint(t, "bob-integration", bob, now.Add(-time.Hour), now.Add(300*24*time.Hour))
+	kept := f.mint(t, "admin-integration", f.admin, now.Add(-time.Hour), now.Add(300*24*time.Hour))
+	// The account goes, but its tokens' revoke never runs.
+	if _, err := f.g.deps.Users.DeleteUser(bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.g.deps.Tokens.Authenticate(f.raw[orphan], gauntlet.TokenKindAPI, now); !ok {
+		t.Fatal("setup: the orphaned token should still work before the sweep")
+	}
+
+	res, err := f.g.SweepTokens(context.Background(), now)
+	if err != nil {
+		t.Fatalf("SweepTokens: %v", err)
+	}
+	if res != (TokenSweep{Orphaned: 1}) {
+		t.Errorf("result = %+v, want 1 orphaned", res)
+	}
+	if f.has(orphan) || !f.has(kept) {
+		t.Errorf("orphan present = %v, admin's present = %v; want false, true", f.has(orphan), f.has(kept))
+	}
+	if _, ok := f.g.deps.Tokens.Authenticate(f.raw[orphan], gauntlet.TokenKindAPI, now); ok {
+		t.Error("the orphaned token still authenticates after the sweep")
+	}
+	var audited []auditEntry
+	for _, e := range f.audit.entries {
+		if e.Action == "token.removed_orphaned" {
+			audited = append(audited, e)
+		}
+	}
+	if len(audited) != 1 || audited[0].Actor != "system" || audited[0].Target != "bob-integration" ||
+		!strings.Contains(audited[0].Detail, "id="+orphan) {
+		t.Errorf("audit entries = %+v, want one token.removed_orphaned by system for %s", audited, orphan)
+	}
+}

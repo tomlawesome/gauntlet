@@ -911,6 +911,51 @@ func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error) {
 	return removed, nil
 }
 
+// RemoveOrphans deletes, in one write, every token whose creating
+// account exists reports gone, and returns copies of them with
+// HashedValue zeroed, as List does. It is how a token outlives its
+// account's deletion only until the next sweep: deleting an account and
+// revoking its tokens (RevokeAllCreatedBy) are two writes, and a crash
+// or failure between them leaves the tokens live with nothing recording
+// that they are owed a revoke.
+//
+// A token with an empty CreatedBy is never removed, for the reason
+// RevokeAllCreatedBy gives. exists runs inside the write, so may run
+// more than once for a token on a conflict replay; it must not call
+// into this store. Nothing to remove is no write and a nil result; on a
+// persistence failure nothing is removed and the result is nil.
+//
+// An unpersisted store holds no tokens, so it removes nothing.
+func (s *TokenStore) RemoveOrphans(exists func(userID string) bool, now time.Time) ([]Token, error) {
+	if !s.Persisted() {
+		return nil, nil
+	}
+	s.reloadIfStale()
+	var removed []Token
+	err := s.mutate(func(st *tokenState) error {
+		// Reset: the op runs again on a conflict replay.
+		removed = nil
+		for _, t := range st.tokens() {
+			if t.CreatedBy == "" || exists(t.CreatedBy) {
+				continue
+			}
+			delete(st.byID, t.ID)
+			delete(st.byHash, t.HashedValue)
+			cp := *t
+			cp.HashedValue = ""
+			removed = append(removed, cp)
+		}
+		if len(removed) == 0 {
+			return errNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
 // TokenSweepResult is what one TokenStore.Sweep did. HashedValue is
 // zeroed on every token, as List does.
 type TokenSweepResult struct {
