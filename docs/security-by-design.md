@@ -223,7 +223,7 @@ it says so instead of repeating the reasoning.
 | 6.8.1 identity namespaced by IdP | 2 | Met | `(issuer, subject)` is the key (`user.go:104`, `store.go` `ByOIDCIdentity`) |
 | 6.8.2 assertion signatures always validated | 2 | Met | ID token verified by go-oidc with the RS256/ES256/PS256 allowlist (`oidc/oidc.go:183`); no unsigned path |
 | 6.8.3 SAML replay | 2 | N/A | No SAML |
-| 6.8.4 strength expected from the IdP verified, or fallback documented | 2 | Deviation, documented here | Gauntlet does not read `acr`, `amr` or `auth_time`. Fallback assumption: an SSO sign-in is as strong as the self-hosted IdP's own policy, which the same operator controls; gauntlet adds no local second factor to it and a linked account loses its local factors (`LinkOIDCIdentity`). Public multi-tenant issuers are refused unless the policy pins the tenant (ADR-0014, `oidc/policy.go` `AllowIssuerWithPolicy`), so that policy is always the operator's own or their organisation's |
+| 6.8.4 strength expected from the IdP verified, or fallback documented | 2 | Deviation, documented here | Gauntlet does not read `acr`, `amr` or `auth_time`. Fallback assumption: an SSO sign-in is as strong as the self-hosted IdP's own policy, which the same operator controls; gauntlet adds no local second factor to it and a linked account loses its local factors (`LinkOIDCIdentity`). Public multi-tenant issuers are refused, Google excepted when the policy pins the `hd` domain (ADR-0014, `oidc/policy.go` `AllowIssuerWithPolicy`), so that policy is always the operator's own or their organisation's |
 
 ### V7 Session management
 
@@ -260,7 +260,7 @@ it says so instead of repeating the reasoning.
 | 8.3.1 enforced on the server | 1 | Met | All in `gate`; nothing trusts the frontend |
 | 8.3.2 changes apply immediately | 3 | Met | Role read from the store on every request (`gate/protect.go:321-341`) |
 | 8.3.3 originating subject's permissions | 3 | Met | No service-to-service hop; the token or session on the request decides |
-| 8.4.1 multi-tenant | 2 | N/A | Single tenant by design: a shared SSO issuer is accepted only with the tenant pinned (ADR-0014, `oidc/policy.go` `AllowIssuerWithPolicy`) |
+| 8.4.1 multi-tenant | 2 | N/A | Single tenant by design: the one shared SSO issuer accepted, Google, needs the `hd` domain pinned (ADR-0014, `oidc/policy.go` `AllowIssuerWithPolicy`) |
 | 8.4.2 layered admin access | 3 | Not targeted | Role plus mandatory second factor; no device posture |
 
 ### V9 Self-contained tokens
