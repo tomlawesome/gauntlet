@@ -270,6 +270,22 @@ All notable changes to this project are documented in this file.
   be queued. A failure refuses the attempt, since no code reached
   anyone; nil means the confirm action is unavailable (#55, #73).
 
+- **Security fixes reach a merge request the same day** (#79).
+  A second, daily pipeline schedule runs the `renovate` job with
+  `RENOVATE_SECURITY_ONLY=true`, which merges the new
+  `renovate-security.json` over `renovate.json`: every ordinary update
+  is off and vulnerability fixes stay on, so a security fix no longer
+  waits for Monday's run (docs/releasing.md).
+- Additive Go API from the v0.3.0 release audit (#79), each described
+  where it changes behaviour below: `SessionStore.CreateContinuing`,
+  `SessionStore.EndSessionsForUser`, `Store.ValidateNewAccount`,
+  `Store.PasswordMatches`, `ErrLastLocalAdmin`, `ErrNoTOTP`,
+  `ErrNoPasskeys`, `TokenStore.RemoveOrphans`,
+  `TokenStore.MarkExpiryWarned`, `TokenSweep.Orphaned`,
+  `KnownBrowser.Confirmed`, `oidc.AllowIssuerWithPolicy`,
+  `oidc.Config.Policy` and `oidc.Client.Issuer`. The accounts document
+  stays at version 9.
+
 ### Security
 
 - A running accounts or tokens store no longer adopts an older, valid
@@ -281,6 +297,41 @@ All notable changes to this project are documented in this file.
   version 6 and the tokens document version 2; older ones open and are
   stamped on their next save. A file rolled back while the service is
   stopped is still accepted on start (docs/design.md §4) (#59).
+
+- **Sign out everywhere keeps the session's 24-hour ceiling** (#79). It
+  asked for no credential and issued the new session as a fresh
+  sign-in, so anyone holding a live cookie could call it once an hour
+  and keep a session for ever. `SessionStore.CreateContinuing` issues
+  the new session with the old one's `IssuedAt`, signals and method, as
+  `Resume` does, and never past the original ceiling; the cookie lasts
+  only to that ceiling. If the caller's session has gone meanwhile,
+  nothing is issued.
+- `password.KDFParams.Valid` now also refuses memory above 1 GiB, more
+  than 64 passes and more than 32 threads, so a damaged or edited lock
+  document cannot drive Argon2id into a huge allocation or hold a hash
+  slot for minutes (#79). A deliberate future profile raises the
+  ceilings.
+- The store file keeps its mode, owner and group when it is replaced
+  (#79). A server and an application's CLI share the store, and the CLI
+  is run with `sudo`: after one root save the server could no longer
+  read or replace its own file. A `chown` refused with permission
+  denied is ignored; any other failure fails the write.
+- A forced password change refuses the password the account already
+  has (#79). It asks for no current password, so a caller could lift
+  `MustChangePassword` by setting the same one, the very password
+  presumed known to someone else. The answer is the same `400` as an
+  ordinary change gives; `Store.PasswordMatches` does the comparison.
+- Five second-factor failures on an account with no local password end
+  its sessions instead of forcing a password change it cannot make
+  (#79). The sign-in provider's identity is what is at risk and this
+  module cannot change that; the flag is left alone, and `Protect`'s
+  must-change door now applies only to an account with a local
+  password, so one that already carries the flag is no longer shut out.
+- `POST /api/auth/totp/confirm` now records a wrong code as
+  `user.login_failed` (`step=recheck`) and logs the "re-check refused"
+  line, and does the same for a limiter refusal, as the other in-session
+  re-checks do (#79). A run of wrong codes from a stolen session cookie
+  against a pending enrolment left no trace.
 
 ### Changed
 
@@ -394,6 +445,120 @@ All notable changes to this project are documented in this file.
   unchanged. Switched before mikroview moves onto gauntlet, so it
   migrates once (ADR-0002, owner 2026-10-03).
 
+Behaviour changes and deprecations from the v0.3.0 release audit (#79):
+
+- **An SSO-only admin may set a local password, and one local admin is
+  always kept** (#79, ADR-0010). `POST /api/auth/password` lets an
+  admin with no local password set a first one with only
+  `newPassword`; users and viewers without one still get `409`, and
+  the forced second-factor enrolment door then applies. Every step-up
+  route now answers `409` to a caller with no local password, telling
+  it to set one first, instead of a `401` that could never succeed and
+  spent the re-check budget. `SetRole`, `DeleteUser` and `TransferAdmin`
+  refuse, inside the write, to remove the last admin who holds a local
+  password while other admins remain, with the new `ErrLastLocalAdmin`
+  (`409` `last-admin` over HTTP). `GET /api/auth/session` reports
+  `mustChangePassword` only for an account with a local password.
+- **Shared SSO issuers are accepted when the policy pins the tenant**
+  (#79, ADR-0014). `oidc.AllowIssuer` refused `accounts.google.com` and
+  Entra's `common`, `organizations` and `consumers` endpoints whatever
+  the policy said, so an operator following `Policy`'s own documentation
+  got a start-up refusal. `oidc.AllowIssuerWithPolicy` accepts one only
+  when `RequiredClaims` names its tenant claim (`hd` for Google, `tid`
+  for Entra) with a value; Apple and Microsoft personal accounts have no
+  tenant claim and stay refused. `oidc.Config.Policy` is checked by
+  `oidc.New` against both the configured URL and the issuer the
+  discovery document names, and `gate.New` checks `Client.Issuer`
+  against `Deps.OIDCPolicy`. `AllowIssuer` and `Policy.Restricted` are
+  deprecated (nothing called `Restricted`).
+- `SessionStore.EndSessionsForUser` ends every session as before but
+  counts only those still live, so an admin's sign-out of another
+  account no longer reports, audits or tells the owner about sessions
+  that had timed out and were kept only for a resume.
+  `RevokeAllForUserCount` is deprecated in its favour (#79).
+- Creating an admin checks the new username and password before the
+  step-up, so a typo no longer costs the caller a recovery code
+  (#79). `Store.ValidateNewAccount` runs `CreateUser`'s checks without
+  writing; `CreateUser` still repeats them inside the write.
+- The minimum password length counts characters (code points), not
+  UTF-8 bytes, in `CreateUser`, `SetPassword` and `ValidateNewAccount`
+  (#79). Seven letters of a non-Latin script no longer pass an "at least
+  8 characters" rule.
+- `POST /api/auth/login/passkey/begin` reserves its attempt on a limiter
+  bucket of its own (`passkey-begin:` plus the address, same limit and
+  ban check) instead of the address's login bucket (#79, ADR-0012).
+  Page views with passkey autofill filled the address's budget and
+  answered every sign-in from it with `429`. The passkey-alone finish
+  and the passkey resume release that key.
+- `login/factor` with an assertion checks that the relying party is
+  ready before it reserves the address's and the account's attempt,
+  so a `409` no longer spends attempts toward a `429` and a lockout
+  (#79).
+- Removing a factor that is not there changes nothing (#79).
+  `ClearTOTP` and `ClearPasskeys` return the new `ErrNoTOTP` or
+  `ErrNoPasskeys` and write nothing when the account has no such factor
+  and none on hold. `DELETE /api/auth/totp` answers `404` `not-found`
+  as passkey delete does, before any session ends or anything is
+  recorded or sent; the admin clear routes answer `200` with
+  `cleared: false` and record and send nothing. Before, a second click
+  on "Disable" announced a removal that never happened.
+- The token sweep sends an expiry warning first and records it after
+  (#79). `TokenStore.Sweep` only lists the tokens to warn about and no
+  longer marks them; the new `TokenStore.MarkExpiryWarned` records the
+  warning for the ids whose notice was sent, and `Gate.SweepTokens`
+  calls it. A failed send is logged and tried again at the next sweep
+  (at least once: a duplicate after a crash between the two is
+  accepted); `TokenSweep.Warned` counts the tokens marked. A notifier
+  failure, timeout or restart used to lose the warning for good.
+- `Gate.SweepTokens` removes tokens whose creating account is gone
+  (#79). Deleting an account saves the accounts document and then
+  revokes its tokens in a second write, and a failure between the two
+  left them working for up to a year. `TokenStore.RemoveOrphans`
+  deletes, in one write, every attributed token whose creator no
+  longer exists, each removal is audited as `token.removed_orphaned`
+  by `system`, and `TokenSweep.Orphaned` counts them. Unattributed
+  tokens are never touched.
+- A lone admin whose sign-in is held for a confirmation code or a
+  passkey is offered the escape code, as one who is blocked is (#79,
+  ADR-0011): the escape cookie is set beside the hold's ticket, the code
+  goes to the log and `escape_issued` is recorded. Before, such an admin
+  was held again on every attempt. The held challenge's body is
+  unchanged.
+- A remembered browser is provisional until its cookie comes back
+  (#79). `KnownBrowser.Confirmed` is set when an entry replaces a live
+  one the browser carried back. Past `MaxKnownBrowsers` unconfirmed
+  entries are evicted first, oldest first, then confirmed ones, and
+  the new entry is never the one evicted; before, three cookie-less
+  sign-ins pushed the owner's everyday browser out. An unconfirmed
+  entry is still known.
+- The sign-in-refused text names only the actions that work for the
+  account, on the password, factor and passkey paths alike (#79). An
+  account with no local password is no longer told to ask an
+  administrator for a reset the reset route refuses; its text stops at
+  "use a browser or place this account has signed in from before".
+  ADR-0009 records that an SSO-only account under `block` has no
+  administrator remedy yet.
+- The restart unlock code honours the 24-hour self-lift (#79). A
+  restart after a disable had lifted itself no longer logs "locked out"
+  and prints a live break-glass code for an admin who can sign in, and
+  an outstanding code stops working once its disable runs out.
+- An empty store file path is refused (#79).
+  `NewEncryptedFileBackend` refuses it at construction and the file
+  backend's `Load` returns the "no file path configured" error `Save`
+  already did; before, it read as a missing file, a fresh install, and
+  was refused only once something was saved.
+- `geoip` downloads are bounded by a timeout whatever HTTP client made
+  them (#79). A caller's `HTTPClient` with no timeout let a provider
+  that stopped answering hang the download, and the refresher with it,
+  for good.
+- The licence check honours `allow-dependencies-licenses` (#79).
+  `licence-check.sh` documented per-module exceptions
+  (`pkg:golang/<module>@<version>`) but never read the key. It now
+  checks that the build has the module at exactly that version (a
+  stale entry fails), passes `--ignore` for it and prints the entry
+  with its reason; an entry whose module path is the start of another
+  module's in the build is refused.
+
 ### Fixed
 
 - An account created by its first single sign-on is now audited as
@@ -422,6 +587,20 @@ Low-severity findings from the v0.2.0 audit (#58):
 - A published password list refused for a build time in the future is
   checked again at each refresh and adopted once the clock catches up.
 - `pwlist build`'s retry waits now reach the documented 8 s ceiling.
+
+Findings from the v0.3.0 release audit (#79):
+
+- The audit lines are now honest about a passkey: a sign-in held for a
+  passkey and completed by one is recorded in `user.login` as "via
+  passkey proof" rather than "via confirmation code", and the note is
+  written even when the session loses its signals to a failed remember
+  write. A session resumed with a passkey is audited by
+  `user.reauthenticated` as "session resumed with passkey", not "with
+  password" (the history row's method stays `resume`).
+- The authenticator-app enrolment URI escapes the product name in both
+  the `otpauth://` label and the `issuer` parameter, so "Home Router"
+  is no longer shown as "Home+Router" or unscannable, and a colon in
+  the name no longer breaks the label's separator.
 
 ## [0.2.0] - 2026-10-03
 

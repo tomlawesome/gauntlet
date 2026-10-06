@@ -22,6 +22,7 @@
 // AnyPasskeysExist is carried over (owner, #20 question 5): the
 // start-up decision it feeds stays the application's, but the question
 // it answers is about the store.
+
 package gauntlet
 
 import (

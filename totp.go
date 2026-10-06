@@ -28,6 +28,7 @@
 //     blanks TOTPSecret, but HasActiveTOTP still answers truly on the
 //     blanked copy (see User.totpSecretBlanked), so listing accounts
 //     with their authenticator-app status needs no Get per account.
+
 package gauntlet
 
 import (

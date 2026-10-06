@@ -10,6 +10,7 @@
 // exist from G2 onward, since a whole-document store must round-trip
 // ResetCodeHash regardless of who last set it) predates this file's
 // IssueResetCode; see Authenticate's own doc comment in store.go.
+
 package gauntlet
 
 import (

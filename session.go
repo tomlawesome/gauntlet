@@ -9,6 +9,7 @@
 //     NewSessionStoreWithMaxLifetime(ttl, 0) already means "no ceiling"
 //     -- one entry point rather than two ways to ask for the same
 //     thing.
+
 package gauntlet
 
 import (

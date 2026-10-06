@@ -12,6 +12,7 @@
 //   - OpenStore(b, opts) replaces mikroview's Open(path)/OpenWithBackend(b):
 //     the application picks the backend (persist.Backend is the seam;
 //     see persist/persist.go), so there is only the one entry point.
+
 package gauntlet
 
 import (
