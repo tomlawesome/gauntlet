@@ -52,9 +52,11 @@ import (
 // up to version 7 refuses a version-8 document rather than drop them.
 // Version 9 (#67) allows more than one account to
 // hold the admin role, which a build reading up to version 8 refuses at
-// load ("allows exactly one"); later in the same release it gained one
-// optional field, `knownBrowsers[].confirmed` (#79; absent means not
-// yet confirmed), which needs no new version. A version-8 document reads unchanged, as
+// load ("allows exactly one"); later in the same release it gained two
+// optional fields, `knownBrowsers[].confirmed` (#79; absent means not
+// yet confirmed) and `resetCodeSpentHash` (#79; absent means no spent
+// reset code to refuse as the new password), which need no new
+// version. A version-8 document reads unchanged, as
 // one with a single admin. A build that reads up to version 8 refuses a
 // version-9 document, so a deployment rolled back to it fails to start
 // with a message naming the version rather than a misleading one about

@@ -1825,6 +1825,7 @@ func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) 
 			// nothing to change.
 			u.ResetCodeHash = ""
 			u.ResetCodeExpiresAt = time.Time{}
+			u.ResetCodeSpentHash = ""
 			u.MustChangePassword = false
 			// No local password left to recheck against HIBP (#43).
 			u.BreachCheckPending = false
@@ -1954,6 +1955,9 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 			if !ok || !u.resetCodeLive(now) || u.ResetCodeHash != hash {
 				return ErrInvalidCredentials
 			}
+			// Kept, not dropped, until the forced change is made, so the
+			// code cannot become the new password (ResetCodeSpentHash).
+			u.ResetCodeSpentHash = u.ResetCodeHash
 			u.ResetCodeHash = ""
 			u.ResetCodeExpiresAt = time.Time{}
 			u.LastLogin = now
@@ -2068,6 +2072,7 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		// clears it rather than each caller having to remember.
 		u.ResetCodeHash = ""
 		u.ResetCodeExpiresAt = time.Time{}
+		u.ResetCodeSpentHash = ""
 		u.MustChangePassword = false
 		// The breach check this password got decides the mark: a new
 		// password owes a recheck only if HIBP could not answer for it.
@@ -2085,22 +2090,37 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 }
 
 // PasswordMatches reports whether password is the current password of
-// the account with ID id. It only compares against the stored hash
+// the account with ID id. It only compares against stored hashes
 // (VerifyPassword, which takes a hash slot like any other check): no
 // lockout is counted, no breach check is made, nothing is recorded or
 // written. It is for refusing a forced password change that sets the
 // same password again, where no current password is asked for and so
 // none is there to compare with. An unknown id is false.
+//
+// While MustChangePassword is set it is also true for the reset code
+// that sign-in spent (ResetCodeSpentHash), typed with or without its
+// dashes: the code was a password someone else saw, and the forced
+// change exists to retire it. After an admin reset the stored password
+// hash is unmatchable, so without this the code itself would pass.
 func (s *Store) PasswordMatches(id, password string) bool {
 	s.reloadIfStale()
 	s.mu.RLock()
 	u, ok := s.byID[id]
-	var hash string
+	var hash, spent string
 	if ok {
 		hash = u.PasswordHash
+		if u.MustChangePassword {
+			spent = u.ResetCodeSpentHash
+		}
 	}
 	s.mu.RUnlock()
-	return ok && VerifyPassword(password, hash)
+	if !ok {
+		return false
+	}
+	if spent != "" && VerifyPassword(NormaliseResetCode(password), spent) {
+		return true
+	}
+	return VerifyPassword(password, hash)
 }
 
 // List returns every account, sorted by username, with every credential

@@ -265,3 +265,41 @@ func TestForcedPasswordChangeRefusesTheSamePassword(t *testing.T) {
 		t.Error("MustChangePassword is still set after a new password")
 	}
 }
+
+// Signing in with a reset code spends it, but the code was seen by the
+// admin who issued it, and the forced change exists to retire it: set
+// as the new password it is refused like the current one. A different
+// password is accepted, and nothing of the code is kept after that.
+func TestForcedPasswordChangeRefusesTheSpentResetCode(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
+	u, _ := g.deps.Users.ByUsername("admin")
+	_, code, err := g.deps.Users.IssueResetCode(u.ID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: mustCookieJar(t)}
+	login := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: code})
+	_ = login.Body.Close()
+	if login.StatusCode != http.StatusOK {
+		t.Fatalf("signing in with the reset code got %d, want 200", login.StatusCode)
+	}
+
+	for _, typed := range []string{code, gauntlet.FormatResetCode(code)} {
+		status, body := readAll(t, postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: typed}))
+		if status != http.StatusBadRequest || !strings.Contains(body, "same as the current one") {
+			t.Errorf("setting the spent reset code %q as the password = %d %s, want 400", typed, status, body)
+		}
+	}
+
+	changed := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "a-new-password"})
+	_ = changed.Body.Close()
+	if changed.StatusCode != http.StatusOK {
+		t.Fatalf("a different password got %d, want 200", changed.StatusCode)
+	}
+	after, _ := g.deps.Users.Get(u.ID)
+	if after.MustChangePassword || after.ResetCodeSpentHash != "" {
+		t.Errorf("after the change: MustChangePassword %v, ResetCodeSpentHash %q; want false, empty", after.MustChangePassword, after.ResetCodeSpentHash)
+	}
+}

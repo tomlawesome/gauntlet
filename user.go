@@ -103,6 +103,16 @@ type User struct {
 	// issued. Checked against, never the only check -- see
 	// User.resetCodeLive.
 	ResetCodeExpiresAt time.Time `json:"resetCodeExpiresAt,omitzero"`
+	// ResetCodeSpentHash keeps ResetCodeHash once a sign-in has spent
+	// the code, until the forced change it led to is made. The code was
+	// a password someone else saw -- the admin who issued it, and
+	// whatever carried it to the account's owner -- and the forced
+	// change exists to retire it, so Store.PasswordMatches refuses it as
+	// the new password. Set by Authenticate in the write that spends the
+	// code; cleared by SetPassword, by a new IssueResetCode, and
+	// wherever ResetCodeHash is voided. Never a way in: nothing signs in
+	// against it.
+	ResetCodeSpentHash string `json:"resetCodeSpentHash,omitempty"`
 	// MustChangePassword is set by an admin reset, and by a LoginLimiter
 	// once a run of second-factor failures shows someone else knows the
 	// password (SecondFactorFailed, #44). It is cleared only where a new
@@ -242,6 +252,7 @@ func (u *User) blankCredentials() {
 	// code *is* the password.
 	u.PasswordHash = ""
 	u.ResetCodeHash = ""
+	u.ResetCodeSpentHash = ""
 	// TOTPSecret is worse than a verifier hash if it leaked -- it's the
 	// actual shared secret, good for minting valid codes indefinitely,
 	// not just checking one. RecoveryCodes are hashes only, same

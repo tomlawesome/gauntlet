@@ -88,8 +88,9 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		// failed second-factor steps, or a sign-in that found the
 		// password in a breach, the password is presumed known to
 		// someone else, and setting it again would lift the flag while
-		// changing nothing. (After an admin reset the stored hash is
-		// unmatchable, so this never fires there.)
+		// changing nothing. After an admin reset the stored hash is
+		// unmatchable, and the reset code the caller signed in with is
+		// what PasswordMatches refuses instead.
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "the new password is the same as the current one", nil)
 		return
 	}
