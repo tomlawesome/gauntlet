@@ -4,6 +4,7 @@
 package gauntlet
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -59,7 +60,7 @@ func TestHasLocalAdminIsFalseForAnSSOProvisionedAdmin(t *testing.T) {
 	if _, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", "carol", time.Now()); err != nil {
 		t.Fatalf("FindOrCreateOIDCUser: %v", err)
 	}
-	if _, _, err := s.TransferAdmin("carol", time.Now()); err != ErrLastLocalAdmin {
+	if _, _, err := s.TransferAdmin("carol", time.Now()); !errors.Is(err, ErrLastLocalAdmin) {
 		t.Fatalf("TransferAdmin to an SSO-provisioned account = %v, want ErrLastLocalAdmin", err)
 	}
 	u, _ := s.ByUsername("carol")
