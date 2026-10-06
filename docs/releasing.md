@@ -283,7 +283,10 @@ Then create the daily schedule for security fixes: description
 timezone **London** (06:37 every day), and two variables, `RENOVATE` =
 `true` and `RENOVATE_SECURITY_ONLY` = `true`. The second variable makes
 the job add `renovate-security.json`, so this run opens a merge request
-only for a security fix, which Renovate allows at any hour. 06:37 is
+only for a security fix, which Renovate allows at any hour. It also
+leaves Monday's merge requests open: by default Renovate closes any of
+its merge requests the current run did not produce, and this run
+produces none of the ordinary ones. 06:37 is
 after the Monday run's one-hour limit, so the two do not normally
 overlap.
 
