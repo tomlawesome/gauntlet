@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,6 +282,35 @@ func TestTOTPConfirmRejectsBadCode(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("a wrong code got %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestTOTPConfirmWrongCodeAndRefusalAreRecorded: a wrong code at
+// confirm is a user.login_failed record marked as a re-check, and a
+// confirm the limiter refuses is the rated Warn line, as at every other
+// in-session re-check.
+func TestTOTPConfirmWrongCodeAndRefusalAreRecorded(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	g.deps.Limiter = mustNewLoginLimiter(t, 1, time.Minute)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	totpEnrol(t, bob, ts)
+	audit, logs, _ := recordSignIns(g)
+
+	status, _ := readAll(t, postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: "000000"}))
+	if status != http.StatusBadRequest {
+		t.Fatalf("a wrong code got %d, want 400", status)
+	}
+	want := auditEntry{totpBobUsername, "user.login_failed", totpBobUsername, "outcome=factor_refused method=code step=recheck " + fixtureFrom}
+	if failed := auditEntries(audit, "user.login_failed"); len(failed) != 1 || failed[0] != want {
+		t.Errorf("records = %+v, want %+v", failed, want)
+	}
+
+	status, _ = readAll(t, postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: "000000"}))
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("a confirm over the limit got %d, want 429", status)
+	}
+	if lines := logLines(logs, "re-check refused"); len(lines) != 1 || !strings.Contains(lines[0], `account="bob"`) {
+		t.Errorf("refused re-check lines = %q, want one naming the account", lines)
 	}
 }
 

@@ -191,12 +191,19 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// cookie, so without it a stolen cookie could guess the six digits
 	// without limit while the owner's enrolment is pending -- and a hit
 	// plants a factor and hands over the recovery codes.
+	//
+	// Both refusals are recorded as every other in-session re-check's
+	// are (recheckPassword, recheckSecondFactor): a run of wrong codes
+	// here is the same guessing from a stolen cookie, and would otherwise
+	// leave no audit line and no Warn for anyone to notice.
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		g.recheckRefused(r, user)
 		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
 	}
 	matched, ok := gauntlet.VerifyTOTP(current.TOTPSecret, req.Code, now, current.TOTPLastCounter)
 	if !ok {
+		g.recheckFailed(r, user, gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode)
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "that code didn't match -- check your authenticator app's clock and try again", nil)
 		return
 	}
