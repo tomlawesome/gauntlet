@@ -43,7 +43,9 @@ const (
 	NoticeRoleChanged NoticeKind = "role-changed"
 	// NoticeTokenExpiring (#74): an API token the account created
 	// expires within a week. Raised by Gate.SweepTokens, not by a
-	// request, so By is empty.
+	// request, so By is empty. The sweep waits for AccountEvent rather
+	// than running it in the background, and an error from it means the
+	// notice is offered again at the next sweep.
 	NoticeTokenExpiring NoticeKind = "token-expiring"
 )
 
@@ -162,6 +164,45 @@ func (g *Gate) asyncNotify(ctx context.Context, who string, fn func(context.Cont
 			g.logError(fmt.Sprintf("gate: the account notifier failed for account %q: %q", who, err.Error()))
 		}
 	}()
+}
+
+// notifyNow asks Config.Notices to tell n's account and waits for the
+// answer, under a context bounded by notifyTimeout: for a caller that
+// must know the notice went out before recording that it did
+// (SweepTokens). It reports whether AccountEvent returned nil. A
+// failure, a panic or the deadline is one error line, as asyncNotify
+// logs; a notifier still running at the deadline is abandoned and left
+// to finish on its own, tracked by g.notifying. False when
+// Config.Notices is unset or n is nil: nothing was sent.
+func (g *Gate) notifyNow(ctx context.Context, n *AccountNotice) bool {
+	notices := g.cfg.Notices
+	if notices == nil || n == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, notifyTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	g.notifying.Add(1)
+	go func() {
+		defer g.notifying.Done()
+		defer func() {
+			if p := recover(); p != nil {
+				done <- fmt.Errorf("panicked: %q", fmt.Sprint(p))
+			}
+		}()
+		done <- notices.AccountEvent(ctx, *n)
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	if err != nil {
+		g.logError(fmt.Sprintf("gate: the account notifier failed for account %q: %q", n.Username, err.Error()))
+		return false
+	}
+	return true
 }
 
 // notify asks Config.Notices, if set, to tell n's account, in the
