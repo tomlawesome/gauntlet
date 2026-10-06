@@ -609,7 +609,10 @@ func contractUnlockCode(t *testing.T, c *contractChecker) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	at := time.Now().Add(-30 * 24 * time.Hour)
+	// Recent enough that the disable has not lifted itself
+	// (LoginDisableDuration, 24 hours): the lockouts on the way to it
+	// add up to about eight hours.
+	at := time.Now().Add(-12 * time.Hour)
 	for range gauntlet.MaxConsecutiveLoginFailures {
 		limiter.ReserveAccount(first.users, admin.ID, at)
 		if until := first.users.LoginLockedUntil(admin.ID); until.After(at) {

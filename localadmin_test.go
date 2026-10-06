@@ -49,23 +49,24 @@ func TestHasLocalAdminFollowsTheAdminsPassword(t *testing.T) {
 
 // An SSO-provisioned account holding the admin role is an admin with no
 // password, which is exactly the state #1252 exists to keep a deployment
-// out of. SSO never creates the first account (#37) and linking no
-// longer costs the admin its password, so the only way left to reach it
-// is transferring the role to an SSO-provisioned user.
+// out of. SSO never creates the first account (#37), linking no longer
+// costs the admin its password, and transferring the role to an
+// SSO-provisioned user is refused while it would leave no admin with a
+// password (ErrLastLocalAdmin): the store keeps a local way in.
 func TestHasLocalAdminIsFalseForAnSSOProvisionedAdmin(t *testing.T) {
 	s := openTestStoreWithAdmin(t)
 
 	if _, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-1", "carol", time.Now()); err != nil {
 		t.Fatalf("FindOrCreateOIDCUser: %v", err)
 	}
-	if _, _, err := s.TransferAdmin("carol", time.Now()); err != nil {
-		t.Fatalf("TransferAdmin: %v", err)
+	if _, _, err := s.TransferAdmin("carol", time.Now()); err != ErrLastLocalAdmin {
+		t.Fatalf("TransferAdmin to an SSO-provisioned account = %v, want ErrLastLocalAdmin", err)
 	}
 	u, _ := s.ByUsername("carol")
-	if u == nil || u.Role != RoleAdmin {
-		t.Fatalf("carol = %+v, want admin -- this test is not set up as it thinks", u)
+	if u == nil || u.Role == RoleAdmin {
+		t.Fatalf("carol = %+v, want not an admin", u)
 	}
-	if s.HasLocalAdmin() {
-		t.Error("an SSO-provisioned admin counts as a local way in")
+	if !s.HasLocalAdmin() {
+		t.Error("the refused transfer should have left the local way in")
 	}
 }
