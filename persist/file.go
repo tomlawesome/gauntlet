@@ -68,9 +68,25 @@ func contentVersion(data []byte) int64 {
 // writeFileAtomic replaces path's contents crash-safely: a temp file is
 // written in path's own directory, fsynced, renamed over path, and the
 // directory is fsynced after the rename.
+//
+// perm applies only to a file being created. The rename puts a new inode
+// at path, owned by whoever wrote it, so when path already exists the
+// temp file first takes on its mode, owner and group. Otherwise one save
+// from an app's CLI run with sudo leaves a store the server sharing it
+// (persist.go's Backend doc) can no longer read or replace, and every
+// save after that fails.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	existing, err := os.Stat(path)
+	switch {
+	case err == nil:
+		perm = existing.Mode().Perm()
+	case os.IsNotExist(err):
+		existing = nil
+	default:
 		return err
 	}
 	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
@@ -89,6 +105,12 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := f.Chmod(perm); err != nil {
 		cleanup()
 		return err
+	}
+	if existing != nil {
+		if err := copyOwner(f, existing); err != nil {
+			cleanup()
+			return err
+		}
 	}
 	if _, err := f.Write(data); err != nil {
 		cleanup()
