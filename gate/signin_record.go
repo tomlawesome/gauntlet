@@ -23,8 +23,9 @@ import (
 //     unusual one (#55) starts with its signals and the action taken:
 //     "unusual=new-browser,new-country; action=flag; ".
 //   - user.reauthenticated instead of user.login when the sign-in was a
-//     resume of a timed-out session with the password alone (#71): the
-//     same session continued under a new ID, not a new sign-in.
+//     resume of a timed-out session with the password alone (#71) or a
+//     passkey (#77), its detail saying which: the same session continued
+//     under a new ID, not a new sign-in.
 //   - user.login_failed on every failed attempt the limiter admitted:
 //     actor and target the account's username when the name matched one,
 //     else "unknown"; detail the outcome, the method, the address and,
@@ -59,6 +60,11 @@ const unknownAccount = "unknown"
 // (completeHeldSignIn) saying a passkey answered the hold rather than a
 // confirmation code, so its user.login says "via passkey proof".
 const proveActionNote = "action=" + string(UnusualSignInProve) + "; "
+
+// resumedWithPasskeyNote is the note finishResume passes for a session
+// resumed with a passkey rather than the password, so its
+// user.reauthenticated says so. It is not written into the detail.
+const resumedWithPasskeyNote = "credential=passkey; "
 
 // signInClient is the address, browser and country (#54) r came from,
 // as the application resolves the address (Config.ClientIP) and the
@@ -152,7 +158,11 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 			return // password_ok, confirm_sent, escape_issued: no sign-in yet
 		}
 		if ev.Method == gauntlet.SignInMethodResume {
-			g.auditRecord(ev.Username, "user.reauthenticated", ev.Username, "session resumed with password; "+from)
+			with := "session resumed with password; "
+			if strings.Contains(note, resumedWithPasskeyNote) {
+				with = "session resumed with passkey; "
+			}
+			g.auditRecord(ev.Username, "user.reauthenticated", ev.Username, with+from)
 			return
 		}
 		detail := from

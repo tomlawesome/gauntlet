@@ -1098,8 +1098,8 @@ func TestAUserVerifyingPasskeyResumesATimedOutSession(t *testing.T) {
 		t.Errorf("resumed session list = %d %+v, want method passkey_alone kept", status, list.Sessions)
 	}
 	wantEvents(t, e.events.all(), "success/resume")
-	if rec := auditEntries(e.audit, "user.reauthenticated"); len(rec) != 1 {
-		t.Errorf("user.reauthenticated records = %+v, want one", rec)
+	if rec := auditEntries(e.audit, "user.reauthenticated"); len(rec) != 1 || rec[0].Detail != "session resumed with passkey"+fixtureFromSuffix {
+		t.Errorf("user.reauthenticated records = %+v, want one, resumed with passkey", rec)
 	}
 	// The old ID is dead.
 	if r, _ := withCookie(t, e.ts, http.MethodGet, "/api/protected", old, nil); r.StatusCode != http.StatusUnauthorized {

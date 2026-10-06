@@ -138,7 +138,7 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 		writeUnauthorized(w, classSignInRequired, "sign in again")
 		return
 	}
-	g.finishResume(w, r, user, res, now)
+	g.finishResume(w, r, user, res, gauntlet.SignInMethodPassword, now)
 }
 
 // resumeWithPasskey is handleReauthenticate's passkey branch (#77), with
@@ -196,15 +196,17 @@ func (g *Gate) resumeWithPasskey(w http.ResponseWriter, r *http.Request, ps gaun
 	}
 	g.clearPasskeySignInCookie(w)
 	g.deps.Limiter.Release(passkeyBeginKey(res.address), now) // the begin step's reservation
-	g.finishResume(w, r, user, res, now)
+	g.finishResume(w, r, user, res, gauntlet.SignInMethodPasskey, now)
 }
 
 // finishResume is the end of a resume whose credential -- the password
 // or the passkey -- checked out: end the timed-out session, start one
 // for the same account under a new ID, set its cookie, record it and
 // answer. Anything that went wrong since resumableSession is a 401
-// sign-in-required.
-func (g *Gate) finishResume(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, now time.Time) {
+// sign-in-required. credential is the one that checked out,
+// gauntlet.SignInMethodPassword or SignInMethodPasskey: the history row's
+// method is resume either way, so the audit record is what says which.
+func (g *Gate) finishResume(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, credential gauntlet.SignInMethod, now time.Time) {
 	cookie, _ := r.Cookie(g.sessionCookieName())
 	sess, ok := g.deps.Sessions.Resume(cookie.Value, g.signInClient(r, res.address), now)
 	if !ok {
@@ -218,6 +220,10 @@ func (g *Gate) finishResume(w http.ResponseWriter, r *http.Request, user *gauntl
 	g.releaseLogin(res, now)
 	g.endAfterReset(res)
 	g.setResumedSessionCookie(w, sess, now)
-	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodResume), res, now)
+	note := ""
+	if credential == gauntlet.SignInMethodPasskey {
+		note = resumedWithPasskeyNote
+	}
+	g.recordSignInNote(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodResume), res, note, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 }
