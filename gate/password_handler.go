@@ -13,6 +13,11 @@ type changePasswordRequest struct {
 	NewPassword     string `json:"newPassword"`
 }
 
+// firstLocalPasswordWindow is how recent the caller's single sign-on
+// must be for an SSO-only admin to set its first local password (see
+// handleChangePassword).
+const firstLocalPasswordWindow = 10 * time.Minute
+
 // handleChangePassword lets a signed-in caller change their own
 // password (mikroview's #294 item 4).
 func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +48,19 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if !user.LocalPassword() && !firstLocalPassword {
 		writeProblem(w, http.StatusConflict, classConflict, "this account signs in through your identity provider and has no local password to change", nil)
 		return
+	}
+	// With no current password to ask for, the session cookie alone
+	// would be enough -- and the cookie is exactly what a thief has,
+	// who could then give the account a permanent password and second
+	// factor of their own. A fresh sign-in through the identity provider
+	// is the one proof this account can give, so the session must have
+	// come from one, within firstLocalPasswordWindow.
+	if firstLocalPassword {
+		sess, ok := g.callerSession(r, user.ID, now)
+		if !ok || sess.Client.Method != gauntlet.SignInMethodSSO || now.Sub(sess.IssuedAt) > firstLocalPasswordWindow {
+			writeProblem(w, http.StatusConflict, classConflict, "sign in again through your identity provider, then set the password within ten minutes", nil)
+			return
+		}
 	}
 
 	// After an admin reset there is no current password to supply -- see

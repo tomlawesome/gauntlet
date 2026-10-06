@@ -1068,7 +1068,9 @@ paths:
         local password (ADR-0010), so an SSO-only admin sets its first one
         here with only `newPassword`, and must do so before any route that
         re-checks the caller's password will work (those answer `409` until
-        it has).
+        it has). It must do so from a session its identity provider issued
+        in the last ten minutes; any other session gets `409` asking it to
+        sign in again through the provider first.
 
         A `newPassword` the same as the current password is `400`, under a
         forced change too.

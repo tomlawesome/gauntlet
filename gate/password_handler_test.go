@@ -148,8 +148,35 @@ func ssoOnlyAdmin(t *testing.T, g *Gate, ts *httptest.Server, subject string) (s
 	if _, _, err := g.deps.Users.SetRole(u.ID, gauntlet.RoleAdmin, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	sess := g.deps.Sessions.Create(u.ID, time.Now())
+	// A fresh SSO sign-in, as the callback leaves it.
+	sess := g.deps.Sessions.CreateFrom(u.ID, gauntlet.SessionClient{Method: gauntlet.SignInMethodSSO}, time.Now())
 	return u.ID, sessionClient(t, ts.URL, sess.ID)
+}
+
+// The cookie alone is what a thief holds, so an SSO-only admin sets its
+// first password only from a session its identity provider issued in
+// the last ten minutes: an older one, or one made any other way, is
+// 409 and sets nothing.
+func TestSSOOnlyAdminFirstPasswordNeedsAFreshSSOSignIn(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
+	id, _ := ssoOnlyAdmin(t, g, ts, "subject-ann")
+
+	for name, sess := range map[string]gauntlet.Session{
+		"an SSO session eleven minutes old": g.deps.Sessions.CreateFrom(id, gauntlet.SessionClient{Method: gauntlet.SignInMethodSSO}, time.Now().Add(-11*time.Minute)),
+		"a fresh session not made by SSO":   g.deps.Sessions.CreateFrom(id, gauntlet.SessionClient{Method: gauntlet.SignInMethodPassword}, time.Now()),
+		"a fresh session with no method":    g.deps.Sessions.Create(id, time.Now()),
+	} {
+		resp := postJSON(t, sessionClient(t, ts.URL, sess.ID), ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "new-password-1"})
+		status, body := readAll(t, resp)
+		if status != http.StatusConflict || !strings.Contains(body, "sign in again through your identity provider") {
+			t.Errorf("%s = %d %s, want 409 asking for a fresh SSO sign-in", name, status, body)
+		}
+	}
+	if u, _ := g.deps.Users.Get(id); u.LocalPassword() {
+		t.Error("a refused request set a local password")
+	}
 }
 
 // Every admin keeps a local password (ADR-0010), so an SSO-only admin
