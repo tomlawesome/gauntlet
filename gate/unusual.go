@@ -523,16 +523,38 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	}
 }
 
-// signInRefusedDetail is the sign-in-refused class's one detail. It
-// never says which signal was raised or whether a code would have been
-// sent.
+// signInRefusedDetail is the sign-in-refused class's detail for an
+// account with a local password. Neither text says which signal was
+// raised or whether a code would have been sent.
 const signInRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+
+// signInRefusedDetailSSO is the detail for an account with no local
+// password: the reset route refuses such an account, so it is not
+// offered.
+const signInRefusedDetailSSO = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before"
+
+// signInRefusedDetailFor is the detail for user's refusal: it names only
+// the actions that work for that account.
+func signInRefusedDetailFor(user *gauntlet.User) string {
+	if user.LocalPassword() {
+		return signInRefusedDetail
+	}
+	return signInRefusedDetailSSO
+}
 
 // writeSignInRefused answers a refused sign-in: 403 sign-in-refused,
 // with no X-Auth-Gate header, which marks a session stopped at a door,
-// and no session exists here.
+// and no session exists here. It always offers the reset, so it is for
+// the password and second-factor paths, which only an account with a
+// local password reaches; anywhere else use writeSignInRefusedFor.
 func writeSignInRefused(w http.ResponseWriter) {
 	writeProblem(w, http.StatusForbidden, classSignInRefused, signInRefusedDetail, nil)
+}
+
+// writeSignInRefusedFor is writeSignInRefused with the detail chosen for
+// user's account (signInRefusedDetailFor).
+func writeSignInRefusedFor(w http.ResponseWriter, user *gauntlet.User) {
+	writeProblem(w, http.StatusForbidden, classSignInRefused, signInRefusedDetailFor(user), nil)
 }
 
 // refuseSignIn is block: one attempt refused, never the account. The
