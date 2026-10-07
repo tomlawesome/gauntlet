@@ -1127,6 +1127,7 @@ func (f *ssoRolesGate) role(t *testing.T, subject string) gauntlet.Role {
 }
 
 func (f *ssoRolesGate) roleNotices() []AccountNotice {
+	f.g.notifying.Wait() // notices are sent in the background
 	f.notes.mu.Lock()
 	defer f.notes.mu.Unlock()
 	var out []AccountNotice
