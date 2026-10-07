@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,7 +30,7 @@ var maxLoginLimiterKeys = 4096
 //     (Reserve, Release, Allow, RecordFailure). It is best effort: a
 //     big enough flood of distinct keys evicts the oldest.
 //   - A real account's counters are keyed by its ID (ReserveAccount,
-//     ReserveRecheck). There can be no more of them than there are
+//     ReserveRecheck, ReserveDelivery). There can be no more of them than there are
 //     accounts, so that map is never evicted and no flood of addresses
 //     or made-up names can reset an account's count. Entries leave only
 //     by expiring.
@@ -175,10 +176,14 @@ const lockoutRetryInterval = 30 * time.Second
 //
 // A known browser's allowance during a lockout (ReserveKnownBrowser,
 // #44) is a third, kept apart from the login budget it stands in for.
+//
+// Sends of a code out of band (ReserveDelivery, #84) are a fourth, one
+// per channel: deliveryBucket + channel + ":" + account ID.
 const (
 	loginBucket        = "login:"
 	recheckBucket      = "password-recheck:"
 	knownBrowserBucket = "known:"
+	deliveryBucket     = "deliver:"
 )
 
 // ErrLimiterConfig is returned by NewLoginLimiter for a threshold or
@@ -742,8 +747,8 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 // count of lockouts on the record, in one write, and also drops what
 // this limiter holds about the account that the record does not -- its
 // count of attempts in the current window, a known browser's too
-// (ReserveKnownBrowser), and any lockout decision it has yet to save
-// (#44). Without that, the account would stay refused
+// (ReserveKnownBrowser), any lockout decision it has yet to save
+// (#44), and the codes sent on every channel (ReserveDelivery, #84). Without that, the account would stay refused
 // by this process's count until the window passed, or have a disable
 // that failed to save written back over the unlock by the next refused
 // attempt's retry.
@@ -782,6 +787,11 @@ func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) e
 	delete(l.accounts, loginBucket+accountID)
 	delete(l.accounts, knownBrowserBucket+accountID)
 	delete(l.wantLockout, accountID)
+	for key := range l.accounts {
+		if strings.HasPrefix(key, deliveryBucket) && strings.HasSuffix(key, ":"+accountID) {
+			delete(l.accounts, key)
+		}
+	}
 	l.mu.Unlock()
 	return nil
 }
@@ -1003,6 +1013,33 @@ func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := recheckBucket + accountID
+	entries := l.pruneIn(l.accounts, key, now)
+	if len(entries) >= l.threshold {
+		return false
+	}
+	l.accounts[key] = append(entries, now)
+	return true
+}
+
+// ReserveDelivery counts one out-of-band delivery for accountID on
+// channel ("confirm", "escape"): threshold per window, per account and
+// channel, in the account map (never evicted). Never handed back: a
+// delivery that happened is a fact, and the mailer may have sent it
+// even when it reported an error.
+//
+// It is the one limit here that counts something other than a guess
+// (#84): a sign-in held for a code proved every credential, so its
+// attempt goes back to the login budget, and the send is what must be
+// bounded instead. Counted at the point of sending, within one request,
+// so there is nothing for a later request to hand back. UnlockLogin
+// empties the account's delivery budgets (an admin's unlock means "let
+// the owner in"); SignedIn does not, so the owner signing in on a known
+// browser cannot refill a stranger's sends. Memory only: a restart
+// clears it.
+func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := deliveryBucket + channel + ":" + accountID
 	entries := l.pruneIn(l.accounts, key, now)
 	if len(entries) >= l.threshold {
 		return false
