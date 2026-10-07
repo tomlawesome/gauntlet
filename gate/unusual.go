@@ -179,9 +179,7 @@ func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) 
 }
 
 // stopSignIn is confirm, prove and block for a judged sign-in, after the
-// caller has dropped the pending login, keeping any limiter reservation
-// the attempt holds (an attempt in flight, which the window hands
-// back). It
+// caller has handed the limiter back and dropped the pending login. It
 // reports whether the sign-in is held (a confirmation code went out, or
 // a passkey is owed: answer heldChallenge); if not, the attempt was
 // refused (answer sign-in-refused) and notice is the block notice to
@@ -540,8 +538,8 @@ func writeSignInRefused(w http.ResponseWriter) {
 }
 
 // refuseSignIn is block: one attempt refused, never the account. The
-// caller has kept the attempt's limiter reservation (an attempt in
-// flight, which the window hands back; nothing completed, so the
+// caller has handed the limiter back (releaseLogin: the credential was
+// right, so it is no failure to count, and nothing completed, so the
 // account's count is not reset) and cleared the pending cookie; nothing
 // is written to the account and no cookie is set. This records the
 // refused row with the signals and user.login_refused, and returns the

@@ -207,9 +207,6 @@ func TestProveRefusesAPasskeyThatIsNotTheAccounts(t *testing.T) {
 func TestProveRefusalsAreCountedAndLimited(t *testing.T) {
 	e := newProveEnv(t)
 	c := e.held(t)
-	// The held sign-in keeps its attempt in the window; once that has
-	// passed, the five refusals below are the window's whole budget.
-	e.clock.set(e.clock.now().Add(6 * time.Minute))
 	options := e.mustProveBegin(t, c)
 	stranger := newFake(e.g)
 	for i := range 5 {

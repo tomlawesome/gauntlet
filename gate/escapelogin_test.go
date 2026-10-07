@@ -358,9 +358,6 @@ func TestEscapeWrongCodeIsCounted(t *testing.T) {
 	b, _ := e.refusedFrom(t, addrLondon2)
 	code := e.loggedCode()
 	wrong := "AAAA-AAAA-AAAA-AAAA"
-	// The refused sign-in keeps its attempt in the window; once that has
-	// passed, the five wrong codes below are the window's whole budget.
-	e.advance(6 * time.Minute)
 	for i := range 5 {
 		_, status, body := e.postEscape(t, b, addrLondon2, wrong)
 		if status != http.StatusUnauthorized || problemType(t, body) != "invalid-credentials" || decodeProblem(t, []byte(body)).Detail != "invalid escape code" {
