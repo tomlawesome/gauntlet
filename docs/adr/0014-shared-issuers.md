@@ -69,3 +69,6 @@ guidance for multi-tenant apps and Google's `hd` check both describe.
   together with a `tid` check on every token; that is a follow-up for
   the owner to decide. An Entra organisation uses its single-tenant
   issuer meanwhile.
+- Owner decision (#79, 2026-10-07): not pursued. Gauntlet serves
+  self-hosted home apps, not enterprise tools; an Entra organisation
+  uses its single-tenant issuer.
