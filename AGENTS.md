@@ -10,6 +10,8 @@ A shared Go library: local accounts, sessions, tokens, OIDC, the passkey
 mikroview both need, so a security fix lands once instead of being
 copied between the two. See [docs/design.md](docs/design.md) and
 [docs/adr/0001-shared-auth-module.md](docs/adr/0001-shared-auth-module.md).
+Its users are self-hosted home apps, not enterprise tools: weigh design
+calls against that (owner, 2026-10-07).
 
 `passkey/` (G8, [ADR-0004](docs/adr/0004-passkey-ceremony.md)) is a leaf:
 no non-test file in `gate` or the root package may import it or
