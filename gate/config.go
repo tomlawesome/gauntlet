@@ -39,9 +39,9 @@ const (
 	AdminPasskeyRequired AdminPasskeyRule = "required"
 	// AdminPasskeyOptional: the application waives the rule, and an
 	// admin's second factor may be any kind, as every other account's
-	// is. For an application reached over plain http or by IP address,
-	// where browsers cannot make a passkey, or one that wires no
-	// passkeys at all.
+	// is. For an application reached over plain http (on any host but
+	// localhost) or by IP address, where browsers cannot make a passkey,
+	// or one that wires no passkeys at all.
 	AdminPasskeyOptional AdminPasskeyRule = "optional"
 )
 
@@ -173,8 +173,9 @@ type Config struct {
 	// and the application never fails silently. AdminPasskeyRequired
 	// also needs a ready relying party (Deps.Passkeys wired, Status
 	// ready), or New refuses to start; AdminPasskeyOptional is for an
-	// application reached over plain http or by IP address, or one that
-	// wires no passkeys. New logs the chosen value.
+	// application reached over plain http (on any host but localhost) or
+	// by IP address, or one that wires no passkeys. New logs the chosen
+	// value.
 	AdminPasskey AdminPasskeyRule
 	// UnusualSignIns is what a sign-in from a new browser, a new country
 	// or an impossible distance away does (#55; unusual.go). The zero

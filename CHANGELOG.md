@@ -26,7 +26,8 @@ Reading notes for this release:
   (see Changed below for what that means when upgrading):
   `gate.AdminPasskeyRequired` turns the rule on,
   `gate.AdminPasskeyOptional` waives it for an application reached over
-  plain http or by IP address, or one with no passkeys. With it on:
+  plain http (anywhere but localhost) or by IP address, or one with no
+  passkeys. With it on:
   - An admin with no passkey that works at this address is stopped at a
     new door, `403` class `must-enrol-passkey` with `X-Auth-Gate:
     must-enrol-passkey`, until they register one. It lets through the
@@ -484,7 +485,8 @@ Reading notes for this release:
   runs without the rule, or locks its admins out, by accident. `New`
   refuses an unset or unknown value, and refuses
   `gate.AdminPasskeyRequired` while `Deps.Passkeys` is nil or its
-  public URL is unset, an IP address or plain http, naming which; it
+  public URL is unset, an IP address or plain http on any host but
+  localhost, naming which; it
   logs the choice at start-up. **Every application must add the line
   before upgrading, or it will not start:** birdcage, which wires no
   passkeys, sets `gate.AdminPasskeyOptional` (until it wires

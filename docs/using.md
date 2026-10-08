@@ -171,11 +171,13 @@ accident.
   wherever the application is served over https on a domain name and
   sets `Deps.Passkeys`. `New` refuses to start with it while
   `Deps.Passkeys` is nil, or its public URL is unset, an IP address or
-  plain http -- browsers cannot make a passkey for any of those, so the
-  door could never open.
+  plain http on any host but `localhost` -- browsers cannot make a
+  passkey for any of those, so the door could never open. Plain http on
+  `localhost` is accepted, as browsers accept it, for development.
 - `gate.AdminPasskeyOptional`: admins may hold any second factor, as
   every other account may. Use this for an application reached over
-  plain http or by IP address, or one that wires no passkeys.
+  plain http (anywhere but `localhost`) or by IP address, or one that
+  wires no passkeys.
 
 `New` logs the choice at start-up ("gate: admin passkey rule:
 required"). Users and viewers are never affected.

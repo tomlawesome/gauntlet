@@ -79,14 +79,15 @@ emergency-access accounts).
    value, so the application's admin makes a conscious choice and the
    application never fails silently, either way. With `required` and no
    ready relying party (`Deps.Passkeys` nil, or a status of `unset`,
-   `ip` or `insecure`), `New` refuses to start, naming the status and
+   `ip` or `insecure` -- plain http on any host but localhost, which
+   browsers accept for development), `New` refuses to start, naming the status and
    the field, rather than lock every admin out or quietly waive the
    rule. The status is fixed by configuration, so the operator sees the
    refusal once, at start-up, not an admin at a door they cannot pass;
    mikroview already refuses to start in the analogous stale-passkey
    case. `New` logs the chosen value. `optional` is for an application
-   reached over plain http or by IP address, where browsers make no
-   passkeys, or one that wires none.
+   reached over plain http (anywhere but localhost) or by IP address,
+   where browsers make no passkeys, or one that wires none.
 5. **An SSO-only admin sets a password first.** While the rule is on, an
    admin with no local password is held at the existing
    `must-change-password` door, which admits only `POST

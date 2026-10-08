@@ -1333,7 +1333,8 @@ it. The data for all of this lives on `User`.
   status is not `ready`, naming the status, rather than lock every
   admin out or silently waive the rule; it logs the choice at start-up.
   `AdminPasskeyOptional` is for an application reached over plain
-  http or by IP address, or one with no passkeys (birdcage today). With
+  http (anywhere but localhost) or by IP address, or one with no
+  passkeys (birdcage today). With
   the rule on, `Protect` holds an admin with no passkey usable under
   the current RP ID at a new door, 403 `must-enrol-passkey`, which
   admits the same enrolment routes as the any-factor door and is
