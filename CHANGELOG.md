@@ -4,10 +4,28 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+Reading notes for this release:
+
+- "ADR-NNNN" points to an architecture decision record in
+  [docs/adr/](docs/adr/), which gives the reasoning; "decision N" is a
+  numbered decision inside it.
+- A *document* is one stored file (accounts, tokens, sign-in history).
+  At this release the accounts document is version 9, the tokens
+  document version 3 and the sign-in history version 3. Entries below
+  name the version each step reached on the way. **This is one-way:**
+  once this release has saved a file, an older gauntlet build refuses
+  to open it, so rolling back means restoring a copy of the file saved
+  before the upgrade. Older files open in this release as before.
+
 ### Added
 
 - **Prove an unusual sign-in with a passkey** (#65, ADR-0009 decision 10).
-  A fifth `UnusualSignInAction`, `prove` (`gate.UnusualSignInProve`),
+  When a sign-in looks unusual, the person can now be asked to tap a
+  passkey instead of typing a code sent to them. An account with no
+  passkey that works at this address is held for a code if
+  `Config.DeliverConfirmCode` is set, and refused if not. For
+  developers: a fifth `UnusualSignInAction`, `prove`
+  (`gate.UnusualSignInProve`),
   ranked between `confirm` and `block`, settable per signal in
   `Config.UnusualSignIns` and returnable from `Decide`: the sign-in is held
   until the browser answers a passkey assertion for the same account.
@@ -25,24 +43,34 @@ All notable changes to this project are documented in this file.
   reason `prove-failed`. `gate.New` accepts `prove` with nothing else
   wired. Additive; the accounts document is unchanged.
 
-- **Sign in with a passkey alone** (#77, ADR-0012). A passkey that verified
-  the user (a PIN or a biometric at the authenticator) can be the whole
-  sign-in: `POST /api/auth/login/passkey/begin` and `POST
-  /api/auth/login/passkey`, a WebAuthn Level 3 discoverable credential
-  login with no username typed, the account named by the passkey's user
-  handle, user verification required (NIST SP 800-63B-4: a multi-factor
-  cryptographic authenticator, AAL2). Off by default: set
-  `gate.Config.PasskeySignIn` and wire a relying party that implements
-  the new optional `gauntlet.PasskeySignIn` (`passkey.RelyingParty`
-  does); otherwise both routes answer 404 and `POST /api/auth/login` and
-  `login/factor` are exactly as before. Every account keeps its password;
-  the accounts document stays version 9. The sign-in is judged for unusual
+- **Sign in with a passkey alone** (#77, ADR-0012). A passkey can now
+  be the whole sign-in: the person taps it and confirms with a PIN or
+  fingerprint at the device, and types no username or password. It is
+  off by default.
+
+  To turn it on, set `gate.Config.PasskeySignIn` and wire a relying
+  party (the passkey checker) that implements the new optional
+  `gauntlet.PasskeySignIn`; `passkey.RelyingParty` does. Otherwise both
+  new routes answer 404 and `POST /api/auth/login` and `login/factor`
+  are exactly as before.
+
+  The new routes are `POST /api/auth/login/passkey/begin` and `POST
+  /api/auth/login/passkey`. In WebAuthn terms (the browser standard for
+  passkeys) this is a Level 3 discoverable-credential login: the
+  passkey itself names the account (its *user handle*), and the device
+  must verify the person (*user verification*, a PIN or biometric). That
+  makes it a multi-factor sign-in on its own (NIST SP 800-63B-4, AAL2).
+  Every account keeps its password; the accounts document stays
+  version 9.
+
+  How it fits with the other checks: the sign-in is judged for unusual
   signals like any other (method `passkey_alone` reaches `Decide`; a
-  confirmation code is not skipped), counted for the account's lockout and
-  disable, the address limit and ban and the known-browser allowance
-  before the signature is checked, and meets the must-change-password door
-  after it; a refused assertion keeps its attempt, and a completed
-  sign-in gives both back. It does not count toward the run of
+  confirmation code is not skipped). Before the signature is checked it
+  counts toward the account's lockout and disable, the address limit
+  and ban, and the known-browser allowance. After it, an account that
+  owes a password change is still limited to changing it. A refused
+  assertion keeps its attempt, and a completed sign-in gives both
+  back. It does not count toward the run of
   second-factor failures that forces a new password. An account with no
   local password cannot sign in this way. The same passkey resumes a
   timed-out session: `POST /api/auth/reauthenticate` takes `{"assertion":
@@ -59,9 +87,10 @@ All notable changes to this project are documented in this file.
   ADR-0013). `oidc.Policy.RoleFromGroups` maps a group to `user` or
   `viewer`; `RoleWithoutGroup` (default `viewer`, or `user`) covers an
   account in no mapped group, an absent groups claim included. The role
-  is applied at provisioning and at every SSO sign-in, in the same write
-  that finds or creates the account: the highest role among the mapped
-  groups wins, and a downgrade ends the account's other sessions. Admin
+  is set when the account is first created and again at every single
+  sign-on login, in the same write that finds or creates the account.
+  The highest role among the mapped groups wins. A downgrade ends the
+  account's other sessions. Admin
   is never given by a group (`gate.New` refuses it, and an unknown role,
   at start-up) and an account already an admin is never changed by the
   map. The change is audited as `user.role_changed` with actor `sso` and
@@ -75,9 +104,12 @@ All notable changes to this project are documented in this file.
   `Store.FindOrCreateOIDCUserWithRole` and `OIDCSignIn`; the accounts
   document stays at version 9. Birdcage and mikroview: a frontend that
   branches on the role route's `409` classes should handle the new one.
-- **Resume a timed-out session with the password alone** (#71). A session
-  idle past the one-hour timeout but inside its 24-hour ceiling no longer
-  forces a full two-factor sign-in (NIST SP 800-63B-4 section 2.2.3).
+- **Resume a timed-out session with the password alone** (#71). A
+  session that timed out after an hour unused, but is less than 24
+  hours old, can now be resumed by typing the password alone, without
+  a full two-factor sign-in. The 24-hour limit from the original
+  sign-in (the session's *ceiling*) does not move (NIST SP 800-63B-4
+  section 2.2.3).
   `POST /api/auth/reauthenticate`, `{"password": "..."}`, presented with
   the timed-out session's cookie, issues a new session ID (ASVS 7.2.4)
   for the same account with the original sign-in time, so the 24-hour
@@ -91,40 +123,49 @@ All notable changes to this project are documented in this file.
   and the audit record say so: method `resume`
   (`gauntlet.SignInMethodResume`) and `user.reauthenticated`. Additive Go
   API: `SessionStore.Resumable` and `SessionStore.Resume`. Behaviour
-  change: a store with a ceiling now keeps a session idle past its timeout
-  until the ceiling instead of dropping it (it still never authenticates
-  a request, and `ListForUser` does not list it), so the store holds up to
-  a ceiling's worth of sessions rather than an idle timeout's worth. Both
-  caps are unchanged; a restart still ends every session.
+  change: the server now remembers a timed-out session until its 24-hour
+  ceiling instead of forgetting it after the hour, so it holds a little
+  more in memory. A timed-out session still cannot authenticate a
+  request, and `ListForUser` does not list it. Both caps are unchanged;
+  a restart still ends every session.
 - **API tokens expire, are removed when unused, and start `gnt_`** (#74),
-  GitHub's personal-access-token lifecycle. `Token.ExpiresAt` (zero means
-  never); `POST /api/tokens` takes an optional `expiresAt`, an RFC 3339
-  time in the future or `"never"` (a router's ingest token, say), a `400`
-  otherwise; the response and list show it, left out for a token that
+  GitHub's personal-access-token lifecycle. **Your application must
+  call `Gate.SweepTokens` once a day.** Gauntlet runs no timer of its
+  own, so without the call no unused token is ever removed and nobody
+  is warned that a token is about to expire.
+
+  `Token.ExpiresAt` (zero means never); `POST /api/tokens` takes an
+  optional `expiresAt`, a future date and time such as
+  `2027-01-31T09:00:00Z` (RFC 3339) or `"never"` (a router's ingest
+  token, say), a `400` otherwise; the response and list show it, left out for a token that
   never expires. `Authenticate` refuses an expired token exactly as it
   refuses an unknown one. New `TokenStore.CreateWithExpiry`,
   `ErrTokenExpiryInvalid`, `TokenPrefix`, `DefaultTokenLifetime`,
   `TokenUnusedLimit` and `TokenExpiryNoticeWindow`.
-  `Gate.SweepTokens(ctx, now)` is the maintenance call the application
-  makes daily (the library runs no timer): it removes tokens unused for a
+  `Gate.SweepTokens(ctx, now)` removes tokens unused for a
   year, or created a year ago and never used (audit
   `token.removed_unused`), and tells the creating account, through
   `Config.Notices`, a week before a token expires, once per token
   (`NoticeTokenExpiring`, `AccountNotice.TokenExpiring`,
   `TokenExpiringDetail`; `Token.ExpiryWarnedAt` remembers it). New values
-  start `gnt_`, with a rule for them in the new `.gitleaks.toml`; tokens
+  start `gnt_`, so secret-scanning tools can recognise a leaked one; the
+  project's own scanner (gitleaks) has a rule for them in the new
+  `.gitleaks.toml`. Tokens
   issued before keep their bare shape and keep working, and keep no
-  expiry. The tokens document is now version 3, which a build reading up
-  to version 2 refuses; older documents open as before.
+  expiry. The tokens document is now version 3: once saved, an older
+  build cannot open it (see the reading notes above); older documents
+  open as before.
 
 - **An escape code for a lone admin refused by `block`** (#66,
-  ADR-0011). When the unusual-sign-in policy refuses an admin from a new
-  browser and no other admin can act, the refusal now writes a one-time
-  code to the server's log (or hands it to the new `Config.OnEscapeCode`)
-  and sets a sealed ticket cookie `gate_escape_login` in the refused
-  browser; `POST /api/auth/login/escape` with that code (15 minutes,
-  single use, through the login limiter) lets that one sign-in through
-  and remembers the browser. The `403 sign-in-refused` body is
+  ADR-0011). If the only admin who can sign in is refused for coming
+  from a new browser, the server now writes a one-time code to its log
+  (or hands it to the new `Config.OnEscapeCode`). The admin reads it
+  there and enters it in the same browser within 15 minutes; it works
+  once. Your sign-in page needs a box that sends the code to `POST
+  /api/auth/login/escape`. That lets the one sign-in through and
+  remembers the browser. Under the hood, the refusal sets an encrypted
+  ticket cookie, `gate_escape_login`, in the refused browser, and the
+  code is checked against it, through the login limiter. The `403 sign-in-refused` body is
   unchanged. Never for users, viewers or the SSO callback; with neither
   `Config.Log` nor `Config.OnEscapeCode` nothing is issued. Additive API:
   `gauntlet.NewOneTimeCode` (the setup and unlock codes' generator),
@@ -161,10 +202,13 @@ All notable changes to this project are documented in this file.
 - An address ban (#70): `LoginLimiter.RecordAddressFailure` counts failed
   sign-in attempts per source address, and the 100th within a rolling 24
   hours bans the address for 24 hours (`AddressBanFailures`,
-  `AddressBanDuration`); `AddressBanned` reads it. IPv6 addresses count
-  per /64 (`AddressBanGroup`), IPv4 by the full address, an address that
-  does not parse as itself. Counts and bans are kept in memory only, in a
-  capped map that sheds counts before bans. `gate` refuses a banned
+  `AddressBanDuration`); `AddressBanned` reads it. IPv4 addresses are
+  counted one by one. IPv6 addresses are counted by network, the first
+  64 bits (`AddressBanGroup`), so an attacker cannot dodge the ban by
+  changing the end of the address. Anything that is not a valid address
+  is counted as the text it is. Counts and bans are kept in memory only,
+  so a restart forgets them; if memory fills, counts are dropped before
+  bans. `gate` refuses a banned
   address with the same `429` as the per-address limit, and a browser the
   account remembers passes the ban, so a reverse proxy that hides visitor
   addresses cannot lock the owner out. The ban starting is one
@@ -260,10 +304,11 @@ All notable changes to this project are documented in this file.
   every session ended, and an unusual sign-in flagged or blocked -- each
   carrying a `NoticeKind` and the one typed detail pointer that kind
   names (`PasswordResetDetail`, `SecondFactorDetail`, `LockoutDetail`,
-  `SessionsEndedDetail`, `UnusualSignInDetail`). Same async contract as
-  the deprecated `Config.Notify` (own goroutine, 10 s, `recover()`,
-  errors logged only, after the response); nil means nobody is told
-  (#73).
+  `SessionsEndedDetail`, `UnusualSignInDetail`). Your hook is called
+  after the response has been sent, in the background, with a
+  10-second limit; if it fails or crashes, gauntlet logs the problem
+  and the sign-in is not affected -- the same as the deprecated
+  `Config.Notify`. nil means nobody is told (#73).
 - `gate.Config.DeliverConfirmCode`: hands an unusual sign-in's
   confirmation code to the application synchronously, before the
   sign-in is answered -- the opposite contract from `Notices`, which may
@@ -303,15 +348,16 @@ All notable changes to this project are documented in this file.
   (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
   `LoginLimiter.ReserveDelivery`. Additive.
 
-- A running accounts or tokens store no longer adopts an older, valid
-  copy of its file put back while the service runs, which undid later
-  changes and revived revoked tokens. Each document now carries a save
-  counter inside the sealed part; a lower one is refused and logged
-  once, the store keeps what it holds and refuses writes until the file
-  is replaced or the process restarts. The accounts document is now
-  version 6 and the tokens document version 2; older ones open and are
-  stamped on their next save. A file rolled back while the service is
-  stopped is still accepted on start (docs/design.md §4) (#59).
+- If someone puts an older copy of the accounts or tokens file back
+  while the service is running, the service now notices and ignores
+  it. It logs one message, keeps what it holds, and stops saving until
+  the file is replaced or the service restarts. Before, it silently
+  took the old copy, undoing later changes and bringing revoked tokens
+  back to life. How: each document now carries a save counter inside
+  its encrypted part, and a lower one is refused. The accounts document
+  is now version 6 and the tokens document version 2; older ones open
+  and are stamped on their next save. A file put back while the service
+  is stopped is still accepted on start (docs/design.md §4) (#59).
 
 - **Sign out everywhere keeps the session's 24-hour ceiling** (#79). It
   asked for no credential and issued the new session as a fresh
@@ -433,7 +479,8 @@ All notable changes to this project are documented in this file.
   the long penalty on the attacker instead.
 - The disable after `MaxConsecutiveLoginFailures` (50) failures lifts
   itself 24 hours after `User.LoginDisabledAt`, with no unlock needed
-  (#70). The record is unchanged: the disable is the field and the clock.
+  (#70). Nothing new is stored: a disabled account simply becomes usable
+  again 24 hours after the time already on its record.
   The first attempt afterwards clears the account's count of lockouts as
   `UnlockLogin` does, so the next failure does not disable it again at
   once. The admin unlock answer's `wasDisabled` is false for a disable
@@ -463,12 +510,14 @@ All notable changes to this project are documented in this file.
   (`register/finish`) or first authenticator app (`totp/confirm`) is
   saved together with its ten recovery codes in one write, on hold; the
   response shows the codes once with `pendingConfirmation: true`
-  (`totp/confirm` answers `enabled: false`). Until the user calls `POST
-  /api/auth/recovery-codes/confirm` the factor signs nothing in, is not
-  listed or counted, the codes redeem nothing, the must-enrol-factor
-  door stays shut, no other session ends and no audit line is written;
-  the confirmation does all of that. Unconfirmed after ten minutes, the
-  factor and codes are deleted. While one is held, starting another
+  (`totp/confirm` answers `enabled: false`).
+
+  What changes for your frontend: until the user calls `POST
+  /api/auth/recovery-codes/confirm`, the factor signs nothing in and is
+  not listed or counted, the codes redeem nothing, and the account stays
+  restricted to the second-factor setup routes. No other session ends
+  and no audit line is written; the confirmation does all of that.
+  Unconfirmed after ten minutes, the factor and codes are deleted. While one is held, starting another
   enrolment is refused with `409`. A scanned but unconfirmed
   authenticator-app secret now expires ten minutes after it was set
   (`401` `step-expired` at `totp/confirm`). A later factor is still added
@@ -477,7 +526,8 @@ All notable changes to this project are documented in this file.
   between the two left a live factor with no codes; the
   `partially-completed` answers from those two routes (and
   `totpActive`) are gone, and a failed save there is `server-error`.
-  `GenerateRecoveryCodesIfAbsent` is no longer used by `gate` and stays
+
+  Go API notes: `GenerateRecoveryCodesIfAbsent` is no longer used by `gate` and stays
   for direct callers. The accounts document is now version 7
   (`totpPendingSince`, `heldEnrolment`); older ones open unchanged, and
   a version-6 build refuses a version-7 document.
@@ -488,10 +538,11 @@ All notable changes to this project are documented in this file.
   `type` links to its permanent entry in
   [docs/api/errors.md](docs/api/errors.md); `detail` carries the same
   message as before. An unknown path or wrong method under `Routes`
-  answers `about:blank`, keeping `Allow` on 405. The two JSON error
-  bodies that existed (user deleted with tokens not revoked; TOTP on
-  with recovery codes not saved) keep `username` and `totpActive`;
-  their `error` field is now `detail`. `WWW-Authenticate` on 401s is
+  answers `about:blank`, keeping `Allow` on 405. The one JSON error body
+  with an extra field (user deleted, tokens not revoked) keeps
+  `username`; its `error` field is now `detail`. The other one that
+  existed (TOTP on, recovery codes not saved, with `totpActive`) is
+  gone: see the held first second factor (#58) above. `WWW-Authenticate` on 401s is
   unchanged. Switched before mikroview moves onto gauntlet, so it
   migrates once (ADR-0002, owner 2026-10-03).
 

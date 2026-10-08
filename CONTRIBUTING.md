@@ -10,14 +10,18 @@ contributors.
 ## Branching
 
 Branch from `dev` and send merge requests to `dev`, the default branch.
-Nothing is promoted through `preview` or `main` here, as it is in other
-projects. A release is a version tag, created by a button in the `dev`
-pipeline; see [docs/releasing.md](docs/releasing.md).
+The repository also has `preview` and `main` branches, which CI copies
+to the GitHub mirror; only the owner merges `dev` into them. Never
+branch from them or send work to them. A release is a version tag on
+`dev`, created by a button in the `dev` pipeline; see [docs/releasing.md](docs/releasing.md).
 
 ## Before starting work
 
-If what you want to do isn't already an issue, open one first: decisions
-and scope belong in the repository, not left implicit in a merge request
+These steps are for the maintainer and anyone the maintainer has
+invited.
+
+If the work isn't already an issue, open one first: decisions and scope
+belong in the repository, not left implicit in a merge request
 description or a commit message.
 
 ## Testing expectations
@@ -39,7 +43,7 @@ including in test fixtures. See [SECURITY.md](SECURITY.md).
 
 ## Security by design
 
-New features are researched before they are designed -- including an
-explicit CVE search and a comparison against known secure and insecure
-implementations. See
+New features are researched before they are designed. That includes a
+search for publicly known security flaws (CVEs) in similar software,
+and a comparison with designs known to be safe and unsafe. See
 [docs/security-by-design.md](docs/security-by-design.md).

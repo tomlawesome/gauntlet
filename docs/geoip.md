@@ -33,6 +33,14 @@ Pick **one**. Both are free, and both need an account.
 | What you need | your account ID and a licence key created in that account | your account's access token |
 | Goes in | `Config.MaxMind.AccountID`, `Config.MaxMind.LicenceKey` | `Config.IPinfo.Token` |
 
+Where to find them, once signed in:
+
+- **MaxMind**: open the
+  [License Keys page](https://www.maxmind.com/en/accounts/current/license-key).
+  It shows your account ID, and lets you generate a new licence key.
+  The key is shown only once, when it is made, so copy it then.
+- **IPinfo**: the access token is shown in your account dashboard.
+
 Gauntlet does not store the key. Keep it the way the application keeps
 its other secrets -- a mounted secret file is best -- and pass it in
 when the application starts. It never appears in a log line, an error
@@ -42,17 +50,23 @@ key and restart.
 
 ## Where the file is kept
 
-`Config.Dir` (required) holds the last good file as `maxmind.mmdb` or
-`ipinfo.mmdb` (or `maxmind-city.mmdb`, below), and a small `state.json`
-saying when it was fetched. The directory is created readable by the
-service only (0700), and the files are written 0600. After a restart
-the kept file is used straight away, before any download.
+Both providers ship their data as an `.mmdb` file: a database of
+address ranges in a format both use. You name a folder in `Config.Dir`
+(required), and the manager keeps there:
 
-**Leave this directory out of backups.** It is the provider's public
-data, downloaded again on demand, not your data. It is a few megabytes
-for MaxMind's country file and tens of megabytes for IPinfo's; the
-city file (below) is roughly ten times its own country file, still
-tens of megabytes, well under the manager's 128 MiB download cap.
+- the last good file, as `maxmind.mmdb` or `ipinfo.mmdb` (or
+  `maxmind-city.mmdb`, below);
+- a small `state.json` saying when it was fetched.
+
+The manager creates the folder readable by the service only (0700),
+and writes the files 0600. After a restart the kept file is used
+straight away, before any download.
+
+**Leave the `Config.Dir` folder out of backups.** It holds the
+provider's public data, downloaded again on demand, not your data.
+Expect a few MB for MaxMind's country file, and tens of MB for IPinfo's
+and for MaxMind's city file. Gauntlet refuses any download over
+128 MiB.
 
 The manager checks for a new file once a day (`Config.Interval`, no
 less than an hour). A failed check keeps the file it has and tries
@@ -61,16 +75,19 @@ check logs a warning, and `Status().Stale` is true, but it is still
 used.
 
 The download only ever goes to the provider's own https address. The
-default client refuses to follow a redirect to plain http or to any
-private or reserved address.
+built-in downloader will not follow a redirect to an unencrypted
+`http` address. It also refuses to connect to an address on your own
+network or any other non-public address, redirects included. This
+stops a hijacked download link from reaching your internal systems.
 
 ## Locations, for impossible travel
 
 Gauntlet can also judge whether a sign-in travelled further than is
 physically possible since the account's last one -- one of the
 "unusual sign-in" signals (#55, [ADR-0009](adr/0009-unusual-sign-ins.md)).
-This needs a point for each address, not just a country, which only
-MaxMind's larger GeoLite2-City file carries.
+This needs the approximate latitude and longitude of each address,
+not just its country, which only MaxMind's larger GeoLite2-City file
+carries.
 
 Set `geoip.Config.Edition` to `geoip.EditionCity` and `Config.Source`
 to `geoip.SourceMaxMind` -- IPinfo Lite has no coordinates, so
@@ -102,8 +119,8 @@ cfg := gate.Config{
 application can show whether impossible travel is actually available
 yet, the same way it already shows whether a country file is loaded.
 
-Everything above -- the key, the download, the cache directory, the
-credit -- works the same way for the city file as for the country
+Everything above -- the key, the download, the `Config.Dir` folder,
+the credit -- works the same way for the city file as for the country
 file; only the edition and the file name differ.
 
 ## Credit the provider
