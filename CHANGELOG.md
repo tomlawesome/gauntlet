@@ -64,6 +64,9 @@ Low-severity findings from the v0.3.0 audit (#80):
 - An SSO sign-in that changes the account's role no longer computes a
   password hash (about 100 ms, 64 MiB) it throws away while every other
   request waits on the account store.
+- A sign-in with the old password that was already being checked when
+  a password change or an admin reset landed is refused, rather than
+  given a session the change was meant to end.
 
 ## [0.3.0] - 2026-10-08
 

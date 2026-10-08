@@ -1900,6 +1900,11 @@ func (s *Store) Authenticate(username, password string, now time.Time) (*User, e
 	return s.recheckBreach(u, password, now), nil
 }
 
+// testHookAuthenticateVerified, when a test sets it, runs in
+// authenticate after the unlocked password check and before the write
+// lock: the window a concurrent password change can land in.
+var testHookAuthenticateVerified func()
+
 // authenticate is Authenticate without the breach recheck.
 func (s *Store) authenticate(username, password string, now time.Time) (*User, error) {
 	s.reloadIfStale()
@@ -1925,6 +1930,9 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 	valid := VerifyPassword(secret, hash)
 	if !known || !valid {
 		return nil, ErrInvalidCredentials
+	}
+	if h := testHookAuthenticateVerified; h != nil {
+		h()
 	}
 
 	s.mu.Lock()
@@ -1972,6 +1980,15 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 		}
 		return &spent, nil
 	}
+	// The password checked above must still be the account's: a
+	// change or an admin reset that landed while it was being checked,
+	// unlocked, ends every session issued before it, and a session
+	// issued now from the old password would outlive that (#80). The
+	// reset-code branch above compares its own hash for the same
+	// reason.
+	if u.PasswordHash != hash {
+		return nil, ErrInvalidCredentials
+	}
 	// Saved only once the saved value is more than lastLoginGranularity
 	// old; otherwise held in memory, where Get and List see it, until
 	// the next save of any kind carries it. Compared against the saved
@@ -1984,13 +2001,15 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 	}
 	s.mutateBestEffortLocked(func(st *storeState) error {
 		u, ok := st.byID[id]
-		if !ok {
+		if !ok || u.PasswordHash != hash {
 			return ErrInvalidCredentials
 		}
 		u.LastLogin = now
 		return nil
 	})
-	if u, ok = s.byID[id]; !ok {
+	// Read again: a save that conflicted reloaded another process's
+	// document, which may carry its password change.
+	if u, ok = s.byID[id]; !ok || u.PasswordHash != hash {
 		return nil, ErrInvalidCredentials
 	}
 	cp := *u
