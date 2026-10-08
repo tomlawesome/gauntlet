@@ -925,3 +925,31 @@ func TestAnyPasskeysExistReadsAnotherProcessesWrite(t *testing.T) {
 		t.Error("the running store did not see a passkey another process added")
 	}
 }
+
+// An account with nothing to clear is told so, and nothing is written:
+// a caller (an "I've lost everything" CLI) must not report every second
+// factor removed, or audit a removal, when there was none (#80), as
+// ClearPasskeys answers ErrNoPasskeys.
+func TestClearAllSecondFactorsWithNothingToClear(t *testing.T) {
+	b := &countingBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	before := b.saves.Load()
+	if err := s.ClearAllSecondFactors(id); !errors.Is(err, ErrNoSecondFactors) {
+		t.Errorf("ClearAllSecondFactors on an account with no factor = %v, want ErrNoSecondFactors", err)
+	}
+	if got := b.saves.Load() - before; got != 0 {
+		t.Errorf("clearing nothing caused %d saves, want 0", got)
+	}
+
+	// A pending (scanned, unconfirmed) authenticator app is something
+	// to clear.
+	if err := s.SetPendingTOTPSecretAt(id, testTOTPSecret, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearAllSecondFactors(id); err != nil {
+		t.Errorf("clearing a pending app: %v", err)
+	}
+	if u, _ := s.Get(id); u.TOTPSecret != "" {
+		t.Error("the pending app secret survived")
+	}
+}

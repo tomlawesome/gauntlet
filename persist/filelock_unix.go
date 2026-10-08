@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"syscall"
+
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
 )
 
 // fileLock is an exclusive advisory lock on a sidecar file, held for the
@@ -89,7 +91,7 @@ func ownLikeStore(f *os.File, store string) error {
 		}
 		return err
 	}
-	return copyOwner(f, info)
+	return atomicfile.CopyOwner(f, info)
 }
 
 // unlock releases the lock by closing the file handle: an flock lives on

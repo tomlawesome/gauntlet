@@ -56,6 +56,10 @@
 # own tests, which this per-package figure does not count) and failures
 # no fake produces, such as a Load that errors or a Save returning
 # version 0.
+# #80: internal/atomicfile is new at 72.0%, persist's crash-safe writer
+# moved out so blocklist and geoip share it. What it leaves uncovered is
+# a chmod, chown, write, sync or close of a just-created temp file
+# failing, which no test here can cause.
 
 floors:
   persist: 90
@@ -73,3 +77,4 @@ floors:
   cmd/pwlist: 90
   geoip: 92
   persist/persisttest: 94
+  internal/atomicfile: 72

@@ -137,6 +137,7 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrEnrolmentHeld:         "a second factor is waiting for you to confirm you have saved its recovery codes -- confirm it, or wait ten minutes for it to expire, before setting up another",
 	gauntlet.ErrNoHeldEnrolment:       "no second factor is waiting to be confirmed",
 	gauntlet.ErrHeldEnrolmentExpired:  "that second factor was not confirmed within ten minutes and has been removed -- set it up again",
+	gauntlet.ErrResetDuringChange:     "an administrator reset this account's password while you were changing it, so your change was not saved -- sign in with the code they give you",
 }
 
 // writeAuthError translates err into a safe, user-facing message via

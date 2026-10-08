@@ -37,7 +37,8 @@ type signInRow struct {
 	Disabled    bool      `json:"disabled,omitempty"`
 	// Unusual is the unusual-sign-in signals the attempt raised (#55),
 	// as an array of names, absent when none; Confirmed marks a sign-in
-	// completed through a confirmation code, absent when false.
+	// completed through a confirmation code, a passkey, the escape code
+	// or an admin's allowance, absent when false.
 	Unusual   gauntlet.SignInSignals `json:"unusual,omitzero"`
 	Confirmed bool                   `json:"confirmed,omitempty"`
 }

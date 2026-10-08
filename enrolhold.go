@@ -166,6 +166,31 @@ func mintRecoveryCodes() (clear []string, hashed []RecoveryCode, err error) {
 	return clear, hashed, nil
 }
 
+// holdRefusal is the refusal a hold for userID would meet at now,
+// decided from the account as this store holds it, without writing:
+// the refusals the hold's own write makes, asked first so a refused
+// hold mints no codes (ten Argon2id hashes, #80). The write decides
+// again against the document it saves; this only spares the hashing.
+// totpSecret is the secret HoldFirstTOTP checked a code against, or ""
+// for a passkey hold.
+func (s *Store) holdRefusal(userID, totpSecret string, now time.Time) error {
+	s.reloadIfStale()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u, ok := s.byID[userID]
+	switch {
+	case !ok:
+		return ErrUserNotFound
+	case u.EnrolmentHeld(now):
+		return ErrEnrolmentHeld
+	case u.HasSecondFactor():
+		return ErrSecondFactorExists
+	case totpSecret != "" && (!u.TOTPPending(now) || u.TOTPSecret != totpSecret):
+		return ErrNoPendingTOTP
+	}
+	return nil
+}
+
 // HoldFirstPasskey saves pk, userID's first second factor, on hold
 // together with ten new recovery codes for it, in one write, and
 // returns the stored passkey (its name normalised, as AddPasskey does)
@@ -182,6 +207,9 @@ func mintRecoveryCodes() (clear []string, hashed []RecoveryCode, err error) {
 func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Passkey, []string, error) {
 	if !s.Persisted() {
 		return Passkey{}, nil, ErrNotPersisted
+	}
+	if err := s.holdRefusal(userID, "", now); err != nil {
+		return Passkey{}, nil, err
 	}
 	// Hashed before the lock: see mintRecoveryCodes.
 	clear, hashed, err := mintRecoveryCodes()
@@ -242,6 +270,12 @@ func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Pass
 func (s *Store) HoldFirstTOTP(userID, encodedSecret string, matchedCounter uint64, now time.Time) ([]string, error) {
 	if !s.Persisted() {
 		return nil, ErrNotPersisted
+	}
+	if encodedSecret == "" {
+		return nil, ErrNoPendingTOTP
+	}
+	if err := s.holdRefusal(userID, encodedSecret, now); err != nil {
+		return nil, err
 	}
 	clear, hashed, err := mintRecoveryCodes()
 	if err != nil {

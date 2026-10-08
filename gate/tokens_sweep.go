@@ -35,8 +35,10 @@ type TokenSweep struct {
 // expiry notices are sent here, one at a time, each bounded by the
 // notify timeout, and a token is marked warned only once its notice was
 // accepted: a send that fails is one error line in Config.Log and is
-// tried again at the next sweep. A crash between a send and the mark
-// can repeat a notice; it never loses one.
+// tried again at the next sweep. A notifier still running at the
+// deadline is not waited for, but if it then answers that it sent the
+// notice, the token is marked at that point. A crash between a send and
+// the mark can repeat a notice; it never loses one.
 //
 // An error means one of the sweep's writes could not be saved. The
 // first (the unused removal) failing changes nothing; a later one
@@ -68,9 +70,27 @@ func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, erro
 	var errs []error
 	orphaned := map[string]bool{}
 	if g.deps.Users != nil {
+		// The accounts are read once, here, before the token store's
+		// write lock: each Users read checks its backend for staleness,
+		// which can stall, and one per token under that lock held every
+		// bearer-token request behind it (#80). A creator missing from
+		// this list is asked about on its own, once -- an orphan, or an
+		// account made since the list was read, whose tokens must stay.
+		live := map[string]bool{}
+		for _, u := range g.deps.Users.List() {
+			live[u.ID] = true
+		}
+		asked := map[string]bool{}
 		gone, err := g.deps.Tokens.RemoveOrphans(func(id string) bool {
-			_, ok := g.deps.Users.Get(id)
-			return ok
+			if live[id] {
+				return true
+			}
+			exists, ok := asked[id]
+			if !ok {
+				_, exists = g.deps.Users.Get(id)
+				asked[id] = exists
+			}
+			return exists
 		}, now)
 		if err != nil {
 			errs = append(errs, err)
@@ -104,10 +124,19 @@ func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, erro
 			warned = append(warned, t.ID)
 			continue
 		}
+		// A notifier that answers yes after the deadline delivered the
+		// notice all the same: it is marked then, or a notifier that is
+		// always slow would resend it at every sweep.
+		id := t.ID
+		markLate := func() {
+			if err := g.deps.Tokens.MarkExpiryWarned([]string{id}, now); err != nil {
+				g.logError(fmt.Sprintf("gate: recording a late token-expiry notice for token %s: %q", id, err.Error()))
+			}
+		}
 		if g.notifyNow(ctx, &AccountNotice{
 			Kind: NoticeTokenExpiring, UserID: owner.ID, Username: owner.Username, Role: owner.Role, At: now,
 			TokenExpiring: &TokenExpiringDetail{TokenID: t.ID, Name: t.Name, Kind: t.Kind, ExpiresAt: t.ExpiresAt},
-		}) {
+		}, markLate) {
 			warned = append(warned, t.ID)
 		}
 	}

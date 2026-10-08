@@ -18,20 +18,20 @@ import (
 // locked out (LoginLimiter.ReserveKnownBrowser). A stranger's browser
 // has never completed a sign-in there and gets nothing.
 //
-// The browser carries a random token -- 32 bytes, base64url, naming
-// nothing -- and the record carries only its SHA-256, the way an API
-// token is kept (token.go): the document holds no value that works as
-// the cookie, and checking one needs no key. That is also why it is
-// not sealed with gate's pending-login codec: that key is per process,
-// so a long-lived cookie sealed with it would die at every deploy.
-// Nothing is keyed on the client's address; shared addresses make that
-// useless.
+// The browser carries a random token for each account it has completed
+// a sign-in on -- 32 bytes each, base64url, naming nothing, up to four in
+// one cookie (gate's knownbrowser.go) -- and an account's record carries
+// only its own token's SHA-256, the way an API token is kept (token.go):
+// the document holds no value that works as the cookie, and checking
+// one needs no key. That is also why it is not sealed with gate's
+// pending-login codec: that key is per process, so a long-lived cookie
+// sealed with it would die at every deploy. Nothing is keyed on the
+// client's address; shared addresses make that useless.
 //
 // Each completed sign-in rotates the token (RememberBrowser): the
 // browser's old one leaves the record in the same write that adds its
-// new one, so a browser holds at most one entry, and the entry is
-// renewed for another KnownBrowserLifetime. One account per browser:
-// the last that completed a sign-in there.
+// new one, so a browser holds at most one entry on an account, and the
+// entry is renewed for another KnownBrowserLifetime.
 //
 // What a stolen token gains is the allowance and nothing more: the
 // limiter's threshold of guesses per window during a lockout, each one
@@ -55,7 +55,7 @@ const MaxKnownBrowsers = 3
 const KnownBrowserLifetime = 45 * 24 * time.Hour
 
 // knownBrowserTokenBytes is the token's size before encoding: 256 bits,
-// as a session ID's random part is, so it cannot be guessed.
+// twice the 128 a session ID has (newID), so it cannot be guessed.
 const knownBrowserTokenBytes = 32
 
 // KnownBrowser is one browser an account remembers (User.KnownBrowsers).
@@ -136,7 +136,8 @@ func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (str
 
 // ClearKnownBrowsers forgets every browser accountID remembers, so none
 // of them keeps an allowance any longer, and with them the countries it
-// signs in from and its last place (#55): sign out everywhere forgets
+// signs in from and its last place (#55), and an administrator's
+// allowance of its next sign-in (#81): sign out everywhere forgets
 // what the account trusts, so the next sign-in sets a fresh baseline. Called by sign out everywhere
 // -- whose own browser is then remembered again as its new session is
 // issued -- and done by IssueResetCode in its own write.
@@ -148,7 +149,7 @@ func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (str
 // be remembered.
 //
 // Refused with ErrUserNotFound for an account that does not exist; an
-// account remembering none of the three costs no write.
+// account remembering none of these costs no write.
 func (s *Store) ClearKnownBrowsers(accountID string) error {
 	s.reloadIfStale()
 	return s.mutate(func(st *storeState) error {
@@ -156,10 +157,11 @@ func (s *Store) ClearKnownBrowsers(accountID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil {
+		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil && u.SignInAllowedUntil.IsZero() {
 			return errNoChange
 		}
 		u.KnownBrowsers, u.SeenCountries, u.LastPlace = nil, nil, nil
+		u.SignInAllowedUntil = time.Time{}
 		return nil
 	})
 }

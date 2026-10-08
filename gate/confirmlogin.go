@@ -156,8 +156,9 @@ const (
 	confirmFailed confirmOutcome = iota
 	// confirmSent: the code went out and the ticket cookie is set.
 	confirmSent
-	// confirmLimited: the account's confirmation-code budget for this
-	// window is spent (#84); nothing was minted or sent.
+	// confirmLimited: the account's confirmation-code budget is spent,
+	// or a resend is inside its cooldown (#84, #83); nothing was minted
+	// or sent.
 	confirmLimited
 )
 
@@ -168,7 +169,8 @@ const (
 // password_ok writes none). Nothing is written to the account.
 //
 // Before minting anything it counts the send on the account's
-// confirmation-code budget (ReserveDelivery, #84): refused, it answers
+// confirmation-code budget (ReserveDelivery, #84; its resend cooldown
+// and hourly cap, #83): refused, it answers
 // confirmLimited with no code, ticket or cookie. The count is kept
 // whatever happens next, a failed delivery included, since the mailer
 // may have sent it and a mail outage must not become a refund loop.

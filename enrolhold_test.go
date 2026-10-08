@@ -2,6 +2,7 @@ package gauntlet
 
 import (
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -439,5 +440,46 @@ func TestListBlanksAHeldEnrolment(t *testing.T) {
 		if u.HeldEnrolment != nil {
 			t.Errorf("List carried %s's held enrolment", u.Username)
 		}
+	}
+}
+
+// A hold that is going to be refused must not mint its ten recovery
+// codes first: each is an Argon2id hash (64 MiB at the production cost),
+// and a refusal throws all ten away (#80). Every refusal the hold makes
+// against the account as it stands is made before the hashing; the write
+// still decides against the document it saves. Measured as allocation,
+// as TestClosedRegistrationDoesNotHash does.
+func TestARefusedHoldMintsNoCodes(t *testing.T) {
+	s, _, id := openHoldStore(t)
+	now := time.Now().UTC()
+	if _, err := s.AddPasskey(id, testPasskey(1, "live")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPendingTOTPSecretAt(id, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+	useProductionHashCost(t)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if _, _, err := s.HoldFirstPasskey(id, testPasskey(2, "k"), now); !errors.Is(err, ErrSecondFactorExists) {
+		t.Errorf("HoldFirstPasskey on an account with a factor: %v, want ErrSecondFactorExists", err)
+	}
+	if _, err := s.HoldFirstTOTP(id, testTOTPSecret, 1, now); !errors.Is(err, ErrSecondFactorExists) {
+		t.Errorf("HoldFirstTOTP on an account with a factor: %v, want ErrSecondFactorExists", err)
+	}
+	if _, _, err := s.HoldFirstPasskey("nobody", testPasskey(3, "k"), now); !errors.Is(err, ErrUserNotFound) {
+		t.Errorf("HoldFirstPasskey for an unknown account: %v, want ErrUserNotFound", err)
+	}
+	if _, err := s.HoldFirstTOTP("nobody", testTOTPSecret, 1, now); !errors.Is(err, ErrUserNotFound) {
+		t.Errorf("HoldFirstTOTP for an unknown account: %v, want ErrUserNotFound", err)
+	}
+	runtime.ReadMemStats(&after)
+
+	const ceiling = 16 << 20 // one hash is 64 MiB
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > ceiling {
+		t.Errorf("four refused holds allocated %.1f MiB; want well under %d MiB -- a refused hold minted its codes",
+			float64(allocated)/(1<<20), ceiling>>20)
 	}
 }

@@ -149,9 +149,10 @@ func (g *Gate) escapeOffered(user *gauntlet.User, method gauntlet.SignInMethod, 
 // cookie exists and the refusal is as it always was.
 //
 // Each code is counted on the account's escape-code budget
-// (ReserveDelivery, #84) before it is minted, and never handed back:
-// with the budget spent no code is issued, exactly as when nothing can
-// announce one, so a password holder cannot fill the server's log.
+// (ReserveDelivery, #84, with its cooldown and hourly cap, #83) before
+// it is minted, and never handed back: with the budget spent no code is
+// issued, exactly as when nothing can announce one, so a password
+// holder cannot fill the server's log.
 func (g *Gate) startEscape(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, now time.Time) bool {
 	if !g.escapeOffered(user, method, now) {
 		return false

@@ -457,6 +457,11 @@ type unlockSelfRequest struct {
 	Code     string `json:"code"`
 }
 
+type allowSignInResponse struct {
+	Username     string    `json:"username"`
+	AllowedUntil time.Time `json:"allowedUntil"`
+}
+
 type adminLogoutAllRequest struct {
 	Reason string `json:"reason,omitempty"`
 }

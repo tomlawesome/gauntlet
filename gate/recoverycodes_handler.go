@@ -27,6 +27,17 @@ type recoveryCodesRegenerateResponse struct {
 // outright when the account has no second factor at all: recovery codes
 // stand in for one, not for a password alone.
 //
+// The old set stops working at once, when GenerateRecoveryCodes saves the
+// new one, just before the reply is written (owner decision, 2026-10-08,
+// #80 P1-S2: as GitHub, Google, Microsoft, 1Password and Dropbox do; NIST
+// SP 800-63B-4 4.2.1.1 lets a replacement be requested at any time). The
+// new codes are shown once, in that reply. Someone who missed them
+// (dropped connection, closed page) regenerates again; there is no
+// pending state and no way to show them twice. If the save fails the old
+// set stays and no codes are issued. First issuance is different: it
+// waits for handleEnrolmentConfirm, and this route refuses (409) while
+// that first factor is still on hold.
+//
 // Unlike ConfirmTOTP, this does not end other sessions: those end
 // sessions because the set of factors protecting the account just
 // changed and a session elsewhere might predate that change; regenerating

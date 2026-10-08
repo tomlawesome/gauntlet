@@ -69,6 +69,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.Handle("PUT /api/auth/users/{id}/role", adminOnly(g, g.handleSetRole))
 	mux.Handle("POST /api/auth/users/{id}/reset-password", adminOnly(g, g.handleResetPassword))
 	mux.Handle("POST /api/auth/users/{id}/unlock", adminOnly(g, g.handleUnlockUser))
+	mux.Handle("POST /api/auth/users/{id}/allow-sign-in", adminOnly(g, g.handleAllowSignIn))
 	mux.Handle("POST /api/auth/users/{id}/logout-all", adminOnly(g, g.handleAdminLogoutAll))
 	mux.Handle("DELETE /api/auth/users/{id}/totp", adminOnly(g, g.handleTOTPAdminClear))
 	mux.Handle("DELETE /api/auth/users/{id}/passkeys", adminOnly(g, g.handlePasskeysAdminClear))

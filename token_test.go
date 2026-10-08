@@ -379,6 +379,8 @@ func TestValidDeviceID(t *testing.T) {
 		"a DEL":                          "router\x7f",
 		"a bidi override":                "router\u202e1",
 		"a zero-width space":             "router\u200b1",
+		"a line separator":               "router\u20281",
+		"a paragraph separator":          "router\u20291",
 		"invalid UTF-8":                  "router\xff",
 	} {
 		if validDeviceID(bad) {
@@ -410,6 +412,7 @@ func TestTokenNameIsBoundedLikeTheDevice(t *testing.T) {
 		"is too long":             longest + "n",
 		"has a control character": "ci\x1b[2Kadmin",
 		"has a bidi override":     "ci\u202egnp.exe",
+		"has a line separator":    "ci\u2028admin",
 	} {
 		if _, _, err := s.Create(bad, TokenKindAPI, "", nil, now); err != ErrTokenNameInvalid {
 			t.Errorf("Create with a name that %s: err = %v, want ErrTokenNameInvalid", why, err)
