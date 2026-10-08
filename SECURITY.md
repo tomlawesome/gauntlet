@@ -25,11 +25,13 @@ is in [docs/design.md](docs/design.md) section 4 and
 - **Sessions**: the session ID is a long random value (128 bits) that
   nobody can guess, and the server looks it up. A session ends after at
   most an hour unused and never lasts more than 24 hours from sign-in.
-  A password change ends every session. Browsers do not send the cookie
-  from other sites (`SameSite=Lax`), and every request that changes
-  something must carry a header a hostile web page cannot add. Together
-  these block cross-site request forgery (a hostile page making your
-  browser act for you).
+  A password change ends every session. The cookie is `SameSite=Lax`:
+  browsers leave it off requests another site makes, except when a link
+  there opens a page here (a plain GET). So every request other than a
+  GET or HEAD must also carry a header a hostile web page cannot add,
+  and an application must not change anything on a GET. Together these
+  block cross-site request forgery (a hostile page making your browser
+  act for you).
 - **Single sign-on (OIDC, OpenID Connect)**:
   - The sign-in is protected against a stolen or replayed code (PKCE),
     and its one-time values are compared in constant time, so timing

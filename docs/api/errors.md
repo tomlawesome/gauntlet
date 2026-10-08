@@ -94,7 +94,8 @@ exists. Each pair is named under the class it shares, below.
   - every refused passkey, at `login/factor`, `login/passkey`,
     `login/prove` and `reauthenticate`: a wrong signature, a clone
     warning (the passkey's use counter went backwards or did not move,
-    which suggests a copied key), or a passkey removed from the account
+    which suggests a copied key; a counter that stays at 0 is normal
+    and accepted), or a passkey removed from the account
     since the sign-in started. A use counter that could not be saved is
     the server's failure, not the caller's, and answers `server-error`.
 

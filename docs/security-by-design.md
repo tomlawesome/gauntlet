@@ -358,11 +358,21 @@ secret and token in it is lost, and nobody can sign in. So:
 2. Keep the old key file. Make the new key: at least 32 bytes from a
    secure random source.
 3. For each store sealed under that key (accounts, tokens, and the
-   sign-in history if the application keeps one):
-   `Load` the document through `persist.Encrypt(backend, oldKey, opts)`,
-   then `Save` it through `persist.Encrypt(backend, newKey, opts)` --
-   the same backend and the same `Label`, passing the version the load
-   returned.
+   sign-in history if the application keeps one), read the document
+   with the old key and write it back with the new one, passing the
+   version the read returned to `Save`. Gauntlet ships no tool for
+   this; it is a few lines of Go in the application. How depends on
+   the backend:
+   - **The file backend** (`persist.NewEncryptedFileBackend`): `Load`
+     through `NewEncryptedFileBackend(path, oldKey)`, then `Save`
+     through `NewEncryptedFileBackend(path, newKey)`. The file is tied
+     to its path, so give both the same path, written exactly as the
+     application gives it. Do not use `persist.Encrypt` here: it writes
+     a different format, and the file backend could not open it.
+   - **Your own backend** (`persist.Encrypt`): `Load` through
+     `persist.Encrypt(backend, oldKey, opts)`, then `Save` through
+     `persist.Encrypt(backend, newKey, opts)`, with the same backend and
+     the same `Label`.
 4. Start the application with the new key and check that someone can
    sign in. Only then delete the old key: until that check passes, it
    is the only way back.
@@ -427,7 +437,7 @@ store, keep and protect:
   | Sign-in | `account.unlock_code_used` | The lone admin lifted their own disable with the unlock code from the server's log (`gate/unlock_handler.go:67`) |
   | Second factor | `account.totp_enabled`, `account.totp_disabled` | The account's owner added or removed an authenticator app |
   | Second factor | `account.passkey_added`, `account.passkey_removed` | The owner added or removed a passkey |
-  | Second factor | `account.passkey_clone_suspected` | A passkey's use counter went backwards or did not move, which suggests a copied key; the sign-in was refused |
+  | Second factor | `account.passkey_clone_suspected` | A passkey's use counter went backwards or did not move, which suggests a copied key; the sign-in was refused. A counter that is 0 both stored and presented is normal (most phone and laptop passkeys never count) and is accepted with no entry |
   | Second factor | `user.totp_cleared`, `user.passkeys_cleared` | An admin removed another account's authenticator app or passkeys |
   | Second factor | `account.recovery_codes_regenerated` | The owner asked for a new set of recovery codes |
   | Accounts and roles | `user.register` | The first admin was created with the setup code |

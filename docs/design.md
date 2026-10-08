@@ -439,7 +439,7 @@ const ResetCodeTTL = 24 * time.Hour
 // backend's file is gone since this process loaded it; restore the file,
 // or restart the process to start afresh), ErrPlaintextAtRest (#50: the
 // backend would hold the accounts in the clear), ErrSeveralAdmins
-// (TransferAdmin with more than one admin), ErrLastLocalAdmin (#76: the
+// (TransferAdmin with more than one admin), ErrLastLocalAdmin (#79: the
 // last admin that can sign in without the identity provider),
 // ErrUnlockCodeInvalid (#44), ErrTokenExpiryInvalid (#74), ErrNoTOTP and
 // ErrNoPasskeys (nothing to remove, nothing written),
@@ -485,7 +485,7 @@ factor's 5, the 100 and the 24 hours are fixed):
 | Wrong password or code for one account | 5 in 5 minutes | locked for 5 minutes, then 15, then 45, then 1 hour each time |
 | Failures in a row on one account | 50 (`MaxConsecutiveLoginFailures`), about 8 hours of lockouts | local sign-in disabled for 24 hours (`LoginDisableDuration`), or until an admin unlocks it |
 | Failed second-factor steps in a row | 5 | the password must be changed, and every session on the account ends |
-| Attempts from one address | 5 in 5 minutes | `429 rate-limited` until the window passes |
+| Failed attempts from one address (a right one does not count) | 5 in 5 minutes | `429 rate-limited` until the window passes |
 | Failed sign-ins from one address | 100 in 24 hours (`AddressBanFailures`) | the address is banned for 24 hours (`AddressBanDuration`) |
 | Codes sent for one account | 5 in 5 minutes, for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
 | Sign-ins from a browser the account remembers, while it is locked out | 5 in 5 minutes | allowed, so a stranger cannot lock the owner out |
@@ -1202,7 +1202,7 @@ The cookies:
 | `gate_escape_login` (#66) | `/api/auth/login` | 15 minutes (`EscapeCodeLifetime`) | a lone admin's refused or held sign-in waiting for its escape code |
 | `gate_oidc_flow` | `/api/auth/oidc` | 5 minutes | the SSO round trip's state, nonce and PKCE verifier |
 | `gate_passkey_register` | `/api/auth/passkeys` | 5 minutes | a passkey registration, begin to finish |
-| `gate_passkey_assert` | `/api/auth/login` | 5 minutes | a passkey as the second factor, begin to finish |
+| `gate_passkey_assert` | `/api/auth/login` | 5 minutes | a passkey as the second factor, or a passkey proving an unusual sign-in (`login/prove`), begin to finish |
 | `gate_passkey_signin` (#77) | `/api/auth` | 5 minutes | a passkey sign-in on its own, or a passkey resuming a timed-out session |
 
 Notes on the table:

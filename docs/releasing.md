@@ -60,8 +60,12 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    - `MIRROR_TO_GITHUB` = `true`: without it the job does not appear at
      all.
    - `GITHUB_MIRROR_SSH_KEY`: the private SSH key that may push to the
-     mirror. Without it the job fails with "GITHUB_MIRROR_SSH_KEY is
-     not set".
+     mirror. Create it with type **File**, not the default Variable:
+     the job reads the key from a file, so a plain Variable fails the
+     job. If the variable is missing, or the tag is not protected (a
+     protected variable reaches only protected tags and branches), the
+     job fails with
+     `GITHUB_MIRROR_SSH_KEY is not set -- is v<VERSION> protected?`.
 
    Check the tag arrived:
    ```
@@ -270,9 +274,10 @@ is the first real list.
 From any branch, [run a pipeline](https://gitlab.tomlawson.io/ai/gauntlet/-/pipelines/new)
 with the variable `BLOCKLIST_SAMPLE` = `true`. `blocklist:build` runs
 over only the first 2,048 of the 1,048,576 groups HIBP serves its
-hashes in (each group is the hashes sharing one 5-character start),
-about 2 MB in all. Its output is stamped as a sample, which signing,
-publishing and every application refuse.
+hashes in (each group is the hashes sharing one 5-character start).
+That is 1/512 of a full run, so roughly 40-80 MB in all. Its output is
+stamped as a sample, which signing, publishing and every application
+refuse.
 
 On a branch other than `dev`, `blocklist:build` is the only job. On
 `dev` the lint and test jobs run as well, as they do for every `dev`
