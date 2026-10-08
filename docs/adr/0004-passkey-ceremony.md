@@ -191,5 +191,14 @@ mikroview's fake authenticator copies and this module reuses.
   2026-10-01).
 - `github.com/go-webauthn/webauthn` joins the modules `govulncheck` and
   the licence gate watch on every pipeline.
+- Status note (v0.3.0 audit, 2026-10-08): built and shipped in v0.2.0 (the `passkey`
+  package and `gate`'s passkey routes); the **Status** line above was
+  never moved from Proposed.
+- Status note (v0.3.0 audit, 2026-10-08): decision 2's "two sealing keys" is now three:
+  ADR-0012 (#77) added a third, for passkey-alone sign-in, so each
+  ceremony's state opens only for its own ceremony.
+- Status note (v0.3.0 audit, 2026-10-08): decision 3's "two cookies" is now three:
+  ADR-0012 (#77) added `gate_passkey_signin` on `/api/auth`. The two
+  named here are unchanged, and all three last five minutes.
 
 Written by Fable 5.1, 2026-10-02.

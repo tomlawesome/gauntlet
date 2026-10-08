@@ -81,3 +81,10 @@ not any one issue:
   needs, not invented fresh.
 - Mikroview is not changed by this work. Its move onto this module is
   mikroview #1202, opened only when the owner says so.
+- Status note (v0.3.0 audit, 2026-10-08): decision 2's "one caller" for
+  `evict.DownTo` is out of date: the address-ban counts and bans map
+  (`addressban.go`) also call it.
+- Status note (v0.3.0 audit, 2026-10-08): the dependency and passkey lines
+  above are superseded: `github.com/go-webauthn/webauthn` was approved
+  on 2026-09-30 and the `passkey` package shipped in v0.2.0
+  ([ADR-0004](0004-passkey-ceremony.md)).

@@ -111,5 +111,10 @@ says `TEXT` too.
 - Not done here: a per-field pepper for password hashes (the sealed
   document is the at-rest layer instead), and reading key files inside
   gauntlet (§1.7 stands).
+- Status note (v0.3.0 audit, 2026-10-08): this change shipped in v0.2.0, so "CHANGELOG,
+  Unreleased" above means the `[0.2.0]` section.
+- Status note (v0.3.0 audit, 2026-10-08): the accounts document is no longer version 3
+  (decision 1): later changes raised it, and it is version 9 now. The
+  sealing is unchanged.
 
 Written by Fable 5.1, 2026-10-02.
