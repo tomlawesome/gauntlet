@@ -608,7 +608,7 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 // sent. Only an account with a local password gets this answer: an
 // SSO-only one is refused at the SSO callback, which redirects with
 // ssoError=refused and carries no text.
-const signInRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+const signInRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to allow your next sign-in or reset the account"
 
 // writeSignInRefused answers a refused sign-in: 403 sign-in-refused,
 // with no X-Auth-Gate header, which marks a session stopped at a door,

@@ -846,7 +846,7 @@ func TestUnusualFailedRememberTellsNobody(t *testing.T) {
 
 // wantRefusedDetail is the sign-in-refused class's one detail, as the
 // design words it.
-const wantRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+const wantRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to allow your next sign-in or reset the account"
 
 // cookieNamed is the cookie resp sets under name, or nil.
 func cookieNamed(resp *http.Response, name string) *http.Cookie {
