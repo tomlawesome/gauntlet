@@ -92,6 +92,10 @@ Low-severity findings from the v0.3.0 audit (#80):
   the same result without fetching (delete the checkpoint to fetch
   again), and the retry logs that every chunk was already fetched
   instead of "resuming at chunk" one past the last.
+- `SweepTokens` reads the account store once to find tokens whose
+  creator is gone, instead of once per token while holding the token
+  store's lock, so a slow accounts backend no longer holds every
+  bearer-token request for the length of the sweep.
 
 ## [0.3.0] - 2026-10-08
 

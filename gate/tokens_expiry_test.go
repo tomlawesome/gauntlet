@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // Token expiry, the gnt_ prefix and the sweep (#74).
@@ -399,5 +401,32 @@ func TestSweepTokensTreatsASlowNotifierAsNotSent(t *testing.T) {
 	f.g.notifying.Wait()
 	if err != nil || res.Warned != 0 {
 		t.Errorf("SweepTokens = %+v, %v; want nothing marked", res, err)
+	}
+}
+
+// The orphan check reads the account store once per sweep, not once per
+// token (#80): each read is a staleness check against the store's
+// backend, which can stall for seconds, and they ran under the token
+// store's write lock, holding every bearer-token request behind them.
+func TestSweepTokensChecksTheAccountStoreOncePerSweep(t *testing.T) {
+	backend := &versionCountingBackend{Memory: persist.NewMemory()}
+	users := openTrackedStore(t, backend)
+	g := newTestGateWithUsers(t, users)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", testAdminPassword)
+	admin, _ := users.ByUsername("admin")
+	now := time.Now()
+	for i := range 20 {
+		if _, _, err := g.deps.Tokens.CreateWithExpiry(fmt.Sprintf("token-%d", i), gauntlet.TokenKindAPI, "", admin, now.Add(-time.Hour), now.Add(300*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := backend.versionCalls.Load()
+	if _, err := g.SweepTokens(context.Background(), now); err != nil {
+		t.Fatalf("SweepTokens: %v", err)
+	}
+	if got := backend.versionCalls.Load() - before; got > 3 {
+		t.Errorf("a sweep over 20 tokens checked the account store %d times; want a fixed few, not one per token", got)
 	}
 }

@@ -68,9 +68,27 @@ func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, erro
 	var errs []error
 	orphaned := map[string]bool{}
 	if g.deps.Users != nil {
+		// The accounts are read once, here, before the token store's
+		// write lock: each Users read checks its backend for staleness,
+		// which can stall, and one per token under that lock held every
+		// bearer-token request behind it (#80). A creator missing from
+		// this list is asked about on its own, once -- an orphan, or an
+		// account made since the list was read, whose tokens must stay.
+		live := map[string]bool{}
+		for _, u := range g.deps.Users.List() {
+			live[u.ID] = true
+		}
+		asked := map[string]bool{}
 		gone, err := g.deps.Tokens.RemoveOrphans(func(id string) bool {
-			_, ok := g.deps.Users.Get(id)
-			return ok
+			if live[id] {
+				return true
+			}
+			exists, ok := asked[id]
+			if !ok {
+				_, exists = g.deps.Users.Get(id)
+				asked[id] = exists
+			}
+			return exists
 		}, now)
 		if err != nil {
 			errs = append(errs, err)
