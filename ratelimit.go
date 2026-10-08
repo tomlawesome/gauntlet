@@ -46,9 +46,11 @@ var maxLoginLimiterKeys = 4096
 // failures in a row disable the account's sign-in until UnlockLogin or
 // until LoginDisableDuration has passed (#70), whichever is first. The
 // count of lockouts and the disable are written in the same write that
-// starts a lockout. Both reset only on a completed sign-in (SignedIn), a
-// new password or a disable running out -- never on a correct password
-// alone, nor on a lockout running out.
+// starts a lockout. The count of lockouts resets only on a completed
+// sign-in (SignedIn), a new password, UnlockLogin or a disable running
+// out -- never on a correct password alone, nor on a lockout running
+// out. A new password does not lift a disable: only UnlockLogin, an
+// admin's reset code (IssueResetCode) or the disable running out does.
 //
 // Separately, failed sign-in attempts are counted per source address and
 // a persistent source is banned for a day (AddressBanned,

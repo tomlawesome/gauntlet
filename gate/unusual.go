@@ -112,16 +112,19 @@ type UnusualSignInCase struct {
 }
 
 // UnusualSignInDetail is NoticeUnusualSignIn's detail (Config.Notices):
-// an unusual sign-in flagged, confirmed or blocked. It never carries the
-// account's coordinates. The application chooses the wording, address
-// and channel; it should treat Client.UserAgent as text, never markup.
+// an unusual sign-in flagged or blocked. It never carries the account's
+// coordinates. The application chooses the wording, address and
+// channel; it should treat Client.UserAgent as text, never markup.
 //
 // Under flag the notice is asked for after the response is written, as
-// every AccountNotice is; a block and the confirm notifier.go sends are
-// the same. At most one flag or block notice per account per hour is
-// sent; one held back is "notify=quiet" in the audit.
+// every AccountNotice is; a block's is the same. A sign-in held for a
+// confirmation code or a passkey sends no notice of its own: the code
+// goes out through Config.DeliverConfirmCode, and a hold that ends in a
+// refusal is noticed as a block. At most one flag or block notice per
+// account per hour is sent; one held back is "notify=quiet" in the
+// audit.
 type UnusualSignInDetail struct {
-	// Action is what happened: flag, confirm or block.
+	// Action is what happened: flag or block.
 	Action  UnusualSignInAction
 	Signals gauntlet.SignInSignals
 	Method  gauntlet.SignInMethod
