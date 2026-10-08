@@ -197,7 +197,9 @@ gauntlet sends no mail itself. To tell an account's owner that
 something happened to their account -- a password reset, a second
 factor added or removed, a lockout, an admin signing them out
 everywhere (`POST /api/auth/users/{id}/logout-all`), an unusual
-sign-in, a role change, an API token about to expire -- set
+sign-in, an admin allowing their next sign-in from a new browser or
+place (`POST /api/auth/users/{id}/allow-sign-in`), a role change, an
+API token about to expire -- set
 `Config.Notices`. It is called with one `AccountNotice` per event: the
 event's `Kind`, the account, and a detail for that kind.
 

@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **An admin can allow an account's next sign-in for ten minutes**
+  (#81, ADR-0009 decision 11). `POST /api/auth/users/{id}/allow-sign-in`
+  lets a person the unusual-sign-in policy holds or refuses at a new
+  browser or place sign in once, normally, and have that browser and
+  place remembered -- without a reset code destroying their password,
+  and as the first administrator remedy at all for an account that
+  signs in only through single sign-on. For another account it takes
+  the caller's password, for the caller's own the password and a
+  current second factor, as own unlock does. It changes no password,
+  second factor, session, lockout or disable. The first completed
+  sign-in from any browser spends it; a reset code or sign out
+  everywhere clears it. Audited as `user.sign_in_allowed`; the account
+  holder is told through the new `NoticeSignInAllowed`
+  (`AccountNotice.SignInAllowed`, `SignInAllowedDetail{Until}`). New
+  `Store.AllowNextSignIn`, `User.SignInAllowedUntil`,
+  `User.SignInAllowed` and `SignInAllowanceLifetime`. Additive.
+
 ### Security
 
 - **Starting a passkey second step spends no sign-in attempts** (#85).
@@ -51,6 +70,21 @@ All notable changes to this project are documented in this file.
   three are deprecated and kept until a major version (ADR-0002).
 
 ### Changed
+
+- **The accounts document is version 10** (#81), for
+  `User.SignInAllowedUntil`. **One-way:** a v0.3.0 build refuses a
+  version-10 document at start-up (ADR-0002), so rolling back means
+  restoring a copy saved before the upgrade. A version-9 document opens
+  as before, with no allowance. No migration code.
+
+- **A sign-in let through by an admin's allowance** (#81) completes as
+  an escape-code one does: history row `confirmed`, `user.login` note
+  `allowed=used`, and the unusual-sign-in notice's `Reason` is
+  `allowed`. `Store.RememberSignIn` now also spends the allowance in its
+  one write.
+
+- **The `sign-in-refused` detail** now reads "... or ask an
+  administrator to allow your next sign-in or reset the account" (#81).
 
 - CI: a release is cut on `main` only (#88): release:version and
   release:gitlab run in `main` pipelines and refuse a commit that is not

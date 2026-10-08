@@ -225,6 +225,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
     KnownBrowsers []KnownBrowser // new (#44): accounts version 4; none in older documents
     SeenCountries []SeenCountry; LastPlace *LastPlace // new (#55): accounts version 8; what unusual sign-ins are judged against, none/nil in older documents
+    SignInAllowedUntil time.Time // new (#81): accounts version 10; an admin's allowance of the next sign-in, read with SignInAllowed; zero in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
@@ -288,7 +289,9 @@ func (s SignInSignals) Has(f SignInSignals) bool; func (s SignInSignals) Names()
 func ParseSignInSignal(name string) (SignInSignals, bool)
 type SignInJudgement struct { Signals SignInSignals; PreviousCountry string } // PreviousCountry is LastPlace.Country when SignalImpossibleTravel is set
 func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, loc *Location, now time.Time) SignInJudgement // read-only; tokens are the known-browser tokens the browser carries
-func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) // one write: rotates the browser token (as RememberBrowser) and remembers the country and last place; RememberBrowser is RememberSignIn with country and loc left blank
+func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) // one write: rotates the browser token (as RememberBrowser) and remembers the country and last place, and spends an allowance (#81); RememberBrowser is RememberSignIn with country and loc left blank
+const SignInAllowanceLifetime = 10 * time.Minute                                   // #81
+func (s *Store) AllowNextSignIn(accountID string, now time.Time) (*User, error)   // #81: SignInAllowedUntil = now + 10 min, replacing any earlier; cleared by RememberSignIn, ClearKnownBrowsers, IssueResetCode
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
@@ -1184,6 +1187,22 @@ strictest of the kept signals wins.
   `confirm` does, through the same login limiter. Never for a user or
   viewer, never on the SSO callback; with neither `Config.Log` nor
   `Config.OnEscapeCode`, nothing is issued.
+- **An admin's allowance of the next sign-in** (#81, ADR-0009 decision
+  11). `POST /api/auth/users/{id}/allow-sign-in`, beside `/unlock`,
+  takes the caller's `password` for another account and password plus
+  a current second factor (`code` or `assertion`) for the caller's own,
+  as own unlock does. It sets `User.SignInAllowedUntil` ten minutes on,
+  replacing any earlier window, and answers `{username, allowedUntil}`.
+  While it is live a judged sign-in the policy would hold or refuse
+  completes instead, as the escape code lets one through: judged in
+  full first, then session issued, browser, country and place
+  remembered, history row `confirmed`, `user.login` note `allowed=used`,
+  notice `Reason: "allowed"`. The first completed sign-in from any
+  browser spends it, and a reset code or sign out everywhere clears it.
+  It lifts no lockout or disable and changes no credential; an SSO-only
+  account's callback completes too. Audited as `user.sign_in_allowed`;
+  the account holder gets `NoticeSignInAllowed`
+  (`SignInAllowedDetail{Until}`, `By`).
 - **Start-up checks.** `gate.New` refuses an unknown action, `confirm`
   with no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on
   with no `Config.Locate` (`prove` needs nothing wired).
@@ -1200,7 +1219,8 @@ strictest of the kept signals wins.
 (`AccountNotifier`) is the one hook for every account event this module
 raises: a password reset, a second factor added or removed, recovery
 codes regenerated, a lockout, a disable, an admin ending every session,
-an unusual sign-in flagged or blocked. Each call carries one
+an unusual sign-in flagged or blocked, an admin allowing the next
+sign-in (#81). Each call carries one
 `AccountNotice` with a `NoticeKind` and the one typed detail pointer that
 kind names; the async contract (own goroutine, 10 s, `recover()`, errors
 logged only, after the response) is the one `Config.Notify` always had.
@@ -1786,6 +1806,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
 | The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual. Since the v0.3.0 audit (#79) the code is also issued when the admin's sign-in is held for a code or a passkey (`confirm`, `prove`), so a lost passkey or an undelivered code has the same way out |
 | A password holder flooding the owner's mailbox or the server's log with codes | each confirmation code and escape code is counted per account as it is sent (`ReserveDelivery`, #84): five per five-minute window each at the consumers' defaults, never handed back, a failed delivery included; past it the held sign-in gets `429 rate-limited` and nothing is sent |
+| An SSO-only account, or a local one whose password should survive, refused under `block` | an admin allows its next sign-in (#81): ten minutes, single use, remembered as any completed sign-in; the reset code stays for an account whose credentials may be in the wrong hands |
 | A log-written escape code that an attacker reads | someone who can read the log already owns the host and holds the setup and unlock codes; without the log, a thief holding the password and second factor has the ticket but no code, and the code without that browser's ticket is nothing. Eighty bits behind the login limiter, one outstanding per refused attempt, single use, gone at expiry or restart |
 
 ### Fail-closed list
