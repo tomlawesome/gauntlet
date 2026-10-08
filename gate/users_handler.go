@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +20,10 @@ type createUserRequest struct {
 	// the new account's.
 	AdminPassword string `json:"adminPassword,omitempty"`
 	AdminCode     string `json:"adminCode,omitempty"`
+	// AdminAssertion is the creating admin's passkey, the alternative to
+	// AdminCode (#82): the browser's answer to the options POST
+	// /api/auth/step-up/passkey/begin gave.
+	AdminAssertion json.RawMessage `json:"adminAssertion,omitempty"`
 }
 
 // userSummary is what the account list exposes -- deliberately not
@@ -79,9 +84,9 @@ func (g *Gate) heldForPasskeyByID(id string, role gauntlet.Role) bool {
 // handleCreateUser lets an existing admin add another account -- the
 // only way to create a user once self-registration has closed. Creating
 // an admin (#67) also takes the caller's own password and a current
-// second factor (adminPassword, adminCode), checked as a role grant is
-// (recheckStepUp): a stolen session alone cannot make its holder
-// permanent.
+// second factor (adminPassword, and adminCode or adminAssertion), checked
+// as a role grant is (recheckStepUp): a stolen session alone cannot make
+// its holder permanent.
 func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
@@ -120,8 +125,8 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			g.writeCreateUserError(w, r, err)
 			return
 		}
-		if !g.recheckStepUp(w, r, caller, req.AdminPassword, req.AdminCode, now,
-			"creating an admin needs your own password and a code from your authenticator app or a recovery code (adminPassword, adminCode)") {
+		if !g.recheckStepUp(w, r, caller, req.AdminPassword, req.AdminCode, req.AdminAssertion, now,
+			"creating an admin needs your own password and either a code from your authenticator app or a recovery code, or your passkey (adminPassword, adminCode or adminAssertion)") {
 			return
 		}
 	}
@@ -132,7 +137,7 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	detail := "role=" + string(user.Role)
 	if user.Role == gauntlet.RoleAdmin {
-		detail += "; granting admin's password and second factor re-entered"
+		detail += "; granting admin's password and " + stepUpFactor(req.AdminAssertion) + " re-entered"
 	}
 	// A new account holds no passkey, so a new admin is held at the
 	// passkey door from its first request while the rule is on (#82).
@@ -385,11 +390,13 @@ type unlockUserResponse struct {
 
 // unlockSelfRequest is the body of the admin unlock route when the
 // account is the caller's own: the password and a current second factor
-// -- a TOTP code or a recovery code -- entered again (owner,
-// 2026-10-02). Another account's unlock takes no body.
+// -- a TOTP code or a recovery code, or since #82 a passkey -- entered
+// again (owner, 2026-10-02). Another account's unlock takes no body.
 type unlockSelfRequest struct {
 	Password string `json:"password"`
-	Code     string `json:"code"`
+	Code     string `json:"code,omitempty"`
+	// Assertion is a passkey, the alternative to Code (#82).
+	Assertion json.RawMessage `json:"assertion,omitempty"`
 }
 
 // handleUnlockUser is the admin's way to lift a disabled sign-in on
@@ -414,6 +421,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := g.now()
+	var selfAssertion json.RawMessage
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
 		// Only the caller's own unlock reads a body; another account's
 		// takes none, as before.
@@ -425,6 +433,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 		if !g.recheckUnlockSelf(w, r, caller, req, now) {
 			return
 		}
+		selfAssertion = req.Assertion
 	}
 
 	target, ok := g.deps.Users.Get(id)
@@ -448,7 +457,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 
 	how := "sign-in unlocked by admin"
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
-		how = "own sign-in unlocked by admin, password and second factor re-entered"
+		how = "own sign-in unlocked by admin, password and " + stepUpFactor(selfAssertion) + " re-entered"
 	}
 	g.audit(r, auditActor(r), "user.unlock", target.Username,
 		fmt.Sprintf("%s; wasDisabled=%t wasLockedOut=%t; lockout count cleared", how, resp.WasDisabled, resp.WasLockedOut))
@@ -466,17 +475,18 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 // carry.
 //
 // The password is checked first (recheckPassword), then the code
-// (recheckSecondFactor), each on the account's re-check budget: a wrong
-// one is refused with 401 and counted there, and nothing is unlocked. A
-// request missing either is 400 and checks nothing. Writes every
-// refusal itself; the caller has already refused a body that does not
-// decode.
+// (recheckSecondFactor) or the passkey (recheckPasskey), each on the
+// account's re-check budget: a wrong one is refused with 401 and counted
+// there, and nothing is unlocked. A request missing the password, or
+// carrying neither or both of code and assertion, is 400 and checks
+// nothing. Writes every refusal itself; the caller has already refused a
+// body that does not decode.
 //
 // The one-time unlock code in the server's log (POST /api/auth/unlock)
 // remains the way back for an admin with no session left.
 func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, req unlockSelfRequest, now time.Time) bool {
-	return g.recheckStepUp(w, r, caller, req.Password, req.Code, now,
-		"unlocking your own account needs your password and a code from your authenticator app or a recovery code")
+	return g.recheckStepUp(w, r, caller, req.Password, req.Code, req.Assertion, now,
+		"unlocking your own account needs your password and either a code from your authenticator app or a recovery code, or your passkey (password, code or assertion)")
 }
 
 // writeLastLocalAdmin is the 409 last-admin answer to
@@ -491,35 +501,54 @@ func writeLastLocalAdmin(w http.ResponseWriter) {
 
 // recheckStepUp is the step-up shared by every admin route that needs the
 // caller's password and a current second factor on the request itself
-// (#67; ASVS 7.5.3): the unlock of the caller's own account above, and
-// granting the admin role. missing is the 400's detail when either
-// field is empty, which checks nothing. Otherwise the password is
-// checked first, then the code, each on the account's re-check budget
-// (recheckPassword, recheckSecondFactor), a wrong one 401 with one
-// message for both so a caller learns nothing about which was wrong. A
-// caller with no local password is 409 before any of that
-// (refuseWithoutLocalPassword). Writes every refusal itself.
-func (g *Gate) recheckStepUp(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, password, code string, now time.Time, missing string) bool {
+// (#67; ASVS 7.5.3): the unlock of the caller's own account above,
+// granting the admin role and creating an admin. The second factor is
+// either code (a TOTP or recovery code) or, since #82, assertion (a
+// passkey, from POST /api/auth/step-up/passkey/begin): exactly one of the
+// two. missing is the 400's detail when the password is empty or the
+// request carries neither or both, which checks nothing. Otherwise the
+// password is checked first, then the code or the passkey, each on the
+// account's re-check budget (recheckPassword, recheckSecondFactor,
+// recheckPasskey), a wrong one 401 with one message for all so a caller
+// learns nothing about which was wrong. A caller with no local password
+// is 409 before any of that (refuseWithoutLocalPassword). Writes every
+// refusal itself.
+func (g *Gate) recheckStepUp(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, password, code string, assertion json.RawMessage, now time.Time, missing string) bool {
 	if refuseWithoutLocalPassword(w, caller) {
 		return false
 	}
-	if password == "" || code == "" {
+	if password == "" || (code == "") == (len(assertion) == 0) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, missing, nil)
 		return false
 	}
 	if _, ok := g.recheckPassword(w, r, caller, password, "incorrect password or code", now); !ok {
 		return false
 	}
+	if len(assertion) > 0 {
+		return g.recheckPasskey(w, r, caller, assertion, "incorrect password or code", now)
+	}
 	return g.recheckSecondFactor(w, r, caller, code, "incorrect password or code", now)
 }
 
+// stepUpFactor names, for an audit detail, the second factor a step-up
+// that passed was given: a passkey when assertion is set, a code
+// otherwise.
+func stepUpFactor(assertion json.RawMessage) string {
+	if len(assertion) > 0 {
+		return "passkey"
+	}
+	return "second factor"
+}
+
 // setRoleRequest is the body of PUT /api/auth/users/{id}/role. Password
-// and Code are the caller's own, as in unlockSelfRequest, and are read
-// only when Role is "admin".
+// and Code or Assertion are the caller's own, as in unlockSelfRequest,
+// and are read only when Role is "admin".
 type setRoleRequest struct {
 	Role     string `json:"role"`
 	Password string `json:"password,omitempty"`
 	Code     string `json:"code,omitempty"`
+	// Assertion is a passkey, the alternative to Code (#82).
+	Assertion json.RawMessage `json:"assertion,omitempty"`
 }
 
 // setRoleResponse is what the role route answers: the account and the
@@ -603,8 +632,8 @@ func (g *Gate) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	}
 	now := g.now()
 	if role == gauntlet.RoleAdmin &&
-		!g.recheckStepUp(w, r, caller, req.Password, req.Code, now,
-			"granting the admin role needs your own password and a code from your authenticator app or a recovery code (password, code)") {
+		!g.recheckStepUp(w, r, caller, req.Password, req.Code, req.Assertion, now,
+			"granting the admin role needs your own password and either a code from your authenticator app or a recovery code, or your passkey (password, code or assertion)") {
 		return
 	}
 
@@ -637,7 +666,7 @@ func (g *Gate) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	by := auditActor(r)
 	detail := fmt.Sprintf("from=%s to=%s", from, changed.Role)
 	if role == gauntlet.RoleAdmin {
-		detail += "; granting admin's password and second factor re-entered"
+		detail += "; granting admin's password and " + stepUpFactor(req.Assertion) + " re-entered"
 	}
 	if ended {
 		detail += "; sessions ended: all"

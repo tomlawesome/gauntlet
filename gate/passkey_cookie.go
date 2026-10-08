@@ -9,7 +9,7 @@ import (
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
-// The three passkey ceremony cookies (G8, ADR-0004; #77, ADR-0012). Each carries the
+// The four passkey ceremony cookies (G8, ADR-0004; #77, ADR-0012; #82). Each carries the
 // ceremony state gauntlet.PasskeyCeremony's Begin sealed -- gate never
 // reads inside it -- from Begin to the matching Finish, written through
 // writeCookie with its fixed attributes. Named generically ("gate_"),
@@ -41,6 +41,14 @@ const (
 	passkeySignInCookieName = "gate_passkey_signin"
 	passkeySignInCookiePath = "/api/auth"
 
+	// passkeyStepUpCookieName/Path carry a signed-in caller's passkey
+	// step-up from step-up/passkey/begin to the route that finishes it
+	// (#82): the role route, create-admin and the admin's own unlock,
+	// all under /api/auth. Its own name, so a second-step login's
+	// ceremony cookie is never finished here, nor this one at a login.
+	passkeyStepUpCookieName = "gate_passkey_stepup"
+	passkeyStepUpCookiePath = "/api/auth"
+
 	// passkeyCeremonyCookieMaxAge is five minutes, matching the expiry
 	// gauntlet/passkey seals into the ceremony state itself (its
 	// ceremonyLifetime). Max-Age only tells the browser when to forget
@@ -70,6 +78,14 @@ func (g *Gate) setPasskeySignInCookie(w http.ResponseWriter, sealed string) {
 
 func (g *Gate) clearPasskeySignInCookie(w http.ResponseWriter) {
 	g.writeCookie(w, passkeySignInCookieName, "", passkeySignInCookiePath, -1)
+}
+
+func (g *Gate) setPasskeyStepUpCookie(w http.ResponseWriter, sealed string) {
+	g.writeCookie(w, passkeyStepUpCookieName, sealed, passkeyStepUpCookiePath, int(passkeyCeremonyCookieMaxAge.Seconds()))
+}
+
+func (g *Gate) clearPasskeyStepUpCookie(w http.ResponseWriter) {
+	g.writeCookie(w, passkeyStepUpCookieName, "", passkeyStepUpCookiePath, -1)
 }
 
 // spentRegistrations holds every registration ceremony a finish has

@@ -62,6 +62,11 @@ const (
 	// party can do it.
 	loginPasskeyBeginPath = "/api/auth/login/passkey/begin"
 	loginPasskeyPath      = "/api/auth/login/passkey"
+
+	// stepUpPasskeyBeginPath starts a passkey step-up for a signed-in
+	// caller (#82; stepup_passkey_handler.go): the assertion it asks for
+	// is the alternative to a code on every recheckStepUp route.
+	stepUpPasskeyBeginPath = "/api/auth/step-up/passkey/begin"
 )
 
 // exemptPaths lists routes reachable without a session once an account

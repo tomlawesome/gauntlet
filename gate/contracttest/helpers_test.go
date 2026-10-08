@@ -362,9 +362,10 @@ type createUserRequest struct {
 }
 
 type setRoleRequest struct {
-	Role     string `json:"role"`
-	Password string `json:"password,omitempty"`
-	Code     string `json:"code,omitempty"`
+	Role      string          `json:"role"`
+	Password  string          `json:"password,omitempty"`
+	Code      string          `json:"code,omitempty"`
+	Assertion json.RawMessage `json:"assertion,omitempty"`
 }
 
 type setRoleResponse struct {

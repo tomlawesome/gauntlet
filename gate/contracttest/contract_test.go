@@ -404,6 +404,31 @@ func contractAdminPasskey(t *testing.T, c *contractChecker) {
 	if !created.HeldForPasskey {
 		t.Error("a new admin was not reported held for a passkey")
 	}
+
+	// Step-up with a passkey (#82 decision 6): the begin route, then a
+	// grant with the password and the assertion in place of a code.
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/step-up/passkey/begin"}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "bob", Password: "contract-bob-password"}}, 201, nil)
+	bob, ok := users.ByUsername("bob")
+	if !ok {
+		t.Fatal("bob was not created")
+	}
+	var options protocol.CredentialAssertion
+	c.do(admin, u, call{method: "POST", path: "/api/auth/step-up/passkey/begin"}, 200, &options)
+	assertion, err := fake.AssertionResponse(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var granted struct {
+		HeldForPasskey bool `json:"heldForPasskey"`
+	}
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + bob.ID + "/role", body: setRoleRequest{Role: "admin", Password: adminPass, Assertion: assertion}}, 200, &granted)
+	if !granted.HeldForPasskey {
+		t.Error("bob, granted admin with no passkey, was not reported held")
+	}
+	// The ceremony is spent: the same assertion again is step-expired.
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + bob.ID + "/role", body: setRoleRequest{Role: "user"}}, 200, nil)
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + bob.ID + "/role", body: setRoleRequest{Role: "admin", Password: adminPass, Assertion: assertion}}, 401, nil)
 }
 
 // contractUnusualSignIns covers the unusual-sign-in answers (#55) on a
