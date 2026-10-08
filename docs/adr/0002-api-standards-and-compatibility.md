@@ -94,5 +94,3 @@ house rule (2026-09-30).
   measurement: [security-by-design.md](../security-by-design.md) holds
   the requirement-by-requirement mapping ("Standards conformance: OWASP
   ASVS (#33)").
-
-Written by Fable 5.1, 2026-09-30.

@@ -25,7 +25,7 @@ until mikroview itself moves onto it. This repository is that module.
    local accounts and roles, OIDC with a self-hosted-only policy and
    `(issuer, subject)` identity, opaque server-side sessions, and
    read-only/write-only tokens. The design is
-   [docs/design.md](../design.md) (Fable 5.1, 2026-09-26, from birdcage's
+   [docs/design.md](../design.md) (2026-09-26, from birdcage's
    `docs/design/gauntlet.md`).
 
 2. **Storage and logging are interfaces**, not this module's concern --

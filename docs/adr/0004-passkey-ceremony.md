@@ -1,6 +1,6 @@
 # ADR-0004: The passkey ceremony is a leaf package behind a seam in the root
 
-**Status:** Accepted, shipped in v0.2.0 (design by Fable 5.1 on #20; owner decisions of
+**Status:** Accepted, shipped in v0.2.0 (design on #20; owner decisions of
 2026-09-30 and 2026-10-01 recorded below). Decision 5's "no discoverable
 or passwordless login" and its unset resident-key preference are
 superseded by ADR-0012.
@@ -200,5 +200,3 @@ mikroview's fake authenticator copies and this module reuses.
 - Status note (v0.3.0 audit, 2026-10-08): decision 3's "two cookies" is now three:
   ADR-0012 (#77) added `gate_passkey_signin` on `/api/auth`. The two
   named here are unchanged, and all three last five minutes.
-
-Written by Fable 5.1, 2026-10-02.

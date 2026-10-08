@@ -1,6 +1,6 @@
 # ADR-0003: The first admin is created with a one-time setup code from the server's log
 
-**Status:** Accepted (owner ruling 2026-10-01 on #37, design by Fable 5.1); decision 4 amended by ADR-0013;
+**Status:** Accepted (owner ruling 2026-10-01 on #37); decision 4 amended by ADR-0013;
 decision 6's refusal of `RoleAdmin` superseded by ADR-0010
 **Date:** 2026-10-01
 **Relates to:** #37 (this change), #26 (v0.2.0 release audit, P54), #39

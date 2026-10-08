@@ -1880,5 +1880,3 @@ removes it before login rather than in B6.
 - **Document store, not rows, for birdcage's accounts** (§2.3).
   Recommendation: the document table; the alternative is a second read
   model.
-
-Written by Fable 5.1, 2026-09-26. Owner decisions recorded by Opus 5.5, 2026-09-26.

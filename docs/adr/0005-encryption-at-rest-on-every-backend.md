@@ -1,7 +1,6 @@
 # ADR-0005: The accounts document is sealed before any backend stores it
 
-**Status:** Accepted (owner assigned design and build 2026-10-02 on #50,
-design by Fable 5.1)
+**Status:** Accepted (owner assigned design and build 2026-10-02 on #50)
 **Date:** 2026-10-02
 **Relates to:** #50 (this change), #18 (the encrypted file backend),
 #33/#34 (the ASVS and SP 800-63B reviews that found it), ADR-0001
@@ -116,5 +115,3 @@ says `TEXT` too.
 - Status note (v0.3.0 audit, 2026-10-08): the accounts document is no longer version 3
   (decision 1): later changes raised it, and it is version 9 now. The
   sealing is unchanged.
-
-Written by Fable 5.1, 2026-10-02.

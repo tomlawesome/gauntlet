@@ -510,8 +510,6 @@ ending one session without re-authentication (7.5.2, owner 2026-10-02).
 Secrets at rest were a fourth until #50 sealed the document on every
 backend.
 
-Written by Fable 5.1, 2026-10-02.
-
 ## Standards conformance: NIST SP 800-63B (#34)
 
 **Revision.** SP 800-63B-4, *Digital Identity Guidelines: Authentication
@@ -672,5 +670,3 @@ invalidation event, including an unusual sign-in flagged or blocked
 (#55), and `Config.DeliverConfirmCode` for the one notice that is
 itself a credential. Each gap is one issue in the standards-gaps
 list, shared with the ASVS section where both standards ask for it.
-
-Written by Fable 5.1, 2026-10-02.
