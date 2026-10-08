@@ -24,7 +24,8 @@ type sessionResponse struct {
 	// identity, read directly off the user's OIDCSubject.
 	SSOConnected bool `json:"ssoConnected"`
 	// MustChangePassword mirrors the door Protect enforces in
-	// protect.go.
+	// protect.go -- including an admin with no local password while the
+	// admin passkey rule is on (#82), whose HasLocalPassword is false.
 	MustChangePassword bool `json:"mustChangePassword"`
 	// MustEnrolSecondFactor is true only when this account has no
 	// second factor yet -- it names the actual door Protect enforces
@@ -35,6 +36,17 @@ type sessionResponse struct {
 	// since Protect's enrol routes answer 403 until the password is
 	// changed (protect.go's !user.MustChangePassword guard).
 	MustEnrolSecondFactor bool `json:"mustEnrolSecondFactor"`
+	// MustEnrolPasskey is true exactly when Protect holds this account at
+	// the admin passkey door (#82): the rule is on, the account is an
+	// admin with a local password and no forced password change
+	// pending, and it holds no passkey usable here. MustEnrolSecondFactor
+	// keeps its meaning beside it; both may be true.
+	MustEnrolPasskey bool `json:"mustEnrolPasskey"`
+	// AdminPasskeyRequired says whether every admin must hold a passkey
+	// on this deployment (Config.AdminPasskey), so a frontend can show
+	// the requirement before the door ever holds. Present, true or
+	// false, only while Authenticated.
+	AdminPasskeyRequired *bool `json:"adminPasskeyRequired,omitempty"`
 	// HasTOTP reports gauntlet.User.HasActiveTOTP: a confirmed
 	// authenticator-app factor, not a pending enrolment.
 	HasTOTP bool `json:"hasTOTP"`
@@ -89,8 +101,12 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp.Role = string(user.Role)
 		resp.HasLocalPassword = user.LocalPassword()
 		resp.SSOConnected = user.OIDCSubject != ""
-		resp.MustChangePassword = user.MustChangePassword && user.LocalPassword()
+		ruleOn := g.adminPasskeyRuleOn()
+		resp.MustChangePassword = (user.MustChangePassword && user.LocalPassword()) ||
+			(ruleOn && user.Role == gauntlet.RoleAdmin && !user.LocalPassword())
 		resp.MustEnrolSecondFactor = !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor()
+		resp.MustEnrolPasskey = g.adminMustEnrolPasskey(user)
+		resp.AdminPasskeyRequired = &ruleOn
 		resp.HasTOTP = user.HasActiveTOTP()
 		if g.deps.Passkeys != nil {
 			resp.Passkeys = &sessionPasskeysInfo{

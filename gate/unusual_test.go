@@ -446,6 +446,7 @@ func TestUnusualPolicyChecks(t *testing.T) {
 			cfg := Config{
 				CookieName: testCookieName, CSRFHeaderValue: testCSRFValue, ProductName: testProductName,
 				ClientIP: func(*http.Request) string { return "" }, UnusualSignIns: c.policy,
+				AdminPasskey: AdminPasskeyOptional,
 			}
 			if c.locate {
 				cfg.Locate = stubLocate

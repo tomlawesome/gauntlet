@@ -13,6 +13,7 @@ package contracttest
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -331,7 +332,103 @@ func TestContractEveryRoute(t *testing.T) {
 	contractUnusualSignIns(t, c)
 	contractEscapeCode(t, c)
 	contractResume(t, c)
+	contractAdminPasskey(t, c)
 	c.requireEveryOperationDriven()
+}
+
+// contractAdminPasskey drives the admin passkey rule (#82): on a gate
+// that requires it, an admin holding only an authenticator app is
+// stopped at the must-enrol-passkey door, the session body says so, and
+// registering a passkey there opens it.
+func contractAdminPasskey(t *testing.T, c *contractChecker) {
+	const adminPass = "contract-admin-password"
+	const publicURL = "https://passkeys.example.org"
+	users, code := openStore(t, persist.NewMemory())
+	rp, err := passkey.New(passkey.Config{PublicURL: publicURL, DisplayName: testProductName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGateWith(t, gate.Deps{Users: users, Passkeys: rp}, func(cfg *gate.Config) {
+		cfg.AdminPasskey = gate.AdminPasskeyRequired
+	})
+	ts := newTestServer(t, g)
+	u := ts.URL
+	admin := c.client()
+	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
+	codes := enrolTOTPFactor(t, c, u, admin, adminPass)
+
+	var state sessionResponse
+	c.do(admin, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if !state.MustEnrolPasskey || state.AdminPasskeyRequired == nil || !*state.AdminPasskeyRequired {
+		t.Fatalf("session of an admin with only an app = %+v, want mustEnrolPasskey and adminPasskeyRequired", state)
+	}
+	if resp := c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 403, nil); resp.Header.Get("X-Auth-Gate") != "must-enrol-passkey" {
+		t.Errorf("X-Auth-Gate = %q, want must-enrol-passkey", resp.Header.Get("X-Auth-Gate"))
+	}
+
+	fake := passkeytest.New("passkeys.example.org", publicURL)
+	var creation protocol.CredentialCreation
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/begin", body: passwordRequest{adminPass}}, 200, &creation)
+	body, err := fake.RegisterResponse(&creation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/passkeys/register/finish", body: passkeyRegisterFinishRequest{json.RawMessage(body), "admin key"}}, 200, nil)
+
+	state = sessionResponse{}
+	c.do(admin, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
+	if state.MustEnrolPasskey {
+		t.Errorf("session after registering a passkey = %+v, want mustEnrolPasskey false", state)
+	}
+	// The admin's only usable passkey cannot be removed by its owner.
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/passkeys/" + base64.RawURLEncoding.EncodeToString(fake.CredentialID()), body: passwordRequest{adminPass}}, 409, nil)
+	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, nil)
+
+	// A new admin is created held for a passkey, and the list says so.
+	var created struct {
+		HeldForPasskey bool `json:"heldForPasskey"`
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{
+		Username: "second", Password: "contract-second-password", Role: "admin", AdminPassword: adminPass, AdminCode: codes[0],
+	}}, 201, &created)
+	var rows []struct {
+		Username       string `json:"username"`
+		HeldForPasskey bool   `json:"heldForPasskey"`
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, &rows)
+	for _, row := range rows {
+		if want := row.Username == "second"; row.HeldForPasskey != want {
+			t.Errorf("users list %s heldForPasskey = %t, want %t", row.Username, row.HeldForPasskey, want)
+		}
+	}
+	if !created.HeldForPasskey {
+		t.Error("a new admin was not reported held for a passkey")
+	}
+
+	// Step-up with a passkey (#82 decision 6): the begin route, then a
+	// grant with the password and the assertion in place of a code.
+	c.do(c.client(), u, call{method: "POST", path: "/api/auth/step-up/passkey/begin"}, 401, nil)
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{Username: "bob", Password: "contract-bob-password"}}, 201, nil)
+	bob, ok := users.ByUsername("bob")
+	if !ok {
+		t.Fatal("bob was not created")
+	}
+	var options protocol.CredentialAssertion
+	c.do(admin, u, call{method: "POST", path: "/api/auth/step-up/passkey/begin"}, 200, &options)
+	assertion, err := fake.AssertionResponse(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var granted struct {
+		HeldForPasskey bool `json:"heldForPasskey"`
+	}
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + bob.ID + "/role", body: setRoleRequest{Role: "admin", Password: adminPass, Assertion: assertion}}, 200, &granted)
+	if !granted.HeldForPasskey {
+		t.Error("bob, granted admin with no passkey, was not reported held")
+	}
+	// The ceremony is spent: the same assertion again is step-expired.
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + bob.ID + "/role", body: setRoleRequest{Role: "user"}}, 200, nil)
+	c.do(admin, u, call{method: "PUT", path: "/api/auth/users/" + bob.ID + "/role", body: setRoleRequest{Role: "admin", Password: adminPass, Assertion: assertion}}, 401, nil)
 }
 
 // contractUnusualSignIns covers the unusual-sign-in answers (#55) on a

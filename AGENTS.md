@@ -21,6 +21,9 @@ go-webauthn, so an app that never imports it never links the library.
 the same way for maxminddb: `go list -deps ./gate ./ | grep -i
 maxminddb` must print nothing (`lint:go` checks both).
 
+No UI of its own: docs describe steps on other sites (GitLab, MaxMind,
+IPinfo) in words, without screenshots (owner, 2026-10-08).
+
 **Belongs in the apps, not here:** a database-table backend (each app
 supplies its own `persist.Backend`), the public URL a relying party is
 built from, and anything that reaches back into birdcage's or

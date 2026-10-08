@@ -19,6 +19,57 @@ Reading notes for this release:
 
 ### Added
 
+- **Every admin account must hold a passkey, where the application says
+  so** (#82, ADR-0015). An admin account now holds at least one passkey;
+  an authenticator app may be held as well, never instead. The
+  application chooses with the new, required `gate.Config.AdminPasskey`
+  (see Changed below for what that means when upgrading):
+  `gate.AdminPasskeyRequired` turns the rule on,
+  `gate.AdminPasskeyOptional` waives it for an application reached over
+  plain http (anywhere but localhost) or by IP address, or one with no
+  passkeys. With it on:
+  - An admin with no passkey that works at this address is stopped at a
+    new door, `403` class `must-enrol-passkey` with `X-Auth-Gate:
+    must-enrol-passkey`, until they register one. It lets through the
+    same routes as the second-factor door, and is checked before it.
+    An admin with no local password (made an admin from single sign-on)
+    is stopped at the `must-change-password` door first, since a passkey
+    needs a password; they set one from a fresh single sign-on.
+  - `GET /api/auth/session` gains `mustEnrolPasskey` (the door holds)
+    and `adminPasskeyRequired` (the rule is on; present while signed
+    in), so a frontend can show the requirement before the door holds.
+  - Making an account an admin, creating one, handing admin over and
+    the first account all succeed, and the new admin is held at the
+    door from its next request. The role and create responses and each
+    row of `GET /api/auth/users` say so in `heldForPasskey`, and the
+    audit detail adds "held for a passkey".
+  - An admin cannot delete their own last passkey that works here:
+    `409` `conflict`, "register another passkey first", before the
+    password is checked. Another admin clearing their passkeys still
+    works, as the way back for a lost key; they are held afterwards.
+  - Users and viewers keep "any second factor". Nothing is stored: the
+    accounts document stays at version 9.
+- **A passkey can stand in for the code at an admin step-up** (#82).
+  Granting admin, creating an admin and an admin's own unlock take the
+  caller's password and either a code or, now, a passkey: `POST
+  /api/auth/step-up/passkey/begin` (signed in, no body) answers the
+  options for the caller's own passkeys and sets a new five-minute
+  ceremony cookie, `gate_passkey_stepup`; the route then takes
+  `assertion` (`adminAssertion` on create) in place of `code`
+  (`adminCode`). Exactly one of the two, or `400`. Begin is counted on
+  a per-account limit of its own, never handed back (`429` past it),
+  and takes nothing from the password re-check budget, so an abandoned
+  prompt costs no re-check; the passkey itself is checked on that
+  budget like a code. A wrong passkey is `401` `invalid-credentials`
+  and counts, and a missing or used ceremony is `401` `step-expired`
+  and does not. A
+  passkey-only admin no longer spends a recovery code on every grant.
+  New `LoginLimiter.ReserveStepUpBegin` and `ReleaseStepUpBegin` hold
+  that limit in the account map, which no flood of addresses can
+  reset. Additive.
+- New Go API for #82, additive: the type `gate.AdminPasskeyRule`, its
+  constants `gate.AdminPasskeyRequired` and `gate.AdminPasskeyOptional`,
+  and the field `gate.Config.AdminPasskey`.
 - **Prove an unusual sign-in with a passkey** (#65, ADR-0009 decision 10).
   When a sign-in looks unusual, the person can now be asked to tap a
   passkey instead of typing a code sent to them. An account with no
@@ -431,6 +482,24 @@ Reading notes for this release:
 
 ### Changed
 
+- **Breaking: `gate.New` refuses to start until `Config.AdminPasskey` is
+  set** (#82, ADR-0015). There is no default either way, so that each
+  application's admin makes a conscious choice and an application never
+  runs without the rule, or locks its admins out, by accident. `New`
+  refuses an unset or unknown value, and refuses
+  `gate.AdminPasskeyRequired` while `Deps.Passkeys` is nil or its
+  public URL is unset, an IP address or plain http on any host but
+  localhost, naming which; it
+  logs the choice at start-up. **Every application must add the line
+  before upgrading, or it will not start:** birdcage, which wires no
+  passkeys, sets `gate.AdminPasskeyOptional` (until it wires
+  `gauntlet/passkey`); mikroview sets `gate.AdminPasskeyRequired` where
+  it serves https on a domain name and `gate.AdminPasskeyOptional` when
+  reached by IP. With `required`, have every admin register a passkey
+  before upgrading: an admin without one is stopped at their first
+  request afterwards and registers one there. This also amends
+  ADR-0004 decision 4: a relying party that is not ready still boots,
+  but only for an application that set `optional`.
 - **Every passkey registration now asks for a discoverable credential**
   (#77). The creation options carry `residentKey: "preferred"`
   (and `requireResidentKey: false`), mikroview's included: W3C's

@@ -33,9 +33,9 @@ info:
       routes.
     - `403` class `forbidden` on a session-gated route when the account's
       role is not one gauntlet knows, or, on the admin routes, when the
-      caller is not an admin; class `must-change-password` or
-      `must-enrol-factor` when the session is stopped at one of the two
-      doors (see the `X-Auth-Gate` header).
+      caller is not an admin; class `must-change-password`,
+      `must-enrol-factor` or `must-enrol-passkey` when the session is
+      stopped at one of the three doors (see the `X-Auth-Gate` header).
 
     A request carrying `Authorization: Bearer ...` never reaches these
     routes: `Protect` sends it to the application's own handler for that
@@ -83,7 +83,7 @@ info:
     (`username`) that is part of the contract and does not change.
     (`totpActive`, the other extension member, was last sent by 0.2.0's
     `totp/confirm`; see `PartiallyCompletedProblem`.) A frontend branches on `type` (or the status code and
-    the `X-Auth-Gate` header, for the two forced-auth-gate classes),
+    the `X-Auth-Gate` header, for the three forced-auth-gate classes),
     never on `detail`'s text. An unmatched path or method (a typo, or a
     method the route does not take) answers the same shape with `type:
     about:blank` and no `detail` -- not a documented class, and the one
@@ -96,9 +96,9 @@ info:
     false`) so the contract tests notice a field the handler added without
     this document, and a field it dropped or renamed. The one deliberate
     exception is WebAuthn's own JSON (the passkey routes): the options
-    `register/begin` and `login/factor/begin` answer, and the `credential`
-    and `assertion` request fields, are the W3C's `PublicKeyCredential`
-    shapes, produced and consumed by the WebAuthn library and the browser,
+    `register/begin`, `login/factor/begin` and the other begin routes
+    answer, and the `credential`, `assertion` and `adminAssertion`
+    request fields, are the W3C's `PublicKeyCredential` shapes, produced and consumed by the WebAuthn library and the browser,
     not by a frontend's own code. They are open objects here so a library
     update that adds a W3C field cannot fail the contract.
 
@@ -126,6 +126,17 @@ info:
     `passkey_alone`), counts toward the account's lockout, the address
     limit and ban like a password attempt, and meets the same doors after
     it (a forced password change still holds).
+
+    **Every admin holds a passkey** (#82). When the application requires
+    it (`Config.AdminPasskey`; it must say either way), an admin account
+    holding no passkey usable at this address is stopped at the
+    `must-enrol-passkey` door until it registers one (an authenticator app
+    does not open it; an admin with no local password meets
+    `must-change-password` first). The session body says so
+    (`mustEnrolPasskey`, `adminPasskeyRequired`), as do the role, create
+    and list routes (`heldForPasskey`). An admin cannot delete their own
+    last usable passkey (`409`). The step-up routes take a passkey in
+    place of a code, through `POST /api/auth/step-up/passkey/begin`.
 
     **First second factor: hold until confirmed** (#58). An account's
     first second factor -- its first passkey (`register/finish`) or its
@@ -648,6 +659,56 @@ paths:
           $ref: "#/components/responses/StepExpired"
         "403":
           $ref: "#/components/responses/CSRFRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
+  /api/auth/step-up/passkey/begin:
+    post:
+      operationId: stepUpPasskeyBegin
+      summary: Start a passkey step-up
+      description: |
+        For a signed-in caller about to grant admin, create an admin or
+        unlock their own account (#82): answers the W3C request options
+        for `navigator.credentials.get()`, allowing only the caller's
+        passkeys registered for the current relying party, and sets the
+        step-up ceremony cookie (`gate_passkey_stepup`, sealed, path
+        `/api/auth`, five minutes; each challenge is usable once). The
+        browser's answer goes in that route's `assertion` (or
+        `adminAssertion`) field, beside the password, in place of a code.
+        Takes no body.
+
+        Takes nothing from the account's password re-check budget, so a
+        prompt that is cancelled or expires costs no re-check. Each begin
+        is counted on a limit of its own for the account (the limiter's
+        threshold per window), never handed back, so a session alone
+        cannot start ceremonies without limit: `429` once it is spent.
+        The route that takes the `assertion` checks it on the re-check
+        budget, as it checks a code.
+        `404` while the application has no passkeys; `409` while its
+        relying party is not ready, when the caller holds no passkey
+        usable at this address, or when the caller has no local password
+        (set one first, as every admin must).
+      parameters:
+        - $ref: "#/components/parameters/CSRFHeader"
+      responses:
+        "200":
+          description: The request options; sets the step-up ceremony cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialAssertion"
+        "401":
+          $ref: "#/components/responses/SignInRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -1580,7 +1641,13 @@ paths:
         Password-gated (rate-limited re-check). When this leaves the
         account with no second factor, its recovery codes are dropped,
         every session on it ends, this one included, and `signedOut` is
-        true.
+        true. While the application requires every admin to hold a
+        passkey (#82), an admin's own last passkey usable at this address
+        is refused with `409` class `conflict` ("register another passkey
+        first"), before the password is checked, so the refusal costs no
+        re-check; a stale passkey is always removable, and another
+        admin's `DELETE /api/auth/users/{id}/passkeys` stays the way back
+        for a lost one.
       parameters:
         - $ref: "#/components/parameters/PasskeyID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -1605,6 +1672,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1757,13 +1826,19 @@ paths:
         The only way to add an account once registration has closed.
         `role` defaults to `user`. Creating an `admin` (#67) also needs
         the caller's own password and a current second factor on the same
-        request, in `adminPassword` and `adminCode` (as in
-        `UnlockSelfRequest`): either missing is `400` and checks nothing;
-        either wrong is `401` and counts against the account's password
-        re-check budget (`429` once it is spent), and nothing is created.
-        The two fields are not read for any other role. The password is
+        request, in `adminPassword` and either `adminCode` or, since #82,
+        `adminAssertion` (as in `UnlockSelfRequest`): the password
+        missing, or neither or both of the others, is `400` and checks
+        nothing; any of them wrong is `401` and counts against the
+        account's password re-check budget (`429` once it is spent), and
+        nothing is created. A dead or missing passkey step-up is `401`
+        class `step-expired`: start it again. The fields are not read for
+        any other role. The password is
         checked as every new password is (see `changePassword`); a refused
-        one is `400`, with the reason.
+        one is `400`, with the reason. While the application requires
+        every admin to hold a passkey (#82), a new admin is created held
+        at the `must-enrol-passkey` door until it registers one
+        (`heldForPasskey`).
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1787,18 +1862,22 @@ paths:
                   description: The caller's own current password. Only for role `admin`.
                 adminCode:
                   type: string
-                  description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here). Only for role `admin`.
+                  description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here). Only for role `admin`; not with `adminAssertion`.
+                adminAssertion:
+                  type: object
+                  additionalProperties: true
+                  description: The W3C `PublicKeyCredential` JSON `navigator.credentials.get()` produced for the options `POST /api/auth/step-up/passkey/begin` gave, for the caller's own passkey (#82). Only for role `admin`; not with `adminCode`. An open object -- see "Compatibility" above.
       responses:
         "201":
           description: Created.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Account"
+                $ref: "#/components/schemas/CreatedAccount"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
+          $ref: "#/components/responses/StepUpRefused"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
@@ -1878,11 +1957,12 @@ paths:
         The one route for every role change among `admin`, `user` and
         `viewer`, in either direction (#67, #75). Granting `admin` needs
         the caller's own password and a current second factor on the same
-        request (`password`, `code`, as in `UnlockSelfRequest`): either
-        missing is `400` and checks nothing; either wrong is `401` and
-        counts against the account's password re-check budget (`429` once
-        it is spent), and nothing changes. Any other change needs
-        neither.
+        request (`password`, and `code` or, since #82, `assertion`, as in
+        `UnlockSelfRequest`): the password missing, or neither or both of
+        the others, is `400` and checks nothing; any of them wrong is
+        `401` and counts against the account's password re-check budget
+        (`429` once it is spent), and nothing changes. Any other change
+        needs none of them.
 
         The last admin cannot be demoted (`409` class `last-admin`); an
         admin may demote themselves while another admin remains. An
@@ -1896,7 +1976,12 @@ paths:
         tier than before) ends every session the account holds, the
         caller's own included when it is their own account; a grant ends
         none. Audited as `user.role_changed` with actor, from and to, and
-        told to the application as `role-changed`.
+        told to the application as `role-changed`. While the application
+        requires every admin to hold a passkey (#82), a grant to an
+        account holding none usable here still succeeds, and the account
+        is held at the `must-enrol-passkey` door from its next request
+        until it registers one (`heldForPasskey`; the audit detail says
+        "held for a passkey").
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -1916,7 +2001,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
+          $ref: "#/components/responses/StepUpRefused"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2000,11 +2085,12 @@ paths:
         Another account's unlock takes no body. The caller's own takes
         `UnlockSelfRequest`: an admin whose sign-in is disabled but who
         still holds a session must enter their password and a current
-        second factor (an authenticator-app code or a recovery code)
-        again; the session alone is not enough. Either missing is `400`;
-        either wrong is `401` and counts against the account's
-        password re-check budget (`429` once it is spent), and nothing
-        is unlocked. An admin with no session left uses the unlock code
+        second factor (an authenticator-app code or a recovery code, or
+        a passkey, #82) again; the session alone is not enough. The
+        password missing, or neither or both of `code` and `assertion`,
+        is `400`; any of them wrong is `401` and counts against the
+        account's password re-check budget (`429` once it is spent), and
+        nothing is unlocked. An admin with no session left uses the unlock code
         in the server's log (`POST /api/auth/unlock`).
       parameters:
         - $ref: "#/components/parameters/UserID"
@@ -2039,7 +2125,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
+          $ref: "#/components/responses/StepUpRefused"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2437,6 +2523,11 @@ components:
       in: cookie
       name: gate_passkey_signin
       description: Set by `POST /api/auth/login/passkey/begin`; sealed, path `/api/auth`, five minutes (not `/api/auth/login/passkey`, because the same begin serves the resume route too). Sealed under its own key, so a second-step login's ceremony cookie cannot finish a sign-in with no password before it. Used by `POST /api/auth/login/passkey` and by a passkey resume at `POST /api/auth/reauthenticate`.
+    passkeyStepUpCookie:
+      type: apiKey
+      in: cookie
+      name: gate_passkey_stepup
+      description: Set by `POST /api/auth/step-up/passkey/begin` (#82); sealed, path `/api/auth`, five minutes. Read only by the routes a passkey step-up finishes -- granting admin, creating an admin and the admin's own unlock -- never by a sign-in, and a sign-in's ceremony cookie is never read there.
     oidcFlowCookie:
       type: apiKey
       in: cookie
@@ -2596,8 +2687,8 @@ components:
         recognized, or (on an admin route) the caller is not an admin
         (class `forbidden`); or the session is stopped at one of two
         doors, named by both `type` and `X-Auth-Gate`
-        (`must-change-password`, `must-enrol-factor`). Not every one of
-        the four is reachable at every route this is used on (a `GET`
+        (`must-change-password`, `must-enrol-factor`,
+        `must-enrol-passkey`). Not every one of the five is reachable at every route this is used on (a `GET`
         never reaches the CSRF check; each door exempts the one route it
         lets through), but none is route-specific enough to be worth its
         own response here.
@@ -2608,16 +2699,21 @@ components:
             `must-change-password` (an administrator reset the account,
             five second-factor steps in a row failed, which says someone
             else knows the password, or a sign-in found the password in a
-            known breach; only `POST /api/auth/password` is
-            reachable) or
+            known breach, or, while the application requires admin
+            passkeys, the account is an admin with no local password;
+            only `POST /api/auth/password` is reachable),
             `must-enrol-factor` (the account has no live second factor yet
             -- every local-password account must hold one; only the TOTP
             enrol and confirm routes, the passkey register begin and
             finish routes and `POST /api/auth/recovery-codes/confirm` are
-            reachable).
+            reachable) or `must-enrol-passkey` (#82: the application
+            requires every admin to hold a passkey, and this admin holds
+            none usable at this address; the same routes as
+            `must-enrol-factor` are reachable, and only a passkey opens
+            it).
           schema:
             type: string
-            enum: [must-change-password, must-enrol-factor]
+            enum: [must-change-password, must-enrol-factor, must-enrol-passkey]
       content:
         application/problem+json:
           schema:
@@ -2630,6 +2726,7 @@ components:
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#forbidden
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-change-password
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-enrol-factor
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-enrol-passkey
     SignInRequiredOrInvalidCredentials:
       description: |
         No valid session (class `sign-in-required`); or, re-entering the
@@ -2653,6 +2750,32 @@ components:
                     enum:
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+    StepUpRefused:
+      description: |
+        No valid session (class `sign-in-required`); or the caller's own
+        password, code or passkey, entered again to re-prove a session
+        is enough to act on, was wrong (class `invalid-credentials`;
+        counted against the account's password re-check budget, `429`
+        once it is spent); or the passkey step-up's ceremony is missing,
+        expired or already used (class `step-expired`, #82): start it
+        again at `POST /api/auth/step-up/passkey/begin`.
+      headers:
+        WWW-Authenticate:
+          required: true
+          schema:
+            type: string
+            const: Bearer realm="gate"
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - properties:
+                  type:
+                    enum:
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
     NotFound:
       description: No account, token, session or passkey has this id or ref; the application has no passkeys, no single sign-on, or no sign-in history configured; or the path matches no route at all (`type` is then `about:blank`, with no `detail`; see the "Errors" note above). Class `not-found` otherwise.
       content:
@@ -2871,14 +2994,19 @@ components:
     UnlockSelfRequest:
       type: object
       additionalProperties: false
-      required: [password, code]
+      required: [password]
+      description: The password, and exactly one of `code` and `assertion`.
       properties:
         password:
           type: string
           description: The caller's current password.
         code:
           type: string
-          description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here).
+          description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here). Not with `assertion`.
+        assertion:
+          type: object
+          additionalProperties: true
+          description: The W3C `PublicKeyCredential` JSON `navigator.credentials.get()` produced for the options `POST /api/auth/step-up/passkey/begin` gave, for the caller's own passkey (#82). Not with `code`. A dead or missing step-up is `401` class `step-expired`. An open object -- see "Compatibility" above.
     SetRoleRequest:
       type: object
       additionalProperties: false
@@ -2891,11 +3019,15 @@ components:
           description: The caller's current password. Required, and read, only when `role` is `admin`.
         code:
           type: string
-          description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here). Required, and read, only when `role` is `admin`.
+          description: A current code from the caller's authenticator app, or one of their unused recovery codes (spent if it is used here). Read only when `role` is `admin`; it or `assertion` is required then.
+        assertion:
+          type: object
+          additionalProperties: true
+          description: The W3C `PublicKeyCredential` JSON `navigator.credentials.get()` produced for the options `POST /api/auth/step-up/passkey/begin` gave, for the caller's own passkey (#82). Read only when `role` is `admin`; not with `code`. An open object -- see "Compatibility" above.
     SetRoleResponse:
       type: object
       additionalProperties: false
-      required: [username, from, to, sessionsEnded]
+      required: [username, from, to, sessionsEnded, heldForPasskey]
       properties:
         username:
           type: string
@@ -2906,6 +3038,9 @@ components:
         sessionsEnded:
           type: boolean
           description: True when the change was a downgrade, which ended every session the account held.
+        heldForPasskey:
+          type: boolean
+          description: True when the account is now an admin holding no passkey usable here while the application requires one (#82); it is held at the `must-enrol-passkey` door from its next request until it registers one.
     PasswordRequest:
       type: object
       additionalProperties: false
@@ -3107,6 +3242,18 @@ components:
           type: string
         role:
           $ref: "#/components/schemas/Role"
+    CreatedAccount:
+      type: object
+      additionalProperties: false
+      required: [username, role, heldForPasskey]
+      properties:
+        username:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        heldForPasskey:
+          type: boolean
+          description: True when the new account is an admin and the application requires every admin to hold a passkey (#82); it is held at the `must-enrol-passkey` door until it registers one.
     ConfirmationChallenge:
       type: object
       additionalProperties: false
@@ -3153,6 +3300,7 @@ components:
         - ssoConnected
         - mustChangePassword
         - mustEnrolSecondFactor
+        - mustEnrolPasskey
         - hasTOTP
       properties:
         setupRequired:
@@ -3174,10 +3322,16 @@ components:
           type: boolean
         mustChangePassword:
           type: boolean
-          description: The session is stopped at the change-password door -- an administrator reset the account, five second-factor steps in a row failed, or a sign-in found the password in a known breach. The account does not record which, so a frontend should not say.
+          description: The session is stopped at the change-password door -- an administrator reset the account, five second-factor steps in a row failed, or a sign-in found the password in a known breach. The account does not record which, so a frontend should not say. Also true for an admin with no local password (`hasLocalPassword` false) while the application requires admin passkeys (#82); it sets its first password from a fresh SSO sign-in.
         mustEnrolSecondFactor:
           type: boolean
           description: True only when the account has no live second factor yet -- every local-password account must hold one. Still true while a first factor is held for its recovery codes to be confirmed.
+        mustEnrolPasskey:
+          type: boolean
+          description: True exactly when the session is stopped at the admin passkey door (#82) -- the application requires every admin to hold a passkey, and this admin holds none usable at this address (an authenticator app does not count). May be true beside `mustEnrolSecondFactor`.
+        adminPasskeyRequired:
+          type: boolean
+          description: Whether this application requires every admin to hold a passkey (`Config.AdminPasskey`, #82). Present only while authenticated.
         hasTOTP:
           type: boolean
           description: A confirmed authenticator app, not a pending enrolment.
@@ -3193,7 +3347,7 @@ components:
             status:
               type: string
               enum: [ready, unset, ip, insecure]
-              description: Whether passkeys work here, and why not -- `unset` (no usable public URL), `ip` (it is an IP address), `insecure` (not https).
+              description: Whether passkeys work here, and why not -- `unset` (no usable public URL), `ip` (it is an IP address), `insecure` (plain http on any host but localhost).
             origin:
               type: string
               description: Present only when `status` is `ready`.
@@ -3217,7 +3371,7 @@ components:
     UserSummary:
       type: object
       additionalProperties: false
-      required: [id, username, role, createdAt, hasLocalPassword, sso, hasTOTP, passkeyCount]
+      required: [id, username, role, createdAt, hasLocalPassword, sso, hasTOTP, passkeyCount, heldForPasskey]
       properties:
         id:
           type: string
@@ -3242,6 +3396,9 @@ components:
         passkeyCount:
           type: integer
           description: How many passkeys the account holds.
+        heldForPasskey:
+          type: boolean
+          description: True when the application requires every admin to hold a passkey (#82) and this admin holds none usable here, so it is held at a door until it registers one.
     Token:
       type: object
       additionalProperties: false

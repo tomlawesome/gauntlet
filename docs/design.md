@@ -375,6 +375,8 @@ func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
 func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back
+func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool // new (#82): a passkey step-up begin, per account, in the account map; counted, never handed back by a finish
+func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time)
 type AccountLockouts interface {                                    // *Store implements it
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
@@ -488,11 +490,13 @@ factor's 5, the 100 and the 24 hours are fixed):
 | Failed attempts from one address (a right one does not count) | 5 in 5 minutes | `429 rate-limited` until the window passes |
 | Failed sign-ins from one address | 100 in 24 hours (`AddressBanFailures`) | the address is banned for 24 hours (`AddressBanDuration`) |
 | Codes sent for one account | 5 in 5 minutes, for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
+| Passkey step-ups started by one account (#82) | 5 in 5 minutes, counted and never refunded | `429 rate-limited`, no challenge; the re-check budget is untouched |
 | Sign-ins from a browser the account remembers, while it is locked out | 5 in 5 minutes | allowed, so a stranger cannot lock the owner out |
 
 A *door* is a check in `Protect` that blocks every route but a few until
 the account has done something: set a new password (the
-must-change-password door) or added a second factor. The
+must-change-password door), added a second factor, or, for an admin
+where the application requires it, registered a passkey (#82). The
 change-password door asks for no current password, which is why several
 rules below end every session before sending an account to it.
 
@@ -616,7 +620,8 @@ together in one save, and they survive a restart as on the `*Store`.
 the login buckets (address, unknown name, account) lives and dies inside
 one request. Anything that must be bounded across requests gets a
 bucket of its own that is counted, never refunded: challenge minting
-(`passkey-begin:`) and code delivery.
+(`passkey-begin:` per address, `passkey-stepup-begin:` per account for
+the passkey step-up, #82) and code delivery.
 
 - A sign-in held for a confirmation code proved every credential, so its
   attempt goes back to the login buckets in that request (a correct
@@ -833,6 +838,7 @@ type Config struct {
     Country             func(address string) (code string, ok bool) // #54: (*geoip.Manager).Country; nil = no country recorded
     Locate              func(address string) (gauntlet.Location, bool) // #55: (*geoip.Manager).Locate; nil = impossible travel never raised, and New refuses ImpossibleTravel turned on
     PasskeySignIn       bool          // #77: offer sign-in with a passkey alone (§1.6); off = those routes answer 404
+    AdminPasskey        AdminPasskeyRule // #82, required, no default: AdminPasskeyRequired (every admin holds a passkey; needs a ready relying party) or AdminPasskeyOptional (§1.6)
     UnusualSignIns      UnusualSignInPolicy // what a new browser, new country or impossible travel does (#55)
     Now                 func() time.Time
 }
@@ -855,7 +861,9 @@ func New(cfg Config, deps Deps) (*Gate, error)
 // order kinds were registered with Handle; a match is dispatched to that
 // kind's handler and never to next. Otherwise: CSRF header on unsafe
 // methods, exempt paths, session cookie, SessionCutoff check,
-// MustChangePassword door, second-factor door, then next.
+// MustChangePassword door (and, under the admin passkey rule, an admin
+// with no local password), admin passkey door (#82), second-factor door,
+// then next.
 func (g *Gate) Protect(next http.Handler) http.Handler
 func (g *Gate) Handle(kind gauntlet.TokenKind, h http.Handler) // e.g. TokenKindAPI -> the app's read-only mux
 func (g *Gate) Exempt(paths ...string)                          // beyond the built-in /api/auth/* set
@@ -1050,7 +1058,26 @@ and a current second factor on the same request (`recheckStepUp`, the
 `adminPassword` and `adminCode` on create, whose `password` is the new
 account's), on the account's `ReserveRecheck` budget: either missing
 400, either wrong 401, 429 once the budget is spent. Any other change
-needs none. The last admin can be neither demoted nor deleted (409,
+needs none. Since #82 a passkey stands in for the code: `POST
+/api/auth/step-up/passkey/begin` (session-gated, no body) starts a login
+ceremony for the caller's own usable passkeys through
+`Deps.Passkeys.BeginLogin` and sets `gate_passkey_stepup`. It takes
+nothing from the re-check budget: each begin is counted on its own
+per-account bucket (`LoginLimiter.ReserveStepUpBegin`, in the account
+map, so no flood of addresses can reset it), never refunded, 429 when
+full, so an abandoned prompt costs no re-check (the budget rule above).
+The route then takes `password` and `assertion` (`adminAssertion` on
+create) in place of the code -- exactly one of the two, else 400 -- and
+`recheckPasskey` reserves a re-check in that request, finishes the
+ceremony for the caller, refuses a clone warning, records the counter
+and hands the reservation back. A wrong assertion is 401 and keeps it; a
+missing or dead ceremony checks nothing, hands it back and is 401
+`step-expired`. So a passkey-only admin no longer
+spends a recovery code per grant. While every admin must hold a passkey
+(§1.6), a grant to an account with none usable here still succeeds, and
+the account is held at the passkey door from its next request: the role
+and create responses and the users list carry `heldForPasskey`, and the
+audit detail says "held for a passkey". The last admin can be neither demoted nor deleted (409,
 class `last-admin`); an admin may demote themselves while another
 remains, and cannot delete their own account. A downgrade ends the
 account's sessions (the store writes `SessionsEndedAt`; the handler
@@ -1187,7 +1214,9 @@ taste:
   then releases, so a correct password does not count as a failure.
 - The machine-readable 403 header that tells a frontend which door
   refused it is `X-Auth-Gate`, the same for every app (a door, §1.3, is
-  the must-change-password or second-factor check in `Protect`).
+  the must-change-password, admin passkey (#82) or second-factor check
+  in `Protect`; the values are `must-change-password`,
+  `must-enrol-passkey` and `must-enrol-factor`).
   Mikroview's `X-Mikroview-Auth-Gate` is renamed, and its frontend
   follows when it moves onto the module (owner, 2026-09-27, on #7).
 
@@ -1204,6 +1233,7 @@ The cookies:
 | `gate_passkey_register` | `/api/auth/passkeys` | 5 minutes | a passkey registration, begin to finish |
 | `gate_passkey_assert` | `/api/auth/login` | 5 minutes | a passkey as the second factor, or a passkey proving an unusual sign-in (`login/prove`), begin to finish |
 | `gate_passkey_signin` (#77) | `/api/auth` | 5 minutes | a passkey sign-in on its own, or a passkey resuming a timed-out session |
+| `gate_passkey_stepup` (#82) | `/api/auth` | 5 minutes | a signed-in caller's passkey standing in for a code at a step-up (granting admin, creating an admin, the admin's own unlock), begin to finish |
 
 Notes on the table:
 
@@ -1234,7 +1264,7 @@ names, the `?ssoError=` redirect target. `Config` gains `ProductName`
 (required: `gate.New` refuses an empty one) and `LoginPath` for them. Mikroview's 30-day cookie constant is gone:
 the cookie's lifetime is the session ceiling (#47).
 
-### 1.6 Second factors and passkeys -- always required, since #49
+### 1.6 Second factors and passkeys -- always required, since #49; a passkey for admins, since #82
 
 Mikroview's model (v0.6.1, `CHANGELOG.md` #1249/#1250/#1253) is: every
 local-password account must hold a second factor, TOTP or a passkey;
@@ -1252,7 +1282,8 @@ it. The data for all of this lives on `User`.
   from `webauthn.CredentialFlags`), so storing them costs no dependency.
   The ceremony (`gauntlet/passkey`: the relying party built from the
   app's public URL, sealed ceremony cookies -- two in G8, a third for
-  the passkey-alone sign-in since #77 -- and the spent-challenge set) brings
+  the passkey-alone sign-in since #77, a fourth for the passkey step-up
+  since #82 -- and the spent-challenge set) brings
   `github.com/go-webauthn/webauthn` v0.18.2 (owner, 2026-09-30) and is
   reached from `gate` only through `gauntlet.PasskeyCeremony`
   ([ADR-0004](adr/0004-passkey-ceremony.md); ADR-0012 adds the optional
@@ -1261,7 +1292,8 @@ it. The data for all of this lives on `User`.
   and does not link it. A missing or unusable public URL is a reported
   status (`unset`, `ip`, `insecure`), not a startup refusal: the
   ceremony routes answer 409 and the session body says why; mikroview's
-  deployments reached by IP keep starting.
+  deployments reached by IP keep starting -- as long as the application
+  sets `Config.AdminPasskey` to `AdminPasskeyOptional` there (#82, below).
 - **A passkey that verified the user can sign in on its own (#77,
   [ADR-0012](adr/0012-passkey-alone-sign-in.md)), behind
   `Config.PasskeySignIn` (off by default).** The person picks their
@@ -1294,6 +1326,33 @@ it. The data for all of this lives on `User`.
   it on got 8-character single-factor passwords. Cost: the TOTP enrol
   screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
   way "recommend on" would have allowed.
+- **Every admin holds a passkey, where the application says so (#82,
+  [ADR-0015](adr/0015-every-admin-holds-a-passkey.md)).** Owner rule
+  (2026-10-06): an admin account holds at least one passkey; an
+  authenticator app may be held as well, never instead.
+  `Config.AdminPasskey` is required and has no default: `New` refuses
+  an unset or unknown value, so the application's admin chooses, and
+  refuses `AdminPasskeyRequired` while `Deps.Passkeys` is nil or its
+  status is not `ready`, naming the status, rather than lock every
+  admin out or silently waive the rule; it logs the choice at start-up.
+  `AdminPasskeyOptional` is for an application reached over plain
+  http (anywhere but localhost) or by IP address, or one with no
+  passkeys (birdcage today). With
+  the rule on, `Protect` holds an admin with no passkey usable under
+  the current RP ID at a new door, 403 `must-enrol-passkey`, which
+  admits the same enrolment routes as the any-factor door and is
+  checked before it; an admin with no local password is held at the
+  must-change-password door first, because registering a passkey needs
+  one (password, then passkey, then admin). The session body carries
+  `mustEnrolPasskey` and `adminPasskeyRequired`. Promotion grants and
+  then holds; there is no grace period, because the door offers
+  registration in the same session. An admin's own last usable
+  passkey cannot be deleted (409 "register another passkey first",
+  before the password re-check); another admin's clear-all and the
+  console `ClearAllSecondFactors` stay open as recovery, and the account
+  is held afterwards. Nothing is stored: the rule is computed from
+  `Role` and `Passkeys`, so the accounts document stays at version 9.
+  Users and viewers keep "any factor".
 - **The first factor is held until its recovery codes are confirmed
   (#58, owner 2026-10-04).** An account's first second factor -- its
   first passkey (`register/finish`) or its first authenticator app

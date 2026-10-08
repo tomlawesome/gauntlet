@@ -62,6 +62,11 @@ const (
 	// party can do it.
 	loginPasskeyBeginPath = "/api/auth/login/passkey/begin"
 	loginPasskeyPath      = "/api/auth/login/passkey"
+
+	// stepUpPasskeyBeginPath starts a passkey step-up for a signed-in
+	// caller (#82; stepup_passkey_handler.go): the assertion it asks for
+	// is the alternative to a code on every recheckStepUp route.
+	stepUpPasskeyBeginPath = "/api/auth/step-up/passkey/begin"
 )
 
 // exemptPaths lists routes reachable without a session once an account
@@ -146,7 +151,7 @@ var bootstrapExemptPaths = map[string]bool{
 // or registering a passkey, and confirming the held first factor's
 // recovery codes (#58: the factor is not live, so the door holds, until
 // that confirmation), and nothing else, as mikroview's requireAuth has
-// it. Named once here, the same reasoning
+// it. The admin passkey door (#82) admits the same routes. Named once here, the same reasoning
 // changePasswordPath is, so Protect's gate and this list cannot drift
 // apart silently. With Deps.Passkeys nil the passkey pair answers 404,
 // so admitting it opens nothing.
@@ -290,21 +295,28 @@ const authGateHeader = "X-Auth-Gate"
 const (
 	authGateMustChangePassword = "must-change-password"
 	authGateMustEnrolFactor    = "must-enrol-factor"
+	// authGateMustEnrolPasskey is the admin passkey door (#82,
+	// ADR-0015): an admin account with no passkey usable here, while
+	// Config.AdminPasskey is AdminPasskeyRequired.
+	authGateMustEnrolPasskey = "must-enrol-passkey"
 )
 
-// writeForcedAuthGate is writeUnauthorized's sibling for this pair of
+// writeForcedAuthGate is writeUnauthorized's sibling for these three
 // doors: sets the machine-readable header before the human-readable
 // body, the same shape as that helper's WWW-Authenticate header.
-// gateName is always one of authGateMustChangePassword or
-// authGateMustEnrolFactor, which are also exactly the anchors of the
-// two classes a forced gate ever answers with, so the class follows
-// from gateName rather than being a third, independently-written
-// parameter the two could drift apart from.
+// gateName is always one of authGateMustChangePassword,
+// authGateMustEnrolFactor or authGateMustEnrolPasskey, which are also
+// exactly the anchors of the three classes a forced gate ever answers
+// with, so the class follows from gateName rather than being another,
+// independently-written parameter the two could drift apart from.
 func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 	w.Header().Set(authGateHeader, gateName)
 	class := classMustChangePassword
-	if gateName == authGateMustEnrolFactor {
+	switch gateName {
+	case authGateMustEnrolFactor:
 		class = classMustEnrolFactor
+	case authGateMustEnrolPasskey:
+		class = classMustEnrolPasskey
 	}
 	writeProblem(w, http.StatusForbidden, class, msg, nil)
 }
@@ -328,8 +340,10 @@ func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 //     treated as "no token" and passed on to the session-cookie check),
 //     as is one that is not a well-formed Bearer credential at all.
 //     Otherwise: the CSRF header on unsafe methods, exempt paths, the
-//     session cookie, the MustChangePassword door, then the
-//     second-factor door (always on, since #49), then next.
+//     session cookie, the MustChangePassword door (which also holds an
+//     admin with no local password while the admin passkey rule is
+//     on), the admin passkey door (#82), then the second-factor door
+//     (always on, since #49), then next.
 func (g *Gate) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := g.now()
@@ -427,6 +441,30 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 			writeForcedAuthGate(w, authGateMustChangePassword, "this account's password must be changed -- set a new password before going any further")
 			return
 		}
+		// An admin with no local password -- an SSO-only account promoted
+		// to admin -- is held at the same door while the admin passkey
+		// rule is on (#82 decision 5): registering a passkey needs a local
+		// password (ADR-0004), so the chain is password, then passkey,
+		// then admin. The one route admitted sets the first password from
+		// a fresh SSO sign-in (handleChangePassword).
+		if g.adminPasskeyRuleOn() && user.Role == gauntlet.RoleAdmin && !user.LocalPassword() && path != changePasswordPath {
+			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustChangePassword))
+			writeForcedAuthGate(w, authGateMustChangePassword, "this admin account has no local password -- set one before going any further")
+			return
+		}
+		// The admin passkey door (#82, ADR-0015): while the rule is on, an
+		// admin account is held until it holds a passkey usable under the
+		// relying party's current RP ID -- an authenticator app alone
+		// never opens it. Checked before the any-factor door below, so an
+		// admin with no factor at all is told the one thing that opens
+		// this one; the same enrolment routes are admitted, and TOTP
+		// enrolment still works there. The !MustChangePassword guard keeps
+		// the no-deadlock property the door below documents.
+		if g.adminMustEnrolPasskey(user) && !secondFactorEnrolPaths[path] {
+			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustEnrolPasskey))
+			writeForcedAuthGate(w, authGateMustEnrolPasskey, "this admin account has no passkey -- register one before going any further")
+			return
+		}
 		// The forced-enrolment door (mikroview's #1253), always shut for
 		// every local-password account since #49 -- a second factor is
 		// mandatory, not an application's choice, so this no longer reads
@@ -456,6 +494,23 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+// adminPasskeyRuleOn reports whether every admin must hold a passkey
+// here (Config.AdminPasskey, #82). New has already refused an unset
+// value, and AdminPasskeyRequired without a ready relying party.
+func (g *Gate) adminPasskeyRuleOn() bool {
+	return g.cfg.AdminPasskey == AdminPasskeyRequired
+}
+
+// adminMustEnrolPasskey reports whether u is held at the admin passkey
+// door, ignoring which route was asked for: the rule is on, u is an
+// admin with a local password and no forced password change pending,
+// and holds no passkey usable under the current RP ID. Protect and the
+// session body (mustEnrolPasskey) both read it.
+func (g *Gate) adminMustEnrolPasskey(u *gauntlet.User) bool {
+	return g.adminPasskeyRuleOn() && u.Role == gauntlet.RoleAdmin &&
+		!u.MustChangePassword && u.LocalPassword() && g.usablePasskeyCount(u) == 0
 }
 
 // isKnownRole reports whether r is one of the three roles this package

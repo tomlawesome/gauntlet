@@ -9,12 +9,16 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
+
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/passkeytest"
 )
 
 // TestUndecidedStateRestrictsToBootstrapPaths covers the gap a
@@ -650,4 +654,317 @@ func TestMustChangePasswordDoorSkipsAnSSOOnlyAccount(t *testing.T) {
 	if got := protectedStatusWithCookie(t, sessionClient(t, ts.URL, sess.ID), ts.URL, nil); got != http.StatusOK {
 		t.Errorf("an SSO-only account carrying MustChangePassword got %d, want 200", got)
 	}
+}
+
+// -- The admin passkey door (#82, ADR-0015) ------------------------------
+
+// doorTestPassword is the password every door test's admin starts with.
+const doorTestPassword = "password-placeholder-1"
+
+// adminPasskeyGate is passkeyGate with Config.AdminPasskey set to
+// AdminPasskeyRequired -- its relying party is ready, as New would
+// insist.
+func adminPasskeyGate(t *testing.T) *Gate {
+	t.Helper()
+	g := passkeyGate(t)
+	g.cfg.AdminPasskey = AdminPasskeyRequired
+	return g
+}
+
+// registerPasskeyWith drives register/begin and finish for client, whose
+// account's password is password, with a fresh fake for g's current
+// relying party, and confirms the passkey's recovery codes when it was
+// the account's first factor (#58), so it is live either way.
+func registerPasskeyWith(t *testing.T, client *http.Client, ts *httptest.Server, g *Gate, password string) *passkeytest.FakeAuthenticator {
+	t.Helper()
+	resp := postJSON(t, client, ts.URL+passkeyRegisterBeginPath, passkeyRegisterBeginRequest{Password: password})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("register/begin returned %d: %s", resp.StatusCode, body)
+	}
+	var creation protocol.CredentialCreation
+	if err := json.NewDecoder(resp.Body).Decode(&creation); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFake(g)
+	if out := passkeyRegisterFinishOK(t, client, ts, fake, &creation, "door key"); out.PendingConfirmation {
+		confirmEnrolmentOK(t, client, ts)
+	}
+	return fake
+}
+
+// doorAt GETs path as client and reports the status, the X-Auth-Gate
+// header and the problem body (zero for a 2xx).
+func doorAt(t *testing.T, client *http.Client, ts *httptest.Server, path string) (int, string, problemBody) {
+	t.Helper()
+	resp, err := client.Get(ts.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	var p problemBody
+	if resp.StatusCode >= 400 {
+		p = decodeProblem(t, raw)
+	}
+	return resp.StatusCode, resp.Header.Get(authGateHeader), p
+}
+
+// wantDoor fails unless a GET of path is held at the door named gate.
+func wantDoor(t *testing.T, client *http.Client, ts *httptest.Server, path, gate, detail string) {
+	t.Helper()
+	status, header, p := doorAt(t, client, ts, path)
+	if status != http.StatusForbidden || header != gate || p.Type != problemTypeBase+gate || !strings.Contains(p.Detail, detail) {
+		t.Errorf("GET %s = %d, X-Auth-Gate %q, %+v; want 403 at the %s door naming %q", path, status, header, p, gate, detail)
+	}
+}
+
+// wantThrough fails unless a GET of path is answered 200.
+func wantThrough(t *testing.T, client *http.Client, ts *httptest.Server, path string) {
+	t.Helper()
+	if status, header, p := doorAt(t, client, ts, path); status != http.StatusOK {
+		t.Errorf("GET %s = %d, X-Auth-Gate %q, %+v; want 200", path, status, header, p)
+	}
+}
+
+// An admin holding only an authenticator app is held at the passkey
+// door on every route but the enrolment ones, with the header and class
+// a frontend routes on; registering a passkey there opens it.
+func TestAdminPasskeyDoorHoldsAnAdminWithOnlyAnApp(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdmin(t, ts, "admin", doorTestPassword)
+
+	for _, path := range []string{"/api/protected", "/api/auth/users", passkeysPath, sessionsPath} {
+		wantDoor(t, admin, ts, path, authGateMustEnrolPasskey, "no passkey")
+	}
+	// The held-enrolment confirm is admitted: with nothing held it is
+	// the route's own 409, not the door's 403.
+	resp := confirmEnrolment(t, admin, ts)
+	if status, body := readAll(t, resp); status != http.StatusConflict {
+		t.Errorf("recovery-codes/confirm at the passkey door = %d %s, want the route's own 409", status, body)
+	}
+
+	registerPasskeyWith(t, admin, ts, g, doorTestPassword) // register begin and finish are admitted
+	for _, path := range []string{"/api/protected", "/api/auth/users", passkeysPath} {
+		wantThrough(t, admin, ts, path)
+	}
+}
+
+// An admin with no factor at all is shown the passkey door, not the
+// any-factor one: the message names the only thing that opens it. An
+// authenticator app can still be enrolled there, and does not open it.
+func TestAdminPasskeyDoorComesBeforeTheAnyFactorDoor(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+
+	wantDoor(t, admin, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+	enrolTOTPFactor(t, admin, ts, doorTestPassword)
+	wantDoor(t, admin, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+
+	registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	wantThrough(t, admin, ts, "/api/protected")
+}
+
+// A passkey registered under an earlier public URL is stale: it cannot
+// sign in here, so it does not open the door either. A new one does.
+func TestAdminPasskeyDoorHoldsAnAdminWhosePasskeyIsStale(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+	registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	wantThrough(t, admin, ts, "/api/protected")
+
+	g.deps.Passkeys = mustRelyingParty(t, "https://new-passkeys.example.org")
+	wantDoor(t, admin, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+
+	registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	wantThrough(t, admin, ts, "/api/protected")
+}
+
+// The rule is about admins: a user or viewer holding only an
+// authenticator app is not held.
+func TestAdminPasskeyDoorLeavesOtherRolesAlone(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+	registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+
+	for _, role := range []gauntlet.Role{gauntlet.RoleUser, gauntlet.RoleViewer} {
+		name, password := "member-"+string(role), "member-password-placeholder"
+		resp := postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: name, Password: password, Role: string(role)})
+		if status, body := readAll(t, resp); status != http.StatusCreated {
+			t.Fatalf("creating %s = %d %s", name, status, body)
+		}
+		u, _ := g.deps.Users.ByUsername(name)
+		member := sessionClient(t, ts.URL, g.deps.Sessions.Create(u.ID, time.Now()).ID)
+		enrolTOTPFactor(t, member, ts, password)
+		wantThrough(t, member, ts, "/api/protected")
+	}
+}
+
+// With the rule waived (AdminPasskeyOptional) an admin holding only an
+// authenticator app is let through, passkeys wired or not.
+func TestAdminPasskeyDoorIsOpenWhenTheRuleIsOptional(t *testing.T) {
+	for name, g := range map[string]*Gate{"passkeys wired": passkeyGate(t), "no passkeys": newTestGate(t)} {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, g)
+			admin := registerAdmin(t, ts, "admin", doorTestPassword)
+			wantThrough(t, admin, ts, "/api/protected")
+		})
+	}
+}
+
+// An admin told to change their password meets that door first, can
+// reach the change route through the passkey door (no deadlock), and
+// meets the passkey door after.
+func TestAdminPasskeyDoorWaitsForAForcedPasswordChange(t *testing.T) {
+	hash, err := gauntlet.HashPassword(doorTestPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := adminPasskeyGate(t)
+	g.deps.Users = openStoreWithUsers(t, gauntlet.User{
+		ID: "admin-1", Username: "admin", PasswordHash: hash, Role: gauntlet.RoleAdmin,
+		CreatedAt: time.Now(), HasLocalPassword: true, MustChangePassword: true,
+	})
+	ts := newTestServer(t, g)
+	admin := sessionClient(t, ts.URL, g.deps.Sessions.Create("admin-1", time.Now()).ID)
+
+	wantDoor(t, admin, ts, "/api/protected", authGateMustChangePassword, "password must be changed")
+	const newPassword = "password-placeholder-2"
+	resp := postJSON(t, admin, ts.URL+changePasswordPath, changePasswordRequest{CurrentPassword: doorTestPassword, NewPassword: newPassword})
+	if status, body := readAll(t, resp); status != http.StatusOK {
+		t.Fatalf("changing the password at the door = %d %s, want 200", status, body)
+	}
+	wantDoor(t, admin, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+	registerPasskeyWith(t, admin, ts, g, newPassword)
+	wantThrough(t, admin, ts, "/api/protected")
+}
+
+// An SSO-only account promoted to admin is held at the password door
+// until it sets a local password (from a fresh SSO sign-in), then at
+// the passkey door, then let in: password, then passkey, then admin.
+func TestAdminPasskeyDoorHoldsAnSSOOnlyAdminForAPasswordFirst(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	first := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+	registerPasskeyWith(t, first, ts, g, doorTestPassword)
+	_, ann := ssoOnlyAdmin(t, g, ts, "subject-ann")
+
+	for _, path := range []string{"/api/protected", "/api/auth/users"} {
+		wantDoor(t, ann, ts, path, authGateMustChangePassword, "no local password")
+	}
+	const annPassword = "password-placeholder-3"
+	resp := postJSON(t, ann, ts.URL+changePasswordPath, changePasswordRequest{NewPassword: annPassword})
+	if status, body := readAll(t, resp); status != http.StatusOK {
+		t.Fatalf("setting the first local password = %d %s, want 200", status, body)
+	}
+	wantDoor(t, ann, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+	registerPasskeyWith(t, ann, ts, g, annPassword)
+	wantThrough(t, ann, ts, "/api/auth/users")
+}
+
+// sessionFields GETs the session body as client and returns its raw
+// top-level members, so a test can tell a member that is absent from
+// one that is false.
+func sessionFields(t *testing.T, client *http.Client, ts *httptest.Server) map[string]json.RawMessage {
+	t.Helper()
+	resp, err := client.Get(ts.URL + sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// wantSessionFields fails unless each named member of the session body
+// is exactly the JSON given; "" means the member must be absent.
+func wantSessionFields(t *testing.T, client *http.Client, ts *httptest.Server, want map[string]string) {
+	t.Helper()
+	body := sessionFields(t, client, ts)
+	for key, value := range want {
+		got, ok := body[key]
+		switch {
+		case value == "" && ok:
+			t.Errorf("session body has %s = %s, want it absent", key, got)
+		case value != "" && (!ok || string(got) != value):
+			t.Errorf("session body %s = %s (present %t), want %s", key, got, ok, value)
+		}
+	}
+}
+
+// The session body says when the admin passkey door holds
+// (mustEnrolPasskey, exactly when Protect would) and whether the rule is
+// on here at all (adminPasskeyRequired, present while signed in), so a
+// frontend can route to registration and show the requirement before
+// the door ever bites. mustEnrolSecondFactor keeps its meaning; both
+// may be true.
+func TestSessionBodyReportsTheAdminPasskeyDoor(t *testing.T) {
+	t.Run("signed out", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		wantSessionFields(t, &http.Client{}, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": ""})
+	})
+	t.Run("admin with no factor, then an app, then a passkey, then a stale one", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "true", "mustEnrolSecondFactor": "true", "adminPasskeyRequired": "true"})
+		enrolTOTPFactor(t, admin, ts, doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "true", "mustEnrolSecondFactor": "false", "adminPasskeyRequired": "true"})
+		registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": "true"})
+		g.deps.Passkeys = mustRelyingParty(t, "https://new-passkeys.example.org")
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "true", "adminPasskeyRequired": "true"})
+	})
+	t.Run("a user with only an app", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		resp := postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: "member", Password: "member-password-placeholder"})
+		if status, body := readAll(t, resp); status != http.StatusCreated {
+			t.Fatalf("creating member = %d %s", status, body)
+		}
+		u, _ := g.deps.Users.ByUsername("member")
+		member := sessionClient(t, ts.URL, g.deps.Sessions.Create(u.ID, time.Now()).ID)
+		enrolTOTPFactor(t, member, ts, "member-password-placeholder")
+		wantSessionFields(t, member, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": "true"})
+	})
+	t.Run("rule optional", func(t *testing.T) {
+		g := passkeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdmin(t, ts, "admin", doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": "false"})
+	})
+	t.Run("forced password change first", func(t *testing.T) {
+		hash, err := gauntlet.HashPassword(doorTestPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := adminPasskeyGate(t)
+		g.deps.Users = openStoreWithUsers(t, gauntlet.User{
+			ID: "admin-1", Username: "admin", PasswordHash: hash, Role: gauntlet.RoleAdmin,
+			CreatedAt: time.Now(), HasLocalPassword: true, MustChangePassword: true,
+		})
+		ts := newTestServer(t, g)
+		admin := sessionClient(t, ts.URL, g.deps.Sessions.Create("admin-1", time.Now()).ID)
+		wantSessionFields(t, admin, ts, map[string]string{"mustChangePassword": "true", "mustEnrolPasskey": "false"})
+	})
+	t.Run("SSO-only admin", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		first := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		registerPasskeyWith(t, first, ts, g, doorTestPassword)
+		_, ann := ssoOnlyAdmin(t, g, ts, "subject-ann")
+		wantSessionFields(t, ann, ts, map[string]string{"mustChangePassword": "true", "hasLocalPassword": "false", "mustEnrolPasskey": "false"})
+	})
 }

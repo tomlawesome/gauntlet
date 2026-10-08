@@ -442,6 +442,15 @@ type passkeyDeleteRequest struct {
 // that leaves the account with no second factor, every session on it is
 // revoked and signedOut says so -- the store has already cleared the
 // recovery codes in the same write.
+//
+// While the admin passkey rule is on (#82 decision 3), an admin's own
+// last usable passkey is refused with 409 before the password is
+// checked (isLastUsableAdminPasskey): the person removing it is present
+// and can register another first, as GitHub and Google ask of a last
+// second factor. A stale passkey is always deletable, and another
+// admin's clear-all (handlePasskeysAdminClear) stays open as the way
+// back for a lost one. The door is the invariant: two concurrent
+// deletes that leave none hold the account at its next request.
 func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -459,6 +468,13 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	credID, err := base64.RawURLEncoding.DecodeString(r.PathValue("id"))
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid passkey id", nil)
+		return
+	}
+	// Before the password re-check, so it costs no re-check budget: the
+	// refusal does not depend on the password.
+	if g.isLastUsableAdminPasskey(user, credID) {
+		writeProblem(w, http.StatusConflict, classConflict,
+			"this is the only passkey that can sign this admin account in -- register another passkey first", nil)
 		return
 	}
 
@@ -489,6 +505,24 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		Kind: NoticeSecondFactorRemoved, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
 		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: removed.Name},
 	})
+}
+
+// isLastUsableAdminPasskey reports whether credID is user's only
+// passkey usable under the current RP ID, user is an admin, and the
+// admin passkey rule is on (#82).
+func (g *Gate) isLastUsableAdminPasskey(user *gauntlet.User, credID []byte) bool {
+	if !g.adminPasskeyRuleOn() || user.Role != gauntlet.RoleAdmin || !g.passkeysReady() {
+		return false
+	}
+	// The caller's copy from context is fresh enough: nothing earlier in
+	// this request wrote the account.
+	rpID := g.deps.Passkeys.RPID()
+	for _, pk := range user.Passkeys {
+		if bytes.Equal(pk.ID, credID) {
+			return pk.RPID == rpID && g.usablePasskeyCount(user) == 1
+		}
+	}
+	return false
 }
 
 // -- POST /api/auth/login/factor/begin ------------------------------------
@@ -689,7 +723,9 @@ func (g *Gate) recordVerifiedAssertion(r *http.Request, user *gauntlet.User, ver
 // the recovery codes only when no factor of either kind is left. The
 // caller's own password is asked for again on the request (#72). An
 // account with no passkeys is answered 200 with cleared false, and
-// nothing is recorded or sent.
+// nothing is recorded or sent. While the admin passkey rule is on, an
+// admin target is held at the passkey door afterwards (#82), and the
+// audit detail says so.
 func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -730,7 +766,14 @@ func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) 
 	}
 
 	by := auditActor(r)
-	g.audit(r, by, "user.passkeys_cleared", target.Username, "passkeys removed by admin")
+	detail := "passkeys removed by admin"
+	// The way back for an admin who lost a passkey stays open (#82
+	// decision 3): the account is held at the passkey door from its
+	// next request until it registers one.
+	if g.adminPasskeyRuleOn() && target.Role == gauntlet.RoleAdmin {
+		detail += "; admin held for a passkey"
+	}
+	g.audit(r, by, "user.passkeys_cleared", target.Username, detail)
 	writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": true})
 	g.notify(r.Context(), &AccountNotice{
 		Kind: NoticeSecondFactorRemoved, UserID: target.ID, Username: target.Username, Role: target.Role, At: g.now(), By: by,

@@ -112,6 +112,7 @@ func newTestGateWithUsers(t *testing.T, users *gauntlet.Store) *Gate {
 		ClientIP:        func(r *http.Request) string { return "198.51.100.1" },
 		ProductName:     testProductName,
 		LoginPath:       testLoginPath,
+		AdminPasskey:    AdminPasskeyOptional, // no passkeys are wired at New; a test about the rule turns it on
 	}, Deps{Users: users, Sessions: sessions, Tokens: tokens, Limiter: limiter})
 	if err != nil {
 		t.Fatalf("New: %v", err)

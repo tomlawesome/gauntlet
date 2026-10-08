@@ -16,7 +16,8 @@ import "net/http"
 // list/register/rename/delete routes, the passkey login begin and the
 // admin clear route (G8, ADR-0004; all 404 while Deps.Passkeys is nil),
 // the passkey-alone sign-in begin and finish (#77, ADR-0012; 404 unless
-// Config.PasskeySignIn is set),
+// Config.PasskeySignIn is set), the passkey step-up begin (#82; 404
+// while Deps.Passkeys is nil),
 // the OIDC login/callback/link trio, and tokens list/create/revoke.
 //
 // Mount the result under the same Protect that guards the rest of the
@@ -56,6 +57,7 @@ func (g *Gate) Routes() http.Handler {
 	mux.HandleFunc("POST "+loginFactorBeginPath, g.handleLoginFactorBegin)
 	mux.HandleFunc("POST "+loginPasskeyBeginPath, g.handleLoginPasskeyBegin)
 	mux.HandleFunc("POST "+loginPasskeyPath, g.handleLoginPasskey)
+	mux.HandleFunc("POST "+stepUpPasskeyBeginPath, g.handleStepUpPasskeyBegin)
 
 	mux.HandleFunc("GET "+oidcLoginPath, g.handleOIDCLogin)
 	mux.HandleFunc("GET "+oidcCallbackPath, g.handleOIDCCallback)

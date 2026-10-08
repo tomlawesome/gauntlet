@@ -177,7 +177,7 @@ type problemClass struct {
 // "type" member.
 const problemTypeBase = "https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#"
 
-// The eighteen classes docs/api/errors.md documents, one var each --
+// The nineteen classes docs/api/errors.md documents, one var each --
 // Go has no constant struct literal, so these stand in for the
 // constants the design calls for: built once at package load and never
 // written to again.
@@ -206,6 +206,10 @@ var (
 	// classRoleManagedBySSO (#76) is a user/viewer change refused on an
 	// SSO account whose role the identity provider's groups decide.
 	classRoleManagedBySSO = problemClass{"role-managed-by-sso", "Role managed by single sign-on"}
+	// classMustEnrolPasskey (#82) is the admin passkey door: an admin
+	// account holding no passkey usable here, while the application
+	// requires one (Config.AdminPasskey).
+	classMustEnrolPasskey = problemClass{"must-enrol-passkey", "Passkey registration required"}
 )
 
 // writeProblem writes an RFC 9457 application/problem+json body: type

@@ -146,3 +146,9 @@ browser and a code typed into the same page. No new concept: it is
   issued on the passkey-alone path ([ADR-0012](0012-passkey-alone-sign-in.md))
   under the same conditions. It is still never issued on the SSO
   callback.
+- Status note (#82, 2026-10-08): unchanged by
+  [ADR-0015](0015-every-admin-holds-a-passkey.md). The escape code
+  stays outside the admin passkey door, as break-glass outside the
+  policy: it lets a refused sign-in through, and the session it issues
+  then meets the door like any other, which admits registering a
+  passkey.

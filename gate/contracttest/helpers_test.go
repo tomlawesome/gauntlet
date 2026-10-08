@@ -128,6 +128,9 @@ func newGateWith(t *testing.T, deps gate.Deps, configure func(*gate.Config)) *ga
 		ClientIP:        func(*http.Request) string { return "198.51.100.1" },
 		ProductName:     testProductName,
 		LoginPath:       testLoginPath,
+		// Several fixtures wire a relying party that is not ready, which
+		// "required" refuses at start; a test about the rule sets it.
+		AdminPasskey: gate.AdminPasskeyOptional,
 	}
 	if configure != nil {
 		configure(&cfg)
@@ -359,9 +362,10 @@ type createUserRequest struct {
 }
 
 type setRoleRequest struct {
-	Role     string `json:"role"`
-	Password string `json:"password,omitempty"`
-	Code     string `json:"code,omitempty"`
+	Role      string          `json:"role"`
+	Password  string          `json:"password,omitempty"`
+	Code      string          `json:"code,omitempty"`
+	Assertion json.RawMessage `json:"assertion,omitempty"`
 }
 
 type setRoleResponse struct {
@@ -401,7 +405,11 @@ type sessionResponse struct {
 	Authenticated bool   `json:"authenticated"`
 	Role          string `json:"role"`
 	SignedInSince string `json:"signedInSince"`
-	Passkeys      *struct {
+	// MustEnrolPasskey and AdminPasskeyRequired report the admin passkey
+	// rule (#82).
+	MustEnrolPasskey     bool  `json:"mustEnrolPasskey"`
+	AdminPasskeyRequired *bool `json:"adminPasskeyRequired"`
+	Passkeys             *struct {
 		Count  int    `json:"count"`
 		Status string `json:"status"`
 		Origin string `json:"origin"`

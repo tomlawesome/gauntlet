@@ -518,3 +518,133 @@ func TestSecondAdminReachesAdminRoutes(t *testing.T) {
 		t.Errorf("a granted admin listing accounts = %d %s, want 200", status, body)
 	}
 }
+
+// -- Promotion under the admin passkey rule (#82) -----------------------
+
+// newAdminPasskeyFixture is newAdminsFixture on a gate with a ready
+// relying party, where "admin" also holds a passkey, and then the admin
+// passkey rule turned on -- so admin is past the door and bob, a user
+// with only an authenticator app, is not an admin yet.
+func newAdminPasskeyFixture(t *testing.T) *adminsFixture {
+	t.Helper()
+	f := newAdminsFixture(t)
+	f.g.deps.Passkeys = mustRelyingParty(t, passkeyTestPublicURL)
+	registerPasskeyWith(t, f.admin, f.ts, f.g, selfUnlockAdminPassword)
+	f.g.cfg.AdminPasskey = AdminPasskeyRequired
+	return f
+}
+
+// heldInList is the users list's heldForPasskey for each username, as
+// the admin reads it; absent means the member was missing.
+func (f *adminsFixture) heldInList(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+	resp, err := f.admin.Get(f.ts.URL + "/api/auth/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var rows []map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]json.RawMessage{}
+	for _, row := range rows {
+		var name string
+		_ = json.Unmarshal(row["username"], &name)
+		out[name] = row["heldForPasskey"]
+	}
+	return out
+}
+
+func heldField(t *testing.T, body string) string {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	return string(m["heldForPasskey"])
+}
+
+// Granting admin to an account with no passkey grants it, says so
+// (heldForPasskey, the audit detail, the users list), and holds the
+// account at the passkey door from its next request. Demoting it
+// releases it.
+func TestGrantingAdminHoldsTheAccountForAPasskey(t *testing.T) {
+	f := newAdminPasskeyFixture(t)
+	status, body := f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "admin", Password: selfUnlockAdminPassword, Code: f.code()})
+	if status != http.StatusOK || heldField(t, body) != "true" {
+		t.Fatalf("granting bob admin = %d %s, want 200 with heldForPasskey true", status, body)
+	}
+	if e := findAuditEntry(t, f.g, "user.role_changed"); !strings.Contains(e.Detail, "; held for a passkey") {
+		t.Errorf("audit detail = %q, want it to say the account is held for a passkey", e.Detail)
+	}
+	wantDoor(t, f.bob, f.ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+	if held := f.heldInList(t); string(held[totpBobUsername]) != "true" || string(held["admin"]) != "false" {
+		t.Errorf("users list heldForPasskey = %s, want bob true and admin false", held)
+	}
+
+	status, body = f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "user"})
+	if status != http.StatusOK || heldField(t, body) != "false" {
+		t.Fatalf("demoting bob = %d %s, want 200 with heldForPasskey false", status, body)
+	}
+	if e := findAuditEntry(t, f.g, "user.role_changed"); strings.Contains(e.Detail, "held for a passkey") {
+		t.Errorf("demotion audit detail = %q, want no hold", e.Detail)
+	}
+	bob := sessionClient(t, f.ts.URL, f.g.deps.Sessions.Create(f.bobID, f.g.now()).ID) // the demotion ended bob's sessions
+	wantThrough(t, bob, f.ts, "/api/protected")
+	if held := f.heldInList(t); string(held[totpBobUsername]) != "false" {
+		t.Errorf("users list heldForPasskey for a demoted bob = %s, want false", held[totpBobUsername])
+	}
+}
+
+// An account that already holds a usable passkey is granted admin and
+// not held.
+func TestGrantingAdminToAnAccountWithAPasskeyHoldsNothing(t *testing.T) {
+	f := newAdminPasskeyFixture(t)
+	registerPasskeyWith(t, f.bob, f.ts, f.g, totpBobPassword)
+	status, body := f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "admin", Password: selfUnlockAdminPassword, Code: f.code()})
+	if status != http.StatusOK || heldField(t, body) != "false" {
+		t.Fatalf("granting bob admin = %d %s, want 200 with heldForPasskey false", status, body)
+	}
+	if e := findAuditEntry(t, f.g, "user.role_changed"); strings.Contains(e.Detail, "held for a passkey") {
+		t.Errorf("audit detail = %q, want no hold", e.Detail)
+	}
+	wantThrough(t, f.bob, f.ts, "/api/protected")
+}
+
+// Creating an admin creates it held: a new account holds no passkey.
+// A user created beside it is not held, and with the rule optional
+// nothing is.
+func TestCreatingAnAdminHoldsItForAPasskey(t *testing.T) {
+	f := newAdminPasskeyFixture(t)
+	create := func(body createUserRequest) (int, string) {
+		t.Helper()
+		return readAll(t, postJSON(t, f.admin, f.ts.URL+"/api/auth/users", body))
+	}
+	status, body := create(createUserRequest{Username: "second", Password: "password456", Role: "admin", AdminPassword: selfUnlockAdminPassword, AdminCode: f.code()})
+	if status != http.StatusCreated || heldField(t, body) != "true" {
+		t.Fatalf("creating an admin = %d %s, want 201 with heldForPasskey true", status, body)
+	}
+	if e := findAuditEntry(t, f.g, "user.create"); !strings.Contains(e.Detail, "; held for a passkey") {
+		t.Errorf("audit detail = %q, want it to say the account is held for a passkey", e.Detail)
+	}
+	if held := f.heldInList(t); string(held["second"]) != "true" {
+		t.Errorf("users list heldForPasskey for second = %s, want true", held["second"])
+	}
+	status, body = create(createUserRequest{Username: "third", Password: "password789"})
+	if status != http.StatusCreated || heldField(t, body) != "false" {
+		t.Errorf("creating a user = %d %s, want 201 with heldForPasskey false", status, body)
+	}
+
+	f.g.cfg.AdminPasskey = AdminPasskeyOptional
+	status, body = create(createUserRequest{Username: "fourth", Password: "password-placeholder-4", Role: "admin", AdminPassword: selfUnlockAdminPassword, AdminCode: f.code()})
+	if status != http.StatusCreated || heldField(t, body) != "false" {
+		t.Errorf("creating an admin with the rule optional = %d %s, want 201 with heldForPasskey false", status, body)
+	}
+	if e := findAuditEntry(t, f.g, "user.create"); strings.Contains(e.Detail, "held for a passkey") {
+		t.Errorf("audit detail with the rule optional = %q, want no hold", e.Detail)
+	}
+	if held := f.heldInList(t); string(held["second"]) != "false" {
+		t.Errorf("users list heldForPasskey with the rule optional = %s, want false", held["second"])
+	}
+}
