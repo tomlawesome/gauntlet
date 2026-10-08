@@ -35,8 +35,10 @@ type TokenSweep struct {
 // expiry notices are sent here, one at a time, each bounded by the
 // notify timeout, and a token is marked warned only once its notice was
 // accepted: a send that fails is one error line in Config.Log and is
-// tried again at the next sweep. A crash between a send and the mark
-// can repeat a notice; it never loses one.
+// tried again at the next sweep. A notifier still running at the
+// deadline is not waited for, but if it then answers that it sent the
+// notice, the token is marked at that point. A crash between a send and
+// the mark can repeat a notice; it never loses one.
 //
 // An error means one of the sweep's writes could not be saved. The
 // first (the unused removal) failing changes nothing; a later one
@@ -122,10 +124,19 @@ func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, erro
 			warned = append(warned, t.ID)
 			continue
 		}
+		// A notifier that answers yes after the deadline delivered the
+		// notice all the same: it is marked then, or a notifier that is
+		// always slow would resend it at every sweep.
+		id := t.ID
+		markLate := func() {
+			if err := g.deps.Tokens.MarkExpiryWarned([]string{id}, now); err != nil {
+				g.logError(fmt.Sprintf("gate: recording a late token-expiry notice for token %s: %q", id, err.Error()))
+			}
+		}
 		if g.notifyNow(ctx, &AccountNotice{
 			Kind: NoticeTokenExpiring, UserID: owner.ID, Username: owner.Username, Role: owner.Role, At: now,
 			TokenExpiring: &TokenExpiringDetail{TokenID: t.ID, Name: t.Name, Kind: t.Kind, ExpiresAt: t.ExpiresAt},
-		}) {
+		}, markLate) {
 			warned = append(warned, t.ID)
 		}
 	}

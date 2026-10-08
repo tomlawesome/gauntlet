@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -174,29 +175,62 @@ func (g *Gate) asyncNotify(ctx context.Context, who string, fn func(context.Cont
 // logs; a notifier still running at the deadline is abandoned and left
 // to finish on its own, tracked by g.notifying. False when
 // Config.Notices is unset or n is nil: nothing was sent.
-func (g *Gate) notifyNow(ctx context.Context, n *AccountNotice) bool {
+//
+// late, when not nil, runs if an abandoned notifier later returns nil:
+// the notice went out after all, so the caller can record it then
+// rather than send it again next time (#80). It runs on the notifier's
+// goroutine, still tracked by g.notifying.
+func (g *Gate) notifyNow(ctx context.Context, n *AccountNotice, late func()) bool {
 	notices := g.cfg.Notices
 	if notices == nil || n == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, notifyTimeout)
 	defer cancel()
+	var (
+		mu        sync.Mutex
+		answered  bool // the notifier returned while the caller waited
+		abandoned bool // the caller stopped waiting first
+	)
 	done := make(chan error, 1)
 	g.notifying.Add(1)
 	go func() {
 		defer g.notifying.Done()
-		defer func() {
-			if p := recover(); p != nil {
-				done <- fmt.Errorf("panicked: %q", fmt.Sprint(p))
-			}
+		err := func() (err error) {
+			defer func() {
+				if p := recover(); p != nil {
+					err = fmt.Errorf("panicked: %q", fmt.Sprint(p))
+				}
+			}()
+			return notices.AccountEvent(ctx, *n)
 		}()
-		done <- notices.AccountEvent(ctx, *n)
+		mu.Lock()
+		if abandoned {
+			mu.Unlock()
+			if err == nil && late != nil {
+				g.logWarn(fmt.Sprintf("gate: the account notifier for account %q answered after the %v deadline; the notice is recorded as sent", n.Username, notifyTimeout))
+				late()
+			}
+			return
+		}
+		answered = true
+		mu.Unlock()
+		done <- err
 	}()
 	var err error
 	select {
 	case err = <-done:
 	case <-ctx.Done():
-		err = ctx.Err()
+		mu.Lock()
+		if answered {
+			// It returned in the same instant: its answer stands.
+			mu.Unlock()
+			err = <-done
+		} else {
+			abandoned = true
+			mu.Unlock()
+			err = ctx.Err()
+		}
 	}
 	if err != nil {
 		g.logError(fmt.Sprintf("gate: the account notifier failed for account %q: %q", n.Username, err.Error()))

@@ -96,6 +96,10 @@ Low-severity findings from the v0.3.0 audit (#80):
   creator is gone, instead of once per token while holding the token
   store's lock, so a slow accounts backend no longer holds every
   bearer-token request for the length of the sweep.
+- A token-expiry notice whose notifier answers after the 10-second
+  deadline, but answers that it sent it, is recorded as sent when it
+  answers. Before, the sweep counted it unsent and a notifier that was
+  always slow sent the owner the same notice every day.
 
 ## [0.3.0] - 2026-10-08
 
