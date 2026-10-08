@@ -61,8 +61,9 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
      all.
    - `GITHUB_MIRROR_SSH_KEY`: the private SSH key that may push to the
      mirror. Create it with type **File**, not the default Variable:
-     the job reads the key from a file, so a plain Variable fails the
-     job. If the variable is missing, or the tag is not protected (a
+     the job reads the key from a file, so a plain Variable stops the
+     job with `GITHUB_MIRROR_SSH_KEY must be a File-type CI/CD variable`
+     before the key can reach the log. If the variable is missing, or the tag is not protected (a
      protected variable reaches only protected tags and branches), the
      job fails with
      `GITHUB_MIRROR_SSH_KEY is not set -- is v<VERSION> protected?`.
