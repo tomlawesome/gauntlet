@@ -36,6 +36,16 @@ var (
 	ErrUsernameIsEmail = errors.New("gauntlet: a local account's username may not be an email address")
 )
 
+// unprintable reports whether r is a character this package refuses or
+// drops in text a person or a client chose: a control (Cc) or format
+// (Cf) character, or the Unicode line or paragraph separator (Zl, Zp),
+// which some mail and chat clients start a new line at, as at a newline
+// (#80). Usernames, token names, device IDs and the client details a
+// session, a sign-in record and a notice carry all use it.
+func unprintable(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+}
+
 // ValidateUsername rejects a username that would be unsafe downstream.
 //
 // Three things are refused, each for a specific reason:
@@ -79,7 +89,7 @@ func ValidateUsername(username string) error {
 		return ErrUsernameLength
 	}
 	for _, r := range username {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unprintable(r) {
 			return ErrUsernameInvalid
 		}
 	}

@@ -68,6 +68,71 @@ All notable changes to this project are documented in this file.
   `main`'s tip; `preview` and `main` pipelines now run every lint and
   test job, as `dev`'s do (docs/releasing.md).
 
+### Fixed
+
+Low-severity findings from the v0.3.0 audit (#80):
+
+- An SSO sign-in that changes the account's role no longer computes a
+  password hash (about 100 ms, 64 MiB) it throws away while every other
+  request waits on the account store.
+- A sign-in with the old password that was already being checked when
+  a password change or an admin reset landed is refused, rather than
+  given a session the change was meant to end.
+- Holding a first second factor (`HoldFirstPasskey`, `HoldFirstTOTP`)
+  refuses an account that already has one, or has one on hold, before
+  minting the ten recovery codes, rather than hashing all ten and
+  throwing them away.
+- An admin reset issued while the owner's own password change was still
+  being checked is no longer overwritten by it (the code the admin read
+  out never worked). The change is refused instead: `POST
+  /api/auth/password` answers `409 conflict` and saves nothing, and
+  `Store.SetPassword` returns the new `ErrResetDuringChange`. Additive.
+- `Store.ClearAllSecondFactors` on an account with nothing to clear
+  returns the new `ErrNoSecondFactors` and writes nothing, as
+  `ClearPasskeys` answers `ErrNoPasskeys`, instead of saving and
+  reporting success. A recovery tool built on it can now say there was
+  nothing to remove rather than that everything was.
+- A failed SSO callback's warning now ends with `cause="..."`: what the
+  token endpoint answered (its status, error code and description, never
+  its raw body), why the token did not verify, what the provider
+  reported, or why the account could not be saved. A provider that is
+  down, a wrong client secret and a failing disk no longer read the
+  same.
+- `pwlist build` with `--checkpoint`, when the finished run fails a
+  sanity bar, now says its checkpoint is kept and that a retry rechecks
+  the same result without fetching (delete the checkpoint to fetch
+  again), and the retry logs that every chunk was already fetched
+  instead of "resuming at chunk" one past the last.
+- `SweepTokens` reads the account store once to find tokens whose
+  creator is gone, instead of once per token while holding the token
+  store's lock, so a slow accounts backend no longer holds every
+  bearer-token request for the length of the sweep.
+- A token-expiry notice whose notifier answers after the 10-second
+  deadline, but answers that it sent it, is recorded as sent when it
+  answers. Before, the sweep counted it unsent and a notifier that was
+  always slow sent the owner the same notice every day.
+- The password list's stored copy (`blocklist.Refresher`) and the
+  country file and its `state.json` (`geoip`) keep their owner and group
+  when a refresh replaces them, as the account store's file has since
+  #79: a refresh run as another user, such as a CLI with sudo, no
+  longer leaves files the server cannot read or replace. All three now
+  share one writer.
+- The Unicode line and paragraph separators (U+2028, U+2029), which a
+  few mail and chat clients show as a new line, are now treated like
+  control characters wherever those are: dropped from a session's and a
+  sign-in record's browser and address and from a masked unknown
+  username, and refused in a new username, token name, token device ID
+  and an admin's sign-out-everywhere reason. An owner's notice can no
+  longer show a made-up extra line.
+- `login/prove/begin` counts each begin on the account's passkey-step
+  begin budget, as `login/factor/begin` does since #85, so a held
+  sign-in's ticket can no longer mint passkey challenges without limit
+  for its life; past it, begin is `429 rate-limited`. Like
+  `login/factor/begin` it also refuses a locked or disabled account and
+  a banned address (`429`, with the same known-browser exceptions)
+  before any challenge, so an owner locked out between the password and
+  the passkey step is told at once instead of after touching their key.
+
 ## [0.3.0] - 2026-10-08
 
 Reading notes for this release:

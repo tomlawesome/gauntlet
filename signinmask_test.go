@@ -25,6 +25,7 @@ func TestMaskUnknownUsername(t *testing.T) {
 		{"newline stripped before masking", "bo\nb-secret", "bo••••••••"},
 		{"bidi override stripped", "\u202Eadmin", "admin"},
 		{"zero-width stripped", "ro\u200Bot", "root"},
+		{"line and paragraph separators stripped", "ro\u2028o\u2029t", "root"},
 		{"multi-byte runes counted as runes", "ñandú-pass", "ña••••••••"},
 		{"invalid UTF-8 dropped", "ab\xffcd", "ab••"},
 		{"only whitespace", "   ", ""},

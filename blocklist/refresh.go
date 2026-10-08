@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
 	"github.com/tomlawesome/gauntlet/internal/listsig"
 )
 
@@ -471,27 +472,10 @@ func (r *Refresher) store(data, sig []byte) error {
 	return nil
 }
 
-func writeFileAtomic(dir, name string, data []byte) (err error) {
-	f, err := os.CreateTemp(dir, "."+name+".*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err = f.Chmod(0o600); err == nil {
-		if _, err = f.Write(data); err == nil {
-			err = f.Sync()
-		}
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(dir, name))
+// writeFileAtomic writes name in dir crash-safely, 0600, keeping an
+// existing file's owner and group (atomicfile.WriteFile), as persist's
+// store writes do: a refresh run as another user (a CLI with sudo) must
+// not leave a file the server cannot read or replace (#80).
+func writeFileAtomic(dir, name string, data []byte) error {
+	return atomicfile.WriteFile(filepath.Join(dir, name), data, 0o600)
 }

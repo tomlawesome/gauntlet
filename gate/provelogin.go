@@ -81,13 +81,18 @@ func (g *Gate) openProveTicket(w http.ResponseWriter, r *http.Request, now time.
 // Session-exempt, like login; it needs the prove ticket. 404 without
 // passkeys, 409 while the relying party is not ready or the account has
 // no passkey usable here (a passkey removed since the sign-in was held).
-// It reserves nothing on the limiter: the ticket proves the
-// credentials, and the finish step is what is counted.
+// Each begin is counted, and a locked or disabled account or a banned
+// address refused early, as login/factor/begin does (reservePasskeyBegin,
+// #80): the ticket proves the credentials, but must not mint challenges
+// without limit for its life, nor ask the owner to touch a key for a
+// sign-in that cannot complete. Past the budget, or so refused, begin is
+// 429. The finish step's reservation stays the authority.
 func (g *Gate) handleLoginProveBegin(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
 	}
-	_, user, ok := g.openProveTicket(w, r, g.now())
+	now := g.now()
+	_, user, ok := g.openProveTicket(w, r, now)
 	if !ok {
 		return
 	}
@@ -99,8 +104,14 @@ func (g *Gate) handleLoginProveBegin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusConflict, classConflict, "this account has no passkey usable at this address", nil)
 		return
 	}
+	onKnown, ok := g.reservePasskeyBegin(w, r, user, now)
+	if !ok {
+		return
+	}
 	options, sealed, err := g.deps.Passkeys.BeginLogin(user)
 	if err != nil {
+		// This server's failure, not the caller's attempt.
+		g.deps.Limiter.ReleaseFactorBegin(user.ID, onKnown, now)
 		g.logError("beginning passkey proof for " + user.Username + ": " + err.Error())
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey sign-in", nil)
 		return

@@ -2,7 +2,6 @@ package gauntlet
 
 import (
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -27,8 +26,8 @@ const maskRune = '•'
 // Applied before the name reaches an audit record, a log line or a
 // stored row, so the typed name exists only in the request.
 //
-// Control (Cc) and format (Cf) characters and invalid UTF-8 are
-// dropped, surrounding white space trimmed, and the result cut to the
+// Control (Cc) and format (Cf) characters, the line and paragraph
+// separators (Zl, Zp) and invalid UTF-8 are dropped, surrounding white space trimmed, and the result cut to the
 // username length limit (64 characters). A name on the fixed probe list
 // (root, admin, postgres and the like, matched exactly in any case) is
 // returned as it now stands: an exact match only, so "admin123" is
@@ -48,7 +47,7 @@ func MaskUnknownUsername(typed string) string {
 		if r == utf8.RuneError && size == 1 {
 			continue
 		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unprintable(r) {
 			continue
 		}
 		b.WriteRune(r)

@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -98,7 +97,8 @@ type SessionClient struct {
 
 // Clean is c with Address and UserAgent cleaned and cut the way every
 // session and sign-in record keeps them: control and Unicode formatting
-// characters and invalid UTF-8 dropped, then UserAgent cut to
+// characters, the line and paragraph separators (unprintable) and
+// invalid UTF-8 dropped, then UserAgent cut to
 // MaxSessionUserAgent bytes and Address to MaxSessionAddress, never
 // mid-character. Both are the client's own word, so neither may carry a
 // terminal escape, a bidirectional override, a line break or a megabyte
@@ -299,7 +299,7 @@ func cleanClientText(s string, maxBytes int) string {
 		if r == utf8.RuneError && size == 1 {
 			continue // invalid UTF-8
 		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unprintable(r) {
 			continue
 		}
 		if b.Len()+size > maxBytes {

@@ -451,9 +451,13 @@ paths:
         no body. Sets the passkey ceremony cookie (sealed, path
         `/api/auth/login`, five minutes; each challenge is usable once).
         It takes nothing on the login limit: `login/prove` is what is
-        counted. `404` when the application has no passkeys; `409` while
-        the relying party is not ready or the account has no passkey
-        usable here (one removed since the sign-in was held).
+        counted. Each begin is counted on the account's passkey-step begin
+        budget, as `login/factor/begin`'s are (#80), and a locked or
+        disabled account or a banned address is refused before any
+        challenge, with `login/factor/begin`'s known-browser exceptions:
+        `429` either way. `404` when the application has no passkeys;
+        `409` while the relying party is not ready or the account has no
+        passkey usable here (one removed since the sign-in was held).
       security:
         - confirmLoginCookie: []
       parameters:
@@ -488,6 +492,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1170,7 +1176,9 @@ paths:
         sign in again through the provider first.
 
         A `newPassword` the same as the current password is `400`, under a
-        forced change too.
+        forced change too. An administrator's reset that lands while the
+        change is being checked wins: the change is `409` and saves
+        nothing, and the owner signs in with the reset code (#80).
 
         A new password is refused with `400`, and a plain-text reason, when
         it is under 8 characters; on the common-password list, in any
@@ -2161,7 +2169,8 @@ paths:
         session, or to list another account's sessions (#53).
 
         The body is optional. `reason` is at most 200 characters of plain text
-        (no control or format characters); it goes into the audit record
+        (no control or format characters, no line or paragraph separators);
+        it goes into the audit record
         and to the application's `Config.Notices` (or the deprecated
         `Config.Notify`), which may mail the account's owner. `notified`
         is true when the application was asked -- after this response,
@@ -2422,7 +2431,7 @@ paths:
                   description: The calling admin's own password.
                 name:
                   type: string
-                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
+                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters, and no line or paragraph separators); otherwise a 400.
                 kind:
                   type: string
                   description: "One of the kinds the application registered (TokenOptions.Kinds): `api` and `ingest` by default. Empty or absent means `api` (read-only), which is a 400 if the application did not register `api`."
@@ -3132,7 +3141,7 @@ components:
         userAgent:
           type: string
           maxLength: 256
-          description: The browser's `User-Agent` at sign-in, with control and formatting characters removed. Absent when none was sent.
+          description: The browser's `User-Agent` at sign-in, with control and formatting characters and line and paragraph separators removed. Absent when none was sent.
         country:
           type: string
           pattern: "^[A-Z]{2}$"
@@ -3510,7 +3519,7 @@ components:
         userAgent:
           type: string
           maxLength: 256
-          description: The first attempt's `User-Agent`, with control and formatting characters removed.
+          description: The first attempt's `User-Agent`, with control and formatting characters and line and paragraph separators removed.
         country:
           type: string
           pattern: "^[A-Z]{2}$"
@@ -3555,7 +3564,7 @@ components:
         reason:
           type: string
           maxLength: 200
-          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters are refused with `400`.
+          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters and the line and paragraph separators (U+2028, U+2029) are refused with `400`.
     AdminLogoutAllResponse:
       type: object
       additionalProperties: false

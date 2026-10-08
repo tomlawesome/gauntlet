@@ -14,8 +14,8 @@ import (
 // document's maxLength counts, so a reason it accepts is never refused
 // for being written in accented or non-Latin letters. It reaches the
 // audit log and, through Config.Notify, the account owner's mail, so it
-// is short and plain: control and format characters are refused, not
-// stripped.
+// is short and plain: control and format characters and the line and
+// paragraph separators are refused, not stripped.
 const MaxSessionEndReason = 200
 
 // adminLogoutAllRequest is POST /api/auth/users/{id}/logout-all's
@@ -35,14 +35,17 @@ type adminLogoutAllResponse struct {
 }
 
 // validSessionEndReason reports whether reason is short enough and
-// carries no control or format character. (JSON decoding has already
+// carries no control or format character and no line or paragraph
+// separator. (JSON decoding has already
 // replaced any invalid UTF-8 with U+FFFD.)
 func validSessionEndReason(reason string) bool {
 	if utf8.RuneCountInString(reason) > MaxSessionEndReason {
 		return false
 	}
 	for _, r := range reason {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		// The line and paragraph separators too: some mail and chat
+		// clients start a new line at them in the owner's notice (#80).
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return false
 		}
 	}
@@ -60,7 +63,8 @@ func validSessionEndReason(reason string) bool {
 // The caller's own account is refused with 409: they have POST
 // /api/auth/logout-all, which keeps the browser they are using signed
 // in. 404 for no such account; 400 for a reason over
-// MaxSessionEndReason characters, or holding a control or format character.
+// MaxSessionEndReason characters, or holding a control or format
+// character or a line or paragraph separator.
 // The body is optional.
 //
 // Once the response is written, Config.Notices, or the deprecated

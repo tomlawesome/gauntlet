@@ -59,6 +59,11 @@ var (
 	// so a caller can answer without auditing or notifying a removal
 	// that never happened.
 	ErrNoPasskeys = errors.New("gauntlet: this account has no passkeys")
+	// ErrNoSecondFactors is returned by ClearAllSecondFactors when the
+	// account has nothing to clear: no authenticator app (live or
+	// pending), no passkey, no recovery codes and nothing on hold.
+	// Nothing is written.
+	ErrNoSecondFactors = errors.New("gauntlet: this account has no second factor to clear")
 	// ErrPasskeyLimitReached is returned by AddPasskey once an account
 	// already holds maxPasskeysPerAccount credentials.
 	ErrPasskeyLimitReached = fmt.Errorf("gauntlet: an account may hold at most %d passkeys -- remove one before adding another", maxPasskeysPerAccount)
@@ -583,7 +588,8 @@ func (s *Store) ClearPasskeys(userID string) error {
 // "I've lost everything" recovery path: unlike DeletePasskey,
 // ClearPasskeys and ClearTOTP there is no factor-remaining check to make
 // here -- there is nothing left standing after this call, by
-// construction.
+// construction. An account with nothing to clear is ErrNoSecondFactors,
+// and nothing is written.
 func (s *Store) ClearAllSecondFactors(userID string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -599,6 +605,11 @@ func (s *Store) ClearAllSecondFactors(userID string) error {
 		u, ok := st.byID[userID]
 		if !ok {
 			return ErrUserNotFound
+		}
+		// Not errNoChange, which mutate answers with nil: the caller
+		// must hear that nothing was removed, not a success.
+		if u.TOTPSecret == "" && len(u.Passkeys) == 0 && len(u.RecoveryCodes) == 0 && u.HeldEnrolment == nil {
+			return ErrNoSecondFactors
 		}
 		clearTOTPFields(u)
 		u.Passkeys = nil

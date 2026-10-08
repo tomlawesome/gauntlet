@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/oschwald/maxminddb-golang/v2"
+
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
 )
 
 const (
@@ -146,6 +148,12 @@ func (m *Manager) fetch(ctx context.Context) error {
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }() // a no-op once renamed into place
 	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// The download is renamed over the kept file, so it takes that
+	// file's owner and group first, as atomicfile.WriteFile does (#80).
+	if err := atomicfile.KeepOwner(tmp, m.cacheFile()); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -327,29 +335,9 @@ func (m *Manager) saveState() {
 	}
 }
 
-// writeFileAtomic is blocklist's: a temporary file in the same
-// directory, 0600, synced, then renamed over the old one.
-func writeFileAtomic(dir, name string, data []byte) (err error) {
-	f, err := os.CreateTemp(dir, "."+name+".*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err = f.Chmod(0o600); err == nil {
-		if _, err = f.Write(data); err == nil {
-			err = f.Sync()
-		}
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(dir, name))
+// writeFileAtomic writes name in dir crash-safely, 0600, keeping an
+// existing file's owner and group, as blocklist's and persist's writes
+// do (atomicfile.WriteFile, #80).
+func writeFileAtomic(dir, name string, data []byte) error {
+	return atomicfile.WriteFile(filepath.Join(dir, name), data, 0o600)
 }

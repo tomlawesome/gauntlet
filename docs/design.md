@@ -377,7 +377,7 @@ func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
 func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back; a 30 s resend cooldown doubling per send, 5 an hour (#83)
 func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool // new (#82): a passkey step-up begin, per account, in the account map; counted, never handed back by a finish
 func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time)
-func (l *LoginLimiter) ReserveFactorBegin(accountID string, knownBrowser bool, now time.Time) bool // new (#85): a second-step passkey begin, per account (a known browser's own budget when knownBrowser), in the account map; counted, never handed back by the step it starts
+func (l *LoginLimiter) ReserveFactorBegin(accountID string, knownBrowser bool, now time.Time) bool // new (#85): a second-step passkey begin (and a held sign-in's prove begin, #80), per account (a known browser's own budget when knownBrowser), in the account map; counted, never handed back by the step it starts
 func (l *LoginLimiter) ReleaseFactorBegin(accountID string, knownBrowser bool, now time.Time)
 type AccountLockouts interface {                                    // *Store implements it
     LoginLockedUntil(accountID string) time.Time
@@ -650,6 +650,10 @@ and code delivery.
   nobody touches a passkey for a sign-in that cannot complete;
   `login/factor`'s reservation stays the authority.
   `LoginLimiter.UnlockLogin` empties both budgets.
+- `login/prove/begin` does the same, on the same budgets (#80): a held
+  sign-in's ticket proves the credentials, but must not mint challenges
+  without limit for its life, nor ask for a passkey once the account is
+  locked or disabled. `login/prove`'s reservation stays the authority.
 
 - A sign-in held for a confirmation code proved every credential, so its
   attempt goes back to the login buckets in that request (a correct
@@ -1083,7 +1087,7 @@ every gauntlet session the account holds and forgets its remembered
 browsers -- all or nothing, no per-session admin route and no admin list
 of another account's sessions (owner, 2026-10-02). 409 for the caller's
 own account, 404 for none, 400 for a reason over 200 characters or holding a
-control or format character. Audited as `user.sessions_ended`. Once the
+control or format character or a line or paragraph separator. Audited as `user.sessions_ended`. Once the
 response is written, `Config.Notices` (or the deprecated `Config.Notify`)
 is called in its own goroutine with a 10-second deadline and `recover()`;
 an error or panic is one log line, and the response's `notified` means

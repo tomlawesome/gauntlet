@@ -525,6 +525,53 @@ func (g *Gate) isLastUsableAdminPasskey(user *gauntlet.User, credID []byte) bool
 	return false
 }
 
+// reservePasskeyBegin is what each begin of a passkey step that follows
+// the credentials does before a challenge exists: login/factor/begin's
+// (#85) and login/prove/begin's (#80). It refuses a banned address and a
+// locked account unless the browser is one the account remembers, and a
+// disabled account always, reading the lockout from user's record
+// without reserving anything; then it counts the begin on the account's
+// begin budget (gauntlet.LoginLimiter.ReserveFactorBegin), falling back
+// to a remembered browser's own budget when the ordinary one is full.
+// On a refusal it records the attempt, answers 429 and reports ok
+// false. onKnown says which budget took the begin, for
+// ReleaseFactorBegin when the server then fails to start the ceremony.
+func (g *Gate) reservePasskeyBegin(w http.ResponseWriter, r *http.Request, user *gauntlet.User, now time.Time) (onKnown, ok bool) {
+	// The cookie is read at most once, and only when a refusal turns on
+	// it, as reserveLogin reads it.
+	knownRead, known := false, false
+	isKnown := func() bool {
+		if !knownRead {
+			knownRead, known = true, g.isKnownBrowser(r, user.ID, now)
+		}
+		return known
+	}
+	res := loginReservation{address: g.cfg.ClientIP(r)}
+	_, banned := g.deps.Limiter.AddressBanned(res.address, now)
+	switch {
+	case banned && !isKnown():
+		res.refusal = gauntlet.SignInRateLimited
+	case user.LoginDisabled(now):
+		res.refusal = gauntlet.SignInDisabled
+	case user.LoginLockedUntil.After(now) && !isKnown():
+		// Read, not reserved: nothing to hand back. The finishing
+		// step's reservation stays the authority; this only spares the
+		// owner a passkey prompt that could not sign in.
+		res.refusal, res.lockedUntil = gauntlet.SignInLocked, user.LoginLockedUntil
+	}
+	if res.refusal == "" && !g.deps.Limiter.ReserveFactorBegin(user.ID, false, now) {
+		if onKnown = isKnown(); !onKnown || !g.deps.Limiter.ReserveFactorBegin(user.ID, true, now) {
+			res.refusal = gauntlet.SignInRateLimited
+		}
+	}
+	if res.refusal != "" {
+		g.recordSignIn(r, loginEvent(user, "", res.refusal, gauntlet.SignInMethodPasskey), res, now)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
+		return false, false
+	}
+	return onKnown, true
+}
+
 // -- POST /api/auth/login/factor/begin ------------------------------------
 
 // handleLoginFactorBegin starts the passkey half of the second login
@@ -580,37 +627,8 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The cookie is read at most once, and only when a refusal turns on
-	// it, as reserveLogin reads it.
-	knownRead, known := false, false
-	isKnown := func() bool {
-		if !knownRead {
-			knownRead, known = true, g.isKnownBrowser(r, user.ID, now)
-		}
-		return known
-	}
-	res := loginReservation{address: g.cfg.ClientIP(r)}
-	_, banned := g.deps.Limiter.AddressBanned(res.address, now)
-	switch {
-	case banned && !isKnown():
-		res.refusal = gauntlet.SignInRateLimited
-	case user.LoginDisabled(now):
-		res.refusal = gauntlet.SignInDisabled
-	case user.LoginLockedUntil.After(now) && !isKnown():
-		// Read, not reserved: nothing to hand back. login/factor's
-		// reservation stays the authority; this only spares the owner
-		// a passkey prompt that could not sign in.
-		res.refusal, res.lockedUntil = gauntlet.SignInLocked, user.LoginLockedUntil
-	}
-	onKnown := false
-	if res.refusal == "" && !g.deps.Limiter.ReserveFactorBegin(user.ID, false, now) {
-		if onKnown = isKnown(); !onKnown || !g.deps.Limiter.ReserveFactorBegin(user.ID, true, now) {
-			res.refusal = gauntlet.SignInRateLimited
-		}
-	}
-	if res.refusal != "" {
-		g.recordSignIn(r, loginEvent(user, "", res.refusal, gauntlet.SignInMethodPasskey), res, now)
-		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
+	onKnown, ok := g.reservePasskeyBegin(w, r, user, now)
+	if !ok {
 		return
 	}
 
