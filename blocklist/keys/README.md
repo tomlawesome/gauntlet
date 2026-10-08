@@ -6,7 +6,7 @@ It's a PEM `PUBLIC KEY` block (the standard public-key file format
 `openssl` and most tools read), as `pwlist keygen` writes it.
 
 A signature proves the list came from the holder of the private key and
-was not changed since. These public keys are compiled into gauntlet,
+was not changed since. These public keys (and only they) are compiled into gauntlet,
 and a list is accepted only when one of them signed it -- whether it
 is the copy built into a release or one an application downloads while
 running (with a `Refresher`).
@@ -40,7 +40,9 @@ once", step 1.
 
 ## Never put a private key in this folder
 
-Gauntlet reads only the `.pub` files here and skips everything else.
-But Git does not ignore other files in this folder, and the Go build
-copies the whole folder into every program built with gauntlet. A
-private key left here, even briefly, could be committed or shipped.
+Gauntlet embeds only the `*.pub` files here, so nothing else in this
+folder is compiled into a program built with gauntlet. The folder's
+`.gitignore` also keeps Git from tracking anything but `*.pub`,
+`README.md` and itself, so a private key left here by mistake is neither
+committed nor shipped. Still, keep it elsewhere: the ignore rule is a
+safety net, not a place to store one.

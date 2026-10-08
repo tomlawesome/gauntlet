@@ -659,7 +659,6 @@ const passkeyStartAgain = "start passkey sign-in again"
 // finish inside the window.
 func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, user *gauntlet.User, assertion json.RawMessage, res loginReservation, now time.Time) bool {
 	refuse := func(class problemClass, msg string) bool {
-		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodPasskey), res, now)
 		writeUnauthorized(w, class, msg)

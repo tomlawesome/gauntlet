@@ -72,12 +72,6 @@ type LoginLimiter struct {
 	lastAddressPressure   time.Time
 	addressPressureLogged bool
 
-	// resetPasses are the address-limit passes AllowAfterReset has
-	// handed out, keyed by resetPassKey. Bounded like the capped map:
-	// one is made only for an address key that map holds, and it goes
-	// once that key does or its password change leaves the window.
-	resetPasses map[string]resetPass
-
 	// wantLockout is the lockout state each account's record should
 	// carry, until syncLockout has written it: a lockout as one begins
 	// (with the count of lockouts, and the disable if this one reaches
@@ -215,7 +209,6 @@ func NewLoginLimiter(threshold int, window time.Duration) (*LoginLimiter, error)
 		attempts:     make(map[string][]time.Time),
 		accounts:     make(map[string][]time.Time),
 		addresses:    make(map[string]addressRecord),
-		resetPasses:  make(map[string]resetPass),
 		wantLockout:  make(map[string]pendingLockout),
 		mem:          memoryLockouts{states: make(map[string]lockoutState)},
 		secondFactor: make(map[string]secondFactorRun),
@@ -393,7 +386,6 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 	for key := range l.accounts {
 		l.pruneIn(l.accounts, key, now)
 	}
-	l.pruneResetPassesLocked(now)
 	target := evict.Target(maxLoginLimiterKeys)
 	if len(l.attempts) <= target {
 		return
@@ -1205,146 +1197,29 @@ func (l *LoginLimiter) syncLockout(rec lockoutRecorder, accountID string, now ti
 	l.mu.Unlock()
 }
 
-// resetPass is one entry in LoginLimiter.resetPasses: the password
-// change a pass was handed out for, whether an attempt holds it now,
-// and whether it has been used up.
-type resetPass struct {
-	address   string
-	changedAt time.Time
-	held      bool
-	ended     bool
-}
-
-func resetPassKey(addressKey, accountID string) string {
-	return addressKey + "\x00" + accountID
-}
-
-// AllowAfterReset reports whether an attempt on accountID from
-// addressKey may go ahead although addressKey is at its limit (Reserve
-// refused it), because the account's password was reset after that
-// address reached the limit (#32). It reserves nothing on addressKey;
-// the account's own counter (ReserveAccount) still applies in full.
+// Deprecated: AllowAfterReset always reports false. It was the reset
+// pass (#32): an account reset out of a lockout could sign in past its
+// address's full limit. That pass is retired (#86): a reset clears the
+// account's own count and lockout (#24) and leaves the address's limit
+// to run out like anyone else's, and a browser the account remembers
+// still gets past it on its own allowance (ReserveKnownBrowser, #44).
 //
-// A reset needs the server's command line or a code an admin issued, so
-// letting that account's next sign-in past the address limit gives an
-// attacker nothing they did not already have, while refusing it reads to
-// the operator as the reset having failed. The pass therefore holds for
-// that one account only -- other accounts tried from the address stay
-// refused -- and only when at least the threshold's worth of both the
-// address's attempts and the account's own in the window predate the
-// change: the change ended a lockout. An account changing its own
-// password while guesses at other names fill its address gets none.
-//
-// One attempt holds the pass at a time: AllowAfterReset hands it out
-// and refuses everyone else until the attempt hands it back
-// (ReleaseAfterReset) or uses it up (EndAfterReset: a session issued,
-// the right password for an account with a second factor, or a wrong
-// guess), so a burst of concurrent guesses gets one try, not one each.
-// A caller with a second step carries the owner through it itself (gate
-// does so in its pending login), so nobody can take the pass in
-// between. A later reset out of a lockout grants a fresh one; the
-// window ends it anyway.
-//
-// The change is read from lockouts as ReserveAccount reads it, so it
-// takes lockouts being the *Store itself (see lockoutRecorder), and a
-// reset made by a separate process counts once the store sees it. A
-// record still carrying a lockout gets no pass: a password change
-// clears the lockout in the same write, so a bump without that clear --
-// linking the admin to SSO -- is not a reset.
+// A caller that asks it after Reserve refused an attempt keeps the
+// refusal, which is the answer every other account at that address
+// gets; there is never a pass to hand back or use up, so
+// ReleaseAfterReset and EndAfterReset have nothing to do. Kept because
+// removing an exported method is an incompatible change, which
+// ADR-0002 allows only at a major version.
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool {
-	if lockouts == nil {
-		return false
-	}
-	lockedUntil, changed := readLockout(lockouts, accountID)
-	if !lockedUntil.IsZero() || changed.IsZero() || changed.After(now) {
-		return false
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := resetPassKey(addressKey, accountID)
-	// Checked before the counts: the account's first attempt under the
-	// pass drops its pre-change guesses (ReserveAccount), so an attempt
-	// after a handed-back pass no longer sees the lockout it ended.
-	if p, ok := l.resetPasses[key]; ok && p.changedAt.Equal(changed) {
-		if p.changedAt.Before(now.Add(-l.window)) {
-			delete(l.resetPasses, key) // no attempt in the window predates it
-			return false
-		}
-		if p.ended || p.held {
-			return false
-		}
-		p.held = true
-		l.resetPasses[key] = p
-		return true
-	}
-	if countBefore(l.pruneLocked(addressKey, now), changed) < l.threshold {
-		return false
-	}
-	cutoff := now.Add(-l.window)
-	var own []time.Time
-	for _, t := range l.accounts[loginBucket+accountID] {
-		if !t.Before(cutoff) {
-			own = append(own, t)
-		}
-	}
-	if countBefore(own, changed) < l.threshold {
-		return false
-	}
-	// Rare -- a full address and a reset inside one window -- so the
-	// sweep runs here too, not only when the capped map is full.
-	l.pruneResetPassesLocked(now)
-	l.resetPasses[key] = resetPass{address: addressKey, changedAt: changed, held: true}
-	return true
+	return false
 }
 
-// countBefore counts the attempts in entries made before t.
-func countBefore(entries []time.Time, t time.Time) int {
-	n := 0
-	for _, e := range entries {
-		if e.Before(t) {
-			n++
-		}
-	}
-	return n
-}
+// Deprecated: ReleaseAfterReset does nothing: AllowAfterReset hands out
+// no pass any more (#86), so there is none to hand back. Kept until a
+// major version (ADR-0002).
+func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) {}
 
-// ReleaseAfterReset hands back the pass AllowAfterReset gave accountID
-// at addressKey, unused: the attempt holding it has finished without a
-// session or a wrong guess -- a refusal by the account's own limit, a
-// storage error. A no-op once
-// EndAfterReset has used the pass up.
-func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := resetPassKey(addressKey, accountID)
-	if p, ok := l.resetPasses[key]; ok {
-		p.held = false
-		l.resetPasses[key] = p
-	}
-}
-
-// EndAfterReset uses up the pass AllowAfterReset gave accountID at
-// addressKey, if there is one: the sign-in it was for has finished, or
-// a guess under it was wrong.
-func (l *LoginLimiter) EndAfterReset(addressKey, accountID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := resetPassKey(addressKey, accountID)
-	if p, ok := l.resetPasses[key]; ok {
-		p.held, p.ended = false, true
-		l.resetPasses[key] = p
-	}
-}
-
-// pruneResetPassesLocked drops every pass that can no longer apply: its
-// password change has left the window, so no attempt in the window can
-// predate it, or its address has left the capped map.
-func (l *LoginLimiter) pruneResetPassesLocked(now time.Time) {
-	cutoff := now.Add(-l.window)
-	for key, p := range l.resetPasses {
-		if _, ok := l.attempts[p.address]; !ok || p.changedAt.Before(cutoff) {
-			delete(l.resetPasses, key)
-		}
-	}
-}
+// Deprecated: EndAfterReset does nothing: AllowAfterReset hands out no
+// pass any more (#86), so there is none to use up. Kept until a major
+// version (ADR-0002).
+func (l *LoginLimiter) EndAfterReset(addressKey, accountID string) {}

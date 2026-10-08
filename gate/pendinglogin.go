@@ -50,12 +50,9 @@ const pendingLoginCookieMaxAge = 5 * time.Minute
 type pendingLoginState struct {
 	UserID   string
 	IssuedAt time.Time
-	// AfterReset is set when the password step went past a full address
-	// limit on the account's reset pass and spent it (#32): the code step
-	// then skips the address limit too, rather than asking for a pass
-	// that anyone guessing from that address could take in between. Only
-	// the right password earns it; the account's own limit still applies.
-	AfterReset bool `json:",omitempty"`
+	// A cookie sealed before #86 may also carry "AfterReset", the reset
+	// pass's flag (#32): decoding ignores it, so the code step reserves
+	// on the address limit like any other.
 	// ID makes the pending login one-shot (ruling R2 on #20): 16 random
 	// bytes, hex, claimed in spentPendingLogins by the sign-in that
 	// completes it, so one correct password yields one session. A cookie
@@ -218,12 +215,12 @@ func (g *Gate) pendingLogin(w http.ResponseWriter, r *http.Request, now time.Tim
 // writes it -- called from handleLogin the moment a password checks out
 // against an account holding an active second factor, in place of
 // creating a session.
-func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, afterReset bool, now time.Time) error {
+func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, now time.Time) error {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		return fmt.Errorf("gate: generating pending login id: %w", err)
 	}
-	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, AfterReset: afterReset, ID: hex.EncodeToString(id)})
+	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, ID: hex.EncodeToString(id)})
 	if err != nil {
 		return err
 	}

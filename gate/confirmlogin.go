@@ -266,14 +266,12 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 		expired()
 		return
 	}
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodCode, false, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodCode, now)
 	if !ok {
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	if !confirmCodeMatches(req.Code, st.CodeHash) {
-		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInConfirmRefused, gauntlet.SignInMethodCode), res, now)
 		writeUnauthorized(w, classInvalidCredentials, "invalid confirmation code")
@@ -282,7 +280,6 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 	// One-shot: of two completions racing on one ticket, the loser is a
 	// replay and is told to sign in again, as completeLoginFactor's is.
 	if !spentConfirmLogins.Claim(st.ID, st.IssuedAt.Add(ConfirmCodeLifetime), now) {
-		g.endAfterReset(res)
 		expired()
 		return
 	}
@@ -297,7 +294,6 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 // place are remembered. It answers 200 with the account.
 func (g *Gate) completeHeldSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st confirmLoginState, action UnusualSignInAction, now time.Time) {
 	g.completeLogin(res, now)
-	g.endAfterReset(res)
 	g.clearConfirmLoginCookie(w)
 	place := g.placeOf(r, res.address)
 	_, signals := g.issueSignInSession(w, r, user.ID, place, st.Signals, st.Method, now)

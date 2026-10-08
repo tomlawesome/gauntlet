@@ -15,10 +15,11 @@ import (
 // The public keys a list must be signed by: every blocklist/keys/*.pub,
 // compiled in, so trust travels with the release and an application
 // has nothing to configure. A rotation is a commit to that directory
-// and a release (blocklist/keys/README.md). Other files there are
-// ignored.
+// and a release (blocklist/keys/README.md). Only *.pub is embedded, so
+// a stray file there -- a private key, say -- is never compiled into an
+// application (#87); the folder's .gitignore keeps it out of Git too.
 //
-//go:embed keys
+//go:embed keys/*.pub
 var keysFS embed.FS
 
 // trustedKeys is the keyring built from keysFS once. An error -- a

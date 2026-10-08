@@ -253,6 +253,33 @@ func TestCommittedKeysParse(t *testing.T) {
 	}
 }
 
+// Only public keys are compiled into an application (#87): anything
+// else in the folder -- the README, or a private key left there -- must
+// not be in the embedded tree.
+func TestEmbeddedKeysAreOnlyPublicKeys(t *testing.T) {
+	var files []string
+	err := fs.WalkDir(keysFS, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			files = append(files, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no public key embedded")
+	}
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".pub") {
+			t.Errorf("embedded %s: only *.pub may be compiled in", f)
+		}
+	}
+}
+
 // With no key committed -- this directory's state until the owner adds
 // the first one -- verification must refuse everything; and a list
 // signed by a key that is not committed is refused whatever is there.

@@ -106,11 +106,10 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 		writeUnauthorized(w, classSignInRequired, "sign in again")
 		return
 	}
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodResume, false, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodResume, now)
 	if !ok {
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	if ps != nil {
 		g.resumeWithPasskey(w, r, ps, user, res, req.Assertion, now)
@@ -125,7 +124,6 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		// Reservations stay claimed: that is what counts the failure.
-		g.endAfterReset(res)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInWrongPassword, gauntlet.SignInMethodResume), res, now)
 		writeUnauthorized(w, classInvalidCredentials, "incorrect password")
 		return
@@ -134,7 +132,6 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 	// check at Authenticate, say): a full sign-in takes it to that door.
 	if authed.MustChangePassword {
 		g.releaseLogin(res, now)
-		g.endAfterReset(res)
 		writeUnauthorized(w, classSignInRequired, "sign in again")
 		return
 	}
@@ -157,13 +154,11 @@ func (g *Gate) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) resumeWithPasskey(w http.ResponseWriter, r *http.Request, ps gauntlet.PasskeySignIn, user *gauntlet.User, res loginReservation, assertion json.RawMessage, now time.Time) {
 	dead := func() {
 		g.releaseLogin(res, now)
-		g.endAfterReset(res)
 		g.clearPasskeySignInCookie(w)
 		writeUnauthorized(w, classStepExpired, passkeyStartAgain)
 	}
 	if !g.passkeysReady() {
 		g.releaseLogin(res, now)
-		g.endAfterReset(res)
 		g.writePasskeysNotReady(w)
 		return
 	}
@@ -184,7 +179,6 @@ func (g *Gate) resumeWithPasskey(w http.ResponseWriter, r *http.Request, ps gaun
 		dead()
 		return
 	case signInAssertionRefused:
-		g.endAfterReset(res)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodResume), res, now)
 		writeUnauthorized(w, classInvalidCredentials, passkeyNotVerified)
 		return
@@ -213,12 +207,10 @@ func (g *Gate) finishResume(w http.ResponseWriter, r *http.Request, user *gauntl
 		// Resumed by another request, or ended, while the password was
 		// being checked.
 		g.releaseLogin(res, now)
-		g.endAfterReset(res)
 		writeUnauthorized(w, classSignInRequired, "sign in again")
 		return
 	}
 	g.releaseLogin(res, now)
-	g.endAfterReset(res)
 	g.setResumedSessionCookie(w, sess, now)
 	note := ""
 	if credential == gauntlet.SignInMethodPasskey {

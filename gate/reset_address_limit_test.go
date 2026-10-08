@@ -10,6 +10,11 @@ import (
 	"github.com/tomlawesome/gauntlet"
 )
 
+// A password reset clears the account's own count and lockout (#24) and
+// nothing on its address's limit: #32's pass past a full address is
+// retired (#86). A browser the account remembers still gets past that
+// limit on its own allowance (#44).
+
 // lockOutFromFixtureAddress spends the fixture's whole per-address
 // budget (5 per window, newTestGate's one client address) on wrong
 // passwords for username, which locks that account out too.
@@ -38,158 +43,100 @@ func loginStatus(t *testing.T, base, username, password string) int {
 	return resp.StatusCode
 }
 
-// #32: a locked-out account rescued by a password reset signs in from
-// the address its lockout came from at once, rather than being refused
-// by the per-address counter for the rest of the window.
-func TestResetLetsAccountPastAddressLimit(t *testing.T) {
-	t.Run("CLI SetPassword", func(t *testing.T) {
-		g, ts, _ := totpFixture(t)
-		lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
+// An account reset out of a lockout, signing in from the address the
+// lockout's guesses filled on a browser it does not remember, is
+// refused like anyone else there until the address's window has passed,
+// then gets in.
+func TestAResetAccountWaitsOutAFullAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reset func(t *testing.T, g *Gate, now time.Time) string
+	}{
+		{"CLI SetPassword", func(t *testing.T, g *Gate, now time.Time) string {
+			const newPW = "reset-by-cli-placeholder"
+			if err := g.deps.Users.SetPassword(totpBobUsername, newPW, now); err != nil {
+				t.Fatal(err)
+			}
+			return newPW
+		}},
+		{"reset code", func(t *testing.T, g *Gate, now time.Time) string {
+			_, code, err := g.deps.Users.IssueResetCode(totpBobID(t, g), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return code
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, ts, _ := totpFixture(t)
+			start := time.Now()
+			clock := &escalationClock{t: start}
+			g.cfg.Now = clock.now
+			lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
 
-		const newPW = "reset-by-cli-placeholder"
-		if err := g.deps.Users.SetPassword(totpBobUsername, newPW, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-		if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusOK {
-			t.Errorf("the new password after a CLI reset got %d, want 200", got)
-		}
-	})
-
-	t.Run("reset code", func(t *testing.T) {
-		g, ts, _ := totpFixture(t)
-		lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
-
-		_, code, err := g.deps.Users.IssueResetCode(totpBobID(t, g), time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := loginStatus(t, ts.URL, totpBobUsername, code); got != http.StatusOK {
-			t.Errorf("the reset code got %d, want 200", got)
-		}
-	})
+			clock.set(start.Add(time.Second))
+			password := tc.reset(t, g, clock.now())
+			if got := loginStatus(t, ts.URL, totpBobUsername, password); got != http.StatusTooManyRequests {
+				t.Errorf("the reset account at the full address got %d, want 429", got)
+			}
+			clock.set(start.Add(5*time.Minute + time.Second))
+			if got := loginStatus(t, ts.URL, totpBobUsername, password); got != http.StatusOK {
+				t.Errorf("the reset account once the address's window had passed got %d, want 200", got)
+			}
+		})
+	}
 }
 
-// The pass is the reset account's alone: every other name tried from
-// the full address -- another real account, or one that matches none --
-// is still refused, and the reset account's pass is used up by its
-// first sign-in, so a second one from that address is refused too.
-func TestResetPassLeavesOtherAccountsLimited(t *testing.T) {
+// A CLI reset keeps the browsers the account remembers, so the owner's
+// own browser signs in at the full address at once, while the same new
+// password from any other browser is refused.
+func TestAResetAccountsKnownBrowserPassesAFullAddress(t *testing.T) {
 	g, ts, _ := totpFixture(t)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
 
 	const newPW = "reset-by-cli-placeholder"
 	if err := g.deps.Users.SetPassword(totpBobUsername, newPW, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if got := loginStatus(t, ts.URL, "admin", "password-placeholder-1"); got != http.StatusTooManyRequests {
-		t.Errorf("another account's correct password from the full address got %d, want 429", got)
-	}
-	if got := loginStatus(t, ts.URL, "nobody", "password-placeholder-1"); got != http.StatusTooManyRequests {
-		t.Errorf("an unknown name from the full address got %d, want 429", got)
-	}
-	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusOK {
-		t.Fatalf("the reset account's new password got %d, want 200", got)
-	}
-	if got := loginStatus(t, ts.URL, "admin", "password-placeholder-1"); got != http.StatusTooManyRequests {
-		t.Errorf("another account after the reset account signed in got %d, want 429: the pass freed an address slot", got)
-	}
 	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusTooManyRequests {
-		t.Errorf("a second sign-in on the same pass got %d, want 429", got)
+		t.Errorf("the new password from an unknown browser at the full address got %d, want 429", got)
+	}
+	if got := signInFrom(t, bob, ts, totpBobUsername, newPW); got != http.StatusOK {
+		t.Errorf("bob's known browser at the full address after the reset got %d, want 200", got)
 	}
 }
 
-// A wrong guess under the pass uses it up: whoever is at the address
-// gets one try at the new password, not one per window.
-func TestResetPassEndsOnAWrongGuess(t *testing.T) {
-	g, ts, _ := totpFixture(t)
-	lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
-
-	const newPW = "reset-by-cli-placeholder"
-	if err := g.deps.Users.SetPassword(totpBobUsername, newPW, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if got := loginStatus(t, ts.URL, totpBobUsername, "wrong-password-placeholder"); got != http.StatusUnauthorized {
-		t.Fatalf("a wrong password under the pass got %d, want 401", got)
-	}
-	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusTooManyRequests {
-		t.Errorf("the new password after the pass was used up got %d, want 429", got)
-	}
-}
-
-// An account with a second factor needs two requests to sign in; the
-// pass covers both, and is used up once the session is issued.
-func TestResetPassCoversTheSecondFactorStep(t *testing.T) {
+// A pending-login cookie sealed before #86 may carry the pass's
+// "AfterReset" flag. It still opens, and the flag is ignored: the code
+// step is refused at a full address like any other.
+func TestAnOldPendingCookieAfterResetFlagIsIgnored(t *testing.T) {
 	g, ts, _ := totpFixture(t)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	secret, _, counter := totpEnrolAndConfirm(t, bob, ts)
-	lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
 
-	const newPW = "reset-by-cli-placeholder"
-	if err := g.deps.Users.SetPassword(totpBobUsername, newPW, time.Now()); err != nil {
+	now := time.Now()
+	old, err := pendingLoginCodec.seal(struct {
+		UserID     string
+		IssuedAt   time.Time
+		AfterReset bool
+		ID         string
+	}{totpBobID(t, g), now, true, newTestPendingID(t)})
+	if err != nil {
 		t.Fatal(err)
 	}
-	client := startTOTPLogin(t, ts, totpBobUsername, newPW)
-	resp := submitLoginFactor(t, client, ts, gauntlet.GenerateTOTPCode(secret, counter+1))
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("the code step after a reset got %d, want 200", resp.StatusCode)
+	if st, err := pendingLoginCodec.decode(old, now); err != nil || st.UserID != totpBobID(t, g) {
+		t.Fatalf("a cookie carrying the old flag decoded to %+v, %v; want bob's pending login", st, err)
 	}
-	if !sessionAuthenticated(t, client, ts) {
-		t.Error("the code step after a reset issued no session")
-	}
-	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusTooManyRequests {
-		t.Errorf("a second sign-in after the pass's session got %d, want 429", got)
-	}
-}
 
-// A wrong guess at the account from the same address, sent while the
-// owner is reading their code, cannot take the pass away: the password
-// step spends it, and the pending login it issues carries the owner
-// through the code step.
-func TestResetPassCannotBeTakenBetweenLoginSteps(t *testing.T) {
-	g, ts, _ := totpFixture(t)
-	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
-	secret, _, counter := totpEnrolAndConfirm(t, bob, ts)
-	lockOutFromFixtureAddress(t, ts.URL, totpBobUsername)
-
-	const newPW = "reset-by-cli-placeholder"
-	if err := g.deps.Users.SetPassword(totpBobUsername, newPW, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	client := startTOTPLogin(t, ts, totpBobUsername, newPW)
-	if got := loginStatus(t, ts.URL, totpBobUsername, "wrong-password-placeholder"); got != http.StatusTooManyRequests {
-		t.Errorf("a guess between the owner's two steps got %d, want 429", got)
-	}
-	resp := submitLoginFactor(t, client, ts, gauntlet.GenerateTOTPCode(secret, counter+1))
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("the owner's code step after an interleaved guess got %d, want 200", resp.StatusCode)
-	}
-}
-
-// Only a reset that ends the account's own lockout earns the pass. An
-// account that was never locked out, changing its own password while
-// guesses at other names fill the shared address, stays behind the
-// address limit like everyone else there.
-func TestOwnPasswordChangeGetsNoAddressPass(t *testing.T) {
-	_, ts, _ := totpFixture(t)
-	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
-	// A voluntary password change is not an enrolment route, so an
-	// account stuck at the forced-enrolment door cannot reach it either
-	// (#49, docs/design.md §1.6) -- bob needs a factor first to stand in
-	// for an ordinary, already-enrolled account here.
-	totpEnrolAndConfirm(t, bob, ts)
+	// Guesses at a name that is no account fill the address without
+	// locking bob out.
 	lockOutFromFixtureAddress(t, ts.URL, "nobody-placeholder")
-
-	const newPW = "changed-by-bob-placeholder"
-	resp := postJSON(t, bob, ts.URL+"/api/auth/password",
-		changePasswordRequest{CurrentPassword: totpBobPassword, NewPassword: newPW})
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("changing bob's own password got %d, want 200", resp.StatusCode)
-	}
-	if got := loginStatus(t, ts.URL, totpBobUsername, newPW); got != http.StatusTooManyRequests {
-		t.Errorf("bob's login after changing his own password at a full address got %d, want 429", got)
+	resp, body := postRaw(t, ts.URL+"/api/auth/login/factor",
+		loginFactorRequest{Code: gauntlet.GenerateTOTPCode(secret, counter+1)},
+		&http.Cookie{Name: pendingLoginCookieName, Value: old})
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("the code step on an old cookie carrying the flag at a full address got %d (%s), want 429", resp.StatusCode, body)
 	}
 }
 
