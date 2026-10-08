@@ -972,6 +972,27 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(admin, u, call{method: "POST", path: "/api/auth/users/no-such-id/unlock"}, 404, nil)
 	c.do(anon, u, call{method: "POST", path: "/api/auth/users/" + bobID + "/unlock"}, 401, nil)
 
+	// An admin allowing an account's next sign-in (#81): the caller's
+	// password for another account, and nothing beside it; password and
+	// a current second factor for the caller's own. The 401 is driven
+	// without a session: a wrong password here would spend the admin's
+	// re-check budget the step-ups below still need (gate's own tests
+	// drive that one).
+	allow := func(id string) string { return "/api/auth/users/" + id + "/allow-sign-in" }
+	var allowed allowSignInResponse
+	c.do(admin, u, call{method: "POST", path: allow(bobID), body: passwordRequest{adminPass}}, 200, &allowed)
+	if allowed.Username != "bob" || allowed.AllowedUntil.IsZero() {
+		t.Fatalf("allow-sign-in = %+v, want bob's with a window", allowed)
+	}
+	c.do(admin, u, call{method: "POST", path: allow(bobID), body: unlockSelfRequest{Password: adminPass, Code: "123456"}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: allow(bobID), body: "{", bad: true}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: allow(adminID), body: unlockSelfRequest{Password: adminPass}}, 400, nil)
+	c.do(admin, u, call{method: "POST", path: allow(adminID), body: unlockSelfRequest{Password: adminPass, Code: adminRecovery[3]}}, 200, &allowed)
+	c.do(admin, u, call{method: "POST", path: allow("no-such-id"), body: passwordRequest{adminPass}}, 404, nil)
+	c.do(admin, u, call{method: "POST", path: allow(bobID), body: passwordRequest{adminPass}, noCSRF: true}, 403, nil)
+	c.do(vic, u, call{method: "POST", path: allow(bobID), body: passwordRequest{bobPass}}, 403, nil)
+	c.do(anon, u, call{method: "POST", path: allow(bobID), body: passwordRequest{adminPass}}, 401, nil)
+
 	// The admin's sign-out of another account (#53): every status but
 	// 503, which the setup section above drives.
 	var loggedOut adminLogoutAllResponse

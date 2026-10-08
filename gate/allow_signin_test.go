@@ -330,6 +330,23 @@ func TestAllowSignInRefusals(t *testing.T) {
 			t.Error("a non-admin recorded an allowance")
 		}
 	})
+	t.Run("another account, a second factor in the body", func(t *testing.T) {
+		g, ts, admin, id := stepUpFixture(t)
+		g.deps.Limiter = mustNewLoginLimiter(t, 1, time.Minute)
+		for _, body := range []any{
+			unlockSelfRequest{Password: testAdminPassword, Code: "123456"},
+			map[string]any{"password": testAdminPassword, "assertion": map[string]any{"id": "x"}},
+		} {
+			wantProblem(t, allowSignIn(t, admin, ts, id, body), http.StatusBadRequest, classInvalidRequest)
+		}
+		if allowed(g, id) {
+			t.Error("a refused request recorded an allowance")
+		}
+		// Refused before the password is checked: nothing counted.
+		if status, body := readAll(t, allowSignIn(t, admin, ts, id, adminStepUpRequest{Password: testAdminPassword})); status != http.StatusOK {
+			t.Errorf("then the password alone = %d %s, want 200", status, body)
+		}
+	})
 	t.Run("unknown account", func(t *testing.T) {
 		_, ts, admin, _ := stepUpFixture(t)
 		wantProblem(t, allowSignIn(t, admin, ts, "no-such-id", adminStepUpRequest{Password: testAdminPassword}), http.StatusNotFound, classNotFound)

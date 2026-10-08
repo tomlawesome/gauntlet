@@ -2145,6 +2145,82 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/users/{id}/allow-sign-in:
+    post:
+      operationId: allowSignIn
+      summary: Allow an account's next sign-in for ten minutes (admin)
+      description: |
+        Allows the account's next sign-in from any browser or place for
+        ten minutes (#81, ADR-0009 decision 11): while the window is
+        live, a sign-in the unusual-sign-in policy would hold for a code
+        or a passkey, or refuse, completes instead, and its browser,
+        country and place are remembered as any completed sign-in's are.
+        Nothing is held: the person signs in again, normally. A repeat
+        call starts a fresh ten minutes and answers `200`.
+
+        The body is `UnlockSelfRequest` either way. For another account
+        it is the calling admin's own `password` alone (a rate-limited
+        re-check, #72): a missing or wrong one is `401` and counts
+        against the caller's re-check budget (`429` once it is spent),
+        and a `code` or `assertion` beside it is `400`. For the caller's
+        own account it is the password and exactly one of `code` and
+        `assertion`, as own unlock takes (#82): the password missing, or
+        neither or both of the two, is `400`; any of them wrong is `401`
+        and counts the same way. A caller with no local password is
+        `409`.
+
+        The window ends at the clock, at the account's next completed
+        sign-in from any browser, and wherever its remembered browsers
+        are cleared (a reset code, sign out everywhere). It changes no
+        password, second factor or session, and lifts no lockout or
+        disable: a locked or disabled account is still refused at the
+        password step, so unlock it as well. An account that signs in
+        only through single sign-on needs nothing local: its callback
+        completes inside the window.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        description: |
+          Another account: `password` only. The caller's own: `password`
+          and exactly one of `code` and `assertion`.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnlockSelfRequest"
+      responses:
+        "200":
+          description: Allowed; the window ends at `allowedUntil` unless a completed sign-in spends it first.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, allowedUntil]
+                properties:
+                  username:
+                    type: string
+                  allowedUntil:
+                    type: string
+                    format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/StepUpRefused"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupOrNotPersisted"
+
   /api/auth/users/{id}/logout-all:
     post:
       operationId: adminLogoutAll
@@ -3001,7 +3077,7 @@ components:
       type: object
       additionalProperties: false
       required: [password]
-      description: The password, and exactly one of `code` and `assertion`.
+      description: The password, and exactly one of `code` and `assertion` -- except `allow-sign-in` for another account, which takes the password alone (#81).
       properties:
         password:
           type: string

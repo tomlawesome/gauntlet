@@ -1,7 +1,6 @@
 package gate
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -28,13 +27,14 @@ type allowSignInResponse struct {
 // stands down once, before they sign in again. Nothing is held and
 // released; the person signs in normally inside the window.
 //
-// For another account the body is the caller's password
-// (adminStepUpRequest, recheckAdminPassword), as reset-password takes
-// (#72): the route hands out access to an account, so a stolen session
-// cookie alone must not do it. For the caller's own account it is the
-// password and a current second factor, code or passkey
-// (unlockSelfRequest, recheckStepUp), as own unlock takes (#82): the
-// lone admin with a new laptop, phone in hand, is who needs it.
+// The body is unlockSelfRequest either way. For another account it is
+// the caller's password alone (recheckAdminPassword), as reset-password
+// takes (#72): the route hands out access to an account, so a stolen
+// session cookie alone must not do it; a code or assertion beside it is
+// 400. For the caller's own account it is the password and a current
+// second factor, code or passkey (recheckStepUp), as own unlock takes
+// (#82): the lone admin with a new laptop, phone in hand, is who needs
+// it.
 //
 // It writes one field (gauntlet.Store.AllowNextSignIn), replacing any
 // earlier window, so a repeat call starts a fresh ten minutes. It
@@ -55,25 +55,25 @@ func (g *Gate) handleAllowSignIn(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
+	// One body type for both cases (unlockSelfRequest): another
+	// account's takes the password alone, and a second factor sent with
+	// it is refused rather than ignored, as an unknown field would be.
+	var req unlockSelfRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
 	now := g.now()
 	caller := UserFromContext(r)
 	own := caller != nil && caller.ID == id
-	var selfAssertion json.RawMessage
 	if own {
-		var req unlockSelfRequest
-		if err := g.decodeJSONBody(w, r, &req); err != nil {
-			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
-			return
-		}
 		if !g.recheckStepUp(w, r, caller, req.Password, req.Code, req.Assertion, now,
 			"allowing your own next sign-in needs your password and either a code from your authenticator app or a recovery code, or your passkey (password, code or assertion)") {
 			return
 		}
-		selfAssertion = req.Assertion
 	} else {
-		var req adminStepUpRequest
-		if err := g.decodeJSONBody(w, r, &req); err != nil {
-			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		if req.Code != "" || len(req.Assertion) > 0 {
+			writeProblem(w, http.StatusBadRequest, classInvalidRequest, "allowing another account's next sign-in takes your password only (no code or assertion)", nil)
 			return
 		}
 		if !g.recheckAdminPassword(w, r, req.Password, now) {
@@ -98,7 +98,7 @@ func (g *Gate) handleAllowSignIn(w http.ResponseWriter, r *http.Request) {
 	detail := fmt.Sprintf("next sign-in allowed until %s from any browser or place; password, second factors, sessions, lockout and disable unchanged",
 		until.Format(time.RFC3339))
 	if own {
-		detail += "; own account, password and " + stepUpFactor(selfAssertion) + " re-entered"
+		detail += "; own account, password and " + stepUpFactor(req.Assertion) + " re-entered"
 	}
 	by := auditActor(r)
 	g.audit(r, by, "user.sign_in_allowed", target.Username, detail)
