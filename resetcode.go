@@ -57,6 +57,13 @@ const ResetCodeTTL = 24 * time.Hour
 // LinkOIDCIdentity's doc comment sets out.
 var ErrNoLocalPassword = errors.New("gauntlet: this account signs in through its identity provider, so there is no local password to reset")
 
+// ErrResetDuringChange is returned by SetPassword when an admin reset
+// (IssueResetCode) was issued for the account while the change was
+// being checked and hashed. The reset stands and the change is not
+// saved: overwriting it would kill the code the admin is reading out.
+// The owner signs in with that code and sets the password then.
+var ErrResetDuringChange = errors.New("gauntlet: an administrator reset this account's password while it was being changed, so the change was not saved -- sign in with the code they give you")
+
 // NormaliseResetCode turns whatever a person typed into the canonical
 // form a stored hash was computed over: upper case, with the dashes and
 // spaces they may have copied (or added themselves) removed.

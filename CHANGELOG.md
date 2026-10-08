@@ -71,6 +71,11 @@ Low-severity findings from the v0.3.0 audit (#80):
   refuses an account that already has one, or has one on hold, before
   minting the ten recovery codes, rather than hashing all ten and
   throwing them away.
+- An admin reset issued while the owner's own password change was still
+  being checked is no longer overwritten by it (the code the admin read
+  out never worked). The change is refused instead: `POST
+  /api/auth/password` answers `409 conflict` and saves nothing, and
+  `Store.SetPassword` returns the new `ErrResetDuringChange`. Additive.
 
 ## [0.3.0] - 2026-10-08
 

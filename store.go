@@ -2052,10 +2052,26 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 // session issued before this reset (see User.SessionCutoff) -- a CLI
 // tool runs in a different process from the live server, so it has no
 // way to reach into that server's in-memory SessionStore directly.
+//
+// An admin reset (IssueResetCode) issued while the new password is
+// being checked and hashed wins: SetPassword then saves nothing and
+// returns ErrResetDuringChange.
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	if passwordTooShort(newPassword) {
 		return ErrPasswordTooShort
 	}
+	// The account's reset state as this change starts. The breach
+	// check and the hash below take from a tenth of a second to
+	// seconds, unlocked, and an admin reset issued in that time must
+	// win (#80): see ErrResetDuringChange.
+	s.reloadIfStale()
+	s.mu.RLock()
+	var resetHash, spentHash string
+	if u, ok := s.byID[s.byName[strings.ToLower(username)]]; ok {
+		resetHash, spentHash = u.ResetCodeHash, u.ResetCodeSpentHash
+	}
+	s.mu.RUnlock()
+
 	breachPending, err := s.checkNewPassword(username, newPassword)
 	if err != nil {
 		return err
@@ -2078,6 +2094,13 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 		u, ok := st.byID[st.byName[strings.ToLower(username)]]
 		if !ok {
 			return ErrUserNotFound
+		}
+		// A code issued since the read above -- live, or already spent
+		// by a sign-in -- is an admin reset this change must not undo.
+		// A change made from the code's own sign-in read that code as
+		// spent, so it still matches.
+		if u.ResetCodeHash != resetHash || u.ResetCodeSpentHash != spentHash {
+			return ErrResetDuringChange
 		}
 		u.PasswordHash = hash
 		u.PasswordChangedAt = now

@@ -1167,7 +1167,9 @@ paths:
         sign in again through the provider first.
 
         A `newPassword` the same as the current password is `400`, under a
-        forced change too.
+        forced change too. An administrator's reset that lands while the
+        change is being checked wins: the change is `409` and saves
+        nothing, and the owner signs in with the reset code (#80).
 
         A new password is refused with `400`, and a plain-text reason, when
         it is under 8 characters; on the common-password list, in any
