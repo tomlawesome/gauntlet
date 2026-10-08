@@ -369,9 +369,9 @@ const AddressBanFailures = 100; const AddressBanDuration = 24 * time.Hour       
 func (l *LoginLimiter) AddressBanned(address string, now time.Time) (until time.Time, banned bool) // new (#70): memory only; IPv6 per /64
 func (l *LoginLimiter) RecordAddressFailure(address string, now time.Time) (banStarted bool)       // new (#70): true once per ban
 func AddressBanGroup(address string) string                                                       // new (#70): the key an address is counted under
-func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
-func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
-func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
+func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // deprecated (#86): always false; #32's pass is retired
+func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) // deprecated (#86): does nothing
+func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)     // deprecated (#86): does nothing
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
 func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back
@@ -489,7 +489,7 @@ factor's 5, the 100 and the 24 hours are fixed):
 | Wrong password or code for one account | 5 in 5 minutes | locked for 5 minutes, then 15, then 45, then 1 hour each time |
 | Failures in a row on one account | 50 (`MaxConsecutiveLoginFailures`), about 8 hours of lockouts | local sign-in disabled for 24 hours (`LoginDisableDuration`), or until an admin unlocks it |
 | Failed second-factor steps in a row | 5 | the password must be changed, and every session on the account ends |
-| Failed attempts from one address (a right one does not count) | 5 in 5 minutes | `429 rate-limited` until the window passes |
+| Failed attempts from one address (a right one does not count) | 5 in 5 minutes | `429 rate-limited` until the window passes; a password reset does not lift it (#86) |
 | Failed sign-ins from one address | 100 in 24 hours (`AddressBanFailures`) | the address is banned for 24 hours (`AddressBanDuration`) |
 | Codes sent for one account | 5 in 5 minutes, for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
 | Passkey step-ups started by one account (#82) | 5 in 5 minutes, counted and never refunded | `429 rate-limited`, no challenge; the re-check budget is untouched |
@@ -597,32 +597,35 @@ together in one save, and they survive a restart as on the `*Store`.
   record still holds it, and an outstanding code stops working once its
   disable lapses.
 
-**After a reset** (#24, #32):
+**After a reset** (#24, #86):
 
 - A new password or reset code ends the lockout, and guesses from before
   it stop counting (#24). Linking the admin to SSO, which ends its
   sessions but keeps its password, does not.
-- The reset account also gets past the per-address limit (#32; owner,
-  2026-10-01: a reset needs the server's command line or an
-  admin-issued code, so this gives an attacker nothing). Only that
-  account gets the pass, and only when the address and the account both
-  reached their limits before the reset. (The reset ended a lockout, so
-  an account that only changed its own password gets nothing.) It is one
-  attempt at a time, and only until its sign-in issues a session or a
-  password is wrong (`AllowAfterReset`, `ReleaseAfterReset`,
-  `EndAfterReset`).
-- For an account with a second factor, the right password spends the
-  pass, and the pending login carries the code step past the address
-  limit, so a guess sent in between cannot take it. The account's own
-  limit still applies. Other names tried from that address stay
-  refused.
+- The address's limit is left alone: someone reset within five minutes
+  of the wrong guesses, on a browser the account does not remember,
+  waits out that address's window like anyone else there. A browser the
+  account remembers still gets past it on its own allowance (#44); a CLI
+  reset keeps those browsers, a reset code forgets them.
+- *Superseded:* #32 (owner, 2026-10-01) let the reset account past a
+  full address limit, one attempt at a time, carried through the
+  pending login to the code step. Retired by #86 (owner, 2026-10-08): it
+  was the last reservation on the login buckets that spanned requests,
+  and no standard or comparable product exempts a reset account from a
+  per-address limit (SP 800-63B-4 §3.2.2, the OWASP authentication and
+  forgot-password cheat sheets, Entra, Okta, Auth0, Keycloak, GitLab).
+  `AllowAfterReset` now always reports false, and `ReleaseAfterReset`
+  and `EndAfterReset` do nothing; a pending-login cookie still carrying
+  its flag is accepted and the flag ignored.
 - Re-checking a signed-in caller's own password has its own per-account
   budget, memory only.
 
 **One rule for every budget** (#84, owner 2026-10-08). A reservation on
 the login buckets (address, unknown name, account) lives and dies inside
 one request. Anything that must be bounded across requests gets a
-bucket of its own that is counted, never refunded: challenge minting
+bucket of its own that is counted, never refunded, without exception
+(#32's reset pass, the last one that spanned requests, is retired,
+#86): challenge minting
 (`passkey-begin:` per address for the login page's passkey sign-in,
 `passkey-stepup-begin:` per account for the passkey step-up, #82, and
 `passkey-factor-begin:` per account for the passkey second step, #85)
@@ -1888,8 +1891,10 @@ once G4 is tagged.
   `GET /api/*` answers 401 without a session and 200 with one, and an API
   token reaches `GET /api/alerts` but not `/api/auth/users`.
 - **B3 CLI `birdcage user`.** *Done when:* `reset-password` against a
-  live server is honoured on the next request without restart --
-  including from an address the lockout's guesses filled (#32).
+  live server is honoured on the next request without restart; from
+  the address the lockout's guesses filled, once that address's
+  five-minute window has passed (#86), or at once from a browser the
+  account remembers (#44).
 - **B4 Frontend: login, register, change-password, TOTP enrolment,
   recovery codes.** *Done when:* a fresh install can be set up and signed
   into from the browser with a second factor, screenshots in the MR.

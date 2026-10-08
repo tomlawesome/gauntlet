@@ -149,14 +149,12 @@ func (g *Gate) handleLoginProve(w http.ResponseWriter, r *http.Request) {
 		g.writePasskeysNotReady(w)
 		return
 	}
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodPasskey, false, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodPasskey, now)
 	if !ok {
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	refuse := func(class problemClass, msg string) {
-		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInConfirmRefused, gauntlet.SignInMethodPasskey), res, now)
 		writeUnauthorized(w, class, msg)
@@ -191,7 +189,6 @@ func (g *Gate) handleLoginProve(w http.ResponseWriter, r *http.Request) {
 	// One-shot, as confirm's: of two completions racing on one ticket,
 	// the loser is a replay and is told to sign in again.
 	if !spentConfirmLogins.Claim(st.ID, st.IssuedAt.Add(ConfirmCodeLifetime), now) {
-		g.endAfterReset(res)
 		g.clearConfirmLoginCookie(w)
 		writeUnauthorized(w, classStepExpired, "sign in again")
 		return

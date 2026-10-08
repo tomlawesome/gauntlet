@@ -295,7 +295,7 @@ func TestUnknownUsernameKeyIsBounded(t *testing.T) {
 	reserve := func(username, address string) (loginReservation, bool) {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
 		req.Header.Set("X-Test-Address", address)
-		return g.reserveLogin(httptest.NewRecorder(), req, "", username, gauntlet.SignInMethodPassword, false, g.now())
+		return g.reserveLogin(httptest.NewRecorder(), req, "", username, gauntlet.SignInMethodPassword, g.now())
 	}
 
 	short, ok := reserve("someone", "192.0.2.100")

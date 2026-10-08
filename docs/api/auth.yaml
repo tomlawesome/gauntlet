@@ -230,9 +230,8 @@ paths:
       summary: Sign in with username and password
       description: |
         Rate-limited per client address and per account; only a success
-        releases the attempt. An account whose password was reset after
-        its address reached the limit gets past that address limit (not
-        its own) until its next sign-in finishes or a guess fails (#32).
+        releases the attempt. A password reset clears the account's own
+        count, not the address's (#86).
         A browser the account remembers (the known-browser cookie) keeps
         an allowance of its own past either limit (#44).
         On an account with no second factor this

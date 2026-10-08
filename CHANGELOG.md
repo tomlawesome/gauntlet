@@ -34,6 +34,22 @@ All notable changes to this project are documented in this file.
   into every app. It now embeds `keys/*.pub` only, and the folder has a
   `.gitignore` that lets Git track just `*.pub`, `README.md` and itself.
 
+- **A password reset no longer lets the account past its address's
+  limit** (#86, retiring #32's pass). The pass was the last thing on the
+  sign-in limits that carried across requests: the pending-login cookie
+  let the code step skip the address limit. A reset still ends the
+  account's lockout and stops its earlier wrong guesses counting (#24),
+  and a browser the account remembers still signs in past a full
+  address on its own allowance (#44). What changes: someone reset within
+  five minutes of the wrong guesses, signing in from the same address on
+  a browser the account does not remember, gets `429 rate-limited` ("too
+  many attempts, try again later") until five minutes have passed since
+  those guesses, then signs in as normal. A pending-login cookie issued
+  before the upgrade that still carries the old flag is accepted, and
+  the flag is ignored. `LoginLimiter.AllowAfterReset` now always reports
+  false, and `ReleaseAfterReset` and `EndAfterReset` do nothing; all
+  three are deprecated and kept until a major version (ADR-0002).
+
 ### Changed
 
 - CI: a release is cut on `main` only (#88): release:version and

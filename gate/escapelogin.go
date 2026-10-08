@@ -242,14 +242,12 @@ func (g *Gate) handleLoginEscape(w http.ResponseWriter, r *http.Request) {
 		expired()
 		return
 	}
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodCode, false, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodCode, now)
 	if !ok {
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	if !escapeCodeMatches(req.Code, st.CodeHash) {
-		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInEscapeRefused, gauntlet.SignInMethodCode), res, now)
 		writeUnauthorized(w, classInvalidCredentials, "invalid escape code")
@@ -258,12 +256,10 @@ func (g *Gate) handleLoginEscape(w http.ResponseWriter, r *http.Request) {
 	// One-shot: of two completions racing on one ticket, the loser is a
 	// replay and is told to sign in again, as confirm's is.
 	if !spentEscapeLogins.Claim(st.ID, st.IssuedAt.Add(EscapeCodeLifetime), now) {
-		g.endAfterReset(res)
 		expired()
 		return
 	}
 	g.completeLogin(res, now)
-	g.endAfterReset(res)
 	g.clearEscapeLoginCookie(w)
 	place := g.placeOf(r, res.address)
 	notice := g.completeSignIn(w, r, user, res, st.Method, place,

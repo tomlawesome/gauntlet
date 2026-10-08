@@ -217,11 +217,9 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	// The begin step's reservation (passkeyBeginKey) is kept until this
 	// completes. res is the address alone until the user handle names an
 	// account, then the address's and the account's, as reserveLogin
-	// takes them. The deferred release is the pass past the address limit
-	// a reservation may hold, handed back however this returns.
+	// takes them.
 	address := g.cfg.ClientIP(r)
 	res := loginReservation{ipKey: "ip:" + address, address: address}
-	defer func() { g.releaseAfterReset(res) }()
 	var (
 		named    *gauntlet.User // the account the handle named, once admitted
 		reserved bool
@@ -233,7 +231,7 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 			return nil, false
 		}
 		admitted := false
-		res, admitted = g.reserveLogin(w, r, u.ID, u.Username, gauntlet.SignInMethodPasskeyAlone, false, now)
+		res, admitted = g.reserveLogin(w, r, u.ID, u.Username, gauntlet.SignInMethodPasskeyAlone, now)
 		if !admitted {
 			limited = true
 			return nil, false
@@ -255,7 +253,6 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	// no_such_user. A dead ceremony with no account named checked no
 	// credential, so records nothing.
 	refuse := func(class problemClass, msg string, record bool) {
-		g.endAfterReset(res)
 		switch {
 		case reserved && record:
 			g.recordSignIn(r, loginEvent(named, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodPasskeyAlone), res, now)
@@ -293,13 +290,11 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 		// than completed; nothing completed, so the account's count is
 		// not reset.
 		g.releaseLogin(res, now)
-		g.endAfterReset(res)
 		out, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPasskeyAlone, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
 		return
 	}
 	g.completeLogin(res, now)
-	g.endAfterReset(res)
 	// The session this browser already held for the account ends here,
 	// as for every sign-in (ASVS 7.2.4; see revokeReplacedSession).
 	notice := g.completeSignIn(w, r, user, res, gauntlet.SignInMethodPasskeyAlone, place, verdict, now)
