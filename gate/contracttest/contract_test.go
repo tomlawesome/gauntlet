@@ -13,6 +13,7 @@ package contracttest
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -379,6 +380,8 @@ func contractAdminPasskey(t *testing.T, c *contractChecker) {
 	if state.MustEnrolPasskey {
 		t.Errorf("session after registering a passkey = %+v, want mustEnrolPasskey false", state)
 	}
+	// The admin's only usable passkey cannot be removed by its owner.
+	c.do(admin, u, call{method: "DELETE", path: "/api/auth/passkeys/" + base64.RawURLEncoding.EncodeToString(fake.CredentialID()), body: passwordRequest{adminPass}}, 409, nil)
 	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, nil)
 
 	// A new admin is created held for a passkey, and the list says so.

@@ -1580,7 +1580,13 @@ paths:
         Password-gated (rate-limited re-check). When this leaves the
         account with no second factor, its recovery codes are dropped,
         every session on it ends, this one included, and `signedOut` is
-        true.
+        true. While the application requires every admin to hold a
+        passkey (#82), an admin's own last passkey usable at this address
+        is refused with `409` class `conflict` ("register another passkey
+        first"), before the password is checked, so the refusal costs no
+        re-check; a stale passkey is always removable, and another
+        admin's `DELETE /api/auth/users/{id}/passkeys` stays the way back
+        for a lost one.
       parameters:
         - $ref: "#/components/parameters/PasskeyID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -1605,6 +1611,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":

@@ -2385,3 +2385,110 @@ func TestPasskeysAdminClearWithNothingToClearChangesNothing(t *testing.T) {
 		t.Error("bilbo was signed out by a clear that removed nothing")
 	}
 }
+
+// -- Removing an admin's last usable passkey (#82 decision 3) -----------
+
+// deletePasskey sends DELETE /api/auth/passkeys/{id} for fake's
+// credential with password, and returns the status and body.
+func deletePasskey(t *testing.T, client *http.Client, ts *httptest.Server, fake *passkeytest.FakeAuthenticator, password string) (int, string) {
+	t.Helper()
+	id := base64.RawURLEncoding.EncodeToString(fake.CredentialID())
+	return readAll(t, deleteJSON(t, client, ts.URL+passkeysPath+"/"+id, passkeyDeleteRequest{Password: password}))
+}
+
+// An admin cannot delete the one passkey that signs the account in
+// here: 409 before the password is checked, so it costs no re-check and
+// a wrong password changes nothing. With a second passkey the first is
+// deletable; a stale passkey always is.
+func TestAdminCannotDeleteTheirLastUsablePasskey(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+	stale := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	g.deps.Passkeys = mustRelyingParty(t, "https://new-passkeys.example.org")
+	only := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	u, _ := g.deps.Users.ByUsername("admin")
+
+	for _, password := range []string{doorTestPassword, "wrong-password-placeholder", "wrong-password-placeholder"} {
+		status, body := deletePasskey(t, admin, ts, only, password)
+		if status != http.StatusConflict || !strings.Contains(body, "register another passkey first") || decodeProblem(t, []byte(body)).Type != problemTypeBase+classConflict.anchor {
+			t.Errorf("deleting the last usable passkey = %d %s, want 409 conflict asking for another passkey first", status, body)
+		}
+	}
+	for i := range 5 {
+		if !g.deps.Limiter.ReserveRecheck(u.ID, time.Now()) {
+			t.Fatalf("re-check reservation %d refused: the 409s spent the budget", i+1)
+		}
+		g.deps.Limiter.ReleaseRecheck(u.ID, time.Now())
+	}
+	if n := storedPasskeys(g, u.ID); n != 2 {
+		t.Fatalf("admin holds %d passkeys after the refusals, want 2", n)
+	}
+
+	if status, body := deletePasskey(t, admin, ts, stale, doorTestPassword); status != http.StatusOK {
+		t.Errorf("deleting a stale passkey = %d %s, want 200", status, body)
+	}
+	second := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	if status, body := deletePasskey(t, admin, ts, only, doorTestPassword); status != http.StatusOK {
+		t.Errorf("deleting one of two usable passkeys = %d %s, want 200", status, body)
+	}
+	if status, body := deletePasskey(t, admin, ts, second, doorTestPassword); status != http.StatusConflict {
+		t.Errorf("deleting the remaining usable passkey = %d %s, want 409", status, body)
+	}
+}
+
+// Only an admin's own last passkey is refused: a user deletes their last
+// as before, and so does an admin while the rule is optional.
+func TestDeletingTheLastPasskeyIsRefusedOnlyForAnAdminUnderTheRule(t *testing.T) {
+	t.Run("user", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		resp := postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword})
+		if status, body := readAll(t, resp); status != http.StatusCreated {
+			t.Fatalf("creating bilbo = %d %s", status, body)
+		}
+		bilbo := loggedInPasskeyClient(t, ts, g)
+		fake := registerPasskeyWith(t, bilbo, ts, g, passkeyBilboPassword)
+		if status, body := deletePasskey(t, bilbo, ts, fake, passkeyBilboPassword); status != http.StatusOK {
+			t.Errorf("a user deleting their last passkey = %d %s, want 200", status, body)
+		}
+	})
+	t.Run("rule optional", func(t *testing.T) {
+		g := passkeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		fake := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		if status, body := deletePasskey(t, admin, ts, fake, doorTestPassword); status != http.StatusOK {
+			t.Errorf("an admin deleting their last passkey with the rule optional = %d %s, want 200", status, body)
+		}
+	})
+}
+
+// Another admin's clear-all stays open as the way back for a lost
+// passkey: it succeeds, the audit says the target is now held, and the
+// target is held at its next request.
+func TestAdminClearingAnotherAdminsPasskeysHoldsThem(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+	registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	const secondPassword = "password-placeholder-5"
+	second, err := g.deps.Users.CreateUser("second", secondPassword, gauntlet.RoleAdmin, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondClient := sessionClient(t, ts.URL, g.deps.Sessions.Create(second.ID, time.Now()).ID)
+	registerPasskeyWith(t, secondClient, ts, g, secondPassword)
+	wantThrough(t, secondClient, ts, "/api/protected")
+
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+second.ID+"/passkeys", adminStepUpRequest{Password: doorTestPassword})
+	if status, body := readAll(t, resp); status != http.StatusOK {
+		t.Fatalf("clearing another admin's passkeys = %d %s, want 200", status, body)
+	}
+	if e := findAuditEntry(t, g, "user.passkeys_cleared"); !strings.Contains(e.Detail, "; admin held for a passkey") {
+		t.Errorf("audit detail = %q, want it to say the admin is now held", e.Detail)
+	}
+	wantDoor(t, secondClient, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+}
