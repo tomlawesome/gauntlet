@@ -182,6 +182,18 @@ type User struct {
 	// documents lack them and read them as nothing remembered.
 	SeenCountries []SeenCountry `json:"seenCountries,omitempty"`
 	LastPlace     *LastPlace    `json:"lastPlace,omitempty"`
+	// SignInAllowedUntil is the end of an administrator's allowance of this
+	// account's next sign-in (#81): until then a sign-in the unusual-sign-in
+	// policy would hold or refuse completes instead, and is remembered as
+	// any completed sign-in is. Set by AllowNextSignIn (SignInAllowanceLifetime
+	// from issue, replacing any earlier window); cleared by RememberSignIn in
+	// the write that remembers the next completed sign-in -- whatever browser
+	// it came from, and whether or not the policy would have stopped it --
+	// and wherever known browsers are cleared (ClearKnownBrowsers,
+	// IssueResetCode). Read with SignInAllowed, never as non-zero. Never shown
+	// by any route. Gauntlet's own field: older documents lack it and read it
+	// as none.
+	SignInAllowedUntil time.Time `json:"signInAllowedUntil,omitzero"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
@@ -335,6 +347,12 @@ func (u *User) SessionCutoff() time.Time {
 // though the field still carries its time until the next attempt clears
 // it.
 func (u *User) LoginDisabled(now time.Time) bool { return loginDisabledAt(u.LoginDisabledAt, now) }
+
+// SignInAllowed reports whether an administrator's allowance of this
+// account's next sign-in (#81, SignInAllowedUntil) is live at now.
+func (u *User) SignInAllowed(now time.Time) bool {
+	return !u.SignInAllowedUntil.IsZero() && now.Before(u.SignInAllowedUntil)
+}
 
 // LocalPassword reports whether this account has a real, user-chosen
 // password that may be reset.

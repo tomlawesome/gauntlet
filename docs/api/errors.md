@@ -194,14 +194,15 @@ exists. Each pair is named under the class it shares, below.
   the account itself is not locked.
 - Returned by `POST /api/auth/login`, `POST /api/auth/login/factor` and
   `POST /api/auth/login/passkey`. The SSO callback redirects with
-  `ssoError=refused` instead. An SSO-only account refused there has no
-  administrator remedy in this release (the reset code needs a local
-  password): the way back is a browser or place the account has signed
-  in from before.
+  `ssoError=refused` instead. An administrator lets an account in from
+  the new browser or place with
+  `POST /api/auth/users/{id}/allow-sign-in` (#81), which an SSO-only
+  account refused at the callback can use too.
 - `detail` is always "this sign-in was refused by the account's sign-in
   policy -- use a browser or place this account has signed in from
-  before, or ask an administrator to reset the account". It never says
-  which signal was raised, or whether a code would have been sent.
+  before, or ask an administrator to allow your next sign-in or reset
+  the account". It never says which signal was raised, or whether a
+  code would have been sent.
 - No `X-Auth-Gate` header: that header marks a session stopped at a
   door, and no session exists here.
 - If the refused account is an admin and no other admin could reset it

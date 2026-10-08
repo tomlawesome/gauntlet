@@ -103,6 +103,7 @@ type SignInEvent struct {
 	// sign-in, and on a SignInDisabled refusal.
 	Disabled bool
 	// Confirmed is set on a SignInSuccess completed through a
-	// confirmation code (#55, gate's confirm step).
+	// confirmation code, a passkey, the escape code or an admin's
+	// allowance (#55, #65, #66, #81).
 	Confirmed bool
 }

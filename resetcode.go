@@ -230,8 +230,10 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		u.KnownBrowsers = nil
 		// So are the countries and last place unusual sign-ins judge
 		// against (#55), by the same rule: the next sign-in sets a
-		// fresh baseline and raises nothing.
+		// fresh baseline and raises nothing. An administrator's allowance
+		// of the next sign-in goes too (#81): the reset is the remedy now.
 		u.SeenCountries, u.LastPlace = nil, nil
+		u.SignInAllowedUntil = time.Time{}
 		issued = *u
 		return nil
 	})
