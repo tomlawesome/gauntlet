@@ -28,6 +28,12 @@ All notable changes to this project are documented in this file.
   (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
   `LoginLimiter.ReserveFactorBegin` and `ReleaseFactorBegin`. Additive.
 
+- **Only public keys are compiled into an application** (#87). The
+  blocklist package embedded the whole `blocklist/keys` folder, so any
+  other file left there, such as a private key, would have been built
+  into every app. It now embeds `keys/*.pub` only, and the folder has a
+  `.gitignore` that lets Git track just `*.pub`, `README.md` and itself.
+
 ### Changed
 
 - CI: a release is cut on `main` only (#88): release:version and
