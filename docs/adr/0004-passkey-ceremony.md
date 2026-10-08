@@ -1,6 +1,6 @@
 # ADR-0004: The passkey ceremony is a leaf package behind a seam in the root
 
-**Status:** Proposed (design by Fable 5.1 on #20; owner decisions of
+**Status:** Accepted, shipped in v0.2.0 (design by Fable 5.1 on #20; owner decisions of
 2026-09-30 and 2026-10-01 recorded below). Decision 5's "no discoverable
 or passwordless login" and its unset resident-key preference are
 superseded by ADR-0012.
