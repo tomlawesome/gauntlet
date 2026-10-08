@@ -57,6 +57,14 @@ All notable changes to this project are documented in this file.
   `main`'s tip; `preview` and `main` pipelines now run every lint and
   test job, as `dev`'s do (docs/releasing.md).
 
+### Fixed
+
+Low-severity findings from the v0.3.0 audit (#80):
+
+- An SSO sign-in that changes the account's role no longer computes a
+  password hash (about 100 ms, 64 MiB) it throws away while every other
+  request waits on the account store.
+
 ## [0.3.0] - 2026-10-08
 
 Reading notes for this release:

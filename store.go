@@ -1572,16 +1572,6 @@ func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint strin
 		}
 	}
 
-	if unmatchable == "" {
-		// The identity's account was deleted between the read above
-		// and this lock -- rare enough that hashing under the lock here
-		// is cheaper than making every sign-in pay for the hash.
-		var err error
-		if unmatchable, err = unmatchablePasswordHash(); err != nil {
-			return OIDCSignIn{}, err
-		}
-	}
-
 	// A JIT-provisioned account that only exists in memory must not be
 	// reported as created: the caller is about to sign this person in as
 	// though the account durably exists, and a restart before the next
@@ -1614,6 +1604,19 @@ func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint strin
 		// admin is created locally with the setup code (issue #37).
 		if len(st.byID) == 0 {
 			return ErrSetupRequired
+		}
+		if unmatchable == "" {
+			// The identity looked known above, but its account is gone
+			// from the document being saved: deleted since, here or by
+			// another process. Rare enough that hashing under the lock
+			// is cheaper than every returning sign-in paying for a hash
+			// -- and a role change, which also reaches this op, must
+			// not pay for one it throws away (#80). Kept across a
+			// replay, which runs this op again.
+			var err error
+			if unmatchable, err = unmatchablePasswordHash(); err != nil {
+				return err
+			}
 		}
 		newRole := RoleUser
 		if role != "" {

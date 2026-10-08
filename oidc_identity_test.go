@@ -6,6 +6,7 @@
 package gauntlet
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -521,5 +522,33 @@ func TestFindOrCreateOIDCUserWithRoleRefusesAdminAndUnknown(t *testing.T) {
 	}
 	if s.Count() != 1 {
 		t.Errorf("Count() = %d, want 1: a refused call provisioned an account", s.Count())
+	}
+}
+
+// A returning SSO sign-in whose role changes is a write, but not a new
+// account: it must not pay for the unmatchable password hash a new one
+// gets (~100 ms of Argon2id and 64 MiB) only to throw it away -- and
+// under the store's lock, where every other request waits for it.
+// Measured as allocation, as TestClosedRegistrationDoesNotHash does, at
+// the production cost.
+func TestFindOrCreateOIDCUserWithRoleChangeDoesNotHash(t *testing.T) {
+	useProductionHashCost(t)
+	s := newTestOIDCStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	signInWithRole(t, s, "staff", RoleUser, now)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	in := signInWithRole(t, s, "staff", RoleViewer, now.Add(time.Minute))
+	runtime.ReadMemStats(&after)
+
+	if in.Created || in.User.Role != RoleViewer {
+		t.Fatalf("got %+v, want the existing account moved to viewer", in)
+	}
+	const ceiling = 16 << 20 // one hash is 64 MiB
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > ceiling {
+		t.Errorf("a role-changing SSO sign-in allocated %.1f MiB; want well under %d MiB -- it hashed a password it never stores",
+			float64(allocated)/(1<<20), ceiling>>20)
 	}
 }
