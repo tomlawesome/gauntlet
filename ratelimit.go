@@ -1076,11 +1076,11 @@ func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time) {
 	l.releaseIn(l.accounts, stepUpBeginBucket+accountID, now)
 }
 
-// ReserveFactorBegin counts one begin of a passkey second login step
-// for accountID (#85): threshold per window, per account, in the account
-// map (never evicted), so a password alone cannot mint challenges
-// without limit and no flood of addresses or made-up names can reset
-// the count. Keyed on the account because the password step has already
+// ReserveFactorBegin counts one begin of a passkey second login step,
+// or of the passkey proof a held sign-in owes (#80), for accountID
+// (#85): threshold per window, per account, in the account map (never
+// evicted), so a password alone cannot mint challenges without limit
+// and no flood of addresses or made-up names can reset the count. Keyed on the account because the password step has already
 // named it, and kept apart from the challenge budget the login page's
 // passkey sign-in spends per address, so filling one does not refuse
 // the other.

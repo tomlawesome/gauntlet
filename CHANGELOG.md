@@ -113,6 +113,14 @@ Low-severity findings from the v0.3.0 audit (#80):
   username, and refused in a new username, token name, token device ID
   and an admin's sign-out-everywhere reason. An owner's notice can no
   longer show a made-up extra line.
+- `login/prove/begin` counts each begin on the account's passkey-step
+  begin budget, as `login/factor/begin` does since #85, so a held
+  sign-in's ticket can no longer mint passkey challenges without limit
+  for its life; past it, begin is `429 rate-limited`. Like
+  `login/factor/begin` it also refuses a locked or disabled account and
+  a banned address (`429`, with the same known-browser exceptions)
+  before any challenge, so an owner locked out between the password and
+  the passkey step is told at once instead of after touching their key.
 
 ## [0.3.0] - 2026-10-08
 

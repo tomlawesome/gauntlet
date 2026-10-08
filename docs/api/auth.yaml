@@ -448,9 +448,13 @@ paths:
         no body. Sets the passkey ceremony cookie (sealed, path
         `/api/auth/login`, five minutes; each challenge is usable once).
         It takes nothing on the login limit: `login/prove` is what is
-        counted. `404` when the application has no passkeys; `409` while
-        the relying party is not ready or the account has no passkey
-        usable here (one removed since the sign-in was held).
+        counted. Each begin is counted on the account's passkey-step begin
+        budget, as `login/factor/begin`'s are (#80), and a locked or
+        disabled account or a banned address is refused before any
+        challenge, with `login/factor/begin`'s known-browser exceptions:
+        `429` either way. `404` when the application has no passkeys;
+        `409` while the relying party is not ready or the account has no
+        passkey usable here (one removed since the sign-in was held).
       security:
         - confirmLoginCookie: []
       parameters:
@@ -485,6 +489,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
