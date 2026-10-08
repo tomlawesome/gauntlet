@@ -404,7 +404,11 @@ type sessionResponse struct {
 	Authenticated bool   `json:"authenticated"`
 	Role          string `json:"role"`
 	SignedInSince string `json:"signedInSince"`
-	Passkeys      *struct {
+	// MustEnrolPasskey and AdminPasskeyRequired report the admin passkey
+	// rule (#82).
+	MustEnrolPasskey     bool  `json:"mustEnrolPasskey"`
+	AdminPasskeyRequired *bool `json:"adminPasskeyRequired"`
+	Passkeys             *struct {
 		Count  int    `json:"count"`
 		Status string `json:"status"`
 		Origin string `json:"origin"`

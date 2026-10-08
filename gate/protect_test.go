@@ -866,3 +866,105 @@ func TestAdminPasskeyDoorHoldsAnSSOOnlyAdminForAPasswordFirst(t *testing.T) {
 	registerPasskeyWith(t, ann, ts, g, annPassword)
 	wantThrough(t, ann, ts, "/api/auth/users")
 }
+
+// sessionFields GETs the session body as client and returns its raw
+// top-level members, so a test can tell a member that is absent from
+// one that is false.
+func sessionFields(t *testing.T, client *http.Client, ts *httptest.Server) map[string]json.RawMessage {
+	t.Helper()
+	resp, err := client.Get(ts.URL + sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// wantSessionFields fails unless each named member of the session body
+// is exactly the JSON given; "" means the member must be absent.
+func wantSessionFields(t *testing.T, client *http.Client, ts *httptest.Server, want map[string]string) {
+	t.Helper()
+	body := sessionFields(t, client, ts)
+	for key, value := range want {
+		got, ok := body[key]
+		switch {
+		case value == "" && ok:
+			t.Errorf("session body has %s = %s, want it absent", key, got)
+		case value != "" && (!ok || string(got) != value):
+			t.Errorf("session body %s = %s (present %t), want %s", key, got, ok, value)
+		}
+	}
+}
+
+// The session body says when the admin passkey door holds
+// (mustEnrolPasskey, exactly when Protect would) and whether the rule is
+// on here at all (adminPasskeyRequired, present while signed in), so a
+// frontend can route to registration and show the requirement before
+// the door ever bites. mustEnrolSecondFactor keeps its meaning; both
+// may be true.
+func TestSessionBodyReportsTheAdminPasskeyDoor(t *testing.T) {
+	t.Run("signed out", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		wantSessionFields(t, &http.Client{}, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": ""})
+	})
+	t.Run("admin with no factor, then an app, then a passkey, then a stale one", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "true", "mustEnrolSecondFactor": "true", "adminPasskeyRequired": "true"})
+		enrolTOTPFactor(t, admin, ts, doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "true", "mustEnrolSecondFactor": "false", "adminPasskeyRequired": "true"})
+		registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": "true"})
+		g.deps.Passkeys = mustRelyingParty(t, "https://new-passkeys.example.org")
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "true", "adminPasskeyRequired": "true"})
+	})
+	t.Run("a user with only an app", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		resp := postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: "member", Password: "member-password-placeholder"})
+		if status, body := readAll(t, resp); status != http.StatusCreated {
+			t.Fatalf("creating member = %d %s", status, body)
+		}
+		u, _ := g.deps.Users.ByUsername("member")
+		member := sessionClient(t, ts.URL, g.deps.Sessions.Create(u.ID, time.Now()).ID)
+		enrolTOTPFactor(t, member, ts, "member-password-placeholder")
+		wantSessionFields(t, member, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": "true"})
+	})
+	t.Run("rule optional", func(t *testing.T) {
+		g := passkeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdmin(t, ts, "admin", doorTestPassword)
+		wantSessionFields(t, admin, ts, map[string]string{"mustEnrolPasskey": "false", "adminPasskeyRequired": "false"})
+	})
+	t.Run("forced password change first", func(t *testing.T) {
+		hash, err := gauntlet.HashPassword(doorTestPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := adminPasskeyGate(t)
+		g.deps.Users = openStoreWithUsers(t, gauntlet.User{
+			ID: "admin-1", Username: "admin", PasswordHash: hash, Role: gauntlet.RoleAdmin,
+			CreatedAt: time.Now(), HasLocalPassword: true, MustChangePassword: true,
+		})
+		ts := newTestServer(t, g)
+		admin := sessionClient(t, ts.URL, g.deps.Sessions.Create("admin-1", time.Now()).ID)
+		wantSessionFields(t, admin, ts, map[string]string{"mustChangePassword": "true", "mustEnrolPasskey": "false"})
+	})
+	t.Run("SSO-only admin", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		first := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		registerPasskeyWith(t, first, ts, g, doorTestPassword)
+		_, ann := ssoOnlyAdmin(t, g, ts, "subject-ann")
+		wantSessionFields(t, ann, ts, map[string]string{"mustChangePassword": "true", "hasLocalPassword": "false", "mustEnrolPasskey": "false"})
+	})
+}

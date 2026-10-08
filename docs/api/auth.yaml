@@ -33,9 +33,9 @@ info:
       routes.
     - `403` class `forbidden` on a session-gated route when the account's
       role is not one gauntlet knows, or, on the admin routes, when the
-      caller is not an admin; class `must-change-password` or
-      `must-enrol-factor` when the session is stopped at one of the two
-      doors (see the `X-Auth-Gate` header).
+      caller is not an admin; class `must-change-password`,
+      `must-enrol-factor` or `must-enrol-passkey` when the session is
+      stopped at one of the three doors (see the `X-Auth-Gate` header).
 
     A request carrying `Authorization: Bearer ...` never reaches these
     routes: `Protect` sends it to the application's own handler for that
@@ -83,7 +83,7 @@ info:
     (`username`) that is part of the contract and does not change.
     (`totpActive`, the other extension member, was last sent by 0.2.0's
     `totp/confirm`; see `PartiallyCompletedProblem`.) A frontend branches on `type` (or the status code and
-    the `X-Auth-Gate` header, for the two forced-auth-gate classes),
+    the `X-Auth-Gate` header, for the three forced-auth-gate classes),
     never on `detail`'s text. An unmatched path or method (a typo, or a
     method the route does not take) answers the same shape with `type:
     about:blank` and no `detail` -- not a documented class, and the one
@@ -2596,8 +2596,8 @@ components:
         recognized, or (on an admin route) the caller is not an admin
         (class `forbidden`); or the session is stopped at one of two
         doors, named by both `type` and `X-Auth-Gate`
-        (`must-change-password`, `must-enrol-factor`). Not every one of
-        the four is reachable at every route this is used on (a `GET`
+        (`must-change-password`, `must-enrol-factor`,
+        `must-enrol-passkey`). Not every one of the five is reachable at every route this is used on (a `GET`
         never reaches the CSRF check; each door exempts the one route it
         lets through), but none is route-specific enough to be worth its
         own response here.
@@ -2608,16 +2608,21 @@ components:
             `must-change-password` (an administrator reset the account,
             five second-factor steps in a row failed, which says someone
             else knows the password, or a sign-in found the password in a
-            known breach; only `POST /api/auth/password` is
-            reachable) or
+            known breach, or, while the application requires admin
+            passkeys, the account is an admin with no local password;
+            only `POST /api/auth/password` is reachable),
             `must-enrol-factor` (the account has no live second factor yet
             -- every local-password account must hold one; only the TOTP
             enrol and confirm routes, the passkey register begin and
             finish routes and `POST /api/auth/recovery-codes/confirm` are
-            reachable).
+            reachable) or `must-enrol-passkey` (#82: the application
+            requires every admin to hold a passkey, and this admin holds
+            none usable at this address; the same routes as
+            `must-enrol-factor` are reachable, and only a passkey opens
+            it).
           schema:
             type: string
-            enum: [must-change-password, must-enrol-factor]
+            enum: [must-change-password, must-enrol-factor, must-enrol-passkey]
       content:
         application/problem+json:
           schema:
@@ -2630,6 +2635,7 @@ components:
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#forbidden
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-change-password
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-enrol-factor
+                      - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#must-enrol-passkey
     SignInRequiredOrInvalidCredentials:
       description: |
         No valid session (class `sign-in-required`); or, re-entering the
@@ -3153,6 +3159,7 @@ components:
         - ssoConnected
         - mustChangePassword
         - mustEnrolSecondFactor
+        - mustEnrolPasskey
         - hasTOTP
       properties:
         setupRequired:
@@ -3174,10 +3181,16 @@ components:
           type: boolean
         mustChangePassword:
           type: boolean
-          description: The session is stopped at the change-password door -- an administrator reset the account, five second-factor steps in a row failed, or a sign-in found the password in a known breach. The account does not record which, so a frontend should not say.
+          description: The session is stopped at the change-password door -- an administrator reset the account, five second-factor steps in a row failed, or a sign-in found the password in a known breach. The account does not record which, so a frontend should not say. Also true for an admin with no local password (`hasLocalPassword` false) while the application requires admin passkeys (#82); it sets its first password from a fresh SSO sign-in.
         mustEnrolSecondFactor:
           type: boolean
           description: True only when the account has no live second factor yet -- every local-password account must hold one. Still true while a first factor is held for its recovery codes to be confirmed.
+        mustEnrolPasskey:
+          type: boolean
+          description: True exactly when the session is stopped at the admin passkey door (#82) -- the application requires every admin to hold a passkey, and this admin holds none usable at this address (an authenticator app does not count). May be true beside `mustEnrolSecondFactor`.
+        adminPasskeyRequired:
+          type: boolean
+          description: Whether this application requires every admin to hold a passkey (`Config.AdminPasskey`, #82). Present only while authenticated.
         hasTOTP:
           type: boolean
           description: A confirmed authenticator app, not a pending enrolment.
