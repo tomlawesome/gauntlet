@@ -29,8 +29,9 @@ info:
     - `401` class `sign-in-required` on every route that needs a session
       and has none. Exempt from that: session, register, login,
       login/factor, login/factor/begin, login/passkey/begin,
-      login/passkey, login/prove/begin, login/prove, logout, unlock and the two `GET /api/auth/oidc/*`
-      routes.
+      login/passkey, login/confirm, login/prove/begin, login/prove,
+      login/escape, reauthenticate, logout, unlock and the two
+      `GET /api/auth/oidc/*` routes.
     - `403` class `forbidden` on a session-gated route when the account's
       role is not one gauntlet knows, or, on the admin routes, when the
       caller is not an admin; class `must-change-password`,

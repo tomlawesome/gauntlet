@@ -303,7 +303,7 @@ type PasskeyCeremony interface {
     BeginLogin(u *User) (options json.RawMessage, sealed string, err error)
     FinishLogin(u *User, sealed string, assertion json.RawMessage) (PasskeyAssertion, error)
 }
-type PasskeyAssertion struct { CredentialID []byte; SignCount uint32; CloneWarning bool } // what RecordPasskeyAssertionIfFresh consumes
+type PasskeyAssertion struct { CredentialID []byte; SignCount uint32; CloneWarning, UserVerified bool } // what RecordPasskeyAssertionIfFresh consumes; UserVerified is the authenticator's UV flag, always true from FinishSignIn (#77)
 var ErrPasskeyCeremonyInvalid error // wrapped by passkey's Finish methods for a dead ceremony: unreadable, other ceremony, expired, already used
 
 func HashPassword(password string) (string, error)   // argon2id, m=64MiB t=3 p=4, 16-byte salt, 32-byte key
@@ -1346,7 +1346,7 @@ it. The data for all of this lives on `User`.
   and birdcage's alike, must hold a second factor before it can reach
   anything but the enrolment routes. This closes the gap ASVS 5.0 6.2.1
   and NIST SP 800-63B-4 §3.1.1.2 flagged against the 8-character minimum
-  (`store.go:46`, docs/security-by-design.md): with the door
+  (`store.go:48`, docs/security-by-design.md): with the door
   configurable and off by default, an application that forgot to turn
   it on got 8-character single-factor passwords. Cost: the TOTP enrol
   screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
