@@ -81,6 +81,12 @@ Low-severity findings from the v0.3.0 audit (#80):
   `ClearPasskeys` answers `ErrNoPasskeys`, instead of saving and
   reporting success. A recovery tool built on it can now say there was
   nothing to remove rather than that everything was.
+- A failed SSO callback's warning now ends with `cause="..."`: what the
+  token endpoint answered (its status, error code and description, never
+  its raw body), why the token did not verify, what the provider
+  reported, or why the account could not be saved. A provider that is
+  down, a wrong client secret and a failing disk no longer read the
+  same.
 
 ## [0.3.0] - 2026-10-08
 

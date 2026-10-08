@@ -17,6 +17,7 @@ import (
 	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 const oidcTestClientID = "test-client"
@@ -1320,5 +1321,81 @@ func TestSSOFirstSignInAuditsTheCreation(t *testing.T) {
 	f.signIn(t, "newcomer", []string{"other"})
 	if n := len(creates()); n != 1 {
 		t.Errorf("%d user.create records after a second sign-in, want still 1", n)
+	}
+}
+
+// A failed callback's warning says why (#80): a provider that refused
+// the code exchange, a token that did not verify and an account store
+// that could not save all read differently, where each used to be a
+// bare ssoError code. The token endpoint's raw body is not logged --
+// only its status, error code and description -- since it is the
+// provider's text and may echo what was sent to it.
+func TestOIDCCallbackFailureLogNamesTheCause(t *testing.T) {
+	cases := []struct {
+		name, code string
+		want       []string
+		setup      func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState)
+	}{
+		{"exchange refused", "provider_error", []string{"401", "invalid_client", "client authentication failed"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.TokenErrorStatus = http.StatusUnauthorized
+			fp.TokenErrorBody = `{"error":"invalid_client","error_description":"client authentication failed","echo":"raw-body-marker"}`
+		}},
+		{"provider unreachable", "provider_error", []string{"exchanging authorization code"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.Server.Close()
+		}},
+		{"token does not verify", "verification_failed", []string{"verifying id_token"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.NextIDToken = fp.SignNoneAlgorithm(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+		}},
+		{"account store fails", "login_failed", []string{"save refused"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+			backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+			users := openTrackedStore(t, backend)
+			if _, err := users.Register("setup-admin", "setup-admin-password", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			backend.left = 0
+			g.deps.Users = users
+		}},
+		{"provider reported an error", "provider_error", []string{"access_denied"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+			fs, err := oidc.NewFlowState(time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := "state=" + fs.State + "&code=test-code"
+			if tc.setup == nil {
+				query = "state=" + fs.State + "&error=access_denied"
+			} else {
+				tc.setup(t, g, fp, fs)
+			}
+			logs := &warnRecorder{}
+			g.cfg.Log = slog.New(logs)
+
+			resp, err := noRedirectClient().Do(oidcCallbackRequest(t, g, ts, fs, query))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if want := testLoginPath + "?ssoError=" + tc.code; resp.Header.Get("Location") != want {
+				t.Fatalf("redirect location = %q, want %q", resp.Header.Get("Location"), want)
+			}
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			if len(logs.msgs) != 1 {
+				t.Fatalf("got %d warnings, want one: %q", len(logs.msgs), logs.msgs)
+			}
+			line := logs.msgs[0]
+			for _, w := range tc.want {
+				if !strings.Contains(line, "cause=") || !strings.Contains(line, w) {
+					t.Errorf("warning %q does not give the cause (want %q)", line, w)
+				}
+			}
+			if strings.Contains(line, "raw-body-marker") {
+				t.Errorf("warning %q carries the token endpoint's raw body", line)
+			}
+		})
 	}
 }
