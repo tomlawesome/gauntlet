@@ -2,6 +2,7 @@
 // shared-auth-module.md decision 3), then split by #19: counters for
 // real accounts moved out of the capped map into their own, and a login
 // lockout is kept on the account so it survives a restart.
+
 package gauntlet
 
 import (

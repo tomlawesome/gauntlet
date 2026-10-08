@@ -246,7 +246,9 @@ paths:
         for may also set the escape cookie (#66): the code that lets that
         one attempt through is in the server's log, not in any response,
         and `POST /api/auth/login/escape` redeems it. The `403` body is
-        the same either way.
+        the same either way. A sign-in held for such an admin (`200` with
+        `confirm` or `prove`) sets the cookie too, so a lost passkey or an
+        undelivered code has the same way out.
       security:
         - {}
       parameters:
@@ -668,9 +670,12 @@ paths:
         /api/auth/login/passkey` and a passkey resume at `POST
         /api/auth/reauthenticate`.
 
-        Nothing names an account yet, so it takes one attempt on the
-        client address's login limit and keeps it until a sign-in
-        completes; a banned address or one at its limit is `429`. The
+        Nothing names an account yet, so it takes one attempt on a limit
+        of its own for the client address -- the same size as the login
+        limit, but not shared with it, so challenges a browser asks for and
+        never uses spend none of the address's sign-in attempts -- and
+        keeps it until a sign-in completes; a banned address or one at
+        that limit is `429`. The
         known-browser allowance, which belongs to an account, applies at
         `login/passkey`. `404` unless passkey sign-in is on; `409` while
         the relying party is not ready.
@@ -915,9 +920,28 @@ paths:
     post:
       operationId: logoutAll
       summary: Sign out everywhere
-      description: Ends every session the caller's account holds and forgets every browser it remembers (the known-browser cookie), then issues this browser a fresh session (sets the session cookie) and remembers it again. Takes no body.
+      description: |
+        Ends every session the caller's account holds, then issues this
+        browser a fresh session (sets the session cookie) and remembers
+        it. An account with a local password sends it in `password`
+        (rate-limited re-check), and every browser, country and place the
+        account remembers is forgotten first. An SSO-only account has no
+        password to send: the body is optional, its sessions end, and
+        what it remembers is kept, so a session cookie alone cannot reset
+        its unusual-sign-in baseline.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                password:
+                  type: string
+                  description: The caller's own password; required when the account has one.
       responses:
         "200":
           description: Every other session ended.
@@ -930,10 +954,14 @@ paths:
                 properties:
                   signedOutEverywhere:
                     const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -1057,6 +1085,18 @@ paths:
         session can reach, and every cause ended every earlier session, so
         it was opened by a sign-in made since). The re-check is rate-limited per account. Ends every
         session on the account and sets a fresh session cookie.
+
+        An account that signs in only through the identity provider has no
+        local password and gets `409`, except an admin: every admin keeps a
+        local password (ADR-0010), so an SSO-only admin sets its first one
+        here with only `newPassword`, and must do so before any route that
+        re-checks the caller's password will work (those answer `409` until
+        it has). It must do so from a session its identity provider issued
+        in the last ten minutes; any other session gets `409` asking it to
+        sign in again through the provider first.
+
+        A `newPassword` the same as the current password is `400`, under a
+        forced change too.
 
         A new password is refused with `400`, and a plain-text reason, when
         it is under 8 characters; on the common-password list, in any
@@ -1229,7 +1269,9 @@ paths:
       description: |
         Password-gated (rate-limited re-check). When this leaves the
         account with no second factor, every session on it ends, this one
-        included, and `signedOut` is true.
+        included, and `signedOut` is true. With no authenticator app on
+        the account the answer is `404` and nothing changes: no session
+        ends, nothing is recorded and no notice is sent.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1258,6 +1300,8 @@ paths:
           $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1642,9 +1686,18 @@ paths:
         Sets the flow cookie and returns the provider URL for the browser
         to navigate to; `GET /api/auth/oidc/callback` finishes it. A
         completed link removes the local password of every account except
-        an admin's: every admin keeps theirs (#67). Takes no body.
+        an admin's: every admin keeps theirs (#67). Password-gated
+        (rate-limited re-check), checked before the flow cookie is set;
+        `409` for an account that is already SSO-only or already linked
+        comes first.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
           description: Navigate the browser to `url`.
@@ -1657,14 +1710,18 @@ paths:
                 properties:
                   url:
                     type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: "#/components/responses/SignInRequired"
+          $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1983,6 +2040,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -2044,7 +2103,7 @@ paths:
     delete:
       operationId: clearUserTOTP
       summary: Remove another account's authenticator app (admin)
-      description: For a lost phone when the owner still has their password. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
+      description: For a lost phone when the owner still has their password. Refused on the caller's own account. With no authenticator app to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2056,7 +2115,7 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          description: Removed.
+          description: Removed, or nothing there to remove.
           content:
             application/json:
               schema:
@@ -2067,7 +2126,8 @@ paths:
                   username:
                     type: string
                   cleared:
-                    const: true
+                    type: boolean
+                    description: False when the account had nothing to remove; nothing changed.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2089,7 +2149,7 @@ paths:
     delete:
       operationId: clearUserPasskeys
       summary: Remove every passkey on another account (admin)
-      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
+      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. With no passkey to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2101,7 +2161,7 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          description: Removed.
+          description: Removed, or nothing there to remove.
           content:
             application/json:
               schema:
@@ -2112,7 +2172,8 @@ paths:
                   username:
                     type: string
                   cleared:
-                    const: true
+                    type: boolean
+                    description: False when the account had nothing to remove; nothing changed.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2291,6 +2352,8 @@ paths:
           $ref: "#/components/responses/SignInRequiredOrInvalidCredentials"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":

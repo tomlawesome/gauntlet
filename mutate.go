@@ -95,6 +95,7 @@
 // ErrDocumentRemoved instead of recreating it from memory; and a state
 // the accounts store would refuse to open (no admin) is stopped at the
 // save, whatever op produced it.
+
 package gauntlet
 
 import (

@@ -185,7 +185,7 @@ func TestSignOutEverywhereKeepsTheOtherAccountsToken(t *testing.T) {
 		t.Fatalf("bob's sign-in = %d", status)
 	}
 	totpEnrolAndConfirm(t, browser, ts) // past the enrolment door
-	if status, body := readAll(t, postJSON(t, browser, ts.URL+"/api/auth/logout-all", nil)); status != http.StatusOK {
+	if status, body := readAll(t, postJSON(t, browser, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword})); status != http.StatusOK {
 		t.Fatalf("bob's sign out everywhere = %d %s", status, body)
 	}
 	got := knownTokens(t, browser, ts)

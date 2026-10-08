@@ -92,11 +92,14 @@ func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	// Dropped first, as the account's own session list drops them: a
 	// session issued before its cutoff is no longer live and should not
 	// be reported as one this ended. The count itself comes from
-	// RevokeAllForUserCount below, under the same lock as the revoke --
+	// EndSessionsForUser below, under the same lock as the revoke --
 	// counting separately beforehand would miss a session a login lands
-	// between the count and the revoke (gauntlet#58 R5).
+	// between the count and the revoke (gauntlet#58 R5). It counts only
+	// sessions still live at now, so a session that timed out and is
+	// kept only to be resumed is ended but not reported, as the list
+	// does not show it either.
 	_ = g.liveSessions(target, now)
-	ended := g.deps.Sessions.RevokeAllForUserCount(target.ID)
+	ended := g.deps.Sessions.EndSessionsForUser(target.ID, now)
 	browsers := "remembered browsers forgotten"
 	if err := g.deps.Users.ClearKnownBrowsers(target.ID); err != nil {
 		g.logError("forgetting the browsers account " + target.ID + " remembers: " + err.Error())

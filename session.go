@@ -9,6 +9,7 @@
 //     NewSessionStoreWithMaxLifetime(ttl, 0) already means "no ceiling"
 //     -- one entry point rather than two ways to ask for the same
 //     thing.
+
 package gauntlet
 
 import (
@@ -93,6 +94,23 @@ type SessionClient struct {
 	Country   string
 	Unusual   SignInSignals
 	Method    SignInMethod
+}
+
+// Clean is c with Address and UserAgent cleaned and cut the way every
+// session and sign-in record keeps them: control and Unicode formatting
+// characters and invalid UTF-8 dropped, then UserAgent cut to
+// MaxSessionUserAgent bytes and Address to MaxSessionAddress, never
+// mid-character. Both are the client's own word, so neither may carry a
+// terminal escape, a bidirectional override, a line break or a megabyte
+// of padding into a page, a log or a message that later shows them.
+// Country, Unusual and Method are gate's own and pass through unchanged.
+// It is one rule: CreateFrom, CreateContinuing and Resume clean through
+// it, and gate cleans through it the client it hands to a notice or a
+// confirmation code.
+func (c SessionClient) Clean() SessionClient {
+	c.Address = cleanClientText(c.Address, MaxSessionAddress)
+	c.UserAgent = cleanClientText(c.UserAgent, MaxSessionUserAgent)
+	return c
 }
 
 // Session is deliberately an opaque random ID (see newID), not a JWT --
@@ -218,21 +236,10 @@ func (s *SessionStore) Create(userID string, now time.Time) Session {
 }
 
 // CreateFrom starts a new session for userID, recording client so the
-// account's owner can recognise it later (ListForUser). Each field is
-// cleaned and cut before it is kept: control and Unicode formatting
-// characters and invalid UTF-8 are dropped, then UserAgent is cut to
-// MaxSessionUserAgent bytes and Address to MaxSessionAddress, never
-// mid-character. Both come from the client, so neither may carry a
-// terminal escape, a bidirectional override or a megabyte of padding
-// into a page or a log that later shows them.
+// account's owner can recognise it later (ListForUser). The client is
+// cleaned and cut before it is kept (SessionClient.Clean).
 func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.Time) Session {
-	client = SessionClient{
-		Address:   cleanClientText(client.Address, MaxSessionAddress),
-		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
-		Country:   client.Country,
-		Unusual:   client.Unusual,
-		Method:    client.Method,
-	}
+	client = client.Clean()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess := Session{ID: newID(), UserID: userID, IssuedAt: now, ExpiresAt: now.Add(s.ttl), LastUsedAt: now, Client: client}
@@ -246,7 +253,40 @@ func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.
 	return sess
 }
 
-// cleanClientText is CreateFrom's rule for one SessionClient field: the
+// CreateContinuing starts a new session for from.UserID that continues
+// from rather than starting a new sign-in: a new ID, but from's IssuedAt,
+// so the lifetime ceiling does not move, and from's unusual-sign-in
+// signals and method, since the sign-in they describe was judged once
+// already. Its client is client, cleaned as CreateFrom does. Its expiry
+// is now plus the idle timeout, never past the ceiling.
+//
+// It is the one way a route that rotates a session without a whole
+// sign-in -- sign out everywhere, which asks at most for the password
+// again -- keeps the sign-in's lifetime ceiling. Issuing through CreateFrom there would start the ceiling
+// again from now, so anyone holding a live cookie could call the route
+// once an idle period and keep a session for ever. It does not check or
+// end from; the caller has already done whatever it needs to.
+func (s *SessionStore) CreateContinuing(from Session, client SessionClient, now time.Time) Session {
+	client = client.Clean()
+	client.Unusual, client.Method = from.Client.Unusual, from.Client.Method
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expires := now.Add(s.ttl)
+	if deadline, capped := s.deadline(from); capped {
+		expires = earliest(expires, deadline)
+	}
+	sess := Session{ID: newID(), UserID: from.UserID, IssuedAt: from.IssuedAt, ExpiresAt: expires, LastUsedAt: now, Client: client}
+	s.sessions[sess.ID] = sess
+	if s.byUser[sess.UserID] == nil {
+		s.byUser[sess.UserID] = make(map[string]struct{})
+	}
+	s.byUser[sess.UserID][sess.ID] = struct{}{}
+	s.order.push(sess.ID)
+	s.sweepLocked(now)
+	return sess
+}
+
+// cleanClientText is Clean's rule for one SessionClient field: the
 // characters printableWithin (token.go) refuses in a token name are
 // dropped rather than refused -- a session is never refused for what a
 // browser sent -- and what is left is cut to at most maxBytes on a
@@ -439,11 +479,7 @@ func (s *SessionStore) Resumable(id string, now time.Time) (Session, bool) {
 //
 // It reports false, changing nothing, unless id is Resumable at now.
 func (s *SessionStore) Resume(id string, client SessionClient, now time.Time) (Session, bool) {
-	client = SessionClient{
-		Address:   cleanClientText(client.Address, MaxSessionAddress),
-		UserAgent: cleanClientText(client.UserAgent, MaxSessionUserAgent),
-		Country:   client.Country,
-	}
+	client = client.Clean()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, ok := s.sessions[id]
@@ -573,12 +609,42 @@ func (s *SessionStore) RevokeAllForUser(userID string) {
 // a new session this sign-out never claimed to touch. A caller that
 // counted first and revoked after (gauntlet#58 R5, the admin sign-out's
 // "ended" response) could report one short when a login raced it.
+//
+// The count includes sessions that had already timed out but were kept
+// as resumable, which no session list shows.
+//
+// Deprecated: use EndSessionsForUser, which counts only the sessions
+// that were still live, so the number agrees with the account's own
+// list of sessions.
 func (s *SessionStore) RevokeAllForUserCount(userID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.byUser[userID])
 	for id := range s.byUser[userID] {
 		s.revokeVisits++
+		delete(s.sessions, id)
+	}
+	delete(s.byUser, userID)
+	return n
+}
+
+// EndSessionsForUser ends every session belonging to userID, as
+// RevokeAllForUser does, and reports how many of them were live at now:
+// the number a person would have seen in their own list of sessions
+// (ListForUser) just before. Sessions that had timed out but could
+// still be resumed, or that were past their ceiling and not yet swept,
+// are ended too but not counted -- reporting them as sessions ended
+// would claim more than the list ever showed. Counted and ended under
+// one lock, for the reason RevokeAllForUserCount gives.
+func (s *SessionStore) EndSessionsForUser(userID string, now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id := range s.byUser[userID] {
+		s.revokeVisits++
+		if sess, ok := s.sessions[id]; ok && !s.expired(sess, now) {
+			n++
+		}
 		delete(s.sessions, id)
 	}
 	delete(s.byUser, userID)

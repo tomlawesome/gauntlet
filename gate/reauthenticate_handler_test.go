@@ -408,7 +408,7 @@ func TestReauthenticateRefusedAfterTheAccountsSessionsEnd(t *testing.T) {
 		end  func(t *testing.T, f *resumeFixture, second *http.Client)
 	}{
 		{"logout-all", func(t *testing.T, f *resumeFixture, second *http.Client) {
-			resp := postJSON(t, second, f.ts.URL+"/api/auth/logout-all", struct{}{})
+			resp := postJSON(t, second, f.ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword})
 			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("logout-all: %d", resp.StatusCode)

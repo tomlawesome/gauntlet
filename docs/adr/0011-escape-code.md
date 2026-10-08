@@ -1,6 +1,6 @@
 # ADR-0011: A log-written escape code lets a lone admin past `block`
 
-**Status:** Accepted (design ratified on #66)
+**Status:** Accepted (design ratified on #66; decision 1 widened on #79)
 **Date:** 2026-10-05
 **Relates to:** #66 (this change), #55 and ADR-0009 (the unusual-sign-in
 policy and the confirm step this reuses), #67 and ADR-0010 (a second
@@ -48,6 +48,11 @@ browser and a code typed into the same page. No new concept: it is
    known and is not counted; two admins both abroad on new laptops is
    the documented residual, and `Decide` answering `confirm` or `flag`
    for admins stays the application's first remedy.
+   **Status (ratified on #79):** also issued, on the same conditions,
+   when the sign-in is held at `confirm` or `prove` rather than refused:
+   the escape cookie is set beside the hold's ticket and the held
+   challenge is unchanged, so a lone admin who has lost the passkey, or
+   whose code never arrives, is not held on every attempt.
 2. **Never** for a user or viewer (an admin resets them), never on the
    SSO callback (every admin keeps a local password, ADR-0010), and
    never while the account is disabled (the unlock code is for that, and

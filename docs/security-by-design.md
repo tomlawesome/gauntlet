@@ -223,7 +223,7 @@ it says so instead of repeating the reasoning.
 | 6.8.1 identity namespaced by IdP | 2 | Met | `(issuer, subject)` is the key (`user.go:104`, `store.go` `ByOIDCIdentity`) |
 | 6.8.2 assertion signatures always validated | 2 | Met | ID token verified by go-oidc with the RS256/ES256/PS256 allowlist (`oidc/oidc.go:183`); no unsigned path |
 | 6.8.3 SAML replay | 2 | N/A | No SAML |
-| 6.8.4 strength expected from the IdP verified, or fallback documented | 2 | Deviation, documented here | Gauntlet does not read `acr`, `amr` or `auth_time`. Fallback assumption: an SSO sign-in is as strong as the self-hosted IdP's own policy, which the same operator controls; gauntlet adds no local second factor to it and a linked account loses its local factors (`LinkOIDCIdentity`). Public multi-tenant issuers are refused (`oidc/policy.go:183`) so that policy is always the operator's |
+| 6.8.4 strength expected from the IdP verified, or fallback documented | 2 | Deviation, documented here | Gauntlet does not read `acr`, `amr` or `auth_time`. Fallback assumption: an SSO sign-in is as strong as the self-hosted IdP's own policy, which the same operator controls; gauntlet adds no local second factor to it and a linked account loses its local factors (`LinkOIDCIdentity`). Public multi-tenant issuers are refused, Google excepted when the policy pins the `hd` domain (ADR-0014, `oidc/policy.go` `AllowIssuerWithPolicy`), so that policy is always the operator's own or their organisation's |
 
 ### V7 Session management
 
@@ -243,7 +243,7 @@ it says so instead of repeating the reasoning.
 | 7.4.4 logout visible on every page | 2 | App | Frontend |
 | 7.4.5 admins can end a user's sessions | 2 | Met | `POST /api/auth/users/{id}/logout-all` ends every session the account holds and forgets its remembered browsers, leaving its password and factors (`gate/users_logoutall_handler.go`, #53); audited as `user.sessions_ended`, and `gate.Config.Notify` lets the application tell the owner. A reset code or deleting the account also ends them |
 | 7.5.1 full re-authentication before changing authentication settings | 2 | Met | `recheckPassword` guards password change, TOTP enrol and delete, passkey register and delete, recovery-code regeneration (`gate/password_handler.go:45,67`, `gate/totp_handler.go:253`, `gate/passkey_handler.go:182,431`, `gate/recoverycodes_handler.go:44`) |
-| 7.5.2 users can view and end their sessions | 2 | Met, with a deviation | `GET /api/auth/sessions` lists the caller's own live sessions with the address and browser each signed in from; `DELETE /api/auth/sessions/{ref}` ends one, `logout-all` ends all (`gate/sessions_handler.go`, #48). Deviation: ending a session asks for no re-authentication, for any account, SSO-only included. Owner decision, 2026-10-02: signing out is a safe direction -- a stolen session can already end every session through `logout-all` without a password, and an SSO-only account has none to give. Ends gauntlet's session only, not the IdP's |
+| 7.5.2 users can view and end their sessions | 2 | Met, with a deviation | `GET /api/auth/sessions` lists the caller's own live sessions with the address and browser each signed in from; `DELETE /api/auth/sessions/{ref}` ends one, `logout-all` ends all (`gate/sessions_handler.go`, #48). Deviation: ending a session asks for no re-authentication, for any account, SSO-only included. Owner decision, 2026-10-02: signing out is a safe direction -- a stolen session can already end every session of an SSO-only account through `logout-all` without a password (an account with a local password gives it there, #79), and an SSO-only account has none to give. Ends gauntlet's session only, not the IdP's |
 | 7.5.3 step-up before highly sensitive operations | 3 | Met | Making an account an admin (`POST /api/auth/users` with `role: admin`, `PUT /api/auth/users/{id}/role`) needs the granting admin's password and a current second factor on the same request, on the re-check budget (`recheckStepUp`, #67, ADR-0010). The other admin routes that take over, expose or strip an account -- reset code, create token, delete user, clear a user's authenticator app or passkeys -- need the calling admin's password, on the same budget (`recheckAdminPassword`, #72) |
 | 7.6.2 session needs the user's action | 2 | Met | The OIDC flow starts from the user's redirect and a sealed flow cookie; the callback cannot create a session without it (`gate/oidc_handler.go:229-249`) |
 
@@ -260,7 +260,7 @@ it says so instead of repeating the reasoning.
 | 8.3.1 enforced on the server | 1 | Met | All in `gate`; nothing trusts the frontend |
 | 8.3.2 changes apply immediately | 3 | Met | Role read from the store on every request (`gate/protect.go:321-341`) |
 | 8.3.3 originating subject's permissions | 3 | Met | No service-to-service hop; the token or session on the request decides |
-| 8.4.1 multi-tenant | 2 | N/A | Single tenant by design (`docs/decisions/multi-tenant-oidc.md`, carried in `oidc/policy.go`) |
+| 8.4.1 multi-tenant | 2 | N/A | Single tenant by design: the one shared SSO issuer accepted, Google, needs the `hd` domain pinned (ADR-0014, `oidc/policy.go` `AllowIssuerWithPolicy`) |
 | 8.4.2 layered admin access | 3 | Not targeted | Role plus mandatory second factor; no device posture |
 
 ### V9 Self-contained tokens
@@ -289,7 +289,7 @@ ceremonies. A sealed value is encrypted and integrity-protected
 | 10.2.3 minimal scopes | 3 | App | `oidc.Config.Scopes` is the application's |
 | 10.5.1 nonce | 2 | Met | `oidc.VerifyNonce` (`gate/oidc_handler.go:249`) |
 | 10.5.2 identify by `sub` | 2 | Met | `(issuer, subject)`; email is display only |
-| 10.5.3 issuer in metadata must match | 2 | Met | go-oidc discovery refuses a mismatched issuer; `AllowIssuer` refuses multi-tenant ones before that |
+| 10.5.3 issuer in metadata must match | 2 | Met | go-oidc discovery refuses a mismatched issuer; `AllowIssuerWithPolicy` refuses multi-tenant ones whose policy does not pin the tenant before that (ADR-0014) |
 | 10.5.4 `aud` equals client id | 2 | Met | go-oidc verifier config |
 | 10.5.5 back-channel logout | 2 | N/A | Not implemented |
 | 10.3, 10.4, 10.6, 10.7 resource and authorization server | — | N/A | Gauntlet is a client; its own bearer tokens are not OAuth |

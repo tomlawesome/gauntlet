@@ -10,6 +10,7 @@
 // exist from G2 onward, since a whole-document store must round-trip
 // ResetCodeHash regardless of who last set it) predates this file's
 // IssueResetCode; see Authenticate's own doc comment in store.go.
+
 package gauntlet
 
 import (
@@ -193,6 +194,9 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		u.PasswordHash = unmatchable
 		u.ResetCodeHash = codeHash
 		u.ResetCodeExpiresAt = now.Add(ResetCodeTTL)
+		// A new code replaces whatever an earlier one left; its own
+		// spend sets this again.
+		u.ResetCodeSpentHash = ""
 		u.MustChangePassword = true
 		u.PasswordChangedAt = now
 		u.SessionsEndedAt = now

@@ -144,6 +144,31 @@ func TestCreateAdminNeedsTheCallersPasswordAndASecondFactor(t *testing.T) {
 	}
 }
 
+// The new account's username and password are checked before the
+// step-up, so a typo in either does not spend the recovery code that
+// came with it: the same code still creates the admin afterwards.
+func TestCreateAdminRefusesABadAccountBeforeSpendingACode(t *testing.T) {
+	f := newAdminsFixture(t)
+	code := f.code()
+	create := func(username, password string) (int, string) {
+		t.Helper()
+		return readAll(t, postJSON(t, f.admin, f.ts.URL+"/api/auth/users", createUserRequest{
+			Username: username, Password: password, Role: "admin",
+			AdminPassword: selfUnlockAdminPassword, AdminCode: code,
+		}))
+	}
+
+	if status, body := create(totpBobUsername, "short"); status != http.StatusBadRequest {
+		t.Errorf("a taken username with a too-short password = %d %s, want 400", status, body)
+	}
+	if status, body := create(totpBobUsername, "password456"); status != http.StatusConflict {
+		t.Errorf("a taken username = %d %s, want 409", status, body)
+	}
+	if status, body := create("second", "password456"); status != http.StatusCreated {
+		t.Errorf("creating the admin with the same recovery code = %d %s, want 201 -- the refusals spent it", status, body)
+	}
+}
+
 // A user or viewer needs no step-up, and the extra fields are not
 // read for them.
 func TestCreateNonAdminNeedsNoStepUp(t *testing.T) {
@@ -358,6 +383,31 @@ func TestLastAdminCannotBeDemotedOrDeleted(t *testing.T) {
 	}
 	if status, _ := listSessions(t, f.admin, f.ts); status != http.StatusOK {
 		t.Error("the refused change ended the last admin's session")
+	}
+}
+
+// The last admin with a local password cannot be demoted while the
+// other admins sign in only through SSO (#79): 409 last-admin, with a
+// message saying what to do instead -- whether it demotes itself or an
+// SSO-only admin, who needs no step-up to demote, tries. (Deleting it
+// over HTTP cannot get that far: the only admin able to pass the
+// delete's step-up is itself, and nobody deletes their own account.
+// The store's own test covers the delete.)
+func TestLastLocalAdminCannotBeDemoted(t *testing.T) {
+	f := newAdminsFixture(t)
+	_, ann := ssoOnlyAdmin(t, f.g, f.ts, "subject-ann")
+
+	for name, client := range map[string]*http.Client{"itself": f.admin, "an SSO-only admin": ann} {
+		status, body := f.setRole(t, client, f.adminID, setRoleRequest{Role: "user"})
+		if status != http.StatusConflict || adminProblemType(t, body) != problemTypeBase+"last-admin" {
+			t.Errorf("%s demoting the last admin with a password = %d %s, want 409 last-admin", name, status, body)
+		}
+		if !strings.Contains(body, "local password") {
+			t.Errorf("message = %s", body)
+		}
+	}
+	if r := roleOf(t, f.g, f.adminID); r != gauntlet.RoleAdmin {
+		t.Errorf("admin's role = %q, want admin", r)
 	}
 }
 

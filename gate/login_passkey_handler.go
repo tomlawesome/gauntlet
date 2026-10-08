@@ -61,12 +61,21 @@ func (g *Gate) passkeySignInOrNotFound(w http.ResponseWriter) (gauntlet.PasskeyS
 // session and no cookie.
 //
 // Nothing names an account yet, so it reserves one attempt on the
-// address alone (the limiter's address bucket), keeping it as
-// login/factor/begin does, so a stranger cannot mint challenges without
-// limit; the finish step takes the account's own reservation, and gives
-// both back when the sign-in completes. A banned address or one at its
+// address alone, keeping it until a sign-in completes, so a stranger
+// cannot mint challenges without limit; the finish step takes the
+// address's and the account's own reservations, and gives all of them
+// back when the sign-in completes. A banned address or one at its begin
 // limit is refused 429 here; the known-browser allowance, which belongs
 // to an account, applies at the finish.
+//
+// The begin attempt is on a bucket of its own (passkeyBeginKey), not the
+// address bucket a password is tried on. A browser asks for a challenge
+// on every load of a login page that offers passkey autofill and after
+// every prompt the user dismisses, and a challenge costs the caller
+// nothing to mint and guesses nothing: on the shared bucket, a few page
+// views would leave the address at its limit and every way of signing
+// in from it answering 429. It must still be bounded, so it gets the
+// same limit on its own.
 func (g *Gate) handleLoginPasskeyBegin(w http.ResponseWriter, r *http.Request) {
 	ps, ok := g.passkeySignInOrNotFound(w)
 	if !ok {
@@ -78,8 +87,9 @@ func (g *Gate) handleLoginPasskeyBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	now := g.now()
 	address := g.cfg.ClientIP(r)
-	res := loginReservation{ipKey: "ip:" + address, address: address}
-	if _, banned := g.deps.Limiter.AddressBanned(address, now); banned || !g.deps.Limiter.Reserve(res.ipKey, now) {
+	beginKey := passkeyBeginKey(address)
+	res := loginReservation{address: address}
+	if _, banned := g.deps.Limiter.AddressBanned(address, now); banned || !g.deps.Limiter.Reserve(beginKey, now) {
 		res.refusal = gauntlet.SignInRateLimited
 		g.recordSignIn(r, gauntlet.SignInEvent{Outcome: res.refusal, Method: gauntlet.SignInMethodPasskeyAlone}, res, now)
 		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
@@ -88,13 +98,21 @@ func (g *Gate) handleLoginPasskeyBegin(w http.ResponseWriter, r *http.Request) {
 	options, sealed, err := ps.BeginSignIn()
 	if err != nil {
 		// This server's failure, not the caller's attempt.
-		g.deps.Limiter.Release(res.ipKey, now)
+		g.deps.Limiter.Release(beginKey, now)
 		g.logError("beginning passkey-alone sign-in: " + err.Error())
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey sign-in", nil)
 		return
 	}
 	g.setPasskeySignInCookie(w, sealed)
 	writeJSON(w, http.StatusOK, options)
+}
+
+// passkeyBeginKey is the limiter bucket login/passkey/begin reserves on
+// for address: its own, so asking for challenges spends none of the
+// address's sign-in attempts (see handleLoginPasskeyBegin). Whatever
+// hands the begin step's reservation back releases this key.
+func passkeyBeginKey(address string) string {
+	return "passkey-begin:" + address
 }
 
 // -- the assertion check both finishes share ------------------------------
@@ -196,9 +214,10 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	}
 	now := g.now()
 
-	// The address's reservation is the begin step's, kept until this
-	// completes; res is replaced by the account's once the user handle
-	// names one. The deferred release is the pass past the address limit
+	// The begin step's reservation (passkeyBeginKey) is kept until this
+	// completes. res is the address alone until the user handle names an
+	// account, then the address's and the account's, as reserveLogin
+	// takes them. The deferred release is the pass past the address limit
 	// a reservation may hold, handed back however this returns.
 	address := g.cfg.ClientIP(r)
 	res := loginReservation{ipKey: "ip:" + address, address: address}
@@ -254,10 +273,11 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 		refuse(classInvalidCredentials, passkeyNotVerified, true)
 		return
 	case signInAssertionBackendFailed:
-		// The credential was right but could not be recorded: both
-		// reservations go back, as login/factor's do.
+		// The credential was right but could not be recorded: this
+		// request's reservations and the begin step's go back, as
+		// login/factor's do.
 		g.releaseLogin(res, now)
-		g.deps.Limiter.Release(res.ipKey, now)
+		g.deps.Limiter.Release(passkeyBeginKey(address), now)
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	}
@@ -265,7 +285,7 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	// Every credential has passed: judge the sign-in (#55) before any
 	// session exists. The ceremony is spent either way.
 	g.clearPasskeySignInCookie(w)
-	g.deps.Limiter.Release(res.ipKey, now) // the begin step's reservation
+	g.deps.Limiter.Release(passkeyBeginKey(address), now) // the begin step's reservation
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodPasskeyAlone, place, now)
 	if verdict.stopsSignIn() {

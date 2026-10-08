@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -285,5 +286,118 @@ func TestSweepTokensStopsOnACancelledContext(t *testing.T) {
 	cancel()
 	if _, err := f.g.SweepTokens(ctx, time.Now()); err == nil {
 		t.Error("a cancelled context swept anyway")
+	}
+}
+
+// Deleting an account and revoking its tokens are two writes. When the
+// second never happens, the next sweep removes the tokens and audits it.
+func TestSweepTokensRemovesTokensWhoseCreatorIsGone(t *testing.T) {
+	f := newSweepFixture(t)
+	now := time.Now()
+	bob, err := f.g.deps.Users.CreateUser("bob", "password-placeholder-1", gauntlet.RoleUser, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan := f.mint(t, "bob-integration", bob, now.Add(-time.Hour), now.Add(300*24*time.Hour))
+	kept := f.mint(t, "admin-integration", f.admin, now.Add(-time.Hour), now.Add(300*24*time.Hour))
+	// The account goes, but its tokens' revoke never runs.
+	if _, err := f.g.deps.Users.DeleteUser(bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.g.deps.Tokens.Authenticate(f.raw[orphan], gauntlet.TokenKindAPI, now); !ok {
+		t.Fatal("setup: the orphaned token should still work before the sweep")
+	}
+
+	res, err := f.g.SweepTokens(context.Background(), now)
+	if err != nil {
+		t.Fatalf("SweepTokens: %v", err)
+	}
+	if res != (TokenSweep{Orphaned: 1}) {
+		t.Errorf("result = %+v, want 1 orphaned", res)
+	}
+	if f.has(orphan) || !f.has(kept) {
+		t.Errorf("orphan present = %v, admin's present = %v; want false, true", f.has(orphan), f.has(kept))
+	}
+	if _, ok := f.g.deps.Tokens.Authenticate(f.raw[orphan], gauntlet.TokenKindAPI, now); ok {
+		t.Error("the orphaned token still authenticates after the sweep")
+	}
+	var audited []auditEntry
+	for _, e := range f.audit.entries {
+		if e.Action == "token.removed_orphaned" {
+			audited = append(audited, e)
+		}
+	}
+	if len(audited) != 1 || audited[0].Actor != "system" || audited[0].Target != "bob-integration" ||
+		!strings.Contains(audited[0].Detail, "id="+orphan) {
+		t.Errorf("audit entries = %+v, want one token.removed_orphaned by system for %s", audited, orphan)
+	}
+}
+
+// A warning is recorded only once it was delivered: a notifier that
+// fails leaves the token unmarked, and the next sweep offers it again.
+func TestSweepTokensMarksAWarningOnlyOnceSent(t *testing.T) {
+	f := newSweepFixture(t)
+	now := time.Now()
+	soon := f.mint(t, "soon", f.admin, now.Add(-24*time.Hour), now.Add(5*24*time.Hour))
+	warnedAt := func() time.Time {
+		for _, tok := range f.g.deps.Tokens.List() {
+			if tok.ID == soon {
+				return tok.ExpiryWarnedAt
+			}
+		}
+		t.Fatal("the token is gone")
+		return time.Time{}
+	}
+
+	f.notes.fail = func(context.Context) error { return errors.New("mail relay down") }
+	res, err := f.g.SweepTokens(context.Background(), now)
+	if err != nil {
+		t.Fatalf("SweepTokens: %v", err)
+	}
+	if res.Warned != 0 || !warnedAt().IsZero() || len(f.notes.all()) != 1 {
+		t.Fatalf("failed send: result %+v, warned at %v, %d notices; want unmarked after one attempt",
+			res, warnedAt(), len(f.notes.all()))
+	}
+
+	f.notes.mu.Lock()
+	f.notes.fail = nil
+	f.notes.mu.Unlock()
+	later := now.Add(24 * time.Hour)
+	res, err = f.g.SweepTokens(context.Background(), later)
+	if err != nil {
+		t.Fatalf("second SweepTokens: %v", err)
+	}
+	if res.Warned != 1 || !warnedAt().Equal(later) || len(f.notes.all()) != 2 {
+		t.Fatalf("retry: result %+v, warned at %v, %d notices; want marked at %v after a second send",
+			res, warnedAt(), len(f.notes.all()), later)
+	}
+
+	res, err = f.g.SweepTokens(context.Background(), later.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("third SweepTokens: %v", err)
+	}
+	if res != (TokenSweep{}) || len(f.notes.all()) != 2 {
+		t.Errorf("third sweep = %+v with %d notices, want nothing new", res, len(f.notes.all()))
+	}
+}
+
+// A notifier still running at the deadline counts as not delivered.
+func TestSweepTokensTreatsASlowNotifierAsNotSent(t *testing.T) {
+	f := newSweepFixture(t)
+	old := notifyTimeout
+	notifyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { notifyTimeout = old })
+	now := time.Now()
+	f.mint(t, "soon", f.admin, now.Add(-24*time.Hour), now.Add(5*24*time.Hour))
+
+	// It ignores its context and only returns, successfully, once the
+	// sweep is over: the sweep must not wait for it.
+	release := make(chan struct{})
+	f.notes.fail = func(context.Context) error { <-release; return nil }
+	res, err := f.g.SweepTokens(context.Background(), now)
+	close(release)
+	f.g.notifying.Wait()
+	if err != nil || res.Warned != 0 {
+		t.Errorf("SweepTokens = %+v, %v; want nothing marked", res, err)
 	}
 }

@@ -27,6 +27,15 @@ func TestNewEncryptedFileBackendRefusesShortKey(t *testing.T) {
 	}
 }
 
+func TestNewEncryptedFileBackendRefusesEmptyPath(t *testing.T) {
+	if _, err := NewEncryptedFileBackend("", testKey(0x01)); err == nil {
+		t.Fatal("NewEncryptedFileBackend accepted an empty path, want a refusal")
+	}
+	if _, err := newEncryptedFileBackendForPath("", "logical", testKey(0x01)); err == nil {
+		t.Fatal("newEncryptedFileBackendForPath accepted an empty path, want a refusal")
+	}
+}
+
 func TestEncryptedFileBackendSaveThenLoadRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.json")
 	b, err := NewEncryptedFileBackend(path, testKey(0x01))

@@ -128,7 +128,7 @@ func TestEverySessionIssueSetsTheKnownBrowserCookie(t *testing.T) {
 	check("the second-factor step", submitLoginFactor(t, bob, ts, gauntlet.GenerateTOTPCode(secret, counter+1)))
 	check("a password change", postJSON(t, bob, ts.URL+"/api/auth/password",
 		changePasswordRequest{CurrentPassword: totpBobPassword, NewPassword: totpBobPassword + "-2"}))
-	check("sign out everywhere", postJSON(t, bob, ts.URL+"/api/auth/logout-all", nil))
+	check("sign out everywhere", postJSON(t, bob, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword + "-2"}))
 }
 
 // A stranger locks bob out; bob's own browser signs in all the same, on
@@ -208,7 +208,7 @@ func TestSignOutEverywhereAndAResetCodeForgetKnownBrowsers(t *testing.T) {
 		t.Fatal("precondition: browser B is not known")
 	}
 
-	if status, body := readAll(t, postJSON(t, browserA, ts.URL+"/api/auth/logout-all", nil)); status != http.StatusOK {
+	if status, body := readAll(t, postJSON(t, browserA, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword})); status != http.StatusOK {
 		t.Fatalf("sign out everywhere = %d %s", status, body)
 	}
 	now := g.now()

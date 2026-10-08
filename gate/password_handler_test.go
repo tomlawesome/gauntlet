@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -130,5 +133,173 @@ func TestChangePasswordStoreFailureIsLogged(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "save refused") {
 		t.Errorf("the store's error is not in the server log; log = %q", logs.String())
+	}
+}
+
+// ssoOnlyAdmin provisions an account through SSO, as a sign-in would,
+// promotes it to admin, and returns its ID and a client holding a
+// session for it. The account has no local password.
+func ssoOnlyAdmin(t *testing.T, g *Gate, ts *httptest.Server, subject string) (string, *http.Client) {
+	t.Helper()
+	u, _, err := g.deps.Users.FindOrCreateOIDCUser("https://idp.example", subject, subject, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := g.deps.Users.SetRole(u.ID, gauntlet.RoleAdmin, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh SSO sign-in, as the callback leaves it.
+	sess := g.deps.Sessions.CreateFrom(u.ID, gauntlet.SessionClient{Method: gauntlet.SignInMethodSSO}, time.Now())
+	return u.ID, sessionClient(t, ts.URL, sess.ID)
+}
+
+// The cookie alone is what a thief holds, so an SSO-only admin sets its
+// first password only from a session its identity provider issued in
+// the last ten minutes: an older one, or one made any other way, is
+// 409 and sets nothing.
+func TestSSOOnlyAdminFirstPasswordNeedsAFreshSSOSignIn(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
+	id, _ := ssoOnlyAdmin(t, g, ts, "subject-ann")
+
+	for name, sess := range map[string]gauntlet.Session{
+		"an SSO session eleven minutes old": g.deps.Sessions.CreateFrom(id, gauntlet.SessionClient{Method: gauntlet.SignInMethodSSO}, time.Now().Add(-11*time.Minute)),
+		"a fresh session not made by SSO":   g.deps.Sessions.CreateFrom(id, gauntlet.SessionClient{Method: gauntlet.SignInMethodPassword}, time.Now()),
+		"a fresh session with no method":    g.deps.Sessions.Create(id, time.Now()),
+	} {
+		resp := postJSON(t, sessionClient(t, ts.URL, sess.ID), ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "new-password-1"})
+		status, body := readAll(t, resp)
+		if status != http.StatusConflict || !strings.Contains(body, "sign in again through your identity provider") {
+			t.Errorf("%s = %d %s, want 409 asking for a fresh SSO sign-in", name, status, body)
+		}
+	}
+	if u, _ := g.deps.Users.Get(id); u.LocalPassword() {
+		t.Error("a refused request set a local password")
+	}
+}
+
+// Every admin keeps a local password (ADR-0010), so an SSO-only admin
+// may set one with nothing but the new password; an SSO-only user still
+// may not. Once it has one, the forced second-factor enrolment door
+// holds it like any other local account.
+func TestSSOOnlyAdminSetsAFirstLocalPassword(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", "password-placeholder-1")
+
+	frodo, _, err := g.deps.Users.FindOrCreateOIDCUser("https://idp.example", "subject-frodo", "frodo", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := sessionClient(t, ts.URL, g.deps.Sessions.Create(frodo.ID, time.Now()).ID)
+	refused := postJSON(t, user, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "new-password-1"})
+	_ = refused.Body.Close()
+	if refused.StatusCode != http.StatusConflict {
+		t.Errorf("an SSO-only user setting a password got %d, want 409", refused.StatusCode)
+	}
+
+	id, admin := ssoOnlyAdmin(t, g, ts, "subject-ann")
+	if got := protectedStatusWithCookie(t, admin, ts.URL, nil); got != http.StatusOK {
+		t.Fatalf("the SSO-only admin's session got %d before setting a password, want 200", got)
+	}
+	resp := postJSON(t, admin, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "new-password-1"})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("an SSO-only admin setting a first password got %d, want 200", resp.StatusCode)
+	}
+	u, _ := g.deps.Users.Get(id)
+	if !u.LocalPassword() {
+		t.Error("the admin still has no local password")
+	}
+	if _, err := g.deps.Users.Authenticate(u.Username, "new-password-1", time.Now()); err != nil {
+		t.Errorf("the new password does not sign in: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/protected", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	door, err := admin.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = door.Body.Close()
+	if door.StatusCode != http.StatusForbidden || door.Header.Get(authGateHeader) != authGateMustEnrolFactor {
+		t.Errorf("after setting a password: %d %s=%q, want 403 at the %s door",
+			door.StatusCode, authGateHeader, door.Header.Get(authGateHeader), authGateMustEnrolFactor)
+	}
+}
+
+// A forced change asks for no current password, so the handler has none
+// to compare the new one with: the stored hash answers instead. Setting
+// the same password again is refused; a different one is accepted and
+// lifts the flag.
+func TestForcedPasswordChangeRefusesTheSamePassword(t *testing.T) {
+	g := newTestGate(t)
+	g.deps.Users = primeMustChangePasswordAdmin(t)
+	ts := newTestServer(t, g)
+
+	client := &http.Client{Jar: mustCookieJar(t)}
+	login := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: "password-placeholder-1"})
+	_ = login.Body.Close()
+	if login.StatusCode != http.StatusOK {
+		t.Fatalf("login got %d, want 200", login.StatusCode)
+	}
+
+	same := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "password-placeholder-1"})
+	status, body := readAll(t, same)
+	if status != http.StatusBadRequest || !strings.Contains(body, "same as the current one") {
+		t.Errorf("resubmitting the current password under a forced change = %d %s, want 400 naming it", status, body)
+	}
+	if u, _ := g.deps.Users.Get("admin-1"); !u.MustChangePassword {
+		t.Fatal("the refused change lifted MustChangePassword")
+	}
+
+	changed := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "a-new-password"})
+	_ = changed.Body.Close()
+	if changed.StatusCode != http.StatusOK {
+		t.Fatalf("a different password under a forced change got %d, want 200", changed.StatusCode)
+	}
+	if u, _ := g.deps.Users.Get("admin-1"); u.MustChangePassword {
+		t.Error("MustChangePassword is still set after a new password")
+	}
+}
+
+// Signing in with a reset code spends it, but the code was seen by the
+// admin who issued it, and the forced change exists to retire it: set
+// as the new password it is refused like the current one. A different
+// password is accepted, and nothing of the code is kept after that.
+func TestForcedPasswordChangeRefusesTheSpentResetCode(t *testing.T) {
+	g := newTestGate(t)
+	ts := newTestServer(t, g)
+	registerAdminNoFactor(t, ts, "admin", "password-placeholder-1")
+	u, _ := g.deps.Users.ByUsername("admin")
+	_, code, err := g.deps.Users.IssueResetCode(u.ID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: mustCookieJar(t)}
+	login := postJSON(t, client, ts.URL+"/api/auth/login", credentialsRequest{Username: "admin", Password: code})
+	_ = login.Body.Close()
+	if login.StatusCode != http.StatusOK {
+		t.Fatalf("signing in with the reset code got %d, want 200", login.StatusCode)
+	}
+
+	for _, typed := range []string{code, gauntlet.FormatResetCode(code)} {
+		status, body := readAll(t, postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: typed}))
+		if status != http.StatusBadRequest || !strings.Contains(body, "same as the current one") {
+			t.Errorf("setting the spent reset code %q as the password = %d %s, want 400", typed, status, body)
+		}
+	}
+
+	changed := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{NewPassword: "a-new-password"})
+	_ = changed.Body.Close()
+	if changed.StatusCode != http.StatusOK {
+		t.Fatalf("a different password got %d, want 200", changed.StatusCode)
+	}
+	after, _ := g.deps.Users.Get(u.ID)
+	if after.MustChangePassword || after.ResetCodeSpentHash != "" {
+		t.Errorf("after the change: MustChangePassword %v, ResetCodeSpentHash %q; want false, empty", after.MustChangePassword, after.ResetCodeSpentHash)
 	}
 }

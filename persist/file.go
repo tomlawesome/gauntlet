@@ -2,7 +2,7 @@ package persist
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -28,6 +28,12 @@ type fileBackend struct {
 
 func newFileBackend(path string) *fileBackend { return &fileBackend{path: path} }
 
+// errNoPath is returned for a backend built with an empty path. Load
+// returns it too, not just Save: read as a file name, "" is simply
+// missing, and Load would report a fresh install that only fails once
+// the operator has filled in the setup form and tries to save it.
+var errNoPath = errors.New("persist: no file path configured")
+
 func (b *fileBackend) Describe() string { return "file " + b.path }
 
 func (b *fileBackend) Close() error { return nil }
@@ -37,6 +43,9 @@ func (b *fileBackend) Close() error { return nil }
 // error, because treating it as absent is how a corrupt document
 // silently becomes a fresh install.
 func (b *fileBackend) Load(ctx context.Context) (Snapshot, error) {
+	if b.path == "" {
+		return Snapshot{}, errNoPath
+	}
 	data, err := os.ReadFile(b.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -68,9 +77,21 @@ func contentVersion(data []byte) int64 {
 // writeFileAtomic replaces path's contents crash-safely: a temp file is
 // written in path's own directory, fsynced, renamed over path, and the
 // directory is fsynced after the rename.
+//
+// The rename puts a new inode at path, owned by whoever wrote it, so
+// when path already exists the temp file first takes on its owner and
+// group. Otherwise one save from an app's CLI run with sudo leaves a
+// store the server sharing it (persist.go's Backend doc) can no longer
+// read or replace, and every save after that fails. The mode is always
+// perm, not the old file's: a store loosened by hand is tightened again
+// on the next save rather than kept as it was found.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	existing, err := os.Stat(path)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
@@ -89,6 +110,12 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := f.Chmod(perm); err != nil {
 		cleanup()
 		return err
+	}
+	if existing != nil {
+		if err := copyOwner(f, existing); err != nil {
+			cleanup()
+			return err
+		}
 	}
 	if _, err := f.Write(data); err != nil {
 		cleanup()
@@ -122,7 +149,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // winning. expect == 0 additionally requires that no file exists yet.
 func (b *fileBackend) Save(ctx context.Context, payload []byte, expect int64) (int64, error) {
 	if b.path == "" {
-		return 0, fmt.Errorf("persist: no file path configured")
+		return 0, errNoPath
 	}
 	dir := filepath.Dir(b.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

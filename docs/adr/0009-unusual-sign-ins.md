@@ -219,6 +219,18 @@ remembers, and let the application decide what happens next.
   lone admin's. Shipped as designed, documented (design.md §4's
   pitfalls table); the follow-up, a server-log escape code, is
   [ADR-0011](0011-escape-code.md) (#66).
+- An SSO-only account under `block` has no administrator remedy in
+  this release: it is refused at the SSO callback (`ssoError=refused`),
+  and the reset code needs a local password, so the way back is a
+  browser or place it has signed in from before. An admin "allow the
+  next sign-in for a short window" is a next-release issue (#79).
+- Sign out everywhere clears the baseline only for an account with a
+  local password, which it asks for again (#79): with only a session
+  cookie, a thief could otherwise wipe what the account trusts and leave
+  their own browser the only one remembered. An SSO-only account's sign
+  out everywhere ends its sessions and keeps its baseline (decision 3's
+  "cleared wherever known browsers are cleared" still holds; known
+  browsers are not cleared there).
 - `geoip` gains a dependency on the City file's larger download (tens
   of megabytes rather than a few) wherever `EditionCity` is chosen; the
   128 MiB cap and the existing refresh schedule are unchanged.

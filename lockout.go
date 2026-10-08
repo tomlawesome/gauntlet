@@ -224,7 +224,8 @@ type passwordChangeRequirer interface {
 
 // requirePasswordChange implements passwordChangeRequirer: one write
 // setting MustChangePassword and ending every session the account holds
-// (SessionsEndedAt, #44), or none if the flag is already set.
+// (SessionsEndedAt, #44), or none if the flag is already set. For an
+// account with no local password it only ends the sessions.
 //
 // The sessions go because the change-password door asks for no current
 // password while MustChangePassword is set (gate's
@@ -245,6 +246,16 @@ func (s *Store) requirePasswordChange(accountID string, now time.Time) error {
 		u, ok := st.byID[accountID]
 		if !ok {
 			return ErrUserNotFound
+		}
+		// An account with no local password signs in through its
+		// identity provider, so the thing the failures put at risk is
+		// the provider identity, which this module cannot change. The
+		// flag would only shut it out of everything behind a door that
+		// refuses it (handleChangePassword), until an operator stepped
+		// in. Its sessions still end; the flag is left alone.
+		if !u.HasLocalPassword {
+			u.SessionsEndedAt = now
+			return nil
 		}
 		if u.MustChangePassword {
 			return errNoChange

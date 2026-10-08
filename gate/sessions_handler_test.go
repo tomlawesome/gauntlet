@@ -411,7 +411,7 @@ func TestSessionsLogoutAllLeavesOneRow(t *testing.T) {
 		t.Fatalf("before sign out everywhere, total = %d, want 3", list.Total)
 	}
 
-	resp := postJSON(t, laptop, ts.URL+"/api/auth/logout-all", nil)
+	resp := postJSON(t, laptop, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("logout-all returned %d", resp.StatusCode)

@@ -13,8 +13,9 @@
 # variables only the owner sets; nothing here sets them, and without them
 # the job never runs.
 #
-# Renovate (#63) runs in the `maintenance` stage, only in the pipeline the
-# weekly `renovate` schedule starts; see the job at the end of the file.
+# Renovate (#63) runs in the `maintenance` stage, only in the pipelines the
+# weekly `renovate` and daily `renovate-security` schedules start; see the
+# job at the end of the file.
 #
 # Runner lane (ai/agent-infra#3): `light` is 4 CPU / 6 GB, which is ample
 # for a dependency-free Go module. `big` is not needed here. The two
@@ -324,7 +325,10 @@ blocklist:build:
           - .gitlab-ci.yml
       paths:
         - .gocache/
-    - key: blocklist-checkpoint-$CI_PIPELINE_ID
+    # Prefixed like every other cache key: a pipeline on an unprotected
+    # branch must never seed the checkpoint the protected monthly build
+    # resumes from, whatever the project's cache-separation setting.
+    - key: $CI_COMMIT_REF_PROTECTED-blocklist-checkpoint-$CI_PIPELINE_ID
       paths:
         - .blocklist/
       when: always
@@ -594,6 +598,14 @@ sync:mirror-to-github:
 # value mean "unset", because Renovate accepts extract, lookup or full and
 # nothing else.
 #
+# A second schedule runs this job daily with RENOVATE_SECURITY_ONLY=true
+# (#79): docs/releasing.md promises a security fix opens a merge request
+# without waiting for Monday, and nothing else runs between Mondays. That
+# run adds renovate-security.json on top of renovate.json, through
+# Renovate's RENOVATE_ADDITIONAL_CONFIG_FILE, which turns every ordinary
+# update off and leaves vulnerability fixes on; everything else still
+# comes from renovate.json, so the two runs never drift apart.
+#
 # There is no `RENOVATE_ALLOWED_COMMANDS`: nothing needs a postUpgradeTask.
 # `go mod tidy` after a Go module bump is Renovate's own gomodTidy option.
 renovate:
@@ -653,5 +665,9 @@ renovate:
         echo "renovate: live run, merge requests will be created"
       else
         echo "renovate: dry run (${RENOVATE_DRY_RUN}), nothing will be created"
+      fi
+      if [ "${RENOVATE_SECURITY_ONLY:-}" = "true" ]; then
+        export RENOVATE_ADDITIONAL_CONFIG_FILE="$CI_PROJECT_DIR/renovate-security.json"
+        echo "renovate: security fixes only ($RENOVATE_ADDITIONAL_CONFIG_FILE)"
       fi
       renovate

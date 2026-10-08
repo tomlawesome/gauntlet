@@ -1,29 +1,3 @@
-// Package gauntlet implements local username/password authentication:
-// user accounts and roles (this file), Argon2id password hashing
-// (password.go), username validation (username.go), and random id
-// generation (id.go). It also owns OIDC/SSO identity storage and
-// just-in-time provisioning (Store.FindOrCreateOIDCUser) -- the OIDC
-// protocol itself lives in the separate gauntlet/oidc package, which
-// this package doesn't import.
-//
-// The types here start from mikroview's internal/auth/store.go, with
-// its names kept (docs/adr/0001-shared-auth-module.md decision 3;
-// docs/design.md §1.3), plus what gauntlet added: User.clone for the
-// copy-then-save writes (Store.mutate) and the unexported
-// totpSecretBlanked mark and blankedPasskeyCount count that let a
-// blanked copy still answer HasActiveTOTP, HasSecondFactor and
-// PasskeyCount. The stored fields are
-// mikroview's, byte for byte, plus gauntlet's own that mikroview's
-// documents lack and read as zero: loginLockedUntil (#19),
-// sessionsEndedAt (#28), loginLockoutCount, loginDisabledAt and
-// knownBrowsers (#44), and totpPendingSince and heldEnrolment (#58).
-// User carries every field mikroview's own User carries -- including TOTP, recovery codes, reset codes and
-// passkeys -- because Store persists the whole document on every save
-// (docs/design.md Summary): a field this package didn't know about would
-// be silently dropped on the first write. The methods that generate, verify or
-// clear those fields live beside them: totp.go, recoverycodes.go,
-// resetcode.go and passkeys.go; the predicates docs/design.md §1.3
-// lists (LocalPassword, HasActiveTOTP, HasSecondFactor) are below.
 package gauntlet
 
 import (
@@ -129,6 +103,16 @@ type User struct {
 	// issued. Checked against, never the only check -- see
 	// User.resetCodeLive.
 	ResetCodeExpiresAt time.Time `json:"resetCodeExpiresAt,omitzero"`
+	// ResetCodeSpentHash keeps ResetCodeHash once a sign-in has spent
+	// the code, until the forced change it led to is made. The code was
+	// a password someone else saw -- the admin who issued it, and
+	// whatever carried it to the account's owner -- and the forced
+	// change exists to retire it, so Store.PasswordMatches refuses it as
+	// the new password. Set by Authenticate in the write that spends the
+	// code; cleared by SetPassword, by a new IssueResetCode, and
+	// wherever ResetCodeHash is voided. Never a way in: nothing signs in
+	// against it.
+	ResetCodeSpentHash string `json:"resetCodeSpentHash,omitempty"`
 	// MustChangePassword is set by an admin reset, and by a LoginLimiter
 	// once a run of second-factor failures shows someone else knows the
 	// password (SecondFactorFailed, #44). It is cleared only where a new
@@ -268,6 +252,7 @@ func (u *User) blankCredentials() {
 	// code *is* the password.
 	u.PasswordHash = ""
 	u.ResetCodeHash = ""
+	u.ResetCodeSpentHash = ""
 	// TOTPSecret is worse than a verifier hash if it leaked -- it's the
 	// actual shared secret, good for minting valid codes indefinitely,
 	// not just checking one. RecoveryCodes are hashes only, same

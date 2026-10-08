@@ -18,8 +18,9 @@ Full detail and the CVE research behind each item is in
   custom-header CSRF check on unsafe methods.
 - **OIDC**: Authorization Code + PKCE, constant-time `state`/`nonce`
   checks, an explicit signing-algorithm allowlist, identity keyed on
-  `(issuer, subject)` rather than email, and self-hosted issuers only --
-  a public multi-tenant IdP is refused at startup, not left to
+  `(issuer, subject)` rather than email, and self-hosted issuers only,
+  plus Google with the `hd` domain pinned in the policy (ADR-0014) --
+  any other public multi-tenant IdP is refused at startup, not left to
   misconfiguration.
 - **Tokens**: SHA-256 at rest, kind-checked on every use so a read token
   can never authenticate a write route, a uniform 401 for missing and

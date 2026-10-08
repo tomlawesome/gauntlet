@@ -13,6 +13,7 @@ import (
 
 	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // Every sign-in attempt is recorded (#45, #53): failures as
@@ -505,5 +506,51 @@ func TestWarnRatingIsBoundedBeyondTheKeyCap(t *testing.T) {
 	logs.mu.Unlock()
 	if n != 3 {
 		t.Errorf("50 keys past a cap of 2 made %d lines, want 3 (two keys and one shared)", n)
+	}
+}
+
+// A sign-in held for a passkey (#65) and completed by one is audited as
+// a passkey proof, not as a confirmation code.
+func TestAProvedSignInIsAuditedAsAPasskeyProof(t *testing.T) {
+	e := newProveEnv(t)
+	c := e.held(t)
+	if resp, body := e.prove(t, c, e.fake); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login/prove = %d %s", resp.StatusCode, body)
+	}
+	entry := findAuditEntry(t, e.g, "user.login")
+	if want := "unusual=new-browser; action=prove; via passkey proof" + fixtureFromSuffix; entry.Detail != want {
+		t.Errorf("user.login detail = %q, want %q", entry.Detail, want)
+	}
+}
+
+// A held sign-in whose remember write fails still says what was judged
+// and how the hold was answered: the session carries no signals then,
+// but the audit must not lose the action.
+func TestAHeldSignInKeepsItsActionWhenRememberingFails(t *testing.T) {
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	rec := &noticeRecorder{}
+	e := newUnusualEnvWith(t, backend, func(c *Config) {
+		c.UnusualSignIns = UnusualSignInPolicy{NewCountry: UnusualSignInConfirm}
+		c.Notices = rec
+		c.DeliverConfirmCode = rec.deliver
+	})
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	e.advance(time.Hour)
+	if status, _ := e.signIn(t, b, addrParis); status != http.StatusOK {
+		t.Fatal("no challenge")
+	}
+	code := confirmCode(t, rec)
+	backend.left = 0
+	_, status, body := e.postConfirm(t, b, addrParis, code)
+	backend.left = -1
+	if status != http.StatusOK {
+		t.Fatalf("confirm = %d %s", status, body)
+	}
+	if got := e.newestSession(t).Client.Unusual; got != 0 {
+		t.Errorf("session signals = %q, want none after a failed remember write", got)
+	}
+	if entry, _ := e.lastAudit("user.login"); entry.Detail != `unusual=new-country; action=confirm; via confirmation code; from="`+addrParis+`"` {
+		t.Errorf("audit = %q", entry.Detail)
 	}
 }

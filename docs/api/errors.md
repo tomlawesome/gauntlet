@@ -73,7 +73,8 @@ named under the class it shares, below.
   password or second factor before acting (`POST /api/auth/password`,
   `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST
   /api/auth/recovery-codes`, `POST /api/auth/passkeys/register/begin`,
-  `DELETE /api/auth/passkeys/{id}`, `POST
+  `DELETE /api/auth/passkeys/{id}`, `POST /api/auth/oidc/link`, `POST
+  /api/auth/logout-all` for an account with a local password, `POST
   /api/auth/users/{id}/unlock` on the caller's own account, and `POST
   /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant
   the admin role, #67), and `gate.
@@ -176,7 +177,10 @@ named under the class it shares, below.
   Retrying from the same browser and place changes nothing; the account
   itself is not locked.
 - Returned by `POST /api/auth/login` and `POST /api/auth/login/factor`.
-  The SSO callback redirects with `ssoError=refused` instead.
+  The SSO callback redirects with `ssoError=refused` instead. An
+  SSO-only account refused there has no administrator remedy in this
+  release (the reset code needs a local password): the way back is a
+  browser or place the account has signed in from before.
 - `detail` is always "this sign-in was refused by the account's sign-in
   policy -- use a browser or place this account has signed in from
   before, or ask an administrator to reset the account". It never says
@@ -233,11 +237,14 @@ named under the class it shares, below.
 ## not-found
 
 - **Status:** 404. **Title:** Not found.
-- No account, token, session or passkey has the id or ref given; or the
+- No account, token, session or passkey has the id or ref given; the
+  caller asked to remove an authenticator app their account does not
+  have; or the
   application does not offer this feature at all (`Deps.Passkeys`,
   `Deps.OIDC` or `Deps.SignIns` is nil). `detail` is absent for the
   feature-off cases and named for the rest ("no such user", "no such
   session", "no such token", "no such passkey on this account",
+  "this account has no authenticator app",
   "sign-in history is not configured").
 - Not the same as `about:blank`: this class is for a *route that exists*
   answering "nothing here has that id"; `about:blank` is for a path or
@@ -267,6 +274,9 @@ named under the class it shares, below.
 - The request would leave the deployment with no admin account (#67):
   deleting the last admin, or demoting them to `user` or `viewer`. Make
   another account an admin first, then retry. Nothing was changed.
+  The same class refuses deleting or demoting the last admin that has a
+  local password while other admins remain (#79): they would all depend
+  on the identity provider. Give another admin a local password first.
 - Returned by `DELETE /api/auth/users/{id}` (the last admin; deleting
   the caller's own account while other admins exist is `conflict`
   instead) and `PUT /api/auth/users/{id}/role`. Before #67 deleting the
@@ -274,7 +284,10 @@ named under the class it shares, below.
   branch on this class too.
 - `detail` is "this is the last admin account -- make another account
   an admin first", or, for a delete, "the last admin account cannot be
-  deleted -- make another account an admin first".
+  deleted -- make another account an admin first", or, for the last
+  admin with a local password, "this is the last admin that can sign in
+  without the identity provider -- give another admin a local password
+  first".
 
 ## role-managed-by-sso
 

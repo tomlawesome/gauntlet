@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,6 +282,35 @@ func TestTOTPConfirmRejectsBadCode(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("a wrong code got %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestTOTPConfirmWrongCodeAndRefusalAreRecorded: a wrong code at
+// confirm is a user.login_failed record marked as a re-check, and a
+// confirm the limiter refuses is the rated Warn line, as at every other
+// in-session re-check.
+func TestTOTPConfirmWrongCodeAndRefusalAreRecorded(t *testing.T) {
+	g, ts, _ := totpFixture(t)
+	g.deps.Limiter = mustNewLoginLimiter(t, 1, time.Minute)
+	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	totpEnrol(t, bob, ts)
+	audit, logs, _ := recordSignIns(g)
+
+	status, _ := readAll(t, postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: "000000"}))
+	if status != http.StatusBadRequest {
+		t.Fatalf("a wrong code got %d, want 400", status)
+	}
+	want := auditEntry{totpBobUsername, "user.login_failed", totpBobUsername, "outcome=factor_refused method=code step=recheck " + fixtureFrom}
+	if failed := auditEntries(audit, "user.login_failed"); len(failed) != 1 || failed[0] != want {
+		t.Errorf("records = %+v, want %+v", failed, want)
+	}
+
+	status, _ = readAll(t, postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: "000000"}))
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("a confirm over the limit got %d, want 429", status)
+	}
+	if lines := logLines(logs, "re-check refused"); len(lines) != 1 || !strings.Contains(lines[0], `account="bob"`) {
+		t.Errorf("refused re-check lines = %q, want one naming the account", lines)
 	}
 }
 
@@ -633,4 +663,65 @@ func TestAConfirmationThatCannotBeSavedChangesNothing(t *testing.T) {
 	if u, _ := g.deps.Users.Get(totpBobID(t, g)); !u.HasActiveTOTP() || len(u.RecoveryCodes) != 10 {
 		t.Error("the app and its codes are not live after the confirmation")
 	}
+}
+
+// wantNothingRecordedOrSent fails t if audit holds any record or rec any
+// notice: what a request that changed nothing must leave behind.
+func wantNothingRecordedOrSent(t *testing.T, g *Gate, audit *auditRecorder, rec *noticeRecorder) {
+	t.Helper()
+	g.notifying.Wait()
+	audit.mu.Lock()
+	entries := append([]auditEntry(nil), audit.entries...)
+	audit.mu.Unlock()
+	if len(entries) != 0 {
+		t.Errorf("audit records = %+v, want none", entries)
+	}
+	if notices := rec.all(); len(notices) != 0 {
+		t.Errorf("notices = %+v, want none", notices)
+	}
+}
+
+// Removing an authenticator app the account does not have changes
+// nothing: the owner's own delete is a 404 that signs no one out, and
+// neither route writes a record or sends a notice. A second click on
+// "Disable" used to end every session on the account and announce a
+// removal that did not happen.
+func TestTOTPRemovalWithNothingToRemoveChangesNothing(t *testing.T) {
+	t.Run("owner", func(t *testing.T) {
+		// The account needs some factor to be past the must-enrol door:
+		// a passkey, the case a stale "Disable" button leaves.
+		g, ts, _ := passkeyFixture(t)
+		bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+		registerPasskey(t, bilbo, ts, g, "YubiKey")
+		audit, rec := &auditRecorder{}, &noticeRecorder{}
+		g.cfg.Audit, g.cfg.Notices = audit, rec
+
+		status, body := readAll(t, deleteJSON(t, bilbo, ts.URL+"/api/auth/totp", totpDeleteRequest{Password: passkeyBilboPassword}))
+		if status != http.StatusNotFound || !strings.Contains(body, "not-found") {
+			t.Errorf("delete with no app = %d %s, want 404 not-found", status, body)
+		}
+		wantNothingRecordedOrSent(t, g, audit, rec)
+		if !sessionOf(t, bilbo, ts).Authenticated {
+			t.Error("the caller was signed out by a delete that removed nothing")
+		}
+	})
+	t.Run("admin", func(t *testing.T) {
+		g, ts, admin := totpFixture(t)
+		bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+		audit, rec := &auditRecorder{}, &noticeRecorder{}
+		g.cfg.Audit, g.cfg.Notices = audit, rec
+
+		status, body := readAll(t, deleteJSON(t, admin, ts.URL+"/api/auth/users/"+totpBobID(t, g)+"/totp", adminStepUpRequest{Password: testAdminPassword}))
+		var out map[string]any
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("admin clear = %d %s: %v", status, body, err)
+		}
+		if status != http.StatusOK || out["username"] != totpBobUsername || out["cleared"] != false {
+			t.Errorf("admin clear with no app = %d %v, want 200 cleared=false", status, out)
+		}
+		wantNothingRecordedOrSent(t, g, audit, rec)
+		if !sessionOf(t, bob, ts).Authenticated {
+			t.Error("bob was signed out by a clear that removed nothing")
+		}
+	})
 }

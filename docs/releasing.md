@@ -187,10 +187,12 @@ monthly interval (for example `17 3 2 * *`, 03:17 UTC on the 2nd), and
 a variable `BLOCKLIST_BUILD` = `true`.
 
 Each run downloads 20-40 GB
-from HIBP over about four hours. Optionally, under
-[Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries),
-refuse duplicate generic packages, so a dated GitLab version can never
-be uploaded twice.
+from HIBP over about four hours. Leave duplicate generic packages
+allowed under
+[Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries):
+each run uploads the list again to the `current` version, which is
+overwritten every month by design, so refusing duplicates would fail
+the second month's publish.
 
 **6. The first run.** Press the schedule's play button. The pipeline
 has three jobs: `blocklist:build`, `blocklist:sign` and
@@ -224,10 +226,12 @@ Go and Alpine images and Renovate's own image in `.gitlab-ci.yml`, and
 the tools CI installs at fixed versions (golangci-lint, govulncheck,
 gitleaks, go-licenses). Every non-major update arrives together in one
 merge request; a major one arrives on its own. A security fix from the
-OSV advisory database opens a merge request straight away rather than
-waiting for Monday. What it watches and why is in `renovate.json`; the
-`renovate` job in `.gitlab-ci.yml` runs it; both are copied from
-orbit's.
+OSV advisory database does not wait for Monday: a second schedule runs
+Renovate every day for security fixes only, and the fix's merge request
+opens on the first daily run after the advisory appears. What it
+watches and why is in `renovate.json`; the `renovate` job in
+`.gitlab-ci.yml` runs it; both are copied from orbit's. The daily run
+adds `renovate-security.json`, which turns every other update off.
 
 Renovate only opens merge requests. Each one runs the normal pipeline
 and is merged by hand like any other. The apidiff tool is the one pin
@@ -264,7 +268,7 @@ keeps the value out of job logs. Protected hands it only to pipelines
 on protected branches: the schedule below runs on `dev`, which is
 protected, and no merge request pipeline ever sees either token.
 
-**4. The schedule.** In
+**4. The schedules.** In
 [Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules),
 create a schedule: description `renovate`, target branch `dev`, cron
 `7 5 * * 1` with cron timezone **London** (05:07 every Monday), and a
@@ -273,6 +277,18 @@ Renovate open merge requests only between 05:00 and 06:15 London time
 on a Monday, so a run at any other time finds nothing it may do. The
 variable is what picks the `renovate` job: every other job stays out of
 scheduled pipelines.
+
+Then create the daily schedule for security fixes: description
+`renovate-security`, target branch `dev`, cron `37 6 * * *` with cron
+timezone **London** (06:37 every day), and two variables, `RENOVATE` =
+`true` and `RENOVATE_SECURITY_ONLY` = `true`. The second variable makes
+the job add `renovate-security.json`, so this run opens a merge request
+only for a security fix, which Renovate allows at any hour. It also
+leaves Monday's merge requests open: by default Renovate closes any of
+its merge requests the current run did not produce, and this run
+produces none of the ordinary ones. 06:37 is
+after the Monday run's one-hour limit, so the two do not normally
+overlap.
 
 For the first run, give the schedule a second variable
 `RENOVATE_DRY_RUN` = `full`. That Monday's `renovate` job then reports

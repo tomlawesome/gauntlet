@@ -83,11 +83,17 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
 	// The step-up is the last check before the write, after every
 	// refusal that costs the caller nothing, so a recovery code is not
-	// spent on a request that was always going to be refused.
+	// spent on a request that was always going to be refused. That
+	// includes the new account's own username and password:
+	// ValidateNewAccount makes CreateUser's checks of them up front.
 	if role == gauntlet.RoleAdmin {
 		caller := UserFromContext(r)
 		if caller == nil {
 			writeUnauthorized(w, classSignInRequired, "sign in first")
+			return
+		}
+		if err := g.deps.Users.ValidateNewAccount(req.Username, req.Password); err != nil {
+			g.writeCreateUserError(w, r, err)
 			return
 		}
 		if !g.recheckStepUp(w, r, caller, req.AdminPassword, req.AdminCode, now,
@@ -97,18 +103,7 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := g.deps.Users.CreateUser(req.Username, req.Password, role, now)
 	if err != nil {
-		status, class := http.StatusInternalServerError, classServerError
-		switch err {
-		case gauntlet.ErrUsernameTaken:
-			status, class = http.StatusConflict, classConflict
-		case gauntlet.ErrNotPersisted:
-			status, class = http.StatusServiceUnavailable, classNotPersisted
-		case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
-			gauntlet.ErrInvalidRole,
-			gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
-			status, class = http.StatusBadRequest, classInvalidRequest
-		}
-		g.writeAuthError(w, r, err, status, class)
+		g.writeCreateUserError(w, r, err)
 		return
 	}
 	detail := "role=" + string(user.Role)
@@ -123,6 +118,23 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			RoleChanged: &RoleChangeDetail{To: user.Role},
 		})
 	}
+}
+
+// writeCreateUserError answers an error from CreateUser, or from
+// ValidateNewAccount ahead of it, with its status and class.
+func (g *Gate) writeCreateUserError(w http.ResponseWriter, r *http.Request, err error) {
+	status, class := http.StatusInternalServerError, classServerError
+	switch err {
+	case gauntlet.ErrUsernameTaken:
+		status, class = http.StatusConflict, classConflict
+	case gauntlet.ErrNotPersisted:
+		status, class = http.StatusServiceUnavailable, classNotPersisted
+	case gauntlet.ErrPasswordTooShort, gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext,
+		gauntlet.ErrInvalidRole,
+		gauntlet.ErrUsernameInvalid, gauntlet.ErrUsernameLength, gauntlet.ErrUsernameIsEmail:
+		status, class = http.StatusBadRequest, classInvalidRequest
+	}
+	g.writeAuthError(w, r, err, status, class)
 }
 
 // handleListUsers backs the admin-facing account list. Admin-only (via
@@ -200,6 +212,9 @@ func (g *Gate) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			status, class = http.StatusNotFound, classNotFound
 		case errors.Is(err, gauntlet.ErrLastAdmin):
 			status, class = http.StatusConflict, classLastAdmin
+		case errors.Is(err, gauntlet.ErrLastLocalAdmin):
+			writeLastLocalAdmin(w)
+			return
 		}
 		g.writeAuthError(w, r, err, status, class)
 		return
@@ -433,6 +448,16 @@ func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, r *http.Request, caller 
 		"unlocking your own account needs your password and a code from your authenticator app or a recovery code")
 }
 
+// writeLastLocalAdmin is the 409 last-admin answer to
+// gauntlet.ErrLastLocalAdmin: the change would leave every admin
+// signing in only through the identity provider. Written here rather
+// than through writeAuthError, whose table of messages does not carry
+// it.
+func writeLastLocalAdmin(w http.ResponseWriter) {
+	writeProblem(w, http.StatusConflict, classLastAdmin,
+		"this is the last admin that can sign in without the identity provider -- give another admin a local password first", nil)
+}
+
 // recheckStepUp is the step-up shared by every admin route that needs the
 // caller's password and a current second factor on the request itself
 // (#67; ASVS 7.5.3): the unlock of the caller's own account above, and
@@ -440,9 +465,13 @@ func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, r *http.Request, caller 
 // field is empty, which checks nothing. Otherwise the password is
 // checked first, then the code, each on the account's re-check budget
 // (recheckPassword, recheckSecondFactor), a wrong one 401 with one
-// message for both so a caller learns nothing about which was wrong.
-// Writes every refusal itself.
+// message for both so a caller learns nothing about which was wrong. A
+// caller with no local password is 409 before any of that
+// (refuseWithoutLocalPassword). Writes every refusal itself.
 func (g *Gate) recheckStepUp(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, password, code string, now time.Time, missing string) bool {
+	if refuseWithoutLocalPassword(w, caller) {
+		return false
+	}
 	if password == "" || code == "" {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, missing, nil)
 		return false
@@ -551,6 +580,9 @@ func (g *Gate) handleSetRole(w http.ResponseWriter, r *http.Request) {
 			status, class = http.StatusNotFound, classNotFound // deleted since the read above
 		case errors.Is(err, gauntlet.ErrLastAdmin):
 			status, class = http.StatusConflict, classLastAdmin
+		case errors.Is(err, gauntlet.ErrLastLocalAdmin):
+			writeLastLocalAdmin(w)
+			return
 		case errors.Is(err, gauntlet.ErrRoleUnchanged):
 			status, class = http.StatusConflict, classConflict
 		case errors.Is(err, gauntlet.ErrNotPersisted):

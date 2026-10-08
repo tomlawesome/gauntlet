@@ -149,5 +149,11 @@ authenticator, AAL2).
 - An address at its limit cannot begin a passkey sign-in even from a
   browser the account remembers, as the allowance belongs to an account
   the begin step cannot name yet; it applies at the finish.
+- Status (v0.3.0 audit, #79): begin no longer reserves on the address's
+  login attempts but on its own bucket of the same size
+  (`passkey-begin:<address>`), released when the sign-in or resume
+  completes. Page loads and cancelled prompts call begin, and were
+  spending the budget a wrong guess is limited by; the finish still
+  reserves on the address and the account as decision 5 says.
 
 Design ratified on #77, 2026-10-05.

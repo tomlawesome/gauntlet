@@ -23,8 +23,9 @@ import (
 //     unusual one (#55) starts with its signals and the action taken:
 //     "unusual=new-browser,new-country; action=flag; ".
 //   - user.reauthenticated instead of user.login when the sign-in was a
-//     resume of a timed-out session with the password alone (#71): the
-//     same session continued under a new ID, not a new sign-in.
+//     resume of a timed-out session with the password alone (#71) or a
+//     passkey (#77), its detail saying which: the same session continued
+//     under a new ID, not a new sign-in.
 //   - user.login_failed on every failed attempt the limiter admitted:
 //     actor and target the account's username when the name matched one,
 //     else "unknown"; detail the outcome, the method, the address and,
@@ -55,6 +56,16 @@ import (
 // matched no account.
 const unknownAccount = "unknown"
 
+// proveActionNote is the part of a held sign-in's note
+// (completeHeldSignIn) saying a passkey answered the hold rather than a
+// confirmation code, so its user.login says "via passkey proof".
+const proveActionNote = "action=" + string(UnusualSignInProve) + "; "
+
+// resumedWithPasskeyNote is the note finishResume passes for a session
+// resumed with a passkey rather than the password, so its
+// user.reauthenticated says so. It is not written into the detail.
+const resumedWithPasskeyNote = "credential=passkey; "
+
 // signInClient is the address, browser and country (#54) r came from,
 // as the application resolves the address (Config.ClientIP) and the
 // country (Config.Country). address, when set, is the one the
@@ -62,6 +73,15 @@ const unknownAccount = "unknown"
 // address the limiter counted. This is the one place that client is
 // built for a sign-in record and for the session issueSession starts,
 // so the two always agree.
+//
+// The client comes back cleaned and cut (SessionClient.Clean), as a
+// session and a sign-in record keep it, because it also goes where
+// nothing else cleans it: the confirmation code (ConfirmCode.Client) and
+// the unusual-sign-in and block notices carry it to the account's owner,
+// and the raw User-Agent would let anyone holding the password put line
+// breaks, a made-up line or a huge header into that message.
+// The country is looked up from the address as resolved, before it is
+// cut.
 func (g *Gate) signInClient(r *http.Request, address string) gauntlet.SessionClient {
 	if address == "" {
 		address = g.cfg.ClientIP(r)
@@ -72,7 +92,7 @@ func (g *Gate) signInClient(r *http.Request, address string) gauntlet.SessionCli
 			client.Country = code
 		}
 	}
-	return client
+	return client.Clean()
 }
 
 // signInFailed reports whether o is a refused credential or a refused
@@ -147,13 +167,19 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 			return // password_ok, confirm_sent, escape_issued: no sign-in yet
 		}
 		if ev.Method == gauntlet.SignInMethodResume {
-			g.auditRecord(ev.Username, "user.reauthenticated", ev.Username, "session resumed with password; "+from)
+			with := "session resumed with password; "
+			if strings.Contains(note, resumedWithPasskeyNote) {
+				with = "session resumed with passkey; "
+			}
+			g.auditRecord(ev.Username, "user.reauthenticated", ev.Username, with+from)
 			return
 		}
 		detail := from
 		switch {
 		case ev.Confirmed && strings.Contains(note, escapeUsedNote):
 			detail = "via escape code; " + from
+		case ev.Confirmed && strings.Contains(note, proveActionNote):
+			detail = "via passkey proof; " + from
 		case ev.Confirmed:
 			detail = "via confirmation code; " + from
 		case ev.Method == gauntlet.SignInMethodCode, ev.Method == gauntlet.SignInMethodPasskey:

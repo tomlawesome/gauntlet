@@ -59,6 +59,7 @@ const accountsFixture = `{
       "roleChangedAt": "2026-01-02T03:05:05Z",
       "resetCodeHash": "$argon2id$fixture-reset-code-hash",
       "resetCodeExpiresAt": "2026-01-03T03:04:05Z",
+      "resetCodeSpentHash": "$argon2id$fixture-spent-reset-code-hash",
       "mustChangePassword": true,
       "breachCheckPending": true,
       "loginLockedUntil": "2026-01-02T03:19:05Z",
@@ -67,7 +68,8 @@ const accountsFixture = `{
       "knownBrowsers": [
         {
           "hash": "fixture-known-browser-hash",
-          "issuedAt": "2026-01-02T04:04:05Z"
+          "issuedAt": "2026-01-02T04:04:05Z",
+          "confirmed": true
         }
       ],
       "seenCountries": [
@@ -237,7 +239,8 @@ const lockoutLines = "      \"loginLockoutCount\": 2,\n" +
 const knownBrowserLines = "      \"knownBrowsers\": [\n" +
 	"        {\n" +
 	"          \"hash\": \"fixture-known-browser-hash\",\n" +
-	"          \"issuedAt\": \"2026-01-02T04:04:05Z\"\n" +
+	"          \"issuedAt\": \"2026-01-02T04:04:05Z\",\n" +
+	"          \"confirmed\": true\n" +
 	"        }\n" +
 	"      ],\n"
 

@@ -25,9 +25,11 @@ Where this document says "mikroview does X", that is where it was seen.
 - The persisted documents hold mikroview's `User` and `Token` JSON,
   byte for byte, in the same whole-document shape, plus a top-level
   `version` (#29, ADR-0002 decision 1): mikroview's documents load as
-  version 1 unchanged, gauntlet writes accounts as version 5 (#28, #44, #43) and
-  tokens as version 1, and a document newer than the running build is
-  refused. Because a
+  version 1 unchanged, gauntlet writes accounts as version 9
+  (#28, #44, #43, #59, #58, #55, #67), tokens as version 3 (#59, #74)
+  and the sign-in history as version 3 (#53, #54, #55), with what each
+  version added in `docversion.go`, and a document newer than the
+  running build is refused. Because a
   whole-document store rewrites every field on every save, gauntlet's
   `User` must carry *every* field mikroview stores today -- including
   TOTP, recovery codes, reset codes and passkeys -- or mikroview's move
@@ -353,7 +355,7 @@ type AccountLockoutRecords interface {                              // new: a ho
 type LoginLockoutRecord struct { LockedUntil time.Time; Lockouts int; DisabledAt time.Time }
 
 type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, unrecorded
-// escape_issued, escape_refused // new (#66, ADR-0011): a lone admin's refused sign-in was given an escape code in the server log (no session yet; a refused row is recorded too) / a wrong escape code; escape_issued is never budgeted, escape_refused is budgeted as any failure
+// escape_issued, escape_refused // new (#66, ADR-0011): a lone admin's refused or held sign-in was given an escape code in the server log (no session yet; the refused or confirm_sent row is recorded too) / a wrong escape code; escape_issued is never budgeted, escape_refused is budgeted as any failure
 // refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out (or, under prove, a passkey is owed, #65) and no session yet, confirm_refused is a wrong code (or a refused passkey assertion). refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
 type SignInMethod string  // password, code, passkey, sso
 type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool
@@ -506,10 +508,10 @@ rate limited on the client address like registration, with one
 identical refusal for every wrong input. It only lifts the disable: no
 session is issued, and the admin signs in as normal with their existing
 password and second factor -- not a password reset, account reset or
-admin transfer (owner, 2026-10-02). A disable the record still holds
-after it has lapsed and before an attempt clears it still counts for
-the unlock code, since the store has no clock to tell otherwise;
-redeeming it makes the same clear. A lockout whose save fails
+admin transfer (owner, 2026-10-02). The unlock code follows
+`User.LoginDisabled`, as every other check does: a disable that has
+lapsed (#70) issues no code, even while the record still holds it, and
+an outstanding code stops working once its disable lapses. A lockout whose save fails
 is saved again by a refused attempt while it is in force, at most every
 30 seconds (#24). A clear whose save fails -- the owner signed in and
 ended a lockout the record still holds -- is retried the same way, but
@@ -573,7 +575,9 @@ it was issued -- a hash needs no key, unlike gate's per-process
 pending-login codec, so the token survives a deploy, and each browser
 can be forgotten on its own. Each completed sign-in rotates the token,
 dropping the browser's old entry in the same write. An account
-remembers at most three browsers, the oldest evicted, each for 45 days
+remembers at most three browsers, the oldest evicted -- those that have
+never brought their token back (`KnownBrowser.Confirmed` false) before
+those that have, and never the one just added -- each for 45 days
 from its latest sign-in there, checked on the server from `IssuedAt`
 (owner, 2026-10-02). Once the ordinary path refuses an attempt -- the
 account locked out, or the address at its limit -- and the browser's
@@ -586,8 +590,10 @@ fills the budget closes it for one window and adds one lockout's worth
 to `LoginLockoutCount` (which also lengthens the next ordinary lockout),
 so the fiftieth disables as an ordinary failure would. A success hands
 the count back (`ReleaseKnownBrowser`, `SignedIn`). Sign out everywhere
-(`ClearKnownBrowsers`, the calling browser then remembered again) and an
-admin's reset code forget every browser; a signed-in password change, an
+on an account with a local password, which asks for it again
+(`ClearKnownBrowsers`, the calling browser then remembered again), and
+an admin's reset code forget every browser; an SSO-only account's sign
+out everywhere has no password to ask for and keeps them; a signed-in password change, an
 SSO link, an unlock and the forced change after second-factor failures
 do not -- that is when the owner needs the allowance. Nothing is
 keyed on the client's address. A request carrying a token the named
@@ -650,9 +656,11 @@ AuthCodeURL/Exchange/VerifyIDToken`, `VerifyNonce`, `Identity`,
 `Policy.Permit/Restricted`, `AllowIssuer`, `IsMultiTenantIssuer`,
 `FlowState`, `NewFlowState`, `StateCodec.Encode/Decode`. It is already a
 leaf package with plain-field config and no mikroview imports. The
-self-hosted-only policy (`multiTenantIssuers`) moves with it and is not
-made configurable: `docs/decisions/multi-tenant-oidc.md` decided that
-deliberately, and [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md) adopted it for birdcage.
+self-hosted-only policy (`multiTenantIssuers`) moves with it, as
+`docs/decisions/multi-tenant-oidc.md` decided and [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md) adopted it for birdcage;
+[ADR-0014](adr/0014-shared-issuers.md) since accepts one shared issuer,
+Google, when the policy pins the `hd` domain; Entra's shared endpoints
+stay refused.
 
 **Roles from groups (#76, [ADR-0013](adr/0013-sso-group-roles.md)).**
 `Policy` gains `RoleFromGroups` (group -> `user` | `viewer`, matched like
@@ -688,7 +696,7 @@ type Config struct {
     Notices             AccountNotifier // told about every account event (#73); nil = nobody told
     Notify              Notifier      // deprecated: Notices narrowed to one event (#53); New refuses both set
     DeliverConfirmCode  func(ctx context.Context, c ConfirmCode) error // synchronous; nil = the confirm action is unavailable (#55, #73)
-    OnEscapeCode        EscapeCodeHandler // #66: takes a refused lone admin's escape code; nil = a Warn line on Log; both nil = none issued
+    OnEscapeCode        EscapeCodeHandler // #66: takes a lone admin's escape code (refused or held sign-in); nil = a Warn line on Log; both nil = none issued
     ClientIP            func(*http.Request) string // limiter key and from= in every audit record (#45); app owns trusted-proxy policy
     UnusualSignIns      UnusualSignInPolicy // what a new browser, new country or impossible travel does (#55)
     Now                 func() time.Time
@@ -879,8 +887,8 @@ sign-in-required`. `GET /api/auth/session` reports `resumable: true` for a
 cookie in that state, which is how a frontend knows to ask for the
 password rather than show the full form; every other gated route still
 answers `sign-in-required`. History row method `resume`; audit
-`user.reauthenticated`. A passkey with user verification may resume a
-session in place of the password once #77 lands: the handler marks where.
+`user.reauthenticated`. A passkey with user verification resumes a
+session in place of the password (#77, ADR-0012).
 Sessions are in memory, so a restart still ends them, resumable or not;
 holding timed-out sessions to the ceiling raises the map's bound from
 one idle timeout's worth of sessions to one ceiling's worth.
@@ -963,7 +971,7 @@ account with no passkey usable here is held for a code (`confirm`) when
 `Config.DeliverConfirmCode` is set, else refused (`block`), and
 `UnusualSignInCase.CanProve` tells `Decide` which. `block` answers 403 `sign-in-refused` (`docs/api/errors.md`), refusing
 the one attempt, never the account, and writes nothing to the
-account's memory. One exception (#66, ADR-0011): a refused admin whom
+account's memory. One exception (#66, ADR-0011): a refused or held admin whom
 no other admin can act for (`Store.OtherAdminCanAct`) also gets an
 escape code -- written to the server's log, or handed to
 `Config.OnEscapeCode`, never answered -- and a sealed ticket cookie
@@ -1279,9 +1287,11 @@ code, `Decide` can answer `confirm` for the admin account alone -- the
 mitigation for the lone-admin-under-`block` risk in §4's pitfalls
 table -- and `flag` for everyone else.
 
-Startup: `oidc.AllowIssuer` refuses a multi-tenant issuer before
-listening, as mikroview's `main.go:1723` does -- `oidc.New` refuses it
-as well, so this call is belt-and-braces, not the only check. Login
+Startup: `oidc.AllowIssuerWithPolicy` refuses a multi-tenant issuer
+whose policy does not pin the tenant ([ADR-0014](adr/0014-shared-issuers.md))
+before listening, as mikroview's `main.go:1723` does -- `oidc.New` and
+`gate.New` refuse it as well, so this call is belt-and-braces, not the
+only check. Login
 limiter: 5 per 5
 minutes per IP and per username (mikroview's constants). Client IP:
 `RemoteAddr` host until birdcage has a trusted-proxy setting (§5, slice
@@ -1415,7 +1425,7 @@ once, which is the price of sharing and the reason fixes land once.
 | Code interception / replay | Authorization Code + PKCE S256, `state` and `nonce` compared constant-time, verifier held in an AES-256-GCM cookie the browser cannot read or forge | all of it; the flow-state key is per process |
 | Algorithm confusion (`alg:none`, HS256 with the public key) | explicit allowlist RS256/ES256/PS256 on the verifier | kept explicit rather than relying on go-oidc's default |
 | Account takeover by email match | identity is (issuer, subject); email and `preferred_username` are display hints only | kept; the index is a struct key |
-| Public IdP hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | multi-tenant refusal kept; since #37 SSO never creates the first account -- the first admin is local, created with the setup code from the server's log (ADR-0003) |
+| Public IdP hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | multi-tenant issuers refused, except Google with the `hd` domain pinned in the policy ([ADR-0014](adr/0014-shared-issuers.md)); since #37 SSO never creates the first account -- the first admin is local, created with the setup code from the server's log (ADR-0003) |
 | Redirect URL from `Host` | built from `publicBaseUrl` only | birdcage: `BIRDCAGE_PUBLIC_URL` |
 | Slow or hung IdP blocks login or startup | 10 s HTTP timeout on discovery, JWKS and exchange | kept |
 | Group/claim policy failing open | every missing or unreadable claim is a refusal; policy re-checked on every login | kept |
@@ -1502,7 +1512,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A browser shared by two accounts refused on every switch | the known-browser cookie carries up to four tokens, one per account (#55 change to #44), so switching accounts in one browser is not "new" to the second account |
 | A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
-| The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual |
+| The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual. Since the v0.3.0 audit (#79) the code is also issued when the admin's sign-in is held for a code or a passkey (`confirm`, `prove`), so a lost passkey or an undelivered code has the same way out |
 | A log-written escape code that an attacker reads | someone who can read the log already owns the host and holds the setup and unlock codes; without the log, a thief holding the password and second factor has the ticket but no code, and the code without that browser's ticket is nothing. Eighty bits behind the login limiter, one outstanding per refused attempt, single use, gone at expiry or restart |
 
 ### Fail-closed list
@@ -1565,7 +1575,8 @@ once G4 is tagged.
   full mikroview `User` document round-trips and `Authenticate` redeems
   a reset code exactly once.
 - **G5 `oidc`.** Package moved with its fake provider. *Done when:* the
-  ported tests pass and `AllowIssuer` refuses the multi-tenant list.
+  ported tests pass and a multi-tenant issuer is refused (Google excepted
+  with `hd` pinned, [ADR-0014](adr/0014-shared-issuers.md)).
 - **G6 `gate`.** Middleware and handlers with `Config`/`Deps`; the
   built-in exempt and bootstrap sets; audit hook. *Done when:* an
   httptest server over `persist.Memory` passes the ported
