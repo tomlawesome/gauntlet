@@ -9,11 +9,11 @@ has to meet.
 | --- | --- | --- |
 | Go unit and package tests | `go test ./... -race` | `test:go` |
 | Static checks | `go vet`, `gofmt`, `golangci-lint` | `lint:go` |
-| Licence gate | `go-licenses` against `supply-chain/licence-policy.yml` | `lint:licences` |
+| Licence gate | `go-licenses` against `supply-chain/licence-policy.yml`, then `scripts/licence-check-bundled.py` for vendored code and embedded files in the same modules (its own cases: `scripts/licence-check_test.sh`, run by hand) | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
 | HTTP contract | `gate/contracttest` (its own Go module) against `docs/api/auth.yaml` | `test:contract` |
-| Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag | `lint:apidiff` |
+| Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag (its own cases: `scripts/apidiff_test.sh`, run by hand) | `lint:apidiff` |
 | Common-password list age | `scripts/blocklist-age-check.sh` (its own cases: `scripts/blocklist-age-check_test.sh`, run by hand) | `release:version` |
 
 There is no frontend, no shipped image and no live-stack e2e stage here
@@ -21,22 +21,43 @@ There is no frontend, no shipped image and no live-stack e2e stage here
 and every behaviour it has is reachable from a Go test.
 
 The common-password list's code (`blocklist`, `cmd/pwlist`, #52) is
-tested against `httptest` fakes of Have I Been Pwned (HIBP)'s range
-API, the list's download host and GitHub's releases API. It uses
-synthetic hashes and Ed25519 keys made per test. No test reaches the
-network, and no real HIBP response is recorded in this repository: the
-owner has not approved one as a fixture. What only the real producer
-can show -- the real corpus's size and counts -- is checked by the
-build's own sanity bars on every scheduled run.
+tested against small fake servers that run inside the test (Go's
+`httptest` package). They stand in for Have I Been Pwned (HIBP)'s
+range API -- the service that takes the first five characters of a
+password hash and returns every hash that starts with them -- the
+list's download site, and GitHub's releases API. The tests use made-up
+hashes and Ed25519 keys made per test. No test reaches the network,
+and no real HIBP response is recorded in this repository: the owner
+has not approved one as a fixture. What only the real data can show --
+its size and counts -- is checked by the build's own size checks on
+every scheduled run.
+
+The real list committed in `blocklist/embedded/` is checked on every
+pipeline too. `TestEmbeddedCopy` parses it and verifies its signature
+against the committed key in `blocklist/keys/`.
+`TestCommittedKeysParse` fails if a committed key does not load, and
+`TestCommittedKeysRefuseAnUncommittedSigner` that a list signed by any
+other key is refused. `scripts/blocklist-age-check.sh` checks only the
+list's age and presence, and leaves the signature to these tests.
 
 The new-password checks (#43) are tested the same way: the live check's
-`blocklist.PwnedChecker` is tested against an `httptest` fake of the
-range API, including that a request carries only the 5-character
-prefix. The store and gate are tested with an injected list and an
-injected breach checker, since the embedded list is still the empty
-placeholder. The range response's shape in those fakes is from HIBP's
-API documentation, not a recorded response. A test against the real API
-would be the only proof that shape still holds.
+`blocklist.PwnedChecker` is tested against a fake range API, including
+that a request carries only the 5-character prefix. The store and gate
+are tested with a stand-in list and breach checker passed in by the
+test, so each test controls which passwords count as common. The range
+response's shape in those fakes is from HIBP's API documentation, not
+a recorded response. A test against the real API would be the only
+proof that shape still holds.
+
+The sign-in country's `geoip` package (#54) is tested against an
+`httptest` fake of both providers. Its country files are built in each
+test with MaxMind's writer, `mmdbwriter` (test scope only), mapping a
+couple of public networks to made-up countries; no provider's data is
+in this repository. Tests confirm that the downloader refuses private
+and other non-public addresses, both when asked directly and when one
+local test server redirects it to another. Whether the
+real providers still serve the archive shapes and headers the fake does
+is something only a real download shows.
 
 ## Compatibility checks
 
@@ -48,38 +69,55 @@ itself, which ADR-0002 allows only in a new major version.
 - **HTTP contract.** To add a route or a response field, change the
   handler and `docs/api/auth.yaml` in the same commit.
   `docs/api/auth.yaml` (OpenAPI 3.1) describes every route
-  `gate.Routes` serves. `TestContractEveryRoute` drives each route
-  through its success path and the refusals a test can reach, and
-  validates every request and response against the document with
-  `kin-openapi` (test scope only). An undocumented status fails, and each
-  documented success or redirect status must be seen at least once. The
-  document closes each response body (`additionalProperties: false`),
-  so a field the handler drops, renames or adds without the document
-  also fails. One deliberate exception: on the passkey routes, the
-  WebAuthn options `register/begin` and `login/factor/begin` answer and
-  the `credential` and `assertion` request fields are open objects.
-  They are the W3C's `PublicKeyCredential` JSON, made and read by the
-  WebAuthn library and the browser. A library update that adds a W3C
-  field must not fail the contract (ADR-0004 decision 6).
-  `TestContractRoutesMatchDocument` checks that the routes
-  `routes.go` registers (read from the source code and confirmed
-  against the running router) are the same list as the document
-  describes, in both directions. `TestContractRequestBodiesMatchHandlers`
-  does the same for the fields each handler reads from a request body
-  (also read from the source code) and the document's request bodies.
-  `TestContractDocumentVersionMatchesVERSION` fails if the document's
-  `info.version` differs from `VERSION`.
+  `gate.Routes` serves. Run the checks with
+  `cd gate/contracttest && go test ./...`. What each one checks:
+  - `TestContractEveryRoute` drives each route through its success path
+    and the refusals a test can reach, and checks every request and
+    response against the document with `kin-openapi` (test scope only).
+    A status the document does not list fails, and each documented
+    success or redirect status must be seen at least once. The document
+    lists every field a response may contain and allows no others
+    (`additionalProperties: false`), so a handler that drops, renames
+    or adds a field without a matching document change fails too.
+  - `TestContractRoutesMatchDocument` checks that the routes
+    `routes.go` registers (read from the source code and confirmed
+    against the running router) are the same list as the document
+    describes, in both directions.
+  - `TestContractRequestBodiesMatchHandlers` does the same for the
+    fields each handler reads from a request body (also read from the
+    source code) and the document's request bodies.
+  - `TestContractDocumentVersionMatchesVERSION` fails if the document's
+    `info.version` differs from `VERSION`.
+
+  One deliberate exception to "no other fields": the passkey data is
+  open. A passkey is a sign-in key held by the person's device, and
+  WebAuthn is the browser standard for using one. These fields come
+  from that standard (the W3C's `PublicKeyCredential` JSON), made and
+  read by the WebAuthn library and the browser, so they are not
+  checked field by field:
+  - the options the four begin routes answer: `login/prove/begin`,
+    `login/factor/begin`, `login/passkey/begin` and
+    `passkeys/register/begin`;
+  - the `assertion` every passkey sign-in or re-check sends, and the
+    `credential` that `passkeys/register/finish` sends.
+
+  A library update that adds a W3C field must not fail the contract
+  (ADR-0004 decision 6).
+
   These tests are a separate Go module, `gate/contracttest`, so
-  `kin-openapi` stays out of the library's `go.mod` (#30). Run them
-  with `cd gate/contracttest && go test ./...`. They use `gate` only
-  through its exported API, the same way an application does.
+  `kin-openapi` stays out of the library's `go.mod` (#30). They use
+  `gate` only through its exported API, the same way an application
+  does.
 - **Go API.** The only way past a breaking change is to raise the first
   number in `VERSION` (0.x.y to 1.0.0). A minor bump such as 0.1 to 0.2
   is not enough. `scripts/apidiff.sh [BASE_REF]` compares the module's
   exported API with the newest `v*` tag reachable from `HEAD` (or
-  `BASE_REF`), using `golang.org/x/exp/cmd/apidiff` via `go run` at a
-  pinned pseudo-version, never in `go.mod`. Internal packages are
-  skipped.
+  `BASE_REF`), using the apidiff tool (`golang.org/x/exp/cmd/apidiff`)
+  at one fixed commit. It is installed in a throwaway folder, so it
+  never becomes a dependency of the library. Internal packages are
+  skipped. The script fails if `go.mod` or `go.sum` changed while it
+  ran, so a check can never quietly add a dependency line that then
+  gets committed by accident (#62).
 
 What each check fails on:
 
@@ -121,5 +159,5 @@ every line ran, not that every condition was tried both ways.
   the backend write fail and checks both the returned error and that the
   in-memory change was rolled back.
 - A check that fails and passes again on unchanged code is a flake:
-  record it in `docs/flakes.md` (create it on first use), and file an
-  issue on its third sighting.
+  record it in `docs/flakes.md`, and file an issue on its third
+  sighting.

@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -218,7 +220,7 @@ func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	failing.left = 0
 	g.deps.Tokens = tokens
 
-	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+operator.ID, nil)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/auth/users/"+operator.ID, strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
 	req.Header.Set(csrfHeaderName, testCSRFValue)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -232,8 +234,8 @@ func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding the error body: %v", err)
 	}
-	if body["error"] == nil || body["error"] == "" {
-		t.Errorf("expected a non-empty error field, got %+v", body)
+	if body["detail"] == nil || body["detail"] == "" {
+		t.Errorf("expected a non-empty detail field, got %+v", body)
 	}
 	if body["username"] != "operator" {
 		t.Errorf("expected the response to still name the deleted account, got %+v", body)
@@ -278,5 +280,45 @@ func TestJSONBodyRejectsTrailingData(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for trailing data after the JSON value", resp.StatusCode)
+	}
+}
+
+// A made-up name is the caller's to choose, up to the body limit, so the
+// limiter must not keep it whole: a 60 KiB name is keyed on a digest of
+// fixed size, the same one in any case, and is limited like any other
+// name -- five attempts in a window, from five addresses, and the sixth
+// is refused.
+func TestUnknownUsernameKeyIsBounded(t *testing.T) {
+	g := newTestGate(t)
+	g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-Address") }
+	name := strings.Repeat("n", 60*1024)
+	reserve := func(username, address string) (loginReservation, bool) {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+		req.Header.Set("X-Test-Address", address)
+		return g.reserveLogin(httptest.NewRecorder(), req, "", username, gauntlet.SignInMethodPassword, false, g.now())
+	}
+
+	short, ok := reserve("someone", "192.0.2.100")
+	if !ok {
+		t.Fatal("a short made-up name was refused")
+	}
+	for i := 1; i <= 6; i++ {
+		username := name
+		if i%2 == 0 {
+			username = strings.ToUpper(name)
+		}
+		res, ok := reserve(username, fmt.Sprintf("192.0.2.%d", i))
+		if i == 6 {
+			if ok {
+				t.Error("the sixth attempt at one made-up name in a window was admitted")
+			}
+			continue
+		}
+		if !ok {
+			t.Fatalf("attempt %d at the long name was refused", i)
+		}
+		if len(res.nameKey) != len(short.nameKey) {
+			t.Fatalf("the 60 KiB name's limiter key is %d bytes, want %d like any other", len(res.nameKey), len(short.nameKey))
+		}
 	}
 }

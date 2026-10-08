@@ -13,6 +13,7 @@
 //     package hard-coding it. A token whose kind is not registered is
 //     kept in the document (never dropped on save) and logged, but can
 //     never authenticate -- see OpenTokenStore below.
+
 package gauntlet
 
 import (
@@ -50,9 +51,13 @@ import (
 // and would only add needless CPU cost to every authenticated request
 // (same reasoning GitHub/GitLab personal access tokens use).
 //
-// There is no expiry field: like sessions and accounts, a token stays
-// valid until explicitly revoked (see TokenStore.Revoke) -- no silent-
-// expiry surprises for whatever integration is holding it.
+// A token expires (#74): ExpiresAt, a year after creation unless the
+// creator chose another time or none (see TokenStore.CreateWithExpiry),
+// after which Authenticate refuses it. One that nobody has used for a
+// year is removed outright by Sweep -- GitHub's personal-access-token
+// lifecycle. A token written before ExpiresAt existed reads as never
+// expiring, which is what it was issued as. Revoke still ends one at
+// once.
 type Token struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -75,6 +80,14 @@ type Token struct {
 	HashedValue string    `json:"hashedValue"`
 	CreatedAt   time.Time `json:"createdAt"`
 	LastUsedAt  time.Time `json:"lastUsedAt,omitzero"`
+	// ExpiresAt is when Authenticate stops accepting the token; the zero
+	// time means it never expires (#74). Tokens written before the field
+	// existed read as zero.
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
+	// ExpiryWarnedAt is when the warning that this token is about to
+	// expire was sent (MarkExpiryWarned), so each token is reported once.
+	// Zero until then.
+	ExpiryWarnedAt time.Time `json:"expiryWarnedAt,omitzero"`
 	// CreatedBy is the account ID that issued this token, so deleting
 	// that account can revoke it (see RevokeAllCreatedBy).
 	//
@@ -138,6 +151,26 @@ var (
 	// display value in the same places the device id is, and bounded
 	// for the same reasons (see ErrTokenDeviceInvalid).
 	ErrTokenNameInvalid = errors.New("gauntlet: token name must be printable text of at most 64 bytes (fewer characters for non-Latin letters)")
+	// ErrTokenExpiryInvalid is returned by CreateWithExpiry for an expiry
+	// that is not after the time of creation: a token born expired
+	// would be a dead credential the caller believes works.
+	ErrTokenExpiryInvalid = errors.New("gauntlet: a token's expiry must be in the future")
+)
+
+const (
+	// TokenPrefix starts every token value minted since #74, so a
+	// secret scanner (gitleaks, GitHub secret scanning) can recognise a
+	// leaked one. Authenticate hashes the value as presented, so a token
+	// minted before the prefix existed keeps working unchanged.
+	TokenPrefix = "gnt_"
+	// DefaultTokenLifetime is how long Create's token lasts: a year.
+	DefaultTokenLifetime = 365 * 24 * time.Hour
+	// TokenUnusedLimit is how long a token may go unused (from its last
+	// use, or its creation if it never had one) before Sweep removes it.
+	TokenUnusedLimit = 365 * 24 * time.Hour
+	// TokenExpiryNoticeWindow is how far ahead of its expiry Sweep
+	// reports a token.
+	TokenExpiryNoticeWindow = 7 * 24 * time.Hour
 )
 
 // defaultTokenKinds is TokenOptions.Kinds' value when left empty --
@@ -217,6 +250,12 @@ type tokenState struct {
 	// lastUsedGranularity), since the in-memory value may be ahead of
 	// it. Store.lastLoginSaved is the same for LastLogin.
 	lastUsedSaved map[string]time.Time
+	// seq is the document's own save counter (#59, tokenFile.Seq) and
+	// this process's watermark -- storeState.seq's exact counterpart.
+	// See decodeTokens and errStaleDocument. Lowercase for the same
+	// reason as storeState.seq: tokenState is embedded in the exported
+	// TokenStore, and this is purely internal bookkeeping.
+	seq int64
 }
 
 // clone deep-copies the state, so a change to the copy can be thrown
@@ -227,6 +266,7 @@ func (st *tokenState) clone() *tokenState {
 		byID:          make(map[string]*Token, len(st.byID)),
 		byHash:        make(map[string]string, len(st.byHash)),
 		lastUsedSaved: make(map[string]time.Time, len(st.lastUsedSaved)),
+		seq:           st.seq,
 	}
 	for id, t := range st.byID {
 		tc := *t
@@ -263,38 +303,46 @@ func (st *tokenState) tokens() []*Token {
 // wrote the bare list; parseTokens reads it as version 1, and the next
 // save writes it in this shape.
 type tokenFile struct {
-	Version int      `json:"version"`
-	Tokens  []*Token `json:"tokens"`
+	Version int `json:"version"`
+	// Seq is storeFile.Seq's exact counterpart for this document (#59,
+	// version 2): the save counter inside persist.Encrypt's seal that
+	// lets a running store refuse an older, valid copy of the file --
+	// see errStaleDocument. An older document has no field and reads
+	// as zero.
+	Seq    int64    `json:"seq"`
+	Tokens []*Token `json:"tokens"`
 }
 
 // encodeTokens is the state as the document is saved.
 func encodeTokens(st *tokenState) ([]byte, error) {
-	return json.MarshalIndent(tokenFile{Version: tokensDocumentVersion, Tokens: st.tokens()}, "", "  ")
+	return json.MarshalIndent(tokenFile{Version: tokensDocumentVersion, Seq: st.seq, Tokens: st.tokens()}, "", "  ")
 }
 
 // parseTokens parses a stored tokens document in either shape: v0.1.0's
 // bare list, or a tokenFile, refusing one newer than this build reads
-// (see checkDocumentVersion) before parsing the rest of it.
-func parseTokens(data []byte) ([]*Token, error) {
+// (see checkDocumentVersion) before parsing the rest of it. The bare
+// v0.1.0 list carries no seq counter either, and reads as zero, same as
+// a tokenFile with no "seq" field.
+func parseTokens(data []byte) ([]*Token, int64, error) {
 	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
 		var list []*Token
 		if err := json.Unmarshal(data, &list); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		return list, nil
+		return list, 0, nil
 	}
 	version, err := documentVersion(data)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := checkDocumentVersion("API tokens", version, tokensDocumentVersion); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var file tokenFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return file.Tokens, nil
+	return file.Tokens, file.Seq, nil
 }
 
 // indexTokens builds the state for a document's token list, leaving a
@@ -302,11 +350,12 @@ func parseTokens(data []byte) ([]*Token, error) {
 // OpenTokenStore) and warning about it. Shared by OpenTokenStore and
 // the conflict replay in mutate, so the two can't diverge on what
 // loading means.
-func (s *TokenStore) indexTokens(list []*Token) *tokenState {
+func (s *TokenStore) indexTokens(list []*Token, seq int64) *tokenState {
 	st := &tokenState{
 		byID:          make(map[string]*Token, len(list)),
 		byHash:        make(map[string]string, len(list)),
 		lastUsedSaved: make(map[string]time.Time, len(list)),
+		seq:           seq,
 	}
 	for _, t := range list {
 		if t == nil { // see indexUsers' identical guard for why this is needed
@@ -325,13 +374,20 @@ func (s *TokenStore) indexTokens(list []*Token) *tokenState {
 	return st
 }
 
-// decodeTokens is the document as it is opened.
-func (s *TokenStore) decodeTokens(data []byte) (*tokenState, error) {
-	list, err := parseTokens(data)
+// decodeTokens is the document as it is opened. minSeq is the highest
+// sequence counter this process has already loaded or written
+// (tokenState.Seq, #59); a document naming a lower one is refused
+// (errStaleDocument) before its tokens are even indexed -- see
+// decodeAccounts's exact counterpart in store.go.
+func (s *TokenStore) decodeTokens(data []byte, minSeq int64) (*tokenState, error) {
+	list, seq, err := parseTokens(data)
 	if err != nil {
 		return nil, err
 	}
-	return s.indexTokens(list), nil
+	if err := checkDocumentSeq("API tokens", seq, minSeq); err != nil {
+		return nil, err
+	}
+	return s.indexTokens(list, seq), nil
 }
 
 // tokens is the replay loop's view of this store -- see mutate.go.
@@ -341,7 +397,14 @@ func (s *TokenStore) tokens() document[tokenState] {
 		what:    "API tokens",
 		clone:   (*tokenState).clone,
 		encode:  encodeTokens,
-		decode:  s.decodeTokens,
+		// s.seq, read here rather than under a separate
+		// lock, for the same reason as accounts() in store.go: every
+		// call runs while mutate already holds the write lock for the
+		// whole replay.
+		decode: func(data []byte) (*tokenState, error) {
+			return s.decodeTokens(data, s.seq)
+		},
+		bump: func(st *tokenState) { st.seq++ },
 	}
 }
 
@@ -443,10 +506,13 @@ func OpenTokenStore(b persist.Backend, opts TokenOptions) (*TokenStore, error) {
 		log:     opts.Log,
 		kinds:   kinds,
 	}
-	s.tokenState = *s.indexTokens(nil)
+	s.tokenState = *s.indexTokens(nil, 0)
 
 	version, existed, err := persist.Open(context.Background(), b, "the API tokens store", func(data []byte) error {
-		st, err := s.decodeTokens(data)
+		// s.seq is 0 here, the same reason OpenStore passes 0
+		// in store.go: nothing is loaded yet, and this process has no
+		// memory of the counter across a restart either way.
+		st, err := s.decodeTokens(data, s.seq)
 		if err != nil {
 			return err
 		}
@@ -533,14 +599,16 @@ func (s *TokenStore) reloadIfStale() {
 	}
 	s.mu.RLock()
 	alreadyRefused := s.hasRefusedVersion && snap.Version == s.refusedVersion
+	minSeq := s.seq
 	s.mu.RUnlock()
 	if alreadyRefused {
 		return
 	}
-	st, err := s.decodeTokens(snap.Payload)
-	// A newer document and the literal null are both refused loudly:
-	// someone wrote them, and the operator should hear why once.
-	if errors.Is(err, errNewerDocument) || errors.Is(err, errNullDocument) {
+	st, err := s.decodeTokens(snap.Payload, minSeq)
+	// A newer document, one older than this process has already seen
+	// (#59), and the literal null are all refused loudly: someone wrote
+	// them, and the operator should hear why once.
+	if errors.Is(err, errNewerDocument) || errors.Is(err, errStaleDocument) || errors.Is(err, errNullDocument) {
 		s.mu.Lock()
 		s.refusedVersion, s.hasRefusedVersion = snap.Version, true
 		s.mu.Unlock()
@@ -627,7 +695,19 @@ func printableWithin(s string, maxBytes int) bool {
 // scopes an ingest token to one device and must be empty for any other
 // kind -- see Token.Device. name is trimmed and held to the same length
 // and character rules as device (ErrTokenNameInvalid).
+//
+// The token expires DefaultTokenLifetime after now (#74); use
+// CreateWithExpiry to choose another time, or none.
 func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) {
+	return s.CreateWithExpiry(name, kind, device, creator, now, now.Add(DefaultTokenLifetime))
+}
+
+// CreateWithExpiry is Create with the expiry chosen by the caller:
+// expiresAt must be after now (ErrTokenExpiryInvalid), or the zero time
+// for a token that never expires -- what a router's ingest token wants,
+// since it would stop reporting on its expiry day. The raw value starts
+// with TokenPrefix.
+func (s *TokenStore) CreateWithExpiry(name string, kind TokenKind, device string, creator *User, now, expiresAt time.Time) (raw string, tok *Token, err error) {
 	if !s.Persisted() {
 		return "", nil, ErrTokenNotPersisted
 	}
@@ -648,10 +728,13 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 	if !validDeviceID(device) {
 		return "", nil, ErrTokenDeviceInvalid
 	}
+	if !expiresAt.IsZero() && !expiresAt.After(now) {
+		return "", nil, ErrTokenExpiryInvalid
+	}
 
 	// newID's generator -- same 128-bit crypto/rand source Session
 	// already uses for its own unguessable IDs (see id.go).
-	raw = newID()
+	raw = TokenPrefix + newID()
 	hash := hashTokenValue(raw)
 	// Picking up another process's writes first avoids most save
 	// conflicts; correctness does not depend on it -- see mutate.
@@ -675,6 +758,7 @@ func (s *TokenStore) Create(name string, kind TokenKind, device string, creator 
 			Device:      device,
 			HashedValue: hash,
 			CreatedAt:   now,
+			ExpiresAt:   expiresAt,
 		}
 		if creator != nil {
 			t.CreatedBy = creator.ID
@@ -700,7 +784,7 @@ const lastUsedGranularity = time.Hour
 
 // Authenticate validates a raw bearer token value *of kind want*,
 // recording LastUsedAt on success. Returns (nil, false) for an unknown,
-// malformed, or revoked token -- deliberately no distinction between
+// malformed, expired (#74), or revoked token -- deliberately no distinction between
 // those, same as Store.Authenticate's treatment of unknown-username vs.
 // wrong-password -- and equally for a real, valid token of the wrong
 // kind, or one whose kind was never registered with this store (see
@@ -709,7 +793,8 @@ const lastUsedGranularity = time.Hour
 // want is a parameter rather than something the caller inspects
 // afterwards on purpose: requiring the kind up front means "accepted an
 // ingest token wherever it meant to accept a read-only one" cannot be
-// made silently. LastUsedAt is left untouched on a mismatch, so a token
+// made silently. A value is hashed as presented, so tokens minted before
+// TokenPrefix existed authenticate as they always did. LastUsedAt is left untouched on a mismatch, so a token
 // presented at the wrong door does not look like it was used.
 func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) {
 	if raw == "" {
@@ -731,6 +816,11 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 		return nil, false
 	}
 	if t.Kind != want {
+		return nil, false
+	}
+	// Refused exactly as an unknown value is, and without recording a
+	// use: nothing tells an expired token from one that never existed.
+	if !t.ExpiresAt.IsZero() && !now.Before(t.ExpiresAt) {
 		return nil, false
 	}
 	// See mikroview's own comment on this line (kept): persisting only
@@ -821,6 +911,149 @@ func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error) {
 		return 0, err
 	}
 	return removed, nil
+}
+
+// RemoveOrphans deletes, in one write, every token whose creating
+// account exists reports gone, and returns copies of them with
+// HashedValue zeroed, as List does. It is how a token outlives its
+// account's deletion only until the next sweep: deleting an account and
+// revoking its tokens (RevokeAllCreatedBy) are two writes, and a crash
+// or failure between them leaves the tokens live with nothing recording
+// that they are owed a revoke.
+//
+// A token with an empty CreatedBy is never removed, for the reason
+// RevokeAllCreatedBy gives. exists runs inside the write, so may run
+// more than once for a token on a conflict replay; it must not call
+// into this store. Nothing to remove is no write and a nil result; on a
+// persistence failure nothing is removed and the result is nil.
+//
+// An unpersisted store holds no tokens, so it removes nothing.
+func (s *TokenStore) RemoveOrphans(exists func(userID string) bool, now time.Time) ([]Token, error) {
+	if !s.Persisted() {
+		return nil, nil
+	}
+	s.reloadIfStale()
+	var removed []Token
+	err := s.mutate(func(st *tokenState) error {
+		// Reset: the op runs again on a conflict replay.
+		removed = nil
+		for _, t := range st.tokens() {
+			if t.CreatedBy == "" || exists(t.CreatedBy) {
+				continue
+			}
+			delete(st.byID, t.ID)
+			delete(st.byHash, t.HashedValue)
+			cp := *t
+			cp.HashedValue = ""
+			removed = append(removed, cp)
+		}
+		if len(removed) == 0 {
+			return errNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// TokenSweepResult is what one TokenStore.Sweep did. HashedValue is
+// zeroed on every token, as List does.
+type TokenSweepResult struct {
+	// Removed are the tokens deleted for going unused for
+	// TokenUnusedLimit.
+	Removed []Token
+	// Expiring are the tokens to warn about: not yet expired, but
+	// expiring within TokenExpiryNoticeWindow, and not marked warned
+	// yet. Sweep does not mark them; the caller does, with
+	// MarkExpiryWarned, once each warning has gone out.
+	Expiring []Token
+}
+
+// Sweep is the token store's maintenance pass (#74): the application
+// calls it about once a day, as this package runs no timer of its own.
+// It removes every token unused for more than TokenUnusedLimit -- by
+// LastUsedAt, or CreatedAt for one never used -- and lists every token
+// that expires within TokenExpiryNoticeWindow and has not been marked
+// warned. It does not mark them: a warning marked before it is sent is
+// lost for good when the send fails, so the caller sends first and then
+// calls MarkExpiryWarned with the ones that went out. A token is listed
+// again by every sweep until it is marked. The removals are saved as
+// one write; on a persistence failure none happened and the result is
+// empty. An expired token is left in the list (Authenticate already
+// refuses it) for an admin to see and revoke.
+//
+// An unpersisted store holds no tokens, so it sweeps nothing.
+func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) {
+	if !s.Persisted() {
+		return TokenSweepResult{}, nil
+	}
+	s.reloadIfStale()
+	var res TokenSweepResult
+	err := s.mutate(func(st *tokenState) error {
+		// Reset: the op runs again on a conflict replay.
+		res = TokenSweepResult{}
+		for _, t := range st.tokens() {
+			last := t.LastUsedAt
+			if last.IsZero() {
+				last = t.CreatedAt
+			}
+			if now.Sub(last) > TokenUnusedLimit {
+				delete(st.byID, t.ID)
+				delete(st.byHash, t.HashedValue)
+				cp := *t
+				cp.HashedValue = ""
+				res.Removed = append(res.Removed, cp)
+				continue
+			}
+			if t.ExpiresAt.IsZero() || !t.ExpiryWarnedAt.IsZero() ||
+				!t.ExpiresAt.After(now) || t.ExpiresAt.Sub(now) > TokenExpiryNoticeWindow {
+				continue
+			}
+			cp := *t
+			cp.HashedValue = ""
+			res.Expiring = append(res.Expiring, cp)
+		}
+		if len(res.Removed) == 0 {
+			// Only removals are written; the listing alone needs no write.
+			return errNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		return TokenSweepResult{}, err
+	}
+	return res, nil
+}
+
+// MarkExpiryWarned records, in one write, that the expiry warning for
+// each token in ids has been sent, so Sweep stops listing it. An id
+// that is not in the store (revoked or removed since) is ignored, and a
+// token already marked keeps its first time. Nothing to mark is no
+// write.
+//
+// An unpersisted store holds no tokens, so it marks nothing.
+func (s *TokenStore) MarkExpiryWarned(ids []string, now time.Time) error {
+	if !s.Persisted() || len(ids) == 0 {
+		return nil
+	}
+	s.reloadIfStale()
+	return s.mutate(func(st *tokenState) error {
+		changed := false
+		for _, id := range ids {
+			t, ok := st.byID[id]
+			if !ok || !t.ExpiryWarnedAt.IsZero() {
+				continue
+			}
+			t.ExpiryWarnedAt = now
+			changed = true
+		}
+		if !changed {
+			return errNoChange
+		}
+		return nil
+	})
 }
 
 // tokenOlder is the one order List, ByKind and the saved document use:

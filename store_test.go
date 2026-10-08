@@ -86,6 +86,30 @@ func TestPasswordTooShortRejectedOnRegisterCreateAndReset(t *testing.T) {
 	}
 }
 
+// The minimum length counts characters, not bytes: seven Greek letters
+// are fourteen bytes of UTF-8 but still seven characters, and refused;
+// eight are accepted. Both paths that set a password count the same way.
+func TestPasswordLengthCountsCharactersNotBytes(t *testing.T) {
+	const seven, eight = "ξενοδοχ", "ξενοδοχε"
+	s := openTestStore(t)
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.CreateUser("second", seven, RoleUser, time.Now()); err != ErrPasswordTooShort {
+		t.Errorf("CreateUser with 7 characters (%d bytes) = %v, want ErrPasswordTooShort", len(seven), err)
+	}
+	if _, err := s.CreateUser("second", eight, RoleUser, time.Now()); err != nil {
+		t.Errorf("CreateUser with 8 characters: %v", err)
+	}
+	if err := s.SetPassword("admin", seven, time.Now()); err != ErrPasswordTooShort {
+		t.Errorf("SetPassword with 7 characters (%d bytes) = %v, want ErrPasswordTooShort", len(seven), err)
+	}
+	if err := s.SetPassword("admin", eight, time.Now()); err != nil {
+		t.Errorf("SetPassword with 8 characters: %v", err)
+	}
+}
+
 func TestCreateUserAddsAdditionalAccounts(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
@@ -104,6 +128,32 @@ func TestCreateUserAddsAdditionalAccounts(t *testing.T) {
 
 // TestCreateUserAcceptsViewer: RoleViewer is a valid role for
 // CreateUser, same as RoleUser.
+// ValidateNewAccount answers what CreateUser would for the same
+// username and password, and creates nothing.
+func TestValidateNewAccountAnswersAsCreateUserWould(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Register("admin", "password-placeholder-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		username, password string
+		want               error
+	}{
+		{"second", "password-placeholder-2", nil},
+		{"ADMIN", "password-placeholder-2", ErrUsernameTaken},
+		{"second", "short", ErrPasswordTooShort},
+		{"second@example.com", "password-placeholder-2", ErrUsernameIsEmail},
+		{"second", "password", ErrPasswordBlocked},
+	} {
+		if err := s.ValidateNewAccount(c.username, c.password); err != c.want {
+			t.Errorf("ValidateNewAccount(%q, %q) = %v, want %v", c.username, c.password, err, c.want)
+		}
+	}
+	if s.Count() != 1 {
+		t.Errorf("%d accounts after validating, want 1", s.Count())
+	}
+}
+
 func TestCreateUserAcceptsViewer(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
@@ -117,10 +167,8 @@ func TestCreateUserAcceptsViewer(t *testing.T) {
 	}
 }
 
-// TestCreateUserRejectsUnknownRole covers the branch ErrSingleAdmin
-// doesn't: a role that is neither RoleAdmin (refused separately as
-// ErrSingleAdmin, see transfer_test.go) nor one of the two CreateUser
-// actually grants.
+// TestCreateUserRejectsUnknownRole: a role that is none of the three
+// CreateUser grants is refused, not coerced to a lesser one.
 func TestCreateUserRejectsUnknownRole(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.Register("admin", "password-placeholder-1", time.Now())
@@ -330,6 +378,32 @@ func TestSetPasswordMarksTheAccountAsHavingALocalPassword(t *testing.T) {
 	got, _ := s.ByUsername(u.Username)
 	if !got.LocalPassword() {
 		t.Error("an account that was just given a password reports no local password")
+	}
+}
+
+// PasswordMatches only compares: the right password is true, a wrong
+// one or an unknown account false, and nothing about the account moves.
+func TestPasswordMatchesComparesWithoutSideEffects(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.Get(u.ID)
+
+	if !s.PasswordMatches(u.ID, "password-placeholder-1") {
+		t.Error("the current password does not match")
+	}
+	if s.PasswordMatches(u.ID, "password-placeholder-2") {
+		t.Error("a wrong password matches")
+	}
+	if s.PasswordMatches("no-such-id", "password-placeholder-1") {
+		t.Error("an unknown account matches")
+	}
+	after, _ := s.Get(u.ID)
+	if !after.LastLogin.Equal(before.LastLogin) || !after.LoginLockedUntil.Equal(before.LoginLockedUntil) {
+		t.Errorf("PasswordMatches changed the account: LastLogin %v -> %v, LoginLockedUntil %v -> %v",
+			before.LastLogin, after.LastLogin, before.LoginLockedUntil, after.LoginLockedUntil)
 	}
 }
 
@@ -734,7 +808,7 @@ func TestConcurrentRegisterCreatesExactlyOneAdmin(t *testing.T) {
 	}
 }
 
-func TestDeleteUserRefusesTheAdmin(t *testing.T) {
+func TestDeleteUserRefusesTheLastAdmin(t *testing.T) {
 	s := openTestStore(t)
 	admin, _ := s.Register("alice", "password-placeholder-1", time.Now())
 
@@ -869,6 +943,40 @@ func TestTransferAdminReturnsNoCredentials(t *testing.T) {
 	}
 	requireNoCredentials(t, "TransferAdmin (from)", from)
 	requireNoCredentials(t, "TransferAdmin (to)", to)
+}
+
+// TestTransferAdminRefusesWithSeveralAdmins: with two admins there is no
+// one account to hand over from, so TransferAdmin must refuse rather
+// than demote whichever admin sorts first, and change nothing (#67).
+func TestTransferAdminRefusesWithSeveralAdmins(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	ids := map[string]string{}
+	for _, c := range []struct {
+		name string
+		role Role
+	}{{"alice", RoleAdmin}, {"bob", RoleAdmin}, {"carol", RoleUser}} {
+		var u *User
+		var err error
+		if c.name == "alice" {
+			u, err = s.Register(c.name, "password-placeholder-1", now)
+		} else {
+			u, err = s.CreateUser(c.name, "password-placeholder-2", c.role, now)
+		}
+		if err != nil {
+			t.Fatalf("creating %s: %v", c.name, err)
+		}
+		ids[c.name] = u.ID
+	}
+
+	if _, _, err := s.TransferAdmin("carol", now); !errors.Is(err, ErrSeveralAdmins) {
+		t.Fatalf("TransferAdmin with two admins: err = %v, want ErrSeveralAdmins", err)
+	}
+	for name, want := range map[string]Role{"alice": RoleAdmin, "bob": RoleAdmin, "carol": RoleUser} {
+		if u, ok := s.Get(ids[name]); !ok || u.Role != want {
+			t.Errorf("after the refused transfer %s is %v, want %v", name, u.Role, want)
+		}
+	}
 }
 
 // TestDeleteUserLeavesTheAccountInPlaceWhenPersistFails: a deletion that

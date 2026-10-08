@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -17,8 +18,11 @@ const oidcFlowCookieName = "gate_oidc_flow"
 
 // oidcFlowCookiePath scopes the cookie to gate's own OIDC routes, per
 // docs/design.md §1.5's fixed behaviour ("the OIDC flow cookie scoped to
-// /api/auth/oidc").
-const oidcFlowCookiePath = "/api/auth/oidc"
+// /api/auth/oidc"). oidcLoginPath and oidcCallbackPath (protect.go) stay
+// plain string literals, because the contract tests read route patterns
+// from the source; TestOIDCFlowCookiePathCoversItsRoutes keeps them under
+// this prefix.
+const oidcFlowCookiePath = oidcPathPrefix
 
 // oidcFlowCookieMaxAge bounds both the cookie's own Max-Age and the
 // tolerance passed to StateCodec.Decode -- kept as one constant so the
@@ -67,25 +71,31 @@ func (g *Gate) failSSO(w http.ResponseWriter, r *http.Request, code string, iden
 // -- see Deps.OIDC's doc comment.
 func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	if g.deps.OIDC == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return
 	}
 
 	fs, err := oidc.NewFlowState(g.now())
 	if err != nil {
 		g.logError("starting SSO login: " + err.Error())
-		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO login", nil)
 		return
 	}
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
 		g.logError("starting SSO login: " + err.Error())
-		http.Error(w, "failed to start SSO login", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO login", nil)
 		return
 	}
 	g.setOIDCFlowCookie(w, encoded)
 
 	http.Redirect(w, r, g.deps.OIDC.AuthCodeURL(fs.State, fs.Nonce, fs.CodeVerifier), http.StatusFound)
+}
+
+// oidcLinkStartRequest is POST /api/auth/oidc/link's body: the caller's
+// own password.
+type oidcLinkStartRequest struct {
+	Password string `json:"password"`
 }
 
 // handleOIDCLinkStart begins linking the signed-in account to an SSO
@@ -102,19 +112,28 @@ func (g *Gate) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 // The target account is taken from the session and sealed into the flow
 // state, never from the request body -- the caller does not get to say
 // which account a link applies to.
+//
+// Password-gated through recheckPassword, as TOTP enrolment and passkey
+// registration are (ASVS 7.5.1): a link is permanent, and for anyone
+// but an admin it removes the password and every local factor, so a
+// stolen session cookie that could start one would become a way in that
+// outlives the session. The password is the one thing a cookie does not
+// carry. Checked here, before the provider round trip and before any
+// flow state is sealed; the two 409s come first, since they check no
+// credential and an account with no local password has none to give.
 func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	if g.deps.OIDC == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return
 	}
 	caller := UserFromContext(r)
 	if caller == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	// Already SSO-only: there is no local password left to convert.
 	if !caller.LocalPassword() {
-		http.Error(w, "this account already signs in through your identity provider", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account already signs in through your identity provider", nil)
 		return
 	}
 	// Already connected -- keeping a password only if it is the admin.
@@ -122,15 +141,23 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	// identity, which LinkOIDCIdentity refuses -- said here too so the
 	// answer comes before the provider round trip.
 	if caller.OIDCSubject != "" {
-		http.Error(w, "this account is already connected to your identity provider", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account is already connected to your identity provider", nil)
+		return
+	}
+	var req oidcLinkStartRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
+	now := g.now()
+	if _, ok := g.recheckPassword(w, r, caller, req.Password, "incorrect password", now); !ok {
 		return
 	}
 
-	now := g.now()
 	fs, err := oidc.NewFlowState(now)
 	if err != nil {
 		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
-		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO linking", nil)
 		return
 	}
 	fs.LinkUserID = caller.ID
@@ -138,7 +165,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 	encoded, err := g.deps.OIDCState.Encode(fs)
 	if err != nil {
 		g.logError("starting SSO linking for account " + caller.ID + ": " + err.Error())
-		http.Error(w, "failed to start SSO linking", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "failed to start SSO linking", nil)
 		return
 	}
 	g.setOIDCFlowCookie(w, encoded)
@@ -191,8 +218,9 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 	// the only record of the link's, and an older build saving the
 	// document while this one runs would drop it (#28). A fresh session
 	// is issued so the person stays signed in on this browser.
+	method := g.sessionMethod(r, caller.ID, now)
 	g.deps.Sessions.RevokeAllForUser(caller.ID)
-	g.issueSession(w, r, caller.ID, now)
+	g.issueSession(w, r, caller.ID, method, now)
 	http.Redirect(w, r, "/?ssoLinked=1", http.StatusFound)
 }
 
@@ -212,7 +240,7 @@ func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.
 // of outcome.
 func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if g.deps.OIDC == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return
 	}
 
@@ -295,19 +323,124 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, _, err := g.deps.Users.FindOrCreateOIDCUser(identity.Issuer, identity.Subject, ssoUsernameHint(identity), now)
+	// The role the identity provider's groups give, if this deployment
+	// maps groups to roles, goes into the same write that finds or
+	// creates the account: no sign-in happens at a role the groups no
+	// longer give.
+	wantRole, _ := g.ssoRoleFor(identity)
+	signIn, err := g.deps.Users.FindOrCreateOIDCUserWithRole(identity.Issuer, identity.Subject, ssoUsernameHint(identity), wantRole, now)
 	if err != nil {
 		g.failSSO(w, r, "login_failed", identity)
 		return
+	}
+	user := signIn.User
+	// An account this callback created is audited as an admin-created
+	// one is (#78), so the trail says when and how it appeared.
+	if signIn.Created {
+		g.audit(r, ssoAuditActor, "user.create", user.Username,
+			fmt.Sprintf("role=%s; first single sign-on at issuer %q", user.Role, identity.Issuer))
+	}
+	if signIn.RoleBefore != user.Role {
+		g.recordSSORoleChange(r, signIn, identity.Issuer, now)
 	}
 
 	// An SSO sign-in is a re-authentication like the password paths:
 	// the session this browser held for the account ends, since the
 	// cookie below replaces it (ASVS 7.2.4; see revokeReplacedSession).
-	g.issueSession(w, r, user.ID, now)
-	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInSuccess, gauntlet.SignInMethodSSO), loginReservation{}, now)
+	// The identity provider vouched for every credential: judge the
+	// sign-in (#55) before any session exists. Never on the link branch
+	// above, whose caller already holds a session.
+	place := g.placeOf(r, "")
+	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodSSO, place, now)
+	if verdict.stopsSignIn() {
+		out, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
+		if out == stopHeld {
+			// The frontend asks for the code and posts it to
+			// login/confirm, which holds the ticket this set -- or,
+			// held for a passkey, runs login/prove/begin and posts
+			// the assertion to login/prove (#65).
+			query := "?confirm=1"
+			if verdict.action == UnusualSignInProve {
+				query = "?prove=1"
+			}
+			http.Redirect(w, r, g.cfg.LoginPath+query, http.StatusFound)
+			return
+		}
+		// Refused, or past the send limit (#84): the frontend's text is
+		// generic either way, so both redirect refused; only a refusal
+		// carries a notice.
+		g.redirectWithSSOError(w, r, "refused")
+		g.notify(r.Context(), notice)
+		return
+	}
+	notice := g.completeSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
 	http.Redirect(w, r, "/", http.StatusFound)
+	g.notify(r.Context(), notice)
 }
+
+// ssoRoleFor is the role Policy.RoleFromGroups gives identity: the
+// highest role among the mapped groups it carries, else
+// Policy.RoleWithoutGroup ("viewer" when unset). The second result is
+// false when no map is configured, which leaves every role alone.
+//
+// Groups match like AllowedGroups -- trimmed, case-insensitive -- and
+// the highest wins, so the result does not depend on the order the
+// provider lists groups in. Only user and viewer are ever given: gate.New
+// refuses any other value, and one that got past it here would fall to
+// the lowest role rather than a higher one (ADR-0013).
+func (g *Gate) ssoRoleFor(identity *oidc.Identity) (gauntlet.Role, bool) {
+	p := g.deps.OIDCPolicy
+	if len(p.RoleFromGroups) == 0 {
+		return "", false
+	}
+	var best gauntlet.Role
+	for _, group := range p.Groups(identity) {
+		for name, value := range p.RoleFromGroups {
+			if !strings.EqualFold(strings.TrimSpace(group), strings.TrimSpace(name)) {
+				continue
+			}
+			role := gauntlet.Role(value)
+			if role != gauntlet.RoleUser && role != gauntlet.RoleViewer {
+				continue
+			}
+			if best == "" || role.AtLeast(best) {
+				best = role
+			}
+		}
+	}
+	if best != "" {
+		return best, true
+	}
+	if gauntlet.Role(p.RoleWithoutGroup) == gauntlet.RoleUser {
+		return gauntlet.RoleUser, true
+	}
+	return gauntlet.RoleViewer, true
+}
+
+// recordSSORoleChange does what handleSetRole does after a role change,
+// for the change an SSO sign-in made: drop the in-memory sessions of a
+// downgrade (the store already recorded SessionsEndedAt), write the
+// audit line with actor "sso", and tell the application. The sign-in
+// that follows issues its session at the new role.
+func (g *Gate) recordSSORoleChange(r *http.Request, signIn gauntlet.OIDCSignIn, issuer string, now time.Time) {
+	user := signIn.User
+	if signIn.SessionsEnded {
+		g.deps.Sessions.RevokeAllForUser(user.ID)
+	}
+	detail := fmt.Sprintf("from=%s to=%s; by group map at issuer %q", signIn.RoleBefore, user.Role, issuer)
+	if signIn.SessionsEnded {
+		detail += "; sessions ended: all"
+	}
+	g.audit(r, ssoAuditActor, "user.role_changed", user.Username, detail)
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeRoleChanged, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		RoleChanged: &RoleChangeDetail{From: signIn.RoleBefore, To: user.Role, ViaSSO: true},
+	})
+}
+
+// ssoAuditActor is the audit actor of a change the identity provider
+// caused: no admin did it, and the account's own holder did not ask.
+const ssoAuditActor = "sso"
 
 // ssoUsernameHint is the name an identity asks to be known by: its
 // preferred_username, else its email.

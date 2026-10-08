@@ -108,6 +108,48 @@ func TestRememberBrowserKeepsThreeAndEvictsTheOldest(t *testing.T) {
 	}
 }
 
+// A browser that has brought its token back is confirmed, and a run of
+// sign-ins that never bring theirs back evicts one another, never it.
+func TestRememberBrowserEvictsUnconfirmedBrowsersFirst(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	first := mustRemember(t, s, id, "", escalationStart)
+	laptop := mustRemember(t, s, id, first, escalationStart.Add(time.Hour))
+	if u := mustGet(t, s, id); len(u.KnownBrowsers) != 1 || !u.KnownBrowsers[0].Confirmed {
+		t.Fatalf("record = %+v, want the returning browser confirmed", u.KnownBrowsers)
+	}
+	var strangers []string
+	for i := range 3 {
+		strangers = append(strangers, mustRemember(t, s, id, "", escalationStart.Add(time.Duration(2+i)*time.Hour)))
+	}
+	now := escalationStart.Add(5 * time.Hour)
+	if !s.KnowsBrowser(id, laptop, now) {
+		t.Error("three cookie-less sign-ins evicted the confirmed browser")
+	}
+	if s.KnowsBrowser(id, strangers[0], now) || !s.KnowsBrowser(id, strangers[2], now) {
+		t.Error("the oldest unconfirmed browser should go, the newest stay")
+	}
+	if u := mustGet(t, s, id); len(u.KnownBrowsers) != MaxKnownBrowsers {
+		t.Errorf("the record holds %d, want %d", len(u.KnownBrowsers), MaxKnownBrowsers)
+	}
+}
+
+// With every slot confirmed, a new browser still gets one -- its cookie
+// must be on the record to come back at all -- and the oldest confirmed
+// browser goes.
+func TestRememberBrowserNeverEvictsTheNewEntry(t *testing.T) {
+	s, id := openLockoutStore(t, persist.NewMemory())
+	var confirmed []string
+	for i := range MaxKnownBrowsers {
+		at := escalationStart.Add(time.Duration(i) * time.Hour)
+		confirmed = append(confirmed, mustRemember(t, s, id, mustRemember(t, s, id, "", at), at.Add(time.Minute)))
+	}
+	now := escalationStart.Add(5 * time.Hour)
+	fresh := mustRemember(t, s, id, "", now)
+	if !s.KnowsBrowser(id, fresh, now) || s.KnowsBrowser(id, confirmed[0], now) || !s.KnowsBrowser(id, confirmed[1], now) {
+		t.Errorf("record = %+v, want the new browser and the two newest confirmed", mustGet(t, s, id).KnownBrowsers)
+	}
+}
+
 // The lifetime is 45 days from the sign-in, checked on the server: a
 // 44-day-old entry is known, a 45- or 46-day-old one grants nothing,
 // whatever the cookie's own Max-Age. One dated ahead of now is refused

@@ -1,7 +1,10 @@
 # ADR-0004: The passkey ceremony is a leaf package behind a seam in the root
 
-**Status:** Proposed (design by Fable 5.1 on #20; owner decisions of
-2026-09-30 and 2026-10-01 recorded below)
+**Status:** Accepted, shipped in v0.2.0 (design on #20; owner decisions of
+2026-09-30 and 2026-10-01 recorded below). Decision 5's "no discoverable
+or passwordless login" and its unset resident-key preference are
+superseded by ADR-0012. Decisions 3 and 4 are amended by ADR-0015 (see
+the status notes at the end).
 **Date:** 2026-10-02
 **Relates to:** #20 (G8, this change), ADR-0001 (mikroview is the
 reference), ADR-0002 (additive API, apidiff, OpenAPI contract),
@@ -92,7 +95,12 @@ mikroview's fake authenticator copies and this module reuses.
    `AnyPasskeysExist()` (added for this on the owner's answer to #20
    question 5), as mikroview's `passkeyStartupRefusal` does.
 
-5. **Policy, written in code rather than left to defaults:** user
+5. *Superseded by ADR-0012 (#77) as to a discoverable login with no
+   password before it, and the unset resident-key preference: a
+   user-verifying passkey may now sign in on its own, behind
+   `Config.PasskeySignIn`, and every registration asks for `residentKey:
+   preferred`. The rest of this decision stands.* **Policy, written in
+   code rather than left to defaults:** user
    presence required; user verification requested but not required
    (a second factor behind a password; requiring it shuts out
    security keys without a PIN); attestation `none`, not verified, no
@@ -184,5 +192,22 @@ mikroview's fake authenticator copies and this module reuses.
   2026-10-01).
 - `github.com/go-webauthn/webauthn` joins the modules `govulncheck` and
   the licence gate watch on every pipeline.
-
-Written by Fable 5.1, 2026-10-02.
+- Status note (v0.3.0 audit, 2026-10-08): built and shipped in v0.2.0 (the `passkey`
+  package and `gate`'s passkey routes); the **Status** line above was
+  never moved from Proposed.
+- Status note (v0.3.0 audit, 2026-10-08): decision 2's "two sealing keys" is now three:
+  ADR-0012 (#77) added a third, for passkey-alone sign-in, so each
+  ceremony's state opens only for its own ceremony.
+- Status note (v0.3.0 audit, 2026-10-08): decision 3's "two cookies" is now three:
+  ADR-0012 (#77) added `gate_passkey_signin` on `/api/auth`. The two
+  named here are unchanged, and all three last five minutes.
+- Status note (#82, 2026-10-08): decisions 3 and 4 are amended by
+  [ADR-0015](0015-every-admin-holds-a-passkey.md). `Deps.Passkeys` nil
+  and a relying party that is not ready (`unset`, `ip`, `insecure`)
+  still boot, but only for an application that sets
+  `gate.Config.AdminPasskey` to `gate.AdminPasskeyOptional`; with
+  `gate.AdminPasskeyRequired`, `gate.New` refuses to start, naming the
+  status. Every application now sets the field, so "always boots" is
+  the application's explicit choice rather than the default. A fourth
+  ceremony cookie, `gate_passkey_stepup` on `/api/auth`, five minutes,
+  carries a passkey step-up.

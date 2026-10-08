@@ -22,6 +22,7 @@
 // AnyPasskeysExist is carried over (owner, #20 question 5): the
 // start-up decision it feeds stays the application's, but the question
 // it answers is about the store.
+
 package gauntlet
 
 import (
@@ -53,6 +54,11 @@ var (
 	// stored passkeys -- covers both "never existed" and "already
 	// removed"; a caller has no legitimate reason to tell those apart.
 	ErrPasskeyNotFound = errors.New("gauntlet: no such passkey on this account")
+	// ErrNoPasskeys is returned by ClearPasskeys when the account has no
+	// passkey to remove, on the account or on hold. Nothing is written,
+	// so a caller can answer without auditing or notifying a removal
+	// that never happened.
+	ErrNoPasskeys = errors.New("gauntlet: this account has no passkeys")
 	// ErrPasskeyLimitReached is returned by AddPasskey once an account
 	// already holds maxPasskeysPerAccount credentials.
 	ErrPasskeyLimitReached = fmt.Errorf("gauntlet: an account may hold at most %d passkeys -- remove one before adding another", maxPasskeysPerAccount)
@@ -64,7 +70,7 @@ var (
 	// the account happens to be full.
 	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
 	// ErrPasskeyCeremonyInvalid is wrapped by gauntlet/passkey's
-	// FinishRegistration and FinishLogin (PasskeyCeremony) whenever the
+	// FinishRegistration and FinishLogin (PasskeyCeremony), and FinishSignIn (PasskeySignIn), whenever the
 	// sealed ceremony state is unusable: it fails the authentication
 	// tag, is malformed, was sealed for the other ceremony or by another
 	// process, has expired, or its challenge was already used. Such a
@@ -164,6 +170,47 @@ type PasskeyAssertion struct {
 	// stored one and either is non-zero -- never for 0 -> 0, which is how
 	// most platform passkeys behave. A caller refuses the login on it.
 	CloneWarning bool
+	// UserVerified is the authenticator's user-verification flag for this
+	// assertion: it checked the person (a PIN or a biometric) as well as
+	// their presence. FinishLogin reports what it saw; FinishSignIn
+	// refuses an assertion without it, so it is always true there (#77).
+	UserVerified bool
+}
+
+// PasskeySignIn is the optional second interface beside PasskeyCeremony
+// (ADR-0004 said a later need would be one): signing in with a passkey
+// alone, no password first (#77, ADR-0012). gauntlet/passkey's
+// RelyingParty implements both; gate offers the routes only when
+// Deps.Passkeys also implements this and Config.PasskeySignIn is set.
+// Every method refuses while Status is not PasskeyStatusReady.
+//
+// It is a client-side discoverable credential login (WebAuthn Level 3):
+// no username is typed, the browser offers the passkeys it holds for
+// this relying party, and the one chosen names its account through the
+// user handle -- the account ID, as FinishRegistration's user supplies
+// it. User verification is required, not preferred.
+type PasskeySignIn interface {
+	// BeginSignIn starts a discoverable login ceremony: options for
+	// navigator.credentials.get() with no allowed list and user
+	// verification required, and the sealed state. The sealed state is
+	// for this ceremony only; it cannot finish a login of the second-step
+	// kind or a registration.
+	BeginSignIn() (options json.RawMessage, sealed string, err error)
+	// FinishSignIn verifies the browser's assertion. It reads the user
+	// handle out of the assertion and calls lookup with it, before the
+	// signature is checked, so the caller can find the account and apply
+	// its own limits; lookup returns false for a handle that names no
+	// account it will sign in, and the assertion is then refused. The
+	// signature is checked against that account's passkeys under the
+	// current RPID, and user verification is required: an assertion
+	// without it is refused.
+	//
+	// It returns the account lookup gave for the verified assertion, and
+	// the assertion as FinishLogin reports it, UserVerified included. As
+	// with FinishLogin, the caller refuses a CloneWarning and records the
+	// count through Store.RecordPasskeyAssertionIfFresh, and an error
+	// wrapping ErrPasskeyCeremonyInvalid means the sealed state is dead.
+	FinishSignIn(lookup func(userHandle []byte) (*User, bool), sealed string, assertion json.RawMessage) (*User, PasskeyAssertion, error)
 }
 
 // Passkey is one registered WebAuthn credential, held on User.Passkeys.
@@ -262,7 +309,10 @@ func findPasskeyIndex(u *User, credID []byte) int {
 // AddPasskey registers a new WebAuthn credential on userID's account --
 // the store-layer half of the registration ceremony gauntlet/passkey
 // runs (PasskeyCeremony.FinishRegistration). pk arrives fully populated
-// by the caller.
+// by the caller. The passkey is live at once and no recovery codes are
+// minted: what gate does for an account that already has a second
+// factor. An account's first factor is held with its codes instead,
+// until confirmed (HoldFirstPasskey, ConfirmHeldEnrolment; #58).
 //
 // The credential ID is checked against every passkey already on the
 // account before the account's capacity is: ErrPasskeyDuplicate takes
@@ -279,11 +329,9 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 	s.reloadIfStale()
 
 	// A registration that only exists in memory must not be reported as
-	// done: the caller is about to tell its user the passkey was added
-	// -- and, on a first factor, mint recovery codes and revoke other
-	// sessions around that claim -- and a restart before the next good
-	// write would drop the credential while nothing else remembers it
-	// ever existed. mutate installs it only once it is saved, and the
+	// done: the caller is about to tell its user the passkey was added,
+	// and a restart before the next good write would drop the credential
+	// while nothing else remembers it ever existed. mutate installs it only once it is saved, and the
 	// duplicate and capacity checks run against the document being
 	// saved, so a replay sees a passkey another process added first.
 	var added Passkey
@@ -495,7 +543,11 @@ func (s *Store) RecordPasskeyAssertionIfFresh(userID string, credID []byte, sign
 // ClearPasskeys removes every passkey on userID's account in one write.
 // Same conditional recovery-code clear as DeletePasskey: codes survive
 // if the account still has an active authenticator-app factor, and are
-// cleared only if this was the account's last second factor.
+// cleared only if this was the account's last second factor. A passkey
+// on hold (#58) goes too, with the codes held for it.
+//
+// Returns ErrNoPasskeys, writing nothing, when there is no passkey to
+// remove, on the account or on hold.
 func (s *Store) ClearPasskeys(userID string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -507,7 +559,16 @@ func (s *Store) ClearPasskeys(userID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
+		heldPasskey := u.HeldEnrolment != nil && u.HeldEnrolment.Kind == HeldFactorPasskey
+		// Not errNoChange, which mutate answers with nil: the caller
+		// must hear that nothing was removed, not a success.
+		if len(u.Passkeys) == 0 && !heldPasskey {
+			return ErrNoPasskeys
+		}
 		u.Passkeys = nil
+		if heldPasskey {
+			u.HeldEnrolment = nil
+		}
 		if !u.HasSecondFactor() {
 			u.RecoveryCodes = nil
 		}
@@ -516,8 +577,9 @@ func (s *Store) ClearPasskeys(userID string) error {
 }
 
 // ClearAllSecondFactors removes every second factor on userID's
-// account -- the authenticator app and every passkey -- and the
-// recovery codes that backed them, all in the one write. Meant for an
+// account -- the authenticator app and every passkey, an enrolment on
+// hold (#58) included -- and the recovery codes that backed them, all in
+// the one write. Meant for an
 // "I've lost everything" recovery path: unlike DeletePasskey,
 // ClearPasskeys and ClearTOTP there is no factor-remaining check to make
 // here -- there is nothing left standing after this call, by
@@ -538,11 +600,10 @@ func (s *Store) ClearAllSecondFactors(userID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		u.TOTPSecret = ""
-		u.TOTPConfirmedAt = time.Time{}
-		u.TOTPLastCounter = 0
+		clearTOTPFields(u)
 		u.Passkeys = nil
 		u.RecoveryCodes = nil
+		u.HeldEnrolment = nil
 		return nil
 	})
 }

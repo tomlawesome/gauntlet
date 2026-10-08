@@ -1,14 +1,27 @@
 package gate
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	gooidc "github.com/coreos/go-oidc/v3/oidc"
 
 	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/oidc"
 	"github.com/tomlawesome/gauntlet/persist"
 )
+
+// accountEventFunc adapts a function to AccountNotifier.
+type accountEventFunc func(ctx context.Context, n AccountNotice) error
+
+func (f accountEventFunc) AccountEvent(ctx context.Context, n AccountNotice) error { return f(ctx, n) }
 
 // validDeps returns a Deps with every required field set, so each
 // subtest below can null out exactly the one it is testing.
@@ -36,6 +49,7 @@ func validConfig() Config {
 		CSRFHeaderValue: "app",
 		ClientIP:        func(r *http.Request) string { return "1.2.3.4" },
 		ProductName:     "Test Product",
+		AdminPasskey:    AdminPasskeyOptional,
 	}
 }
 
@@ -136,5 +150,156 @@ func TestNewDefaultsNowToTimeNow(t *testing.T) {
 	after := time.Now()
 	if got.Before(before) || got.After(after) {
 		t.Errorf("expected now() to default to time.Now, got %v (window %v..%v)", got, before, after)
+	}
+}
+
+// Config.Notices replaces the deprecated Config.Notify (#73): New
+// refuses a Config setting both, so an application migrating cannot
+// leave the old and new hooks both wired and get two notices for one
+// event.
+func TestNewRefusesBothNotifyAndNotices(t *testing.T) {
+	cfg := validConfig()
+	cfg.Notify = notifierFunc(func(context.Context, SessionsEndedNotice) error { return nil })
+	cfg.Notices = accountEventFunc(func(context.Context, AccountNotice) error { return nil })
+	if _, err := New(cfg, validDeps(t)); err == nil || !strings.Contains(err.Error(), "Notify") || !strings.Contains(err.Error(), "Notices") {
+		t.Errorf("New = %v, want a refusal naming Notify and Notices", err)
+	}
+}
+
+// TestNewRefusesAGroupThatGivesAdminOrAnUnknownRole pins ADR-0013
+// decision 1: an identity provider never mints an admin, and the
+// refusal comes at startup, naming the decision.
+func TestNewRefusesAGroupThatGivesAdminOrAnUnknownRole(t *testing.T) {
+	cases := map[string]oidc.Policy{
+		"admin from a group":      {RoleFromGroups: map[string]string{"ops": "admin"}},
+		"unknown role from group": {RoleFromGroups: map[string]string{"ops": "root"}},
+		"admin as the fallback":   {RoleFromGroups: map[string]string{"ops": "user"}, RoleWithoutGroup: "admin"},
+		"unknown fallback":        {RoleFromGroups: map[string]string{"ops": "user"}, RoleWithoutGroup: "guest"},
+	}
+	for name, policy := range cases {
+		t.Run(name, func(t *testing.T) {
+			deps := validDeps(t)
+			deps.OIDCPolicy = policy
+			_, err := New(validConfig(), deps)
+			if err == nil {
+				t.Fatal("expected New to refuse the policy")
+			}
+			if !strings.Contains(err.Error(), "0013") {
+				t.Errorf("error %q does not name ADR-0013", err)
+			}
+		})
+	}
+
+	deps := validDeps(t)
+	deps.OIDCPolicy = oidc.Policy{RoleFromGroups: map[string]string{"staff": "user", "guests": "viewer"}, RoleWithoutGroup: "user"}
+	if _, err := New(validConfig(), deps); err != nil {
+		t.Errorf("a user/viewer map was refused: %v", err)
+	}
+}
+
+// TestNewRefusesASharedIssuerItsPolicyDoesNotPin pins ADR-0014 at the
+// gate: the tenant pin must be in the policy gate enforces, so a client
+// built for a shared issuer is refused when Deps.OIDCPolicy leaves the
+// tenant open, even though oidc.New accepted it under its own policy.
+func TestNewRefusesASharedIssuerItsPolicyDoesNotPin(t *testing.T) {
+	const google = "https://accounts.google.com"
+	// A discovery document naming the shared issuer, served locally so
+	// the test never dials the real provider.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 google,
+			"authorization_endpoint": google + "/authorize",
+			"token_endpoint":         google + "/token",
+			"jwks_uri":               google + "/jwks",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	pinned := oidc.Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}}}
+	client, err := oidc.New(gooidc.InsecureIssuerURLContext(context.Background(), google), oidc.Config{
+		IssuerURL:   srv.URL,
+		ClientID:    "test-client",
+		RedirectURL: "https://app.example/callback",
+		Policy:      pinned,
+	})
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+	codec, err := oidc.NewStateCodec()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deps := validDeps(t)
+	deps.OIDC, deps.OIDCState = client, codec
+	_, err = New(validConfig(), deps)
+	if !errors.Is(err, oidc.ErrMultiTenantIssuer) {
+		t.Fatalf("New with an empty Deps.OIDCPolicy = %v, want oidc.ErrMultiTenantIssuer", err)
+	}
+	if !strings.Contains(err.Error(), "0014") {
+		t.Errorf("error %q does not name ADR-0014", err)
+	}
+
+	deps.OIDCPolicy = pinned
+	if _, err := New(validConfig(), deps); err != nil {
+		t.Errorf("a shared issuer with its tenant pinned was refused: %v", err)
+	}
+}
+
+// TestNewRequiresTheAdminPasskeyRule pins #82 decision 4: the app says
+// whether every admin must hold a passkey, with no default either way.
+// New refuses an unset or unknown value, and refuses "required" unless
+// a relying party is wired and ready, rather than lock every admin out
+// or silently waive the rule. The chosen value is logged once.
+func TestNewRequiresTheAdminPasskeyRule(t *testing.T) {
+	cases := []struct {
+		name     string
+		rule     AdminPasskeyRule
+		passkeys gauntlet.PasskeyCeremony
+		want     []string // substrings of the refusal; nil means New succeeds
+	}{
+		{"unset", "", nil, []string{"Config.AdminPasskey", "not set", "AdminPasskeyRequired", "AdminPasskeyOptional"}},
+		{"unknown value", "sometimes", nil, []string{"Config.AdminPasskey", `"sometimes"`}},
+		{"required, no passkeys wired", AdminPasskeyRequired, nil, []string{"Config.AdminPasskey", "Deps.Passkeys is nil", "AdminPasskeyOptional"}},
+		{"required, relying party on an IP", AdminPasskeyRequired, mustRelyingParty(t, "https://192.0.2.10"), []string{"Config.AdminPasskey", "(ip)", "AdminPasskeyOptional"}},
+		{"required, no public URL", AdminPasskeyRequired, mustRelyingParty(t, ""), []string{"Config.AdminPasskey", "(unset)"}},
+		{"required, plain http", AdminPasskeyRequired, mustRelyingParty(t, "http://app.example"), []string{"Config.AdminPasskey", "(insecure)"}},
+		{"optional, no passkeys", AdminPasskeyOptional, nil, nil},
+		{"optional, relying party not ready", AdminPasskeyOptional, mustRelyingParty(t, "https://192.0.2.10"), nil},
+		{"required, ready relying party", AdminPasskeyRequired, mustRelyingParty(t, passkeyTestPublicURL), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &messageRecorder{}
+			cfg := validConfig()
+			cfg.AdminPasskey = tc.rule
+			cfg.Log = slog.New(rec)
+			deps := validDeps(t)
+			deps.Passkeys = tc.passkeys
+			_, err := New(cfg, deps)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("New = %v, want it to start", err)
+				}
+				var logged []string
+				for _, m := range rec.msgs {
+					if strings.Contains(m, "admin passkey rule") {
+						logged = append(logged, m)
+					}
+				}
+				if want := "gate: admin passkey rule: " + string(tc.rule); len(logged) != 1 || logged[0] != want {
+					t.Errorf("New logged %q, want exactly %q once", logged, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("New started, want a refusal")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("New = %q, want it to name %q", err, w)
+				}
+			}
+		})
 	}
 }

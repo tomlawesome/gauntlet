@@ -49,10 +49,14 @@ func TestContractRoutesMatchDocument(t *testing.T) {
 	}
 	slices.Sort(registered)
 
-	mux, ok := newTestGate(t).g.Routes().(*http.ServeMux)
+	// Routes wraps its *http.ServeMux in gate's own problemRouter
+	// (gauntlet #23), so the live mux is reached through its Mux
+	// accessor rather than a direct type assertion.
+	wrapped, ok := newTestGate(t).g.Routes().(interface{ Mux() *http.ServeMux })
 	if !ok {
-		t.Fatal("Routes no longer returns an *http.ServeMux; update this test's live check")
+		t.Fatal("Routes no longer returns something with a Mux() *http.ServeMux method; update this test's live check")
 	}
+	mux := wrapped.Mux()
 	for _, pattern := range registered {
 		method, path, _ := strings.Cut(pattern, " ")
 		req := httptest.NewRequest(method, strings.NewReplacer("{id}", "some-id").Replace(path), nil)

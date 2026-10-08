@@ -26,13 +26,6 @@ func storeWithAdminAndUser(t *testing.T) (*Store, *User, *User) {
 	return s, admin, user
 }
 
-func TestCreateUserCannotMintASecondAdmin(t *testing.T) {
-	s, _, _ := storeWithAdminAndUser(t)
-	if _, err := s.CreateUser("other", "correct-horse-battery-staple", RoleAdmin, time.Now()); !errors.Is(err, ErrSingleAdmin) {
-		t.Errorf("a second admin was created (err=%v) -- the single-admin invariant is the whole model", err)
-	}
-}
-
 func TestTransferAdminMovesTheRole(t *testing.T) {
 	s, admin, user := storeWithAdminAndUser(t)
 
@@ -53,7 +46,7 @@ func TestTransferAdminMovesTheRole(t *testing.T) {
 		t.Fatal("previous admin vanished")
 	}
 	if old.Role != RoleUser {
-		t.Errorf("previous admin still has role %q -- there are now two admins", old.Role)
+		t.Errorf("previous admin still has role %q after the transfer", old.Role)
 	}
 }
 

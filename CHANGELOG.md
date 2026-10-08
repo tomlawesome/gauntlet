@@ -4,6 +4,777 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-08
+
+Reading notes for this release:
+
+- "ADR-NNNN" points to an architecture decision record in
+  [docs/adr/](docs/adr/), which gives the reasoning; "decision N" is a
+  numbered decision inside it.
+- A *document* is one stored file (accounts, tokens, sign-in history).
+  At this release the accounts document is version 9, the tokens
+  document version 3 and the sign-in history version 3. Entries below
+  name the version each step reached on the way. **This is one-way:**
+  once this release has saved a file, an older gauntlet build refuses
+  to open it, so rolling back means restoring a copy of the file saved
+  before the upgrade. Older files open in this release as before.
+
+### Added
+
+- **Every admin account must hold a passkey, where the application says
+  so** (#82, ADR-0015). An admin account now holds at least one passkey;
+  an authenticator app may be held as well, never instead. The
+  application chooses with the new, required `gate.Config.AdminPasskey`
+  (see Changed below for what that means when upgrading):
+  `gate.AdminPasskeyRequired` turns the rule on,
+  `gate.AdminPasskeyOptional` waives it for an application reached over
+  plain http (anywhere but localhost) or by IP address, or one with no
+  passkeys. With it on:
+  - An admin with no passkey that works at this address is stopped at a
+    new door, `403` class `must-enrol-passkey` with `X-Auth-Gate:
+    must-enrol-passkey`, until they register one. It lets through the
+    same routes as the second-factor door, and is checked before it.
+    An admin with no local password (made an admin from single sign-on)
+    is stopped at the `must-change-password` door first, since a passkey
+    needs a password; they set one from a fresh single sign-on.
+  - `GET /api/auth/session` gains `mustEnrolPasskey` (the door holds)
+    and `adminPasskeyRequired` (the rule is on; present while signed
+    in), so a frontend can show the requirement before the door holds.
+  - Making an account an admin, creating one, handing admin over and
+    the first account all succeed, and the new admin is held at the
+    door from its next request. The role and create responses and each
+    row of `GET /api/auth/users` say so in `heldForPasskey`, and the
+    audit detail adds "held for a passkey".
+  - An admin cannot delete their own last passkey that works here:
+    `409` `conflict`, "register another passkey first", before the
+    password is checked. Another admin clearing their passkeys still
+    works, as the way back for a lost key; they are held afterwards.
+  - Users and viewers keep "any second factor". Nothing is stored: the
+    accounts document stays at version 9.
+- **A passkey can stand in for the code at an admin step-up** (#82).
+  Granting admin, creating an admin and an admin's own unlock take the
+  caller's password and either a code or, now, a passkey: `POST
+  /api/auth/step-up/passkey/begin` (signed in, no body) answers the
+  options for the caller's own passkeys and sets a new five-minute
+  ceremony cookie, `gate_passkey_stepup`; the route then takes
+  `assertion` (`adminAssertion` on create) in place of `code`
+  (`adminCode`). Exactly one of the two, or `400`. Begin is counted on
+  a per-account limit of its own, never handed back (`429` past it),
+  and takes nothing from the password re-check budget, so an abandoned
+  prompt costs no re-check; the passkey itself is checked on that
+  budget like a code. A wrong passkey is `401` `invalid-credentials`
+  and counts, and a missing or used ceremony is `401` `step-expired`
+  and does not. A
+  passkey-only admin no longer spends a recovery code on every grant.
+  New `LoginLimiter.ReserveStepUpBegin` and `ReleaseStepUpBegin` hold
+  that limit in the account map, which no flood of addresses can
+  reset. Additive.
+- New Go API for #82, additive: the type `gate.AdminPasskeyRule`, its
+  constants `gate.AdminPasskeyRequired` and `gate.AdminPasskeyOptional`,
+  and the field `gate.Config.AdminPasskey`.
+- **Prove an unusual sign-in with a passkey** (#65, ADR-0009 decision 10).
+  When a sign-in looks unusual, the person can now be asked to tap a
+  passkey instead of typing a code sent to them. An account with no
+  passkey that works at this address is held for a code if
+  `Config.DeliverConfirmCode` is set, and refused if not. For
+  developers: a fifth `UnusualSignInAction`, `prove`
+  (`gate.UnusualSignInProve`),
+  ranked between `confirm` and `block`, settable per signal in
+  `Config.UnusualSignIns` and returnable from `Decide`: the sign-in is held
+  until the browser answers a passkey assertion for the same account.
+  The 200 is `{"prove": "passkey", "passkeyOrigin": ...}` where `confirm`'s
+  is `{"confirm": true}` (the SSO callback redirects with `?prove=1`), and
+  the new `POST /api/auth/login/prove/begin` and `POST
+  /api/auth/login/prove {assertion}` finish it, through the existing
+  non-discoverable ceremony (user verification preferred, not required),
+  the login limiter as `login/confirm` does, and the held sign-in's
+  confirm ticket, which now has two kinds that are not interchangeable.
+  A sign-in that was itself by passkey is already proved and is flagged; an
+  account with no passkey usable at this address is held for a code when
+  `Config.DeliverConfirmCode` is set, else refused. `UnusualSignInCase`
+  gains `CanProve`; a ticket that cannot be made is a block with the new
+  reason `prove-failed`. `gate.New` accepts `prove` with nothing else
+  wired. Additive; the accounts document is unchanged.
+
+- **Sign in with a passkey alone** (#77, ADR-0012). A passkey can now
+  be the whole sign-in: the person taps it and confirms with a PIN or
+  fingerprint at the device, and types no username or password. It is
+  off by default.
+
+  To turn it on, set `gate.Config.PasskeySignIn` and wire a relying
+  party (the passkey checker) that implements the new optional
+  `gauntlet.PasskeySignIn`; `passkey.RelyingParty` does. Otherwise both
+  new routes answer 404 and `POST /api/auth/login` and `login/factor`
+  are exactly as before.
+
+  The new routes are `POST /api/auth/login/passkey/begin` and `POST
+  /api/auth/login/passkey`. In WebAuthn terms (the browser standard for
+  passkeys) this is a Level 3 discoverable-credential login: the
+  passkey itself names the account (its *user handle*), and the device
+  must verify the person (*user verification*, a PIN or biometric). That
+  makes it a multi-factor sign-in on its own (NIST SP 800-63B-4, AAL2).
+  Every account keeps its password; the accounts document stays
+  version 9.
+
+  How it fits with the other checks: the sign-in is judged for unusual
+  signals like any other (method `passkey_alone` reaches `Decide`; a
+  confirmation code is not skipped). Before the signature is checked it
+  counts toward the account's lockout and disable, the address limit
+  and ban, and the known-browser allowance. After it, an account that
+  owes a password change is still limited to changing it. A refused
+  assertion keeps its attempt, and a completed sign-in gives both
+  back. It does not count toward the run of
+  second-factor failures that forces a new password. An account with no
+  local password cannot sign in this way. The same passkey resumes a
+  timed-out session: `POST /api/auth/reauthenticate` takes `{"assertion":
+  ...}` from the same begin route instead of `{"password": ...}`, the user
+  handle must be the session's own account. `GET /api/auth/session`
+  gains `passkeys.signIn: true` when the routes are on and ready, and now
+  sends a `passkeys` block signed out in that case so a login page can
+  offer the button. Sessions, the session list (`method`), the sign-in
+  history and the audit record carry the method `passkey_alone`. Additive
+  Go API: `gauntlet.PasskeySignIn`, `PasskeyAssertion.UserVerified`,
+  `SignInMethodPasskeyAlone`, `SessionClient.Method`, `Config.PasskeySignIn`
+  and `passkey.RelyingParty`'s `BeginSignIn` and `FinishSignIn`.
+- **Roles for SSO accounts from identity-provider groups** (#76,
+  ADR-0013). `oidc.Policy.RoleFromGroups` maps a group to `user` or
+  `viewer`; `RoleWithoutGroup` (default `viewer`, or `user`) covers an
+  account in no mapped group, an absent groups claim included. The role
+  is set when the account is first created and again at every single
+  sign-on login, in the same write that finds or creates the account.
+  The highest role among the mapped groups wins. A downgrade ends the
+  account's other sessions. Admin
+  is never given by a group (`gate.New` refuses it, and an unknown role,
+  at start-up) and an account already an admin is never changed by the
+  map. The change is audited as `user.role_changed` with actor `sso` and
+  told to `Config.Notices` as `NoticeRoleChanged` with `By` empty and the
+  new `RoleChangeDetail.ViaSSO`. On such an account (linked to SSO, a map
+  configured, not an admin) `PUT /api/auth/users/{id}/role` to `user` or
+  `viewer` is `409` with the new class `role-managed-by-sso`: change the
+  group at the provider. Granting or demoting an admin still works. Not
+  configured, nothing changes. Additive Go API: `Policy.RoleFromGroups`,
+  `Policy.RoleWithoutGroup`, `Policy.Groups`, `Policy.ValidateRoles`,
+  `Store.FindOrCreateOIDCUserWithRole` and `OIDCSignIn`; the accounts
+  document stays at version 9. Birdcage and mikroview: a frontend that
+  branches on the role route's `409` classes should handle the new one.
+- **Resume a timed-out session with the password alone** (#71). A
+  session that timed out after an hour unused, but is less than 24
+  hours old, can now be resumed by typing the password alone, without
+  a full two-factor sign-in. The 24-hour limit from the original
+  sign-in (the session's *ceiling*) does not move (NIST SP 800-63B-4
+  section 2.2.3).
+  `POST /api/auth/reauthenticate`, `{"password": "..."}`, presented with
+  the timed-out session's cookie, issues a new session ID (ASVS 7.2.4)
+  for the same account with the original sign-in time, so the 24-hour
+  ceiling does not move, and ends the old ID. It takes the same limiter
+  reservation as a password sign-in (lockout, disable, address ban and
+  limit, known-browser allowance; a wrong password is a failed sign-in),
+  is not judged as an unusual sign-in, and never asks for a second factor.
+  Anything not resumable is `401 sign-in-required`, as is an account with
+  no local password or one owing a password change. `GET /api/auth/session`
+  gains `resumable: true` for a cookie in that state. Sign-in history rows
+  and the audit record say so: method `resume`
+  (`gauntlet.SignInMethodResume`) and `user.reauthenticated`. Additive Go
+  API: `SessionStore.Resumable` and `SessionStore.Resume`. Behaviour
+  change: the server now remembers a timed-out session until its 24-hour
+  ceiling instead of forgetting it after the hour, so it holds a little
+  more in memory. A timed-out session still cannot authenticate a
+  request, and `ListForUser` does not list it. Both caps are unchanged;
+  a restart still ends every session.
+- **API tokens expire, are removed when unused, and start `gnt_`** (#74),
+  GitHub's personal-access-token lifecycle. **Your application must
+  call `Gate.SweepTokens` once a day.** Gauntlet runs no timer of its
+  own, so without the call no unused token is ever removed and nobody
+  is warned that a token is about to expire.
+
+  `Token.ExpiresAt` (zero means never); `POST /api/tokens` takes an
+  optional `expiresAt`, a future date and time such as
+  `2027-01-31T09:00:00Z` (RFC 3339) or `"never"` (a router's ingest
+  token, say), a `400` otherwise; the response and list show it, left out for a token that
+  never expires. `Authenticate` refuses an expired token exactly as it
+  refuses an unknown one. New `TokenStore.CreateWithExpiry`,
+  `ErrTokenExpiryInvalid`, `TokenPrefix`, `DefaultTokenLifetime`,
+  `TokenUnusedLimit` and `TokenExpiryNoticeWindow`.
+  `Gate.SweepTokens(ctx, now)` removes tokens unused for a
+  year, or created a year ago and never used (audit
+  `token.removed_unused`), and tells the creating account, through
+  `Config.Notices`, a week before a token expires, once per token
+  (`NoticeTokenExpiring`, `AccountNotice.TokenExpiring`,
+  `TokenExpiringDetail`; `Token.ExpiryWarnedAt` remembers it). New values
+  start `gnt_`, so secret-scanning tools can recognise a leaked one; the
+  project's own scanner (gitleaks) has a rule for them in the new
+  `.gitleaks.toml`. Tokens
+  issued before keep their bare shape and keep working, and keep no
+  expiry. The tokens document is now version 3: once saved, an older
+  build cannot open it (see the reading notes above); older documents
+  open as before.
+
+- **An escape code for a lone admin refused by `block`** (#66,
+  ADR-0011). If the only admin who can sign in is refused for coming
+  from a new browser, the server now writes a one-time code to its log
+  (or hands it to the new `Config.OnEscapeCode`). The admin reads it
+  there and enters it in the same browser within 15 minutes; it works
+  once. Your sign-in page needs a box that sends the code to `POST
+  /api/auth/login/escape`. That lets the one sign-in through and
+  remembers the browser. Under the hood, the refusal sets an encrypted
+  ticket cookie, `gate_escape_login`, in the refused browser, and the
+  code is checked against it, through the login limiter. The `403 sign-in-refused` body is
+  unchanged. Never for users, viewers or the SSO callback; with neither
+  `Config.Log` nor `Config.OnEscapeCode` nothing is issued. Additive API:
+  `gauntlet.NewOneTimeCode` (the setup and unlock codes' generator),
+  `Store.OtherAdminCanAct(userID, now)`, `SignInEscapeIssued` and
+  `SignInEscapeRefused`, `gate.EscapeCodeHandler`, `gate.EscapeCodeFunc`
+  and `gate.EscapeCodeLifetime`. `user.login_refused` gains
+  `escape=issued`, a completed escape records `escape=used` (confirmed),
+  and its notice is a `NoticeUnusualSignIn` with `Reason: "escape"`.
+- **Several admins, the last one protected** (#67, ADR-0010). A
+  deployment may hold any number of admins; the last can be neither
+  deleted nor demoted. `Store.CreateUser` accepts `RoleAdmin`; new
+  `Store.SetRole(id, role, now)` (any of admin, user and viewer, in either
+  direction, returning the account and the role it held), `Store.Admins`,
+  `ErrLastAdmin` and `ErrRoleUnchanged`. The last-admin check runs inside
+  the same locked write as the change, so two admins removed at once
+  cannot leave none. A downgrade, `TransferAdmin`'s demotion included,
+  ends the account's sessions (`SessionsEndedAt`); every change writes
+  `RoleChangedAt`. `TransferAdmin` refuses with `ErrSeveralAdmins` when
+  more than one admin exists. `Admin()` returns the first admin by username;
+  `HasLocalAdmin` is true when any admin has a local password; every
+  admin keeps its password and second factor when SSO is linked.
+- `PUT /api/auth/users/{id}/role` (#75, #67): the one route for every
+  role change among admin, user and viewer. `POST /api/auth/users` now
+  accepts `role: admin`. Granting admin on either needs the caller's own
+  password and a current second factor on the same request (`password`
+  and `code` on the role route; `adminPassword` and `adminCode` on
+  create), on the re-check budget: missing is `400`, wrong is `401`, `429`
+  once the budget is spent. Audited as `user.role_changed` (actor, from,
+  to).
+- The `last-admin` error class (409): deleting or demoting the last admin.
+- `gate.NoticeRoleChanged` and `AccountNotice.RoleChanged`
+  (`RoleChangeDetail{From, To}`): `Config.Notices` is told of a role
+  change, and of an admin created over HTTP (`From` empty).
+- An address ban (#70): `LoginLimiter.RecordAddressFailure` counts failed
+  sign-in attempts per source address, and the 100th within a rolling 24
+  hours bans the address for 24 hours (`AddressBanFailures`,
+  `AddressBanDuration`); `AddressBanned` reads it. IPv4 addresses are
+  counted one by one. IPv6 addresses are counted by network, the first
+  64 bits (`AddressBanGroup`), so an attacker cannot dodge the ban by
+  changing the end of the address. Anything that is not a valid address
+  is counted as the text it is. Counts and bans are kept in memory only,
+  so a restart forgets them; if memory fills, counts are dropped before
+  bans. `gate` refuses a banned
+  address with the same `429` as the per-address limit, and a browser the
+  account remembers passes the ban, so a reverse proxy that hides visitor
+  addresses cannot lock the owner out. The ban starting is one
+  `address.banned` audit record. Today's per-address limit is unchanged.
+- `LoginDisableDuration` and `User.LoginDisabled`, for the disable that
+  lifts itself (see Changed) (#70).
+
+- `persist/persisttest`, a test suite an application runs against its
+  own `persist.Backend` from its own tests: `persisttest.Run`. It checks
+  that a save reads back as the same bytes and version, that a wrong
+  expected version and a second create are refused with
+  `persist.ErrConflict`, that a second backend over the same storage
+  sees the first's writes, that `VersionReader` (where implemented)
+  agrees, and that of two concurrent writers from one version exactly
+  one wins. Each check is its own subtest. Gauntlet's memory, file and
+  encrypted file backends run it too (#61).
+- `SessionStore.RevokeAllForUserCount`: signs a user out everywhere and
+  returns how many sessions it ended, counted under the same lock (#58).
+- `POST /api/auth/recovery-codes/confirm`: the signed-in user confirms
+  they have saved the recovery codes their first second factor was held
+  with, which makes the factor and the codes live (see Changed). Open at
+  the must-enrol-factor door. `409` when nothing is held, `401`
+  `step-expired` when the hold ran out (#58).
+- `Store.HoldFirstPasskey`, `Store.HoldFirstTOTP` and
+  `Store.ConfirmHeldEnrolment`, with `User.HeldEnrolment`,
+  `User.EnrolmentHeld`, `HeldEnrolmentLifetime` and the errors
+  `ErrEnrolmentHeld`, `ErrSecondFactorExists`, `ErrNoHeldEnrolment` and
+  `ErrHeldEnrolmentExpired`, for applications driving enrolment
+  themselves. `Store.SetPendingTOTPSecretAt` records when a pending
+  authenticator-app secret was set; `User.TOTPPending` and
+  `TOTPPendingLifetime` say whether it can still be confirmed (#58).
+- `gate.Config.Country`: an optional lookup from a client address to its
+  ISO 3166-1 alpha-2 country code, recorded on a sign-in and the session
+  it issues. `SessionClient` and `SignInRow` gain `Country`; the
+  sign-in history document is now version 2 for the added field, and an
+  older document loads with it blank. The admin sign-in history
+  (`GET /api/auth/sign-ins`) and a person's own session list
+  (`GET /api/auth/sessions`) both gain an optional `country` field.
+  Nothing is recorded with `Config.Country` left nil (#54).
+- `geoip`, a new package that downloads the operator's chosen country
+  file -- MaxMind GeoLite2-Country or IPinfo Lite, each with the
+  operator's own key -- keeps it current in a directory the application
+  names, and looks addresses up in it locally. Its `Manager.Country` is
+  what an application passes as `gate.Config.Country`. Gauntlet never
+  stores the key and keeps it out of every log and error; the
+  application credits the provider (docs/geoip.md, ADR-0008). Neither
+  `gate` nor the root package imports it (#54).
+- Unusual sign-ins (#55, ADR-0009): a completed sign-in -- password or
+  SSO, plus any second factor, with no session yet -- is judged against
+  what the account remembers (`Store.JudgeSignIn`), and every session
+  issue remembers it (`Store.RememberSignIn`), whatever the policy. Three
+  signals, each raised only against something already remembered:
+  `gauntlet.SignInSignals` (`new-browser`, `new-country`,
+  `impossible-travel`), carried on `SessionClient.Unusual`. The account
+  remembers up to three countries for 90 days (`User.SeenCountries`) and
+  its one latest located sign-in (`User.LastPlace`); both are cleared
+  wherever known browsers already are. The accounts document is now
+  version 8 for the added fields, and an older build refuses it.
+- `gate.Config.UnusualSignIns` (`UnusualSignInPolicy`): what each signal
+  does -- `off`, `flag` (default), `confirm` or `block`, with an optional
+  override per signal and an optional `Decide` function that can
+  overrule the settings' answer once per sign-in, under a fixed 3-second
+  `DecideTimeout`. `Decide`, a failed delivery or an invalid answer all
+  fail closed to `block`. `gate.New` refuses an unknown action, `confirm`
+  with no way to deliver a code, and impossible travel turned on with no
+  `Config.Locate` (#55).
+- `gate.Config.Locate`, and `geoip.Config.Edition`/`geoip.EditionCity`/
+  `(*geoip.Manager).Locate`: an optional point-and-radius lookup from
+  MaxMind's larger GeoLite2-City file, so impossible travel can be
+  judged; `New` refuses `EditionCity` with IPinfo Lite, which has no
+  coordinates. `geoip.Status` gains `Edition` and `Locates` (#55,
+  docs/geoip.md).
+- `POST /api/auth/login/confirm` and the sealed `gate_confirm_login`
+  cookie (15 minutes): under the `confirm` action, a sign-in with every
+  credential right is held for an eight-digit code that
+  `gate.Config.DeliverConfirmCode` hands the application synchronously;
+  typing the code into the same sign-in completes it. Only the code's
+  SHA-256 is ever kept (#55).
+- The `sign-in-refused` error class (403): under the `block` action,
+  every credential was right and the account's sign-in policy refused
+  the attempt from this browser or place; returned by `login` and
+  `login/factor`, and as `?ssoError=refused` from the SSO callback.
+  `SignInOutcome` gains `refused`, `confirm_sent` and `confirm_refused`;
+  `SignInEvent` and `SignInRow` gain `Confirmed`. `GET
+  /api/auth/sign-ins` and `GET /api/auth/sessions` both gain `unusual`,
+  and `sign-ins` also gains `confirmed`; `SignInQuery` gains `Unusual`,
+  and `?unusual=true` on `GET /api/auth/sign-ins` answers only rows that
+  raised at least one signal. The sign-in history document is now
+  version 3 for the added fields, and an older build refuses it (#55).
+- `gate.Config.Notices` (`AccountNotifier`): one hook for every account
+  event this module raises -- a password reset, a second factor added
+  or removed, recovery codes regenerated, an account lockout, a disable,
+  every session ended, and an unusual sign-in flagged or blocked -- each
+  carrying a `NoticeKind` and the one typed detail pointer that kind
+  names (`PasswordResetDetail`, `SecondFactorDetail`, `LockoutDetail`,
+  `SessionsEndedDetail`, `UnusualSignInDetail`). Your hook is called
+  after the response has been sent, in the background, with a
+  10-second limit; if it fails or crashes, gauntlet logs the problem
+  and the sign-in is not affected -- the same as the deprecated
+  `Config.Notify`. nil means nobody is told (#73).
+- `gate.Config.DeliverConfirmCode`: hands an unusual sign-in's
+  confirmation code to the application synchronously, before the
+  sign-in is answered -- the opposite contract from `Notices`, which may
+  be queued. A failure refuses the attempt, since no code reached
+  anyone; nil means the confirm action is unavailable (#55, #73).
+
+- **Security fixes reach a merge request the same day** (#79).
+  A second, daily pipeline schedule runs the `renovate` job with
+  `RENOVATE_SECURITY_ONLY=true`, which merges the new
+  `renovate-security.json` over `renovate.json`: every ordinary update
+  is off and vulnerability fixes stay on, so a security fix no longer
+  waits for Monday's run (docs/releasing.md).
+- Additive Go API from the v0.3.0 release audit (#79), each described
+  where it changes behaviour below: `SessionStore.CreateContinuing`,
+  `SessionStore.EndSessionsForUser`, `Store.ValidateNewAccount`,
+  `Store.PasswordMatches`, `ErrLastLocalAdmin`, `ErrNoTOTP`,
+  `ErrNoPasskeys`, `TokenStore.RemoveOrphans`,
+  `TokenStore.MarkExpiryWarned`, `TokenSweep.Orphaned`,
+  `KnownBrowser.Confirmed`, `oidc.AllowIssuerWithPolicy`,
+  `oidc.Config.Policy` and `oidc.Client.Issuer`. The accounts document
+  stays at version 9.
+
+### Security
+
+- **Confirmation codes and escape codes are limited per account** (#84).
+  A sign-in held for a code hands its attempt back to the login
+  limiter, so someone holding the password could repeat it without limit
+  and flood the owner's mailbox with confirmation codes, or a lone
+  admin's server log with escape codes. Each code is now counted per
+  account as it is sent, the limiter's threshold per window (5 per 5
+  minutes at the usual settings), confirmation and escape codes
+  separately, and never handed back, a failed delivery included. Past
+  it, a held sign-in is answered `429 rate-limited` with no code, ticket
+  or cookie (the SSO callback redirects `ssoError=refused`), recorded as
+  `rate_limited`, and a lone admin gets no escape code. A browser the
+  account knows is never held, so is unaffected; an admin's unlock
+  (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
+  `LoginLimiter.ReserveDelivery`. Additive.
+
+- If someone puts an older copy of the accounts or tokens file back
+  while the service is running, the service now notices and ignores
+  it. It logs one message, keeps what it holds, and stops saving until
+  the file is replaced or the service restarts. Before, it silently
+  took the old copy, undoing later changes and bringing revoked tokens
+  back to life. How: each document now carries a save counter inside
+  its encrypted part, and a lower one is refused. The accounts document
+  is now version 6 and the tokens document version 2; older ones open
+  and are stamped on their next save. A file put back while the service
+  is stopped is still accepted on start (docs/design.md §4) (#59).
+
+- **Sign out everywhere keeps the session's 24-hour ceiling** (#79). It
+  asked for no credential and issued the new session as a fresh
+  sign-in, so anyone holding a live cookie could call it once an hour
+  and keep a session for ever. `SessionStore.CreateContinuing` issues
+  the new session with the old one's `IssuedAt`, signals and method, as
+  `Resume` does, and never past the original ceiling; the cookie lasts
+  only to that ceiling. If the caller's session has gone meanwhile,
+  nothing is issued.
+- `password.KDFParams.Valid` now also refuses memory above 1 GiB, more
+  than 64 passes and more than 32 threads, so a damaged or edited lock
+  document cannot drive Argon2id into a huge allocation or hold a hash
+  slot for minutes (#79). A deliberate future profile raises the
+  ceilings.
+- The store file keeps its mode, owner and group when it is replaced
+  (#79). A server and an application's CLI share the store, and the CLI
+  is run with `sudo`: after one root save the server could no longer
+  read or replace its own file. A `chown` refused with permission
+  denied is ignored; any other failure fails the write. The `.lock` file
+  beside the store takes the store's owner when the server creates it.
+  Upgrade note: a `.lock` file an earlier release left root-owned
+  cannot be repaired by the server; the save error now says so, and
+  the fix is to `chown` it to the server's user or delete it while the
+  server is stopped.
+- A forced password change refuses the password the account already
+  has (#79). It asks for no current password, so a caller could lift
+  `MustChangePassword` by setting the same one, the very password
+  presumed known to someone else. The answer is the same `400` as an
+  ordinary change gives; `Store.PasswordMatches` does the comparison.
+- Five second-factor failures on an account with no local password end
+  its sessions instead of forcing a password change it cannot make
+  (#79). The sign-in provider's identity is what is at risk and this
+  module cannot change that; the flag is left alone, and `Protect`'s
+  must-change door now applies only to an account with a local
+  password, so one that already carries the flag is no longer shut out.
+- `POST /api/auth/totp/confirm` now records a wrong code as
+  `user.login_failed` (`step=recheck`) and logs the "re-check refused"
+  line, and does the same for a limiter refusal, as the other in-session
+  re-checks do (#79). A run of wrong codes from a stolen session cookie
+  against a pending enrolment left no trace.
+- `POST /api/auth/oidc/link` asks for the caller's own password,
+  `{"password": ...}`, on the same rate-limited re-check as TOTP enrol
+  and passkey registration: a wrong or missing one is `401`, a spent
+  budget `429`, and no flow cookie is set (#79). A link is permanent and
+  strips a non-admin of its password and factors, so a stolen session
+  cookie alone could turn into a lasting way in. A frontend that starts
+  a link must now send the password.
+- `POST /api/auth/logout-all` asks an account with a local password for
+  it, `{"password": ...}`, before any session ends (`401`/`429` as on the
+  other re-checks), and an SSO-only account's sign out everywhere no
+  longer forgets its remembered browsers, countries and last place
+  (#79). With only a session cookie, a thief could wipe the account's
+  unusual-sign-in baseline and leave their own browser the only one
+  remembered, so that under `block` the owner was refused on their own
+  devices. An SSO-only account still sends no body; the audit detail
+  says the browsers were kept. A frontend must now send the password
+  for an account that has one.
+- The login limiter keys a username that matches no account on a
+  SHA-256 digest of the lowercased name instead of the name itself
+  (#79). A body may hold a 64 KiB name and the limiter keeps thousands
+  of keys, so a credential-free flood of long made-up names could pin
+  hundreds of megabytes. Limiting is unchanged: one name, in any case,
+  is one bucket.
+- The confirmation code (`ConfirmCode.Client`) and the unusual-sign-in
+  and block notices carry the client cleaned and cut as a session's is,
+  not the raw `User-Agent` (#79): someone holding the password could put
+  line breaks, a made-up line or a huge header into the message the
+  service sends the real owner. The rule is exported as
+  `gauntlet.SessionClient.Clean`, which `CreateFrom`, `CreateContinuing`
+  and `Resume` now use too. Additive.
+
+### Changed
+
+- **Breaking: `gate.New` refuses to start until `Config.AdminPasskey` is
+  set** (#82, ADR-0015). There is no default either way, so that each
+  application's admin makes a conscious choice and an application never
+  runs without the rule, or locks its admins out, by accident. `New`
+  refuses an unset or unknown value, and refuses
+  `gate.AdminPasskeyRequired` while `Deps.Passkeys` is nil or its
+  public URL is unset, an IP address or plain http on any host but
+  localhost, naming which; it
+  logs the choice at start-up. **Every application must add the line
+  before upgrading, or it will not start:** birdcage, which wires no
+  passkeys, sets `gate.AdminPasskeyOptional` (until it wires
+  `gauntlet/passkey`); mikroview sets `gate.AdminPasskeyRequired` where
+  it serves https on a domain name and `gate.AdminPasskeyOptional` when
+  reached by IP. With `required`, have every admin register a passkey
+  before upgrading: an admin without one is stopped at their first
+  request afterwards and registers one there. This also amends
+  ADR-0004 decision 4: a relying party that is not ready still boots,
+  but only for an application that set `optional`.
+- **Every passkey registration now asks for a discoverable credential**
+  (#77). The creation options carry `residentKey: "preferred"`
+  (and `requireResidentKey: false`), mikroview's included: W3C's
+  recommendation, harmless where the authenticator cannot hold one
+  (a PIN-less security key still registers, as a second factor), and
+  needed before a passkey can sign in alone. Passkeys registered before
+  this may not be discoverable; they keep working as a second factor.
+- **A token created without an expiry now expires after a year** (#74).
+  `TokenStore.Create` and `POST /api/tokens` without `expiresAt` used to
+  issue a token that lasted until revoked. Birdcage and mikroview: a
+  token made the old way keeps working, but one made from now on stops at
+  a year unless its creator passes `expiresAt: "never"` (call
+  `CreateWithExpiry` with the zero time from Go), or the application
+  rotates it first. Call `Gate.SweepTokens` daily so owners hear a week
+  ahead.
+- **Breaking: five admin routes now take the calling admin's password**
+  (#72, ASVS 7.5.3). `POST /api/auth/users/{id}/reset-password`,
+  `POST /api/tokens`, `DELETE /api/auth/users/{id}`,
+  `DELETE /api/auth/users/{id}/totp` and
+  `DELETE /api/auth/users/{id}/passkeys` need `password` (the caller's
+  own) in the JSON request body, which the three `DELETE`s and
+  `reset-password` did not read before; a request without a readable
+  body is `400`. A missing or wrong password is `401`
+  `invalid-credentials`, counted on the same per-account re-check budget
+  as the self-service routes (`429` once spent). A caller sending the
+  old bodies must add it. `POST /api/auth/users` is unchanged.
+- **The accounts document is now version 9** (#67). No field changed:
+  a document with several admins is now legal, which a build reading up
+  to version 8 refuses at load as "allows exactly one". A version-8
+  document opens unchanged, and a version-8 build refuses a version-9
+  one. A document with accounts and no admin is still refused.
+- Deleting the last admin answers `409` class `last-admin` (the
+  `conflict` class it had on `dev` was never released), and the caller's own account
+  cannot be deleted while other admins exist (`409` `conflict`).
+  `POST /api/auth/users` with `role: admin` is no longer a `400` for
+  being an admin; without `adminPassword` and `adminCode` it is a `400`
+  naming them.
+- `ErrSingleAdmin` is never returned now; it stays exported so
+  applications switching on it keep compiling. `ErrCannotDeleteAdmin`
+  is still the value `DeleteUser` returns, and also answers
+  `errors.Is(err, ErrLastAdmin)`. `ErrInvalidRole`'s text now names admin.
+- Login lockouts are capped at one hour, not 24 (#70): 5, 15 and 45
+  minutes at 5 attempts per 5 minutes, then an hour each. The escalation
+  and the known-browser allowance are unchanged. A stranger who knew the
+  username could keep the owner out for a day; the address ban now puts
+  the long penalty on the attacker instead.
+- The disable after `MaxConsecutiveLoginFailures` (50) failures lifts
+  itself 24 hours after `User.LoginDisabledAt`, with no unlock needed
+  (#70). Nothing new is stored: a disabled account simply becomes usable
+  again 24 hours after the time already on its record.
+  The first attempt afterwards clears the account's count of lockouts as
+  `UnlockLogin` does, so the next failure does not disable it again at
+  once. The admin unlock answer's `wasDisabled` is false for a disable
+  that has lapsed. The one-time unlock code follows the same clock since
+  the v0.3.0 audit (#79): a lapsed disable issues none.
+
+- `gate.Config.Notify` and `Notifier` are deprecated in favour of
+  `Config.Notices`: kept working for a minor release (ADR-0002 decision
+  2), and `gate.New` refuses a `Config` setting both. An admin ending
+  another account's sessions now goes to `Notices` when it is set, else
+  the deprecated `Notify` (#73).
+- The known-browser cookie (`gate_known_browser`) now carries up to four
+  tokens, one per account, rather than one for whichever account last
+  completed a sign-in in that browser: a browser shared by two accounts
+  is no longer "new" to the second one on every switch. A one-token
+  cookie from before this change still reads as a list of one (#55).
+- `Store.ClearKnownBrowsers` also forgets `User.SeenCountries` and
+  `User.LastPlace`, and `Store.IssueResetCode` clears all three in its
+  own write: sign out everywhere, or an admin reset code, now forgets
+  everything the account trusts, not only its known browsers (#55).
+- The sign-in history's fold key now also includes the unusual-sign-in
+  signals and whether a confirmation code completed the sign-in, so an
+  unusual success is never folded into an ordinary one from the same
+  address (#55).
+- **Breaking for HTTP clients: an account's first second factor is held
+  until its recovery codes are confirmed** (#58). The first passkey
+  (`register/finish`) or first authenticator app (`totp/confirm`) is
+  saved together with its ten recovery codes in one write, on hold; the
+  response shows the codes once with `pendingConfirmation: true`
+  (`totp/confirm` answers `enabled: false`).
+
+  What changes for your frontend: until the user calls `POST
+  /api/auth/recovery-codes/confirm`, the factor signs nothing in and is
+  not listed or counted, the codes redeem nothing, and the account stays
+  restricted to the second-factor setup routes. No other session ends
+  and no audit line is written; the confirmation does all of that.
+  Unconfirmed after ten minutes, the factor and codes are deleted. While one is held, starting another
+  enrolment is refused with `409`. A scanned but unconfirmed
+  authenticator-app secret now expires ten minutes after it was set
+  (`401` `step-expired` at `totp/confirm`). A later factor is still added
+  live, without codes (`alreadyIssued: true`). This replaces minting the
+  codes in a second write after the factor went live, where a failure
+  between the two left a live factor with no codes; the
+  `partially-completed` answers from those two routes (and
+  `totpActive`) are gone, and a failed save there is `server-error`.
+
+  Go API notes: `GenerateRecoveryCodesIfAbsent` is no longer used by `gate` and stays
+  for direct callers. The accounts document is now version 7
+  (`totpPendingSince`, `heldEnrolment`); older ones open unchanged, and
+  a version-6 build refuses a version-7 document.
+- **Breaking for HTTP clients.** Every error `gate.Routes` and
+  `gate.Protect` return is now an RFC 9457 Problem Details body
+  (`application/problem+json`, with `type`, `title`, `status` and
+  `detail`) instead of `text/plain` or `{"error": ...}` (#23). Each
+  `type` links to its permanent entry in
+  [docs/api/errors.md](docs/api/errors.md); `detail` carries the same
+  message as before. An unknown path or wrong method under `Routes`
+  answers `about:blank`, keeping `Allow` on 405. The one JSON error body
+  with an extra field (user deleted, tokens not revoked) keeps
+  `username`; its `error` field is now `detail`. The other one that
+  existed (TOTP on, recovery codes not saved, with `totpActive`) is
+  gone: see the held first second factor (#58) above. `WWW-Authenticate` on 401s is
+  unchanged. Switched before mikroview moves onto gauntlet, so it
+  migrates once (ADR-0002, owner 2026-10-03).
+
+Behaviour changes and deprecations from the v0.3.0 release audit (#79):
+
+- **An SSO-only admin may set a local password, and one local admin is
+  always kept** (#79, ADR-0010). `POST /api/auth/password` lets an
+  admin with no local password set a first one with only
+  `newPassword`; users and viewers without one still get `409`, and
+  the forced second-factor enrolment door then applies. Every step-up
+  route now answers `409` to a caller with no local password, telling
+  it to set one first, instead of a `401` that could never succeed and
+  spent the re-check budget. `SetRole`, `DeleteUser` and `TransferAdmin`
+  refuse, inside the write, to remove the last admin who holds a local
+  password while other admins remain, with the new `ErrLastLocalAdmin`
+  (`409` `last-admin` over HTTP). `GET /api/auth/session` reports
+  `mustChangePassword` only for an account with a local password.
+- **Google's shared SSO issuer is accepted when the policy pins `hd`**
+  (#79, ADR-0014). `oidc.AllowIssuer` refused `accounts.google.com`
+  whatever the policy said, so an operator following `Policy`'s own
+  documentation got a start-up refusal. `oidc.AllowIssuerWithPolicy`
+  accepts it only when `RequiredClaims` names `hd` with a value. Apple
+  and Microsoft personal accounts have no tenant claim and stay refused;
+  Entra's `common`, `organizations` and `consumers` endpoints stay
+  refused too, because go-oidc cannot discover their templated issuer,
+  and the error names the single-tenant issuer
+  (`https://login.microsoftonline.com/<tenant-guid>/v2.0`) to use
+  instead. `oidc.Config.Policy` is checked by `oidc.New` against both
+  the configured URL and the issuer the discovery document names, and
+  `gate.New` checks `Client.Issuer` against `Deps.OIDCPolicy`. `AllowIssuer` and `Policy.Restricted` are
+  deprecated (nothing called `Restricted`).
+- `SessionStore.EndSessionsForUser` ends every session as before but
+  counts only those still live, so an admin's sign-out of another
+  account no longer reports, audits or tells the owner about sessions
+  that had timed out and were kept only for a resume.
+  `RevokeAllForUserCount` is deprecated in its favour (#79).
+- Creating an admin checks the new username and password before the
+  step-up, so a typo no longer costs the caller a recovery code
+  (#79). `Store.ValidateNewAccount` runs `CreateUser`'s checks without
+  writing; `CreateUser` still repeats them inside the write.
+- The minimum password length counts characters (code points), not
+  UTF-8 bytes, in `CreateUser`, `SetPassword` and `ValidateNewAccount`
+  (#79). Seven letters of a non-Latin script no longer pass an "at least
+  8 characters" rule.
+- `POST /api/auth/login/passkey/begin` reserves its attempt on a limiter
+  bucket of its own (`passkey-begin:` plus the address, same limit and
+  ban check) instead of the address's login bucket (#79, ADR-0012).
+  Page views with passkey autofill filled the address's budget and
+  answered every sign-in from it with `429`. The passkey-alone finish
+  and the passkey resume release that key.
+- `login/factor` with an assertion checks that the relying party is
+  ready before it reserves the address's and the account's attempt,
+  so a `409` no longer spends attempts toward a `429` and a lockout
+  (#79).
+- Removing a factor that is not there changes nothing (#79).
+  `ClearTOTP` and `ClearPasskeys` return the new `ErrNoTOTP` or
+  `ErrNoPasskeys` and write nothing when the account has no such factor
+  and none on hold. `DELETE /api/auth/totp` answers `404` `not-found`
+  as passkey delete does, before any session ends or anything is
+  recorded or sent; the admin clear routes answer `200` with
+  `cleared: false` and record and send nothing. Before, a second click
+  on "Disable" announced a removal that never happened.
+- The token sweep sends an expiry warning first and records it after
+  (#79). `TokenStore.Sweep` only lists the tokens to warn about and no
+  longer marks them; the new `TokenStore.MarkExpiryWarned` records the
+  warning for the ids whose notice was sent, and `Gate.SweepTokens`
+  calls it. A failed send is logged and tried again at the next sweep
+  (at least once: a duplicate after a crash between the two is
+  accepted); `TokenSweep.Warned` counts the tokens marked. A notifier
+  failure, timeout or restart used to lose the warning for good.
+- `Gate.SweepTokens` removes tokens whose creating account is gone
+  (#79). Deleting an account saves the accounts document and then
+  revokes its tokens in a second write, and a failure between the two
+  left them working for up to a year. `TokenStore.RemoveOrphans`
+  deletes, in one write, every attributed token whose creator no
+  longer exists, each removal is audited as `token.removed_orphaned`
+  by `system`, and `TokenSweep.Orphaned` counts them. Unattributed
+  tokens are never touched.
+- A lone admin whose sign-in is held for a confirmation code or a
+  passkey is offered the escape code, as one who is blocked is (#79,
+  ADR-0011): the escape cookie is set beside the hold's ticket, the code
+  goes to the log and `escape_issued` is recorded. Before, such an admin
+  was held again on every attempt. The held challenge's body is
+  unchanged.
+- A remembered browser is provisional until its cookie comes back
+  (#79). `KnownBrowser.Confirmed` is set when an entry replaces a live
+  one the browser carried back. Past `MaxKnownBrowsers` unconfirmed
+  entries are evicted first, oldest first, then confirmed ones, and
+  the new entry is never the one evicted; before, three cookie-less
+  sign-ins pushed the owner's everyday browser out. An unconfirmed
+  entry is still known.
+- The sign-in-refused text and the SSO-refusal docs now name only
+  actions that work (#79). The `403` text, which only an account with a
+  local password receives, is unchanged; `docs/api/errors.md` and
+  ADR-0009 now say that an SSO-only account refused at the SSO callback
+  (`ssoError=refused`) has no administrator remedy in this release, and
+  that its way back is a browser or place it has signed in from before.
+- The restart unlock code honours the 24-hour self-lift (#79). A
+  restart after a disable had lifted itself no longer logs "locked out"
+  and prints a live break-glass code for an admin who can sign in, and
+  an outstanding code stops working once its disable runs out.
+- An empty store file path is refused (#79).
+  `NewEncryptedFileBackend` refuses it at construction and the file
+  backend's `Load` returns the "no file path configured" error `Save`
+  already did; before, it read as a missing file, a fresh install, and
+  was refused only once something was saved.
+- `geoip` downloads are bounded by a timeout whatever HTTP client made
+  them (#79). A caller's `HTTPClient` with no timeout let a provider
+  that stopped answering hang the download, and the refresher with it,
+  for good.
+- The licence check honours `allow-dependencies-licenses` (#79).
+  `licence-check.sh` documented per-module exceptions
+  (`pkg:golang/<module>@<version>`) but never read the key. It now
+  checks that the build has the module at exactly that version (a
+  stale entry fails), passes `--ignore` for it and prints the entry
+  with its reason; an entry whose module path is the start of another
+  module's in the build is refused.
+
+### Fixed
+
+- An account created by its first single sign-on is now audited as
+  `user.create` (actor `sso`, the role and the issuer), as an
+  admin-created account is (#78).
+
+Low-severity findings from the v0.2.0 audit (#58):
+
+- `GET /api/auth/session` no longer says `mustEnrolSecondFactor` while
+  a forced password change still blocks the enrol routes.
+- Two first passkey registrations finishing at the same moment no
+  longer revoke each other's new session.
+- The `ended` count from an admin's sign-out-everywhere can no longer
+  be one short when a login lands during it.
+- Lowering the sign-in history's `MaxRows` below the rows it holds now
+  logs the dropped rows once instead of dropping them silently.
+- The sign-in history notices a replaced or `null` file on its next
+  read, not only at the next sign-in.
+- Registering with a setup code another, lagging process has just spent
+  now says the code was already used, not that registration is closed.
+- `VerifyPassword` caps the thread count it reads from a stored hash,
+  beside its memory, time, salt and key-length caps.
+- The file backend's save honours its context deadline while waiting
+  for the sidecar lock file, and its doc comment no longer calls
+  deleting that `.lock` file harmless.
+- A published password list refused for a build time in the future is
+  checked again at each refresh and adopted once the clock catches up.
+- `pwlist build`'s retry waits now reach the documented 8 s ceiling.
+
+Findings from the v0.3.0 release audit (#79):
+
+- The audit lines are now honest about a passkey: a sign-in held for a
+  passkey and completed by one is recorded in `user.login` as "via
+  passkey proof" rather than "via confirmation code", and the note is
+  written even when the session loses its signals to a failed remember
+  write. A session resumed with a passkey is audited by
+  `user.reauthenticated` as "session resumed with passkey", not "with
+  password" (the history row's method stays `resume`).
+- The authenticator-app enrolment URI escapes the product name in both
+  the `otpauth://` label and the `issuer` parameter, so "Home Router"
+  is no longer shown as "Home+Router" or unscannable, and a colon in
+  the name no longer breaks the label's separator.
+
 ## [0.2.0] - 2026-10-03
 
 ### Added

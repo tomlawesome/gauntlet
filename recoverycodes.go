@@ -5,11 +5,14 @@
 // usable exactly once, and never stored anywhere but hashed: this store
 // never again has enough information to show one back to its owner,
 // only to check a guess against it. They are shared between the
-// authenticator app and passkeys (docs/design.md §1.6): minted on
-// whichever factor activates first, cleared only when the account's
-// last second factor of either kind goes -- see ClearTOTP (totp.go) and
-// DeletePasskey/ClearPasskeys (passkeys.go), which own that clearing
-// rule from each side.
+// authenticator app and passkeys (docs/design.md §1.6): minted with the
+// account's first factor of either kind and saved with it, on hold,
+// until the owner confirms they saved them (HoldFirstPasskey,
+// HoldFirstTOTP, ConfirmHeldEnrolment in enrolhold.go; #58), and
+// cleared only when the account's last second factor of either kind
+// goes -- see ClearTOTP (totp.go) and DeletePasskey/ClearPasskeys
+// (passkeys.go), which own that clearing rule from each side.
+
 package gauntlet
 
 import (
@@ -42,8 +45,8 @@ const (
 // RecoveryCode is one hashed recovery code, held on User.RecoveryCodes.
 // Hash is Argon2id via HashPassword -- the same treatment a password
 // gets -- never the plain code, which exists in clear only for the
-// instant GenerateRecoveryCodes/GenerateRecoveryCodesIfAbsent returns it
-// to its caller. UsedAt is zero until BurnRecoveryCode spends it, and is
+// instant the method that minted it (GenerateRecoveryCodes,
+// HoldFirstPasskey, HoldFirstTOTP) returns it to its caller. UsedAt is zero until BurnRecoveryCode spends it, and is
 // never cleared afterward: a spent code stays spent.
 type RecoveryCode struct {
 	Hash   string    `json:"hash"`
@@ -103,6 +106,9 @@ func NormaliseRecoveryCode(typed string) string {
 // clear -- grouped for display -- exactly once. The caller must show
 // them to the user immediately and must never itself persist the
 // returned strings; only the hashes this writes to the store survive.
+// It backs gate's "regenerate recovery codes" route; an account's first
+// set is minted with its first factor instead (HoldFirstPasskey,
+// HoldFirstTOTP).
 //
 // now is unused: a recovery code records no issue time. It stays so the
 // signature matches mikroview's and gauntlet v0.1.0's.
@@ -115,16 +121,9 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 	// and IssueResetCode: HashPassword is ~100ms of Argon2id by design,
 	// and ten of them held under the store's write lock would serialize
 	// every reader for the better part of a second.
-	clear := make([]string, recoveryCodeCount)
-	hashed := make([]RecoveryCode, recoveryCodeCount)
-	for i := range hashed {
-		code := newRecoveryCode()
-		hash, err := HashPassword(code)
-		if err != nil {
-			return nil, err
-		}
-		clear[i] = FormatRecoveryCode(code)
-		hashed[i] = RecoveryCode{Hash: hash}
+	clear, hashed, err := mintRecoveryCodes()
+	if err != nil {
+		return nil, err
 	}
 
 	s.reloadIfStale()
@@ -135,7 +134,7 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 	// whatever set (if any) existed before, leaving the shown codes
 	// unable to verify against anything. mutate installs the set only
 	// once it is saved.
-	err := s.mutate(func(st *storeState) error {
+	err = s.mutate(func(st *storeState) error {
 		u, ok := st.byID[userID]
 		if !ok {
 			return ErrUserNotFound
@@ -153,7 +152,10 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 // sibling, for a caller that must never replace a set an earlier
 // first-factor confirmation already minted and showed its user (e.g.
 // confirming TOTP after a passkey already minted the shared set, or the
-// reverse). Checking len(u.RecoveryCodes) on a snapshot taken before the
+// reverse). gate no longer calls it: since #58 an account's first
+// factor and its codes are saved together, on hold, by HoldFirstPasskey
+// or HoldFirstTOTP, so no factor is ever live before its codes exist.
+// It stays for applications that call it directly. Checking len(u.RecoveryCodes) on a snapshot taken before the
 // call and then calling GenerateRecoveryCodes unconditionally would
 // leave a window where two concurrent first enrolments -- two browser
 // tabs, or a TOTP confirm racing a passkey registration -- both see no
@@ -195,16 +197,9 @@ func (s *Store) GenerateRecoveryCodesIfAbsent(userID string, now time.Time) (cod
 		return nil, true, nil
 	}
 
-	clear := make([]string, recoveryCodeCount)
-	hashed := make([]RecoveryCode, recoveryCodeCount)
-	for i := range hashed {
-		code := newRecoveryCode()
-		hash, err := HashPassword(code)
-		if err != nil {
-			return nil, false, err
-		}
-		clear[i] = FormatRecoveryCode(code)
-		hashed[i] = RecoveryCode{Hash: hash}
+	clear, hashed, err := mintRecoveryCodes()
+	if err != nil {
+		return nil, false, err
 	}
 
 	s.reloadIfStale()

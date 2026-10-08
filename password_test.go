@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -102,5 +103,75 @@ func TestVerifyPasswordRejectsOutOfRangeStoredHash(t *testing.T) {
 				t.Errorf("hash slots in use went from %d to %d: a slot leaked", before, after)
 			}
 		})
+	}
+}
+
+// TestVerifyPasswordRejectsOutOfRangeThreadCount is gauntlet#58 SEC2:
+// memory, time, salt and key length are all bounded against a stored
+// hash's declared cost, but threads was not, so a stored hash someone
+// edited (or corrupted into) could ask for far more parallelism than
+// HashPassword ever produces.
+//
+// A high but otherwise in-bounds thread count does not make the real
+// computation take noticeably longer or crash, so a plain
+// VerifyPassword(...) == false assertion cannot tell "refused before
+// hashing" apart from "hashed and simply didn't match". Instead this
+// saturates every hash slot first: a call that is refused by its
+// thread count never reaches acquireHashSlot and returns at once;
+// one that is not refused blocks on the channel forever, since nothing
+// here ever frees a slot.
+func TestVerifyPasswordRejectsOutOfRangeThreadCount(t *testing.T) {
+	const salt, key = "AAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	encoded := "argon2id$v=19$m=65536,t=3,p=255$" + salt + "$" + key
+
+	for range maxConcurrentHashes {
+		hashSlots <- struct{}{}
+	}
+	defer func() {
+		for range maxConcurrentHashes {
+			<-hashSlots
+		}
+	}()
+
+	done := make(chan bool, 1)
+	go func() { done <- VerifyPassword("anything", encoded) }()
+
+	select {
+	case got := <-done:
+		if got {
+			t.Error("expected an out-of-range thread count to never verify")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("VerifyPassword blocked waiting for a hash slot -- the oversized thread count was not refused before hashing")
+	}
+}
+
+// Valid bounds the cost from above as well as below, at the same ceiling
+// VerifyPassword applies to a stored hash: a damaged or edited lock
+// document must not be able to drive DeriveKey into a huge allocation or
+// a pass count that holds a hash slot for minutes.
+func TestKDFParamsValidBounds(t *testing.T) {
+	ok := DefaultKDFParams()
+	cases := []struct {
+		name string
+		p    KDFParams
+		want bool
+	}{
+		{"default", ok, true},
+		{"memory at floor", KDFParams{Memory: 8 * 1024, Time: 1, Threads: 1}, true},
+		{"memory below floor", KDFParams{Memory: 8*1024 - 1, Time: 1, Threads: 1}, false},
+		{"memory at ceiling", KDFParams{Memory: maxVerifyMemory, Time: ok.Time, Threads: ok.Threads}, true},
+		{"memory over ceiling", KDFParams{Memory: maxVerifyMemory + 1, Time: ok.Time, Threads: ok.Threads}, false},
+		{"time zero", KDFParams{Memory: ok.Memory, Time: 0, Threads: ok.Threads}, false},
+		{"time at ceiling", KDFParams{Memory: ok.Memory, Time: maxVerifyTime, Threads: ok.Threads}, true},
+		{"time over ceiling", KDFParams{Memory: ok.Memory, Time: maxVerifyTime + 1, Threads: ok.Threads}, false},
+		{"threads zero", KDFParams{Memory: ok.Memory, Time: ok.Time, Threads: 0}, false},
+		{"threads at ceiling", KDFParams{Memory: ok.Memory, Time: ok.Time, Threads: maxVerifyThreads}, true},
+		{"threads over ceiling", KDFParams{Memory: ok.Memory, Time: ok.Time, Threads: maxVerifyThreads + 1}, false},
+	}
+	for _, c := range cases {
+		if got := c.p.Valid(); got != c.want {
+			t.Errorf("%s: %+v.Valid() = %v, want %v", c.name, c.p, got, c.want)
+		}
 	}
 }

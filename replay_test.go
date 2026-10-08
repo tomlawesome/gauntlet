@@ -227,7 +227,11 @@ func TestFindOrCreateOIDCUserRefusesOnReplayAgainstAnEmptiedDocument(t *testing.
 		}
 	})
 	b.beforeSave = func() {
-		if _, err := b.Memory.Save(t.Context(), []byte(`{"version":1,"users":[]}`), other.version); err != nil {
+		// seq (#59) ahead of what s has already seen (alice's account),
+		// so this emptying is a legitimate write, not a rollback the
+		// sequence check would refuse before FindOrCreateOIDCUser's own
+		// checkAdmins-based refusal (ErrSetupRequired) is reached.
+		if _, err := b.Memory.Save(t.Context(), []byte(`{"version":1,"seq":2,"users":[]}`), other.version); err != nil {
 			t.Errorf("the other process emptying the document: %v", err)
 		}
 	}
@@ -382,7 +386,7 @@ func TestFindOrCreateOIDCUserDoesNotSignInToAnAccountAnotherProcessDeleted(t *te
 }
 
 // refuseNextSave makes the other process write a document this store
-// refuses (two admins) just before this store's next save, so the
+// refuses (no admin) just before this store's next save, so the
 // replay is refused outright: the op's first run, against memory, is
 // the only one that happened, and its result was never saved.
 func refuseNextSave(t *testing.T, b *otherProcessBackend) {
@@ -394,7 +398,7 @@ func refuseNextSave(t *testing.T, b *otherProcessBackend) {
 			return
 		}
 		// b.Memory, not b: b's own Save is the one that runs this hook.
-		if _, err := b.Memory.Save(context.Background(), []byte(twoAdminsDocument), snap.Version); err != nil {
+		if _, err := b.Memory.Save(context.Background(), []byte(noAdminDocument), snap.Version); err != nil {
 			t.Error(err)
 		}
 	}

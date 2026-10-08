@@ -95,6 +95,7 @@
 // ErrDocumentRemoved instead of recreating it from memory; and a state
 // the accounts store would refuse to open (no admin) is stopped at the
 // save, whatever op produced it.
+
 package gauntlet
 
 import (
@@ -157,6 +158,13 @@ type document[S any] struct {
 	// this package should produce such a state; this is the line of
 	// defence for the one that does.
 	check func(*S) error
+	// bump, when non-nil, advances the state's own save counter (#59)
+	// immediately before check and encode, on every attempt this loop
+	// makes to save it -- what makes the sequence counter inside the
+	// sealed document go up by one on every save, not only the ones
+	// that reach disk on the first try. Op never touches it: Seq is not
+	// business data.
+	bump func(*S)
 }
 
 // replay runs op against a copy of cur and saves the result, reloading
@@ -226,6 +234,9 @@ func (d document[S]) replay(cur *S, version int64, op func(*S) error) (*S, int64
 	}
 
 	for attempt := 1; ; attempt++ {
+		if d.bump != nil {
+			d.bump(next)
+		}
 		if d.check != nil {
 			if err := d.check(next); err != nil {
 				return nil, 0, fmt.Errorf("not saving %s to %s: this change would leave a document the store refuses to open: %w", d.what, d.backend.Describe(), err)

@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "nextSeq": 4,
+  "rows": [
+    {"seq": 1, "at": "2026-10-02T09:00:00Z", "until": "2026-10-02T09:00:00Z", "count": 1, "userId": "7d2e9b10", "username": "admin", "outcome": "success", "method": "code", "address": "2001:db8::1", "userAgent": "Mozilla/5.0", "country": "GB"},
+    {"seq": 2, "at": "2026-10-02T09:20:00Z", "until": "2026-10-02T09:20:00Z", "count": 1, "userId": "7d2e9b10", "username": "admin", "outcome": "confirm_sent", "method": "code", "address": "203.0.113.9", "country": "FR", "unusual": ["new-browser", "new-country"]},
+    {"seq": 3, "at": "2026-10-02T09:25:00Z", "until": "2026-10-02T09:25:00Z", "count": 1, "userId": "7d2e9b10", "username": "admin", "outcome": "success", "method": "code", "address": "203.0.113.9", "country": "FR", "unusual": ["new-browser", "new-country"], "confirmed": true}
+  ]
+}

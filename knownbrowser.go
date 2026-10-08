@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"slices"
 	"time"
 )
 
@@ -41,8 +40,10 @@ import (
 
 // MaxKnownBrowsers is how many browsers one account remembers at a
 // time (owner, 2026-10-02). Remembering one more evicts the one
-// remembered longest ago, so an account's record never grows past it
-// however many browsers sign in.
+// remembered longest ago among those never confirmed
+// (KnownBrowser.Confirmed), and only when none is left a confirmed one,
+// so an account's record never grows past it however many browsers sign
+// in.
 const MaxKnownBrowsers = 3
 
 // KnownBrowserLifetime is how long a remembered browser keeps the
@@ -64,9 +65,18 @@ type KnownBrowser struct {
 	Hash string `json:"hash"`
 	// IssuedAt is when the token was issued: the browser's latest
 	// completed sign-in on the account. It ages out KnownBrowserLifetime
-	// later, and the oldest goes first when the account remembers more
-	// than MaxKnownBrowsers.
+	// later, and the oldest goes first, within its class (Confirmed),
+	// when the account remembers more than MaxKnownBrowsers.
 	IssuedAt time.Time `json:"issuedAt"`
+	// Confirmed is true once the browser has brought its token back: the
+	// entry replaced one it carried (RememberSignIn). A browser that
+	// signs in once and never returns stays unconfirmed, and unconfirmed
+	// entries are evicted first, so a run of cookie-less sign-ins cannot
+	// push out the browsers the owner uses every day. An unconfirmed
+	// entry is still known (KnowsBrowser): coming back is what confirms
+	// it. No document version bump: version 9 is new in the release that
+	// adds this field, and an older entry reads as unconfirmed.
+	Confirmed bool `json:"confirmed,omitempty"`
 }
 
 // live reports whether b still grants the allowance at now: issued no
@@ -113,51 +123,21 @@ func newKnownBrowserToken() string {
 // browser renews its own entry instead of piling up new ones. In that
 // write too, entries past KnownBrowserLifetime are dropped, and if the
 // account would then remember more than MaxKnownBrowsers the ones
-// issued longest ago go.
+// issued longest ago go, unconfirmed ones (KnownBrowser.Confirmed)
+// before confirmed ones; the new entry always stays.
 //
 // One write per call. A failed write is the caller's to log: the
 // sign-in it follows has already succeeded and should not fail over
 // this, and the browser keeps whatever token it had. Refused with
 // ErrUserNotFound for an account that does not exist.
 func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (string, error) {
-	token := newKnownBrowserToken()
-	entry := KnownBrowser{Hash: knownBrowserHash(token), IssuedAt: now}
-	var replaced string
-	if replacing != "" {
-		replaced = knownBrowserHash(replacing)
-	}
-
-	s.reloadIfStale()
-	err := s.mutate(func(st *storeState) error {
-		u, ok := st.byID[accountID]
-		if !ok {
-			return ErrUserNotFound
-		}
-		kept := make([]KnownBrowser, 0, len(u.KnownBrowsers)+1)
-		for _, b := range u.KnownBrowsers {
-			if b.Hash == replaced || !b.live(now) {
-				continue
-			}
-			kept = append(kept, b)
-		}
-		kept = append(kept, entry)
-		if len(kept) > MaxKnownBrowsers {
-			// Stable, so of two issued at the same instant the one
-			// already on the record goes first and the new one stays.
-			slices.SortStableFunc(kept, func(a, b KnownBrowser) int { return a.IssuedAt.Compare(b.IssuedAt) })
-			kept = kept[len(kept)-MaxKnownBrowsers:]
-		}
-		u.KnownBrowsers = kept
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return token, nil
+	return s.RememberSignIn(accountID, replacing, "", nil, now)
 }
 
 // ClearKnownBrowsers forgets every browser accountID remembers, so none
-// of them keeps an allowance any longer. Called by sign out everywhere
+// of them keeps an allowance any longer, and with them the countries it
+// signs in from and its last place (#55): sign out everywhere forgets
+// what the account trusts, so the next sign-in sets a fresh baseline. Called by sign out everywhere
 // -- whose own browser is then remembered again as its new session is
 // issued -- and done by IssueResetCode in its own write.
 //
@@ -168,7 +148,7 @@ func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (str
 // be remembered.
 //
 // Refused with ErrUserNotFound for an account that does not exist; an
-// account remembering nothing costs no write.
+// account remembering none of the three costs no write.
 func (s *Store) ClearKnownBrowsers(accountID string) error {
 	s.reloadIfStale()
 	return s.mutate(func(st *storeState) error {
@@ -176,10 +156,10 @@ func (s *Store) ClearKnownBrowsers(accountID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		if len(u.KnownBrowsers) == 0 {
+		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil {
 			return errNoChange
 		}
-		u.KnownBrowsers = nil
+		u.KnownBrowsers, u.SeenCountries, u.LastPlace = nil, nil, nil
 		return nil
 	})
 }

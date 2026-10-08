@@ -78,6 +78,17 @@ func (g *Gate) setSessionCookie(w http.ResponseWriter, sessionID string) {
 	g.writeCookie(w, g.sessionCookieName(), sessionID, "/", int(g.sessionCookieMaxAge().Seconds()))
 }
 
+// setResumedSessionCookie is setSessionCookie for a resumed session:
+// the cookie lasts only until the session's original ceiling, not a
+// fresh ceiling from now, so resuming never extends the 24 hours from
+// the sign-in. At least one second, since a Max-Age of zero would mean
+// no limit at all.
+func (g *Gate) setResumedSessionCookie(w http.ResponseWriter, sess gauntlet.Session, now time.Time) {
+	_, ceiling := g.deps.Sessions.Limits()
+	left := int(sess.IssuedAt.Add(ceiling).Sub(now).Seconds())
+	g.writeCookie(w, g.sessionCookieName(), sess.ID, "/", max(left, 1))
+}
+
 func (g *Gate) clearSessionCookie(w http.ResponseWriter) {
 	g.writeCookie(w, g.sessionCookieName(), "", "/", -1)
 }
@@ -94,11 +105,12 @@ func (g *Gate) clearSessionCookie(w http.ResponseWriter) {
 // it does not own.
 //
 // Called only through issueSession, so every path that issues a
-// session runs it. Where the path has already ended every session of the
-// account (password change, factor enrolment, SSO link, sign out
-// everywhere) the cookie's session is gone and this finds nothing; at
-// first-account registration no session can belong to the new account
-// yet. Both are harmless, and one route through issueSession means a
+// session runs it -- except sign out everywhere, which issues through
+// issueContinuedSession after ending every session itself. Where the
+// path has already ended every session of the account (password
+// change, factor enrolment, SSO link) the cookie's session is gone and
+// this finds nothing; at first-account registration no session can
+// belong to the new account yet. Both are harmless, and one route through issueSession means a
 // new sign-in path cannot forget it.
 func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Time) {
 	cookie, err := r.Cookie(g.sessionCookieName())
@@ -112,7 +124,8 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 	g.deps.Sessions.Revoke(sess.ID)
 }
 
-// issueSession starts a session for userID and hands the browser its
+// issueSession starts a session for userID, recording method as how it was
+// signed in (#77), and hands the browser its
 // cookie -- the one way gate issues a session, so the four things every
 // issue must do happen together at every one of them: end the session
 // this browser already held for the account (revokeReplacedSession,
@@ -120,16 +133,81 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 // session in their own list (gauntlet.SessionStore.CreateFrom, #48),
 // set the cookie under sessionCookieName with the ceiling's Max-Age
 // (#47), and remember the browser, rotating its known-browser token
-// (rememberBrowser, #44).
+// (#44), with the country and place it came from (rememberSignIn, #55).
 //
 // The address is Config.ClientIP's, the same resolution the login
 // limiter is keyed on, so the list shows what the application's own
-// proxy policy believes; the agent is the request's User-Agent header.
-// Both are the client's word, cleaned and capped by CreateFrom.
-func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, now time.Time) {
+// proxy policy believes; the agent is the request's User-Agent header;
+// the country, if any, is Config.Country's for that address (#54) --
+// signInClient builds all three, the same client a sign-in record for
+// this request carries, so the session list and the history agree.
+// Address and UserAgent are the client's word, cleaned and capped by
+// CreateFrom.
+//
+// A route that rotates the session the caller already holds after
+// asking for a credential -- a password change, a factor confirmed --
+// passes what sessionMethod read before it ended the old one: the new
+// session continues the same sign-in, as its client does, and the list
+// of sessions keeps saying how it was made.
+func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, method gauntlet.SignInMethod, now time.Time) {
+	g.issueSignInSession(w, r, userID, g.placeOf(r, ""), 0, method, now)
+}
+
+// sessionMethod is the method of the live session r's cookie names, when
+// it belongs to userID: read by the routes that end every session of the
+// account and then issue one for the caller, before they end it. Empty
+// when there is none.
+func (g *Gate) sessionMethod(r *http.Request, userID string, now time.Time) gauntlet.SignInMethod {
+	sess, _ := g.callerSession(r, userID, now)
+	return sess.Client.Method
+}
+
+// callerSession is the live session r's cookie names, when it belongs to
+// userID, and whether there is one.
+func (g *Gate) callerSession(r *http.Request, userID string, now time.Time) (gauntlet.Session, bool) {
+	cookie, err := r.Cookie(g.sessionCookieName())
+	if err != nil {
+		return gauntlet.Session{}, false
+	}
+	sess, ok := g.deps.Sessions.Validate(cookie.Value, now)
+	if !ok || sess.UserID != userID {
+		return gauntlet.Session{}, false
+	}
+	return sess, true
+}
+
+// issueContinuedSession is issueSession for a route that rotates the
+// caller's session without a whole sign-in -- sign out everywhere, which
+// asks at most for the password again. The new session continues old, the caller's session read
+// before every session of the account was ended
+// (gauntlet.SessionStore.CreateContinuing): it keeps old's IssuedAt,
+// signals and method, and its cookie lasts only to old's ceiling
+// (setResumedSessionCookie). Issued as a new sign-in, it would restart
+// the lifetime ceiling, and a stolen cookie used on that route once an
+// hour would never expire. The browser is remembered as issueSession
+// remembers it. There is no session to replace: the caller has ended
+// them all already.
+func (g *Gate) issueContinuedSession(w http.ResponseWriter, r *http.Request, old gauntlet.Session, now time.Time) {
+	place := g.placeOf(r, "")
+	g.rememberSignIn(w, r, old.UserID, place, now)
+	sess := g.deps.Sessions.CreateContinuing(old, place.client, now)
+	g.setResumedSessionCookie(w, sess, now)
+}
+
+// issueSignInSession is issueSession for a sign-in already judged: place
+// is where it came from, looked up once, and signals the unusual-sign-in
+// signals the session carries (#55), and method how it was made (#77). The browser, country and place are
+// remembered first (rememberSignIn); if that write fails, nothing is
+// flagged and the session carries no signals. It returns the session
+// and the signals it carries.
+func (g *Gate) issueSignInSession(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, signals gauntlet.SignInSignals, method gauntlet.SignInMethod, now time.Time) (gauntlet.Session, gauntlet.SignInSignals) {
 	g.revokeReplacedSession(r, userID, now)
-	client := gauntlet.SessionClient{Address: g.cfg.ClientIP(r), UserAgent: r.UserAgent()}
+	if !g.rememberSignIn(w, r, userID, place, now) {
+		signals = 0
+	}
+	client := place.client
+	client.Unusual, client.Method = signals, method
 	sess := g.deps.Sessions.CreateFrom(userID, client, now)
 	g.setSessionCookie(w, sess.ID)
-	g.rememberBrowser(w, r, userID, now)
+	return sess, signals
 }

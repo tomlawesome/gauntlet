@@ -28,18 +28,45 @@ const (
 	registerPath     = "/api/auth/register"
 	loginPath        = "/api/auth/login"
 	loginFactorPath  = "/api/auth/login/factor"
-	logoutPath       = "/api/auth/logout"
-	oidcLoginPath    = "/api/auth/oidc/login"
-	oidcCallbackPath = "/api/auth/oidc/callback"
-	totpEnrolPath    = "/api/auth/totp/enrol"
-	totpConfirmPath  = "/api/auth/totp/confirm"
-	sessionsPath     = "/api/auth/sessions"
-	unlockPath       = "/api/auth/unlock"
+	loginConfirmPath = "/api/auth/login/confirm"
+	// loginProveBeginPath and loginProvePath finish a sign-in held for a
+	// passkey (#65, ADR-0009; provelogin.go).
+	loginProveBeginPath = "/api/auth/login/prove/begin"
+	loginProvePath      = "/api/auth/login/prove"
+	loginEscapePath     = "/api/auth/login/escape"
+	logoutPath          = "/api/auth/logout"
+	oidcPathPrefix      = "/api/auth/oidc"
+	oidcLoginPath       = "/api/auth/oidc/login"
+	oidcCallbackPath    = "/api/auth/oidc/callback"
+	totpEnrolPath       = "/api/auth/totp/enrol"
+	totpConfirmPath     = "/api/auth/totp/confirm"
+	sessionsPath        = "/api/auth/sessions"
+	unlockPath          = "/api/auth/unlock"
+
+	// reauthenticatePath resumes a session that timed out with the
+	// password alone (#71; reauthenticate_handler.go).
+	reauthenticatePath = "/api/auth/reauthenticate"
+
+	// enrolmentConfirmPath is where a held first factor and its
+	// recovery codes are confirmed (#58; recoverycodes_handler.go).
+	enrolmentConfirmPath = "/api/auth/recovery-codes/confirm"
 
 	passkeysPath              = "/api/auth/passkeys"
 	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"
 	passkeyRegisterFinishPath = "/api/auth/passkeys/register/finish"
 	loginFactorBeginPath      = "/api/auth/login/factor/begin"
+
+	// loginPasskeyBeginPath and loginPasskeyPath are signing in with a
+	// passkey alone (#77, ADR-0012; login_passkey_handler.go). Both
+	// answer 404 unless Config.PasskeySignIn is set and the relying
+	// party can do it.
+	loginPasskeyBeginPath = "/api/auth/login/passkey/begin"
+	loginPasskeyPath      = "/api/auth/login/passkey"
+
+	// stepUpPasskeyBeginPath starts a passkey step-up for a signed-in
+	// caller (#82; stepup_passkey_handler.go): the assertion it asks for
+	// is the alternative to a code on every recheckStepUp route.
+	stepUpPasskeyBeginPath = "/api/auth/step-up/passkey/begin"
 )
 
 // exemptPaths lists routes reachable without a session once an account
@@ -53,7 +80,14 @@ const (
 // reached with the short-lived pending-login cookie, never a session, so
 // it has to work before one exists, same reasoning as /api/auth/login
 // itself. POST /api/auth/login/factor/begin, which starts the passkey
-// half of that step (G8), is reached the same way for the same reason. GET /api/auth/oidc/login and /callback are a top-level
+// half of that step (G8), is reached the same way for the same reason.
+// POST /api/auth/login/passkey/begin and /api/auth/login/passkey sign in
+// with a passkey alone (#77): no session and no pending login, only the
+// ceremony cookie the begin route set. POST /api/auth/login/prove/begin
+// and /api/auth/login/prove finish a sign-in held for a passkey (#65):
+// only the confirm ticket, as login/confirm has.
+//
+// GET /api/auth/oidc/login and /callback are a top-level
 // browser redirect/navigation the provider issues, not a fetch() an
 // application's frontend controls -- being listed here is what exempts
 // them from requiring an existing session (state/nonce/PKCE, oidc.go, is
@@ -66,17 +100,30 @@ const (
 // from the server's log (#44): by definition they cannot sign in to
 // reach it. It only lifts the disable; it issues no session. Not in
 // bootstrapExemptPaths: with no account there is nothing to unlock.
+//
+// POST /api/auth/reauthenticate resumes a session that has timed out
+// (#71): by definition the caller has no live session to present, only
+// the timed-out one's cookie, which the handler reads itself. It is
+// session-exempt like login and still needs the CSRF header. Not in
+// bootstrapExemptPaths: with no account there is no session to resume.
 var exemptPaths = map[string]bool{
-	"/api/healthz":       true,
-	sessionPath:          true,
-	registerPath:         true,
-	loginPath:            true,
-	logoutPath:           true,
-	loginFactorPath:      true,
-	loginFactorBeginPath: true,
-	oidcLoginPath:        true,
-	oidcCallbackPath:     true,
-	unlockPath:           true,
+	"/api/healthz":        true,
+	sessionPath:           true,
+	registerPath:          true,
+	loginPath:             true,
+	logoutPath:            true,
+	loginFactorPath:       true,
+	loginFactorBeginPath:  true,
+	loginPasskeyBeginPath: true,
+	loginPasskeyPath:      true,
+	loginConfirmPath:      true,
+	loginProveBeginPath:   true,
+	loginProvePath:        true,
+	loginEscapePath:       true,
+	oidcLoginPath:         true,
+	oidcCallbackPath:      true,
+	unlockPath:            true,
+	reauthenticatePath:    true,
 }
 
 // bootstrapExemptPaths is the narrower set reachable while no account
@@ -101,8 +148,10 @@ var bootstrapExemptPaths = map[string]bool{
 // secondFactorEnrolPaths are the routes a session may still reach while
 // stuck at the forced-enrolment door (always shut for a local-password
 // account with no second factor, since #49) -- enrolling a TOTP factor
-// or registering a passkey, and nothing else, as
-// mikroview's requireAuth has it. Named once here, the same reasoning
+// or registering a passkey, and confirming the held first factor's
+// recovery codes (#58: the factor is not live, so the door holds, until
+// that confirmation), and nothing else, as mikroview's requireAuth has
+// it. The admin passkey door (#82) admits the same routes. Named once here, the same reasoning
 // changePasswordPath is, so Protect's gate and this list cannot drift
 // apart silently. With Deps.Passkeys nil the passkey pair answers 404,
 // so admitting it opens nothing.
@@ -116,6 +165,7 @@ var secondFactorEnrolPaths = map[string]bool{
 	totpConfirmPath:           true,
 	passkeyRegisterBeginPath:  true,
 	passkeyRegisterFinishPath: true,
+	enrolmentConfirmPath:      true,
 }
 
 func isSafeMethod(method string) bool {
@@ -129,7 +179,7 @@ func isSafeMethod(method string) bool {
 func (g *Gate) csrfOK(w http.ResponseWriter, r *http.Request) bool {
 	if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
 		g.warnRefused(r, "csrf", "gate: refused a request without the CSRF header")
-		http.Error(w, "missing required header", http.StatusForbidden)
+		writeProblem(w, http.StatusForbidden, classCSRFRequired, "missing required header", nil)
 		return false
 	}
 	return true
@@ -214,9 +264,12 @@ func (g *Gate) isExempt(path string) bool {
 // writeUnauthorized answers a 401 with the WWW-Authenticate header RFC
 // 9110 §15.5.2 requires on every 401 -- see rest.go's own doc comment on
 // why this covers session-cookie paths too, not just bearer-token ones.
-func writeUnauthorized(w http.ResponseWriter, msg string) {
+// class is explicit at every call site (invalid-credentials, sign-in-
+// required or step-expired -- the three classes a 401 ever carries),
+// never derived from msg.
+func writeUnauthorized(w http.ResponseWriter, class problemClass, msg string) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="gate"`)
-	http.Error(w, msg, http.StatusUnauthorized)
+	writeProblem(w, http.StatusUnauthorized, class, msg, nil)
 }
 
 // authGateHeader marks a 403 that means "sign-in worked, but this
@@ -242,14 +295,30 @@ const authGateHeader = "X-Auth-Gate"
 const (
 	authGateMustChangePassword = "must-change-password"
 	authGateMustEnrolFactor    = "must-enrol-factor"
+	// authGateMustEnrolPasskey is the admin passkey door (#82,
+	// ADR-0015): an admin account with no passkey usable here, while
+	// Config.AdminPasskey is AdminPasskeyRequired.
+	authGateMustEnrolPasskey = "must-enrol-passkey"
 )
 
-// writeForcedAuthGate is writeUnauthorized's sibling for this pair of
+// writeForcedAuthGate is writeUnauthorized's sibling for these three
 // doors: sets the machine-readable header before the human-readable
 // body, the same shape as that helper's WWW-Authenticate header.
+// gateName is always one of authGateMustChangePassword,
+// authGateMustEnrolFactor or authGateMustEnrolPasskey, which are also
+// exactly the anchors of the three classes a forced gate ever answers
+// with, so the class follows from gateName rather than being another,
+// independently-written parameter the two could drift apart from.
 func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 	w.Header().Set(authGateHeader, gateName)
-	http.Error(w, msg, http.StatusForbidden)
+	class := classMustChangePassword
+	switch gateName {
+	case authGateMustEnrolFactor:
+		class = classMustEnrolFactor
+	case authGateMustEnrolPasskey:
+		class = classMustEnrolPasskey
+	}
+	writeProblem(w, http.StatusForbidden, class, msg, nil)
 }
 
 // Protect is mikroview's requireAuth, generalized over an application's
@@ -271,8 +340,10 @@ func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 //     treated as "no token" and passed on to the session-cookie check),
 //     as is one that is not a well-formed Bearer credential at all.
 //     Otherwise: the CSRF header on unsafe methods, exempt paths, the
-//     session cookie, the MustChangePassword door, then the
-//     second-factor door (always on, since #49), then next.
+//     session cookie, the MustChangePassword door (which also holds an
+//     admin with no local password while the admin passkey rule is
+//     on), the admin passkey door (#82), then the second-factor door
+//     (always on, since #49), then next.
 func (g *Gate) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := g.now()
@@ -290,7 +361,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 
 		if g.deps.Users.Count() == 0 {
 			if !bootstrapExemptPaths[path] {
-				http.Error(w, "setup required", http.StatusServiceUnavailable)
+				writeProblem(w, http.StatusServiceUnavailable, classSetupRequired, "setup required", nil)
 				return
 			}
 			if !g.csrfOK(w, r) {
@@ -308,7 +379,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 					return
 				}
 			}
-			writeUnauthorized(w, "invalid or revoked token")
+			writeUnauthorized(w, classInvalidCredentials, "invalid or revoked token")
 			return
 		}
 		// An Authorization header that is there but is not a
@@ -319,7 +390,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// Authorization header at all goes on to the cookie.
 		if _, sent := r.Header["Authorization"]; sent {
 			g.warnRefused(r, "authorization", "gate: refused a malformed Authorization header")
-			writeUnauthorized(w, "invalid or revoked token")
+			writeUnauthorized(w, classInvalidCredentials, "invalid or revoked token")
 			return
 		}
 
@@ -333,7 +404,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 
 		user, ok := g.sessionUser(r, now)
 		if !ok {
-			writeUnauthorized(w, "unauthorized")
+			writeUnauthorized(w, classSignInRequired, "unauthorized")
 			return
 		}
 		// docs/design.md §4's fail-closed list: "Unknown role → denied
@@ -350,7 +421,7 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// Role.AtLeast (issue #14).
 		if !isKnownRole(user.Role) {
 			g.warnRefused(r, "role", fmt.Sprintf("gate: refused account %q: its role is not recognized", user.Username))
-			http.Error(w, "account role is not recognized", http.StatusForbidden)
+			writeProblem(w, http.StatusForbidden, classForbidden, "account role is not recognized", nil)
 			return
 		}
 		// Two things set MustChangePassword: an administrator's reset,
@@ -358,9 +429,40 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// knows the password (gauntlet.LoginLimiter.SecondFactorFailed,
 		// #44). The account carries no record of which, so the message
 		// names neither.
-		if user.MustChangePassword && path != changePasswordPath {
+		//
+		// Only for an account with a local password: one that signs in
+		// through its identity provider has no password to change, and
+		// the one route this door admits refuses it, so the door would
+		// shut it out of everything. The store no longer sets the flag on
+		// such an account, but a document written before that may carry
+		// it.
+		if user.MustChangePassword && user.LocalPassword() && path != changePasswordPath {
 			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustChangePassword))
 			writeForcedAuthGate(w, authGateMustChangePassword, "this account's password must be changed -- set a new password before going any further")
+			return
+		}
+		// An admin with no local password -- an SSO-only account promoted
+		// to admin -- is held at the same door while the admin passkey
+		// rule is on (#82 decision 5): registering a passkey needs a local
+		// password (ADR-0004), so the chain is password, then passkey,
+		// then admin. The one route admitted sets the first password from
+		// a fresh SSO sign-in (handleChangePassword).
+		if g.adminPasskeyRuleOn() && user.Role == gauntlet.RoleAdmin && !user.LocalPassword() && path != changePasswordPath {
+			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustChangePassword))
+			writeForcedAuthGate(w, authGateMustChangePassword, "this admin account has no local password -- set one before going any further")
+			return
+		}
+		// The admin passkey door (#82, ADR-0015): while the rule is on, an
+		// admin account is held until it holds a passkey usable under the
+		// relying party's current RP ID -- an authenticator app alone
+		// never opens it. Checked before the any-factor door below, so an
+		// admin with no factor at all is told the one thing that opens
+		// this one; the same enrolment routes are admitted, and TOTP
+		// enrolment still works there. The !MustChangePassword guard keeps
+		// the no-deadlock property the door below documents.
+		if g.adminMustEnrolPasskey(user) && !secondFactorEnrolPaths[path] {
+			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustEnrolPasskey))
+			writeForcedAuthGate(w, authGateMustEnrolPasskey, "this admin account has no passkey -- register one before going any further")
 			return
 		}
 		// The forced-enrolment door (mikroview's #1253), always shut for
@@ -381,9 +483,10 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		// for exactly this, gitlab/dev 683704c4).
 		//
 		// secondFactorEnrolPaths (TOTP enrol/confirm, passkey register
-		// begin/finish) stays reachable while this door holds -- without
-		// it, a newly created local account with no factor yet would have
-		// no route left to enrol one on.
+		// begin/finish, the held factor's confirmation) stays reachable
+		// while this door holds -- without it, a newly created local
+		// account with no factor yet would have no route left to enrol
+		// one on.
 		if !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
 			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustEnrolFactor))
 			writeForcedAuthGate(w, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")
@@ -391,6 +494,23 @@ func (g *Gate) Protect(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+// adminPasskeyRuleOn reports whether every admin must hold a passkey
+// here (Config.AdminPasskey, #82). New has already refused an unset
+// value, and AdminPasskeyRequired without a ready relying party.
+func (g *Gate) adminPasskeyRuleOn() bool {
+	return g.cfg.AdminPasskey == AdminPasskeyRequired
+}
+
+// adminMustEnrolPasskey reports whether u is held at the admin passkey
+// door, ignoring which route was asked for: the rule is on, u is an
+// admin with a local password and no forced password change pending,
+// and holds no passkey usable under the current RP ID. Protect and the
+// session body (mustEnrolPasskey) both read it.
+func (g *Gate) adminMustEnrolPasskey(u *gauntlet.User) bool {
+	return g.adminPasskeyRuleOn() && u.Role == gauntlet.RoleAdmin &&
+		!u.MustChangePassword && u.LocalPassword() && g.usablePasskeyCount(u) == 0
 }
 
 // isKnownRole reports whether r is one of the three roles this package
@@ -440,7 +560,7 @@ func requireRole(min gauntlet.Role, next http.Handler, refused func(r *http.Requ
 			if refused != nil {
 				refused(r, min)
 			}
-			http.Error(w, "insufficient role", http.StatusForbidden)
+			writeProblem(w, http.StatusForbidden, classForbidden, "insufficient role", nil)
 			return
 		}
 		next.ServeHTTP(w, r)

@@ -21,7 +21,7 @@ import (
 const selfUnlockAdminPassword = "password-placeholder-1"
 
 // enrolAdminTOTP enrols and confirms an authenticator app on the
-// fixture's admin, returning its secret, its recovery codes and the
+// fixture's admin, and confirms its held recovery codes, returning its secret, its recovery codes and the
 // counter the confirmation used.
 func enrolAdminTOTP(t *testing.T, admin *http.Client, ts *httptest.Server) ([]byte, []string, uint64) {
 	t.Helper()
@@ -47,6 +47,7 @@ func enrolAdminTOTP(t *testing.T, admin *http.Client, ts *httptest.Server) ([]by
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
+	confirmEnrolmentOK(t, admin, ts) // the first factor is held until its codes are confirmed (#58)
 	return secret, out.RecoveryCodes, counter
 }
 

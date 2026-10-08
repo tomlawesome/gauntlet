@@ -28,10 +28,10 @@ const pendingLoginCookieName = "gate_pending_login"
 
 // pendingLoginCookiePath scopes the cookie to the two routes that ever
 // need it: the login that sets it and the factor step that reads it.
-// "/api/auth/login" is a prefix of "/api/auth/login/factor" too (RFC
-// 6265's path-match rule), so one Path value covers both without
-// widening it to the whole API the way the session cookie's "/" does.
-const pendingLoginCookiePath = "/api/auth/login"
+// loginPath (protect.go) is a prefix of loginFactorPath too (RFC 6265's
+// path-match rule), so one Path value covers both without widening it
+// to the whole API the way the session cookie's "/" does.
+const pendingLoginCookiePath = loginPath
 
 // pendingLoginCookieMaxAge bounds both the cookie's own Max-Age and the
 // tolerance pendingLoginStateCodec.decode checks IssuedAt against -- kept
@@ -70,11 +70,12 @@ type pendingLoginState struct {
 // (or an attacker probing the endpoint) needs to be able to tell apart.
 var errPendingLoginInvalid = errors.New("gate: pending login expired or was tampered with")
 
-// pendingLoginStateCodec seals/opens a pendingLoginState the same way
-// oidc.StateCodec seals an oidc.FlowState: AES-256-GCM, stdlib only, so a
-// tampered cookie fails the auth-tag check rather than decoding into a
-// different account, with a key generated once via crypto/rand and held
-// only in memory.
+// sealCodec seals and opens a small JSON value for a cookie the same
+// way oidc.StateCodec seals an oidc.FlowState: AES-256-GCM, stdlib only,
+// so a tampered cookie fails the auth-tag check rather than decoding
+// into a different account, with a key generated once via crypto/rand
+// and held only in memory. The pending-login ticket and the
+// confirm-login ticket (#55) each have their own, with their own key.
 //
 // A second implementation rather than reusing oidc.StateCodec directly.
 // That type is hard-coded to oidc.FlowState's fields, and gate has no
@@ -82,8 +83,69 @@ var errPendingLoginInvalid = errors.New("gate: pending login expired or was tamp
 // -- widening a codec that belongs to one login flow to also carry a
 // second, unrelated flow's payload would leave neither flow's cookie
 // shape visible from its own file.
-type pendingLoginStateCodec struct {
+type sealCodec struct {
 	aead cipher.AEAD
+}
+
+// mustNewSealCodec builds a codec with a fresh key. what names it in a
+// panic.
+func mustNewSealCodec(what string) *sealCodec {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		// Same stance gauntlet's own newID takes (id.go): a CSPRNG that
+		// cannot produce bytes is not a condition to degrade from
+		// gracefully here -- every login on an account with a second
+		// factor depends on this codec existing.
+		panic("gate: crypto/rand unavailable: " + err.Error())
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic("gate: constructing " + what + " cipher: " + err.Error())
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		panic("gate: constructing " + what + " AEAD: " + err.Error())
+	}
+	return &sealCodec{aead: aead}
+}
+
+// seal encodes v as JSON and seals it, base64url without padding.
+func (c *sealCodec) seal(v any) (string, error) {
+	plaintext, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("gate: encoding sealed state: %w", err)
+	}
+	nonce := make([]byte, c.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("gate: generating seal nonce: %w", err)
+	}
+	sealed := c.aead.Seal(nonce, nonce, plaintext, nil)
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+// open reverses seal into v, reporting whether value opened. Strict:
+// only the spelling seal wrote opens, so a sealed value has one cookie
+// string, as passkey's seal does (#20).
+func (c *sealCodec) open(value string, v any) bool {
+	sealed, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	if err != nil {
+		return false
+	}
+	ns := c.aead.NonceSize()
+	if len(sealed) < ns {
+		return false
+	}
+	nonce, ciphertext := sealed[:ns], sealed[ns:]
+	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(plaintext, v) == nil
+}
+
+// pendingLoginStateCodec seals/opens a pendingLoginState (sealCodec).
+type pendingLoginStateCodec struct {
+	*sealCodec
 }
 
 // pendingLoginCodec is built once, at package load, and shared by every
@@ -96,59 +158,19 @@ type pendingLoginStateCodec struct {
 var pendingLoginCodec = mustNewPendingLoginCodec()
 
 func mustNewPendingLoginCodec() *pendingLoginStateCodec {
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		// Same stance gauntlet's own newID takes (id.go): a CSPRNG that
-		// cannot produce bytes is not a condition to degrade from
-		// gracefully here -- every login on an account with a second
-		// factor depends on this codec existing.
-		panic("gate: crypto/rand unavailable: " + err.Error())
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic("gate: constructing pending-login cipher: " + err.Error())
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		panic("gate: constructing pending-login AEAD: " + err.Error())
-	}
-	return &pendingLoginStateCodec{aead: aead}
+	return &pendingLoginStateCodec{mustNewSealCodec("pending-login")}
 }
 
 func (c *pendingLoginStateCodec) encode(st pendingLoginState) (string, error) {
-	plaintext, err := json.Marshal(st)
-	if err != nil {
-		return "", fmt.Errorf("gate: encoding pending login state: %w", err)
-	}
-	nonce := make([]byte, c.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("gate: generating pending login seal nonce: %w", err)
-	}
-	sealed := c.aead.Seal(nonce, nonce, plaintext, nil)
-	return base64.RawURLEncoding.EncodeToString(sealed), nil
+	return c.seal(st)
 }
 
 // decode reverses encode, refusing (errPendingLoginInvalid) anything
 // malformed, tampered, or older than pendingLoginCookieMaxAge as measured
 // from the sealed IssuedAt against now.
 func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pendingLoginState, error) {
-	// Strict: only the spelling encode wrote opens, so a sealed value has
-	// one cookie string, as passkey's seal does (#20).
-	sealed, err := base64.RawURLEncoding.Strict().DecodeString(cookieValue)
-	if err != nil {
-		return pendingLoginState{}, errPendingLoginInvalid
-	}
-	ns := c.aead.NonceSize()
-	if len(sealed) < ns {
-		return pendingLoginState{}, errPendingLoginInvalid
-	}
-	nonce, ciphertext := sealed[:ns], sealed[ns:]
-	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return pendingLoginState{}, errPendingLoginInvalid
-	}
 	var st pendingLoginState
-	if err := json.Unmarshal(plaintext, &st); err != nil {
+	if !c.open(cookieValue, &st) {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}
 	if now.Sub(st.IssuedAt) > pendingLoginCookieMaxAge {
@@ -178,7 +200,7 @@ var spentPendingLogins = spent.New(pendingLoginCookieMaxAge)
 func (g *Gate) pendingLogin(w http.ResponseWriter, r *http.Request, now time.Time) (pendingLoginState, bool) {
 	refuse := func() (pendingLoginState, bool) {
 		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+		writeUnauthorized(w, classStepExpired, "sign in again")
 		return pendingLoginState{}, false
 	}
 	cookie, err := r.Cookie(pendingLoginCookieName)

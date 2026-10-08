@@ -185,17 +185,36 @@ func passkeyRegisterFinishOK(t *testing.T, client *http.Client, ts *httptest.Ser
 	return out
 }
 
+// storedPasskeys is how many passkeys id's account holds, live or held
+// for its first factor's codes to be confirmed (#58) -- for the tests
+// about how many a ceremony stores, not whether they are live yet.
+func storedPasskeys(g *Gate, id string) int {
+	u, ok := g.deps.Users.Get(id)
+	if !ok {
+		return 0
+	}
+	n := len(u.Passkeys)
+	if u.HeldEnrolment != nil && u.HeldEnrolment.Passkey != nil {
+		n++
+	}
+	return n
+}
+
 func newFake(g *Gate) *passkeytest.FakeAuthenticator {
 	return passkeytest.New(g.deps.Passkeys.RPID(), g.deps.Passkeys.Origin())
 }
 
 // registerPasskey drives register/begin+finish end to end with a fresh
-// fake, returning both.
+// fake, returning both, and -- when the passkey was the account's first
+// factor and so held with its codes (#58) -- confirms it, so the
+// passkey is live either way. registerPasskeyHeld stops at the hold.
 func registerPasskey(t *testing.T, client *http.Client, ts *httptest.Server, g *Gate, name string) (*passkeytest.FakeAuthenticator, passkeyRegisterFinishResponse) {
 	t.Helper()
-	fake := newFake(g)
-	creation := passkeyRegisterBegin(t, client, ts)
-	return fake, passkeyRegisterFinishOK(t, client, ts, fake, creation, name)
+	fake, out := registerPasskeyHeld(t, client, ts, g, name)
+	if out.PendingConfirmation {
+		confirmEnrolmentOK(t, client, ts)
+	}
+	return fake, out
 }
 
 // startPasskeyLogin does the password step for an account whose usable
@@ -889,8 +908,9 @@ func TestPasskeyNameIsTruncatedNotRefused(t *testing.T) {
 	}
 }
 
-// TestPasskeyRecoveryCodeMintOnce: whichever factor activates first
-// mints the ten codes, and the second reuses them.
+// TestPasskeyRecoveryCodeMintOnce: whichever factor is enrolled first
+// mints the ten codes (held with it until confirmed, #58), and the
+// second is added live and reuses them.
 func TestPasskeyRecoveryCodeMintOnce(t *testing.T) {
 	t.Run("passkey first, TOTP confirm reuses the same codes", func(t *testing.T) {
 		g, ts, _ := passkeyFixture(t)
@@ -946,6 +966,7 @@ func TestPasskeyRecoveryCodeMintOnce(t *testing.T) {
 		if confirm.StatusCode != http.StatusOK {
 			t.Fatalf("TOTP confirm returned %d", confirm.StatusCode)
 		}
+		confirmEnrolmentOK(t, bilbo, ts)
 		id := passkeyBilboID(t, g)
 		before, ok := g.deps.Users.Get(id)
 		if !ok || len(before.RecoveryCodes) != 10 {
@@ -983,11 +1004,12 @@ func totpEnrolAs(t *testing.T, client *http.Client, ts *httptest.Server, passwor
 	return out
 }
 
-// TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits: a
-// first-factor registration whose recovery-code mint fails after
-// AddPasskey committed answers 500, but the passkey is live, so sessions
-// are rotated and account.passkey_added is recorded as on success.
-func TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits(t *testing.T) {
+// TestAFirstPasskeyWhoseHoldCannotBeSavedHoldsNothing: the first
+// passkey and its recovery codes are one write (#58), so a failed save
+// leaves neither -- a 500, no passkey, no hold, no codes, nothing
+// rotated and nothing audited -- where the old two-write order left a
+// live passkey with no codes behind it.
+func TestAFirstPasskeyWhoseHoldCannotBeSavedHoldsNothing(t *testing.T) {
 	g := passkeyGate(t)
 	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
 	g.deps.Users = openTrackedStore(t, backend)
@@ -1000,28 +1022,25 @@ func TestPasskeyRegisterWhoseRecoveryCodesFailStillRotatesAndAudits(t *testing.T
 	otherDevice := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
 	creation := passkeyRegisterBegin(t, browser, ts)
 
-	backend.left = 1 // AddPasskey's own save, then nothing
+	backend.left = 0 // the hold's one save fails
 	resp := passkeyRegisterFinishRaw(t, browser, ts, newFake(g), creation, "YubiKey")
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
 	backend.left = -1
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("register/finish with a failing mint returned %d, want 500: %s", resp.StatusCode, body)
+	wantProblem(t, resp, http.StatusInternalServerError, classServerError)
+
+	u, _ := g.deps.Users.Get(passkeyBilboID(t, g))
+	if len(u.Passkeys) != 0 || len(u.RecoveryCodes) != 0 || u.HeldEnrolment != nil {
+		t.Fatalf("after a failed hold: passkeys=%d codes=%d held=%+v, want nothing", len(u.Passkeys), len(u.RecoveryCodes), u.HeldEnrolment)
 	}
-	if want := "the passkey is now active, but recovery codes could not be saved"; !strings.HasPrefix(string(body), want) {
-		t.Errorf("body = %q, want it to start %q", body, want)
+	if !sessionOf(t, otherDevice, ts).Authenticated || !sessionOf(t, browser, ts).Authenticated {
+		t.Error("a failed hold ended a session")
 	}
-	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
-		t.Fatal("the passkey was not added -- the save budget failed AddPasskey itself, so this test proves nothing")
+	if hasAuditEntry(g, "account.passkey_added", passkeyBilboUsername) {
+		t.Error("a failed hold was audited as a passkey added")
 	}
-	if got := protectedStatus(t, otherDevice, ts); got != http.StatusUnauthorized {
-		t.Errorf("a pre-factor session elsewhere got %d after the first factor went live, want 401", got)
-	}
-	if got := protectedStatus(t, browser, ts); got != http.StatusOK {
-		t.Errorf("the registering browser got %d, want its reissued session to work", got)
-	}
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="YubiKey"; recovery codes could not be saved`+fixtureFromSuffix {
-		t.Errorf("account.passkey_added detail = %q", entry.Detail)
+	// Nothing is half done: the same browser simply registers again.
+	_, out := registerPasskeyHeld(t, browser, ts, g, "YubiKey")
+	if !out.PendingConfirmation || len(out.RecoveryCodes) != 10 {
+		t.Errorf("registering again = %+v, want a held passkey with ten codes", out)
 	}
 }
 
@@ -1037,6 +1056,7 @@ func TestPasskeyClearConditionalKeepsRecoveryCodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = postJSON(t, bilbo, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))}).Body.Close()
+		confirmEnrolmentOK(t, bilbo, ts)
 		registerPasskey(t, bilbo, ts, g, "backup key")
 
 		del := deleteJSON(t, bilbo, ts.URL+"/api/auth/totp", totpDeleteRequest{Password: passkeyBilboPassword})
@@ -1084,7 +1104,7 @@ func TestPasskeyAdminClear(t *testing.T) {
 	registerPasskey(t, bilbo, ts, g, "key")
 	id := passkeyBilboID(t, g)
 
-	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/passkeys", nil)
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -1108,12 +1128,12 @@ func TestPasskeyAdminClear(t *testing.T) {
 		t.Error("expected a plain password login to work once the admin cleared every passkey")
 	}
 
-	missing := deleteJSON(t, admin, ts.URL+"/api/auth/users/no-such-id/passkeys", nil)
+	missing := deleteJSON(t, admin, ts.URL+"/api/auth/users/no-such-id/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = missing.Body.Close()
 	if missing.StatusCode != http.StatusNotFound {
 		t.Errorf("clearing an unknown user got %d, want 404", missing.StatusCode)
 	}
-	notAdmin := deleteJSON(t, plain, ts.URL+"/api/auth/users/"+id+"/passkeys", nil)
+	notAdmin := deleteJSON(t, plain, ts.URL+"/api/auth/users/"+id+"/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = notAdmin.Body.Close()
 	if notAdmin.StatusCode != http.StatusForbidden {
 		t.Errorf("a non-admin clearing passkeys got %d, want 403", notAdmin.StatusCode)
@@ -1126,7 +1146,7 @@ func TestPasskeyAdminCannotClearOwnPasskeys(t *testing.T) {
 	if !ok {
 		t.Fatal("no admin account")
 	}
-	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+u.ID+"/passkeys", nil)
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+u.ID+"/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("an admin clearing their own passkeys got %d, want 409", resp.StatusCode)
@@ -1473,7 +1493,7 @@ func TestPasskeyRegisterExpiredCeremony(t *testing.T) {
 				t.Error("an expired registration did not clear its ceremony cookie")
 			}
 			admin, _ := g.deps.Users.ByUsername("admin")
-			if n, wantN := g.deps.Users.PasskeyCount(admin.ID), map[bool]int{true: 0, false: 1}[expired]; n != wantN {
+			if n, wantN := storedPasskeys(g, admin.ID), map[bool]int{true: 0, false: 1}[expired]; n != wantN {
 				t.Errorf("after a finish %v late the account holds %d passkeys, want %d", wait, n, wantN)
 			}
 		})
@@ -1524,7 +1544,7 @@ func TestPasskeyLoginFactorBeginNeedsAPendingLogin(t *testing.T) {
 	}
 
 	// The account is deleted between the password step and begin.
-	gone := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+passkeyBilboID(t, g), nil)
+	gone := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+passkeyBilboID(t, g), adminStepUpRequest{Password: testAdminPassword})
 	_ = gone.Body.Close()
 	if got := postStatus(t, pending, ts.URL+"/api/auth/login/factor/begin"); got != http.StatusUnauthorized {
 		t.Errorf("begin for a deleted account got %d, want 401", got)
@@ -1770,6 +1790,7 @@ func TestPasskeyAssertionFromAnotherAccountIsRefused(t *testing.T) {
 	creation := passkeyRegisterBeginAs(t, frodo, ts, frodoPassword)
 	frodoKey := newFake(g)
 	passkeyRegisterFinishOK(t, frodo, ts, frodoKey, creation, "frodo's key")
+	confirmEnrolmentOK(t, frodo, ts)
 
 	pending := startPasskeyLogin(t, ts, passkeyBilboUsername, passkeyBilboPassword)
 	resp := submitPasskeyAssertion(t, pending, ts, frodoKey, passkeyLoginFactorBegin(t, pending, ts))
@@ -1869,7 +1890,7 @@ func TestPasskeyNotOfferedToAnAccountWithNoLocalPassword(t *testing.T) {
 	if list := passkeysList(t, sam, ts); len(list) != 1 {
 		t.Fatalf("the SSO account lists %d passkeys, want its carried-over one", len(list))
 	}
-	clear := deleteJSON(t, admin, ts.URL+"/api/auth/users/sso-1/passkeys", nil)
+	clear := deleteJSON(t, admin, ts.URL+"/api/auth/users/sso-1/passkeys", adminStepUpRequest{Password: testAdminPassword})
 	_ = clear.Body.Close()
 	if clear.StatusCode != http.StatusOK || g.deps.Users.PasskeyCount("sso-1") != 0 {
 		t.Errorf("admin clear on the SSO account got %d and left %d passkeys, want 200 and none", clear.StatusCode, g.deps.Users.PasskeyCount("sso-1"))
@@ -2132,9 +2153,10 @@ func TestPasskeyStolenRegisterCookieIsOneShot(t *testing.T) {
 			thief := stealJar(t, owner, ts)
 			passkeyRegisterFinishOK(t, owner, ts, newFake(g), creation, "owner")
 			if !existing {
-				// A first factor ends every session and reissues the
-				// owner's; the thief copies that new one too, so what
-				// stops them is the spent ceremony, not a dead session.
+				// A first factor is held, not live (#58), so nothing is
+				// rotated yet; the thief copies the owner's cookies again
+				// anyway, so what stops them is the spent ceremony, not a
+				// dead session.
 				u, err := url.Parse(ts.URL + "/")
 				if err != nil {
 					t.Fatal(err)
@@ -2148,7 +2170,7 @@ func TestPasskeyStolenRegisterCookieIsOneShot(t *testing.T) {
 			if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(raw), "start registration again") {
 				t.Errorf("a second finish on the owner's spent ceremony got %d %q, want 401 start registration again", resp.StatusCode, raw)
 			}
-			if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != want {
+			if n := storedPasskeys(g, passkeyBilboID(t, g)); n != want {
 				t.Errorf("the account holds %d passkeys, want %d -- one per password-proved begin", n, want)
 			}
 		})
@@ -2225,7 +2247,9 @@ func TestConcurrentFinishesOfOneRegistrationStoreOnePasskey(t *testing.T) {
 // password) and cancels the browser prompt; someone who copied both of
 // the owner's HttpOnly cookies inside those five minutes finishes it
 // with their own authenticator. It stores one passkey -- at most one per
-// such window -- listed under its name and audited as
+// such window -- and, on an account with no factor yet, holds it with
+// its codes (#58) until the thief, still holding the owner's session,
+// confirms them; it is then listed under its name and audited as
 // account.passkey_added. If this test starts failing because the finish
 // is refused, the residual has been closed: update ADR-0004.
 func TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual(t *testing.T) {
@@ -2239,9 +2263,10 @@ func TestPasskeyStolenRegisterCookieInTheOwnersWindowIsAnAcceptedResidual(t *tes
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("the accepted residual changed: the thief's finish got %d", resp.StatusCode)
 	}
-	if n := g.deps.Users.PasskeyCount(passkeyBilboID(t, g)); n != 1 {
+	if n := storedPasskeys(g, passkeyBilboID(t, g)); n != 1 {
 		t.Errorf("the account holds %d passkeys, want exactly 1", n)
 	}
+	confirmEnrolmentOK(t, thief, ts)
 	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != `name="thief"`+fixtureFromSuffix {
 		t.Errorf("account.passkey_added detail = %q, want the thief's passkey named", entry.Detail)
 	}
@@ -2333,8 +2358,137 @@ func TestARespelledRegisterCookieIsRefusedAfterTheOwnersFinish(t *testing.T) {
 			t.Errorf("a re-spelled copy of the spent register cookie got %d, want 401", got)
 		}
 		admin, _ := g.deps.Users.ByUsername("admin")
-		if n := g.deps.Users.PasskeyCount(admin.ID); n != 1 {
+		if n := storedPasskeys(g, admin.ID); n != 1 {
 			t.Errorf("the account holds %d passkeys after one begin, want 1", n)
 		}
 	})
+}
+
+// Clearing the passkeys of an account that has none changes nothing:
+// 200 with cleared false, no record, no notice, no session ended.
+func TestPasskeysAdminClearWithNothingToClearChangesNothing(t *testing.T) {
+	g, ts, admin := passkeyFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	audit, rec := &auditRecorder{}, &noticeRecorder{}
+	g.cfg.Audit, g.cfg.Notices = audit, rec
+
+	status, body := readAll(t, deleteJSON(t, admin, ts.URL+"/api/auth/users/"+passkeyBilboID(t, g)+"/passkeys", adminStepUpRequest{Password: testAdminPassword}))
+	var out map[string]any
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("admin clear = %d %s: %v", status, body, err)
+	}
+	if status != http.StatusOK || out["username"] != passkeyBilboUsername || out["cleared"] != false {
+		t.Errorf("admin clear with no passkeys = %d %v, want 200 cleared=false", status, out)
+	}
+	wantNothingRecordedOrSent(t, g, audit, rec)
+	if !sessionOf(t, bilbo, ts).Authenticated {
+		t.Error("bilbo was signed out by a clear that removed nothing")
+	}
+}
+
+// -- Removing an admin's last usable passkey (#82 decision 3) -----------
+
+// deletePasskey sends DELETE /api/auth/passkeys/{id} for fake's
+// credential with password, and returns the status and body.
+func deletePasskey(t *testing.T, client *http.Client, ts *httptest.Server, fake *passkeytest.FakeAuthenticator, password string) (int, string) {
+	t.Helper()
+	id := base64.RawURLEncoding.EncodeToString(fake.CredentialID())
+	return readAll(t, deleteJSON(t, client, ts.URL+passkeysPath+"/"+id, passkeyDeleteRequest{Password: password}))
+}
+
+// An admin cannot delete the one passkey that signs the account in
+// here: 409 before the password is checked, so it costs no re-check and
+// a wrong password changes nothing. With a second passkey the first is
+// deletable; a stale passkey always is.
+func TestAdminCannotDeleteTheirLastUsablePasskey(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+	stale := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	g.deps.Passkeys = mustRelyingParty(t, "https://new-passkeys.example.org")
+	only := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	u, _ := g.deps.Users.ByUsername("admin")
+
+	for _, password := range []string{doorTestPassword, "wrong-password-placeholder", "wrong-password-placeholder"} {
+		status, body := deletePasskey(t, admin, ts, only, password)
+		if status != http.StatusConflict || !strings.Contains(body, "register another passkey first") || decodeProblem(t, []byte(body)).Type != problemTypeBase+classConflict.anchor {
+			t.Errorf("deleting the last usable passkey = %d %s, want 409 conflict asking for another passkey first", status, body)
+		}
+	}
+	for i := range 5 {
+		if !g.deps.Limiter.ReserveRecheck(u.ID, time.Now()) {
+			t.Fatalf("re-check reservation %d refused: the 409s spent the budget", i+1)
+		}
+		g.deps.Limiter.ReleaseRecheck(u.ID, time.Now())
+	}
+	if n := storedPasskeys(g, u.ID); n != 2 {
+		t.Fatalf("admin holds %d passkeys after the refusals, want 2", n)
+	}
+
+	if status, body := deletePasskey(t, admin, ts, stale, doorTestPassword); status != http.StatusOK {
+		t.Errorf("deleting a stale passkey = %d %s, want 200", status, body)
+	}
+	second := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	if status, body := deletePasskey(t, admin, ts, only, doorTestPassword); status != http.StatusOK {
+		t.Errorf("deleting one of two usable passkeys = %d %s, want 200", status, body)
+	}
+	if status, body := deletePasskey(t, admin, ts, second, doorTestPassword); status != http.StatusConflict {
+		t.Errorf("deleting the remaining usable passkey = %d %s, want 409", status, body)
+	}
+}
+
+// Only an admin's own last passkey is refused: a user deletes their last
+// as before, and so does an admin while the rule is optional.
+func TestDeletingTheLastPasskeyIsRefusedOnlyForAnAdminUnderTheRule(t *testing.T) {
+	t.Run("user", func(t *testing.T) {
+		g := adminPasskeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		resp := postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: passkeyBilboUsername, Password: passkeyBilboPassword})
+		if status, body := readAll(t, resp); status != http.StatusCreated {
+			t.Fatalf("creating bilbo = %d %s", status, body)
+		}
+		bilbo := loggedInPasskeyClient(t, ts, g)
+		fake := registerPasskeyWith(t, bilbo, ts, g, passkeyBilboPassword)
+		if status, body := deletePasskey(t, bilbo, ts, fake, passkeyBilboPassword); status != http.StatusOK {
+			t.Errorf("a user deleting their last passkey = %d %s, want 200", status, body)
+		}
+	})
+	t.Run("rule optional", func(t *testing.T) {
+		g := passkeyGate(t)
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+		fake := registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+		if status, body := deletePasskey(t, admin, ts, fake, doorTestPassword); status != http.StatusOK {
+			t.Errorf("an admin deleting their last passkey with the rule optional = %d %s, want 200", status, body)
+		}
+	})
+}
+
+// Another admin's clear-all stays open as the way back for a lost
+// passkey: it succeeds, the audit says the target is now held, and the
+// target is held at its next request.
+func TestAdminClearingAnotherAdminsPasskeysHoldsThem(t *testing.T) {
+	g := adminPasskeyGate(t)
+	ts := newTestServer(t, g)
+	admin := registerAdminNoFactor(t, ts, "admin", doorTestPassword)
+	registerPasskeyWith(t, admin, ts, g, doorTestPassword)
+	const secondPassword = "password-placeholder-5"
+	second, err := g.deps.Users.CreateUser("second", secondPassword, gauntlet.RoleAdmin, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondClient := sessionClient(t, ts.URL, g.deps.Sessions.Create(second.ID, time.Now()).ID)
+	registerPasskeyWith(t, secondClient, ts, g, secondPassword)
+	wantThrough(t, secondClient, ts, "/api/protected")
+
+	resp := deleteJSON(t, admin, ts.URL+"/api/auth/users/"+second.ID+"/passkeys", adminStepUpRequest{Password: doorTestPassword})
+	if status, body := readAll(t, resp); status != http.StatusOK {
+		t.Fatalf("clearing another admin's passkeys = %d %s, want 200", status, body)
+	}
+	if e := findAuditEntry(t, g, "user.passkeys_cleared"); !strings.Contains(e.Detail, "; admin held for a passkey") {
+		t.Errorf("audit detail = %q, want it to say the admin is now held", e.Detail)
+	}
+	wantDoor(t, secondClient, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
 }

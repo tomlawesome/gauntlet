@@ -12,7 +12,7 @@ func TestAdminResetPasswordHappyPath(t *testing.T) {
 	g, ts, admin := totpFixture(t)
 	id := totpBobID(t, g)
 
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("reset-password returned %d", resp.StatusCode)
@@ -49,7 +49,7 @@ func TestAdminCannotResetOwnPassword(t *testing.T) {
 		t.Fatal("no admin account")
 	}
 
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+adminUser.ID+"/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+adminUser.ID+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("an admin resetting their own password got %d, want 409", resp.StatusCode)
@@ -63,7 +63,7 @@ func TestResetPasswordRefusedForSSOOnlyAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+u.ID+"/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+u.ID+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("resetting an SSO-only account got %d, want 409", resp.StatusCode)
@@ -72,7 +72,7 @@ func TestResetPasswordRefusedForSSOOnlyAccount(t *testing.T) {
 
 func TestResetPasswordNotFound(t *testing.T) {
 	_, ts, admin := totpFixture(t)
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/not-a-real-user-id/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/not-a-real-user-id/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("resetting an unknown user got %d, want 404", resp.StatusCode)
@@ -84,7 +84,7 @@ func TestResetPasswordRequiresAdmin(t *testing.T) {
 	id := totpBobID(t, g)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 
-	resp := postJSON(t, bob, ts.URL+"/api/auth/users/"+id+"/reset-password", nil)
+	resp := postJSON(t, bob, ts.URL+"/api/auth/users/"+id+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("a non-admin resetting a password got %d, want 403", resp.StatusCode)
@@ -99,7 +99,7 @@ func TestResetPasswordRequiresAdmin(t *testing.T) {
 func TestResetCodeLoginSaveFailureIsServerError(t *testing.T) {
 	g, ts, admin, backend := budgetFixture(t)
 	id := totpBobID(t, g)
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	var reset resetPasswordResponse
 	if err := json.NewDecoder(resp.Body).Decode(&reset); err != nil {
 		t.Fatal(err)
