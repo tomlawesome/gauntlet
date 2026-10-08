@@ -28,6 +28,13 @@ All notable changes to this project are documented in this file.
   (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
   `LoginLimiter.ReserveFactorBegin` and `ReleaseFactorBegin`. Additive.
 
+### Changed
+
+- CI: a release is cut on `main` only (#88): release:version and
+  release:gitlab run in `main` pipelines and refuse a commit that is not
+  `main`'s tip; `preview` and `main` pipelines now run every lint and
+  test job, as `dev`'s do (docs/releasing.md).
+
 ## [0.3.0] - 2026-10-08
 
 Reading notes for this release:

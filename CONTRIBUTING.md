@@ -11,9 +11,11 @@ contributors.
 
 Branch from `dev` and send merge requests to `dev`, the default branch.
 The repository also has `preview` and `main` branches, which CI copies
-to the GitHub mirror; only the owner merges `dev` into them. Never
-branch from them or send work to them. A release is a version tag on
-`dev`, created by a button in the `dev` pipeline; see [docs/releasing.md](docs/releasing.md).
+to the GitHub mirror; only the owner promotes work into them, `dev` to
+`preview` to `main`, by merge request. Never branch from them or send
+work to them. A release is a version tag on `main`, created by a button
+in the `main` pipeline; `dev` and `preview` are not releases. See
+[docs/releasing.md](docs/releasing.md).
 
 ## Before starting work
 
