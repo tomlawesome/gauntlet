@@ -86,9 +86,11 @@ Two automatic checks run on every change:
 This is a small project kept by one person, with no formal disclosure
 programme.
 
-**Do not post the details of a vulnerability in public.** Open an
-issue on [gitlab.tomlawson.io/ai/gauntlet](https://gitlab.tomlawson.io/ai/gauntlet)
-that says only that you have a security report, and ask for a private
-way to send it. For a minor issue you would be happy to see public, you
-may describe it in the issue. You need an account on that GitLab server
-to open an issue.
+**Do not post the details of a vulnerability in public.** Report it
+privately through GitHub instead:
+
+- Open [github.com/tomlawesome/gauntlet/security/advisories/new](https://github.com/tomlawesome/gauntlet/security/advisories/new)
+  (or the repository's **Security** tab, then **Report a vulnerability**).
+- You need a GitHub account. Only you and the maintainer can see the
+  report.
+- Say what is affected, how to reproduce it, and which version you used.
