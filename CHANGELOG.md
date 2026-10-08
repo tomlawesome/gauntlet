@@ -87,6 +87,11 @@ Low-severity findings from the v0.3.0 audit (#80):
   reported, or why the account could not be saved. A provider that is
   down, a wrong client secret and a failing disk no longer read the
   same.
+- `pwlist build` with `--checkpoint`, when the finished run fails a
+  sanity bar, now says its checkpoint is kept and that a retry rechecks
+  the same result without fetching (delete the checkpoint to fetch
+  again), and the retry logs that every chunk was already fetched
+  instead of "resuming at chunk" one past the last.
 
 ## [0.3.0] - 2026-10-08
 

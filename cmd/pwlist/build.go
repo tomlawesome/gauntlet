@@ -160,7 +160,16 @@ func (b *builder) run(ctx context.Context) error {
 		_, _ = fmt.Fprintf(b.log, "pwlist: chunk %d/%d (prefixes %05X-%05X) done: %d hashes so far, %d kept, lowest kept count %d\n",
 			c+1, chunks, lo, hi-1, st.total, len(st.top.h), st.top.floor())
 	}
-	return b.emit(st)
+	if err := b.emit(st); err != nil {
+		if b.checkpoint == "" {
+			return err
+		}
+		// The checkpoint now holds every chunk, so a retry fetches
+		// nothing and meets the same result: say so, and how to start
+		// again (#80).
+		return fmt.Errorf("%w; the checkpoint %s is kept, so a retry checks this same result again without fetching -- delete it to fetch from the first chunk", err, b.checkpoint)
+	}
+	return nil
 }
 
 // runChunk fetches prefixes [lo, hi) with b.concurrency requests in
@@ -450,6 +459,10 @@ func (b *builder) resume() *state {
 	st := &state{next: cp.Next, total: cp.Total, top: &topN{n: b.top}}
 	for _, e := range cp.Entries {
 		st.top.offer(e)
+	}
+	if chunks := (b.prefixes + b.chunkSize - 1) / b.chunkSize; cp.Next >= chunks {
+		_, _ = fmt.Fprintf(b.log, "pwlist: checkpoint %s: every chunk was already fetched; checking its result again without fetching (delete it to fetch from the first chunk)\n", b.checkpoint)
+		return st
 	}
 	_, _ = fmt.Fprintf(b.log, "pwlist: resuming from checkpoint %s at chunk %d\n", b.checkpoint, cp.Next+1)
 	return st
