@@ -387,7 +387,9 @@ type loginFactorRequest struct {
 // reserves against (the address and the account) -- a wrong code or a
 // refused assertion here is exactly as good a brute-force move as a
 // wrong password there, so all of them share one budget rather than each
-// getting their own.
+// getting their own. Every release here returns the reservation this
+// request took: login/factor/begin counts on a budget of its own
+// (ReserveFactorBegin, #85), so there is nothing of begin's to hand back.
 func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	var req loginFactorRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
@@ -437,16 +439,10 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 
 	if len(req.Assertion) > 0 {
 		if g.verifyPasskeyAssertion(w, r, user, req.Assertion, res, now) {
-			// login/factor/begin reserved one attempt on each key for
-			// the challenge this assertion answered; a completed sign-in
-			// hands that back too, so a passkey sign-in costs none of
-			// the budget a wrong guess is limited by. completeLoginFactor
-			// releases this request's own; begin's goes back only once
-			// the sign-in has actually completed, so a replay refused
-			// there keeps both.
-			if g.completeLoginFactor(w, r, user, res, st, method, now) {
-				g.releaseLogin(res, now)
-			}
+			// completeLoginFactor hands back this request's reservation
+			// and nothing else: login/factor/begin counted its challenge
+			// on the account's begin budget, never on these buckets.
+			g.completeLoginFactor(w, r, user, res, st, method, now)
 		}
 		return
 	}
@@ -498,9 +494,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // completeLoginFactor is handleLoginFactor's success path: spend the
 // pending login, release the reservations a wrong guess would have kept
 // and reset the account's count (completeLogin), drop the pending
-// cookie, and issue the real session handleLogin withheld. It reports
-// whether every credential was accepted. method is how the second
-// factor was presented.
+// cookie, and issue the real session handleLogin withheld. method is
+// how the second factor was presented.
 //
 // The pending login is claimed first, under spentPendingLogins' lock, so
 // of two completions racing on one cookie exactly one wins (ruling R2 on
@@ -510,16 +505,15 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // refuses the cookie at, so the claim and the decode share one expiry by
 // construction, on the same wall clock.
 //
-// It also reports true when the unusual-sign-in policy refused the
-// sign-in or held it for a confirmation code (#55): every credential
-// was right, so the passkey begin step's reservation is handed back as
-// for a success.
-func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) bool {
+// When the unusual-sign-in policy refuses the sign-in or holds it (#55),
+// every credential was right, so this request's reservation goes back
+// as for a success.
+func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) {
 	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
 		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
 		writeUnauthorized(w, classStepExpired, "sign in again")
-		return false
+		return
 	}
 	// Every credential has passed: judge the sign-in (#55) before any
 	// session exists.
@@ -534,7 +528,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		g.clearPendingLoginCookie(w)
 		out, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
-		return true
+		return
 	}
 	g.completeLogin(res, now)
 	g.endAfterReset(res)
@@ -545,5 +539,4 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	notice := g.completeSignIn(w, r, user, res, method, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 	g.notify(r.Context(), notice)
-	return true
 }

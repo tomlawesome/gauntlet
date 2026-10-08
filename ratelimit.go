@@ -180,13 +180,17 @@ const lockoutRetryInterval = 30 * time.Second
 // Sends of a code out of band (ReserveDelivery, #84) are a fourth, one
 // per channel: deliveryBucket + channel + ":" + account ID.
 //
-// Passkey step-up begins (ReserveStepUpBegin, #82) are a fifth.
+// Passkey step-up begins (ReserveStepUpBegin, #82) are a fifth, and
+// second-step passkey begins (ReserveFactorBegin, #85) a sixth, with a
+// known browser's own beside it.
 const (
-	loginBucket        = "login:"
-	recheckBucket      = "password-recheck:"
-	knownBrowserBucket = "known:"
-	deliveryBucket     = "deliver:"
-	stepUpBeginBucket  = "passkey-stepup-begin:"
+	loginBucket            = "login:"
+	recheckBucket          = "password-recheck:"
+	knownBrowserBucket     = "known:"
+	deliveryBucket         = "deliver:"
+	stepUpBeginBucket      = "passkey-stepup-begin:"
+	factorBeginBucket      = "passkey-factor-begin:"
+	knownFactorBeginBucket = "passkey-factor-begin-known:"
 )
 
 // ErrLimiterConfig is returned by NewLoginLimiter for a threshold or
@@ -751,10 +755,11 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 // this limiter holds about the account that the record does not -- its
 // count of attempts in the current window, a known browser's too
 // (ReserveKnownBrowser), any lockout decision it has yet to save
-// (#44), and the codes sent on every channel (ReserveDelivery, #84). Without that, the account would stay refused
-// by this process's count until the window passed, or have a disable
-// that failed to save written back over the unlock by the next refused
-// attempt's retry.
+// (#44), the codes sent on every channel (ReserveDelivery, #84) and the
+// passkey second steps begun (ReserveFactorBegin, #85). Without that,
+// the account would stay refused by this process's count until the
+// window passed, or have a disable that failed to save written back
+// over the unlock by the next refused attempt's retry.
 //
 // The run of second-factor failures is kept: an unlock is not a
 // completed sign-in, and the password those failures followed has not
@@ -789,6 +794,8 @@ func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) e
 	l.mu.Lock()
 	delete(l.accounts, loginBucket+accountID)
 	delete(l.accounts, knownBrowserBucket+accountID)
+	delete(l.accounts, factorBeginKey(accountID, false))
+	delete(l.accounts, factorBeginKey(accountID, true))
 	delete(l.wantLockout, accountID)
 	for key := range l.accounts {
 		if strings.HasPrefix(key, deliveryBucket) && strings.HasSuffix(key, ":"+accountID) {
@@ -1075,6 +1082,53 @@ func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.releaseIn(l.accounts, stepUpBeginBucket+accountID, now)
+}
+
+// ReserveFactorBegin counts one begin of a passkey second login step
+// for accountID (#85): threshold per window, per account, in the account
+// map (never evicted), so a password alone cannot mint challenges
+// without limit and no flood of addresses or made-up names can reset
+// the count. Keyed on the account because the password step has already
+// named it, and kept apart from the challenge budget the login page's
+// passkey sign-in spends per address, so filling one does not refuse
+// the other.
+//
+// knownBrowser selects the budget of a browser the account remembers
+// (Store.KnowsBrowser), asked for only once the ordinary one has
+// refused, as ReserveKnownBrowser stands in for ReserveAccount: a
+// stranger holding the password who fills the ordinary budget cannot
+// keep the owner's own browser from its passkey.
+//
+// Never handed back by the step it starts, so it spends nothing a wrong
+// guess is limited by and leaves nothing for a later request to return;
+// ReleaseFactorBegin is only for a begin the server failed to start, in
+// the same request. UnlockLogin empties both budgets; a completed
+// sign-in leaves them. Memory only: a restart clears them.
+func (l *LoginLimiter) ReserveFactorBegin(accountID string, knownBrowser bool, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := factorBeginKey(accountID, knownBrowser)
+	entries := l.pruneIn(l.accounts, key, now)
+	if len(entries) >= l.threshold {
+		return false
+	}
+	l.accounts[key] = append(entries, now)
+	return true
+}
+
+// ReleaseFactorBegin is Release for ReserveFactorBegin.
+func (l *LoginLimiter) ReleaseFactorBegin(accountID string, knownBrowser bool, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.releaseIn(l.accounts, factorBeginKey(accountID, knownBrowser), now)
+}
+
+// factorBeginKey is ReserveFactorBegin's bucket in the account map.
+func factorBeginKey(accountID string, knownBrowser bool) string {
+	if knownBrowser {
+		return knownFactorBeginBucket + accountID
+	}
+	return factorBeginBucket + accountID
 }
 
 // ReleaseRecheck is Release for ReserveRecheck.

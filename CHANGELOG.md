@@ -400,6 +400,24 @@ Reading notes for this release:
   account knows is never held, so is unaffected; an admin's unlock
   (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
   `LoginLimiter.ReserveDelivery`. Additive.
+- **Starting a passkey second step spends no sign-in attempts** (#85).
+  `login/factor/begin` used to take an attempt on the address's and
+  the account's sign-in limits and `login/factor` handed it back in a
+  later request, so an abandoned prompt could start a lockout, and a
+  completed step whose begin had aged out of the window handed back a
+  real wrong guess from that address. Each begin is now counted on a
+  limit of the account's own, the limiter's threshold per window (5
+  per 5 minutes at the usual settings), never handed back; past it,
+  begin is `429 rate-limited`, recorded as `rate_limited`, while codes
+  and recovery codes still work. `login/factor` hands back only the
+  attempt it took itself. The limit is not the per-address one the login
+  page's passkey sign-in spends, so that one filling does not refuse an
+  account's second step, and a browser the account remembers has a
+  limit of its own beside it, so a stranger holding the password cannot
+  keep the owner from their passkey. A banned address is still refused
+  at begin unless the browser is known. An admin's unlock
+  (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
+  `LoginLimiter.ReserveFactorBegin` and `ReleaseFactorBegin`. Additive.
 
 - If someone puts an older copy of the accounts or tokens file back
   while the service is running, the service now notices and ignores

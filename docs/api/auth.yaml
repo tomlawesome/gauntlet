@@ -307,9 +307,8 @@ paths:
         authenticator-app code or one unused recovery code (spent on use).
         `assertion` is the browser's answer to the options
         `POST /api/auth/login/factor/begin` gave, checked against the
-        passkey ceremony cookie that route set; a completed passkey sign-in
-        also hands back the attempt that begin counted. Shares the login
-        rate limit. Sets the session cookie on success. Like `login`, the
+        passkey ceremony cookie that route set. Shares the login rate
+        limit; begin's own count is separate and is not handed back here. Sets the session cookie on success. Like `login`, the
         completed sign-in is first judged for unusual-sign-in signals and
         may be refused (`403` `sign-in-refused`), held for a confirmation
         code (`200` `{"confirm": true}`, #55) or, when the account holds a
@@ -642,8 +641,15 @@ paths:
         the account's passkeys registered for the current relying party,
         and sets the passkey ceremony cookie (sealed, path
         `/api/auth/login`, five minutes; each challenge is usable once).
-        Takes the same login rate-limit attempt as `login/factor` and
-        keeps it until the assertion signs in. Takes no body.
+        Takes no body.
+
+        Each begin is counted on a limit of the account's own (the
+        limiter's threshold per window), never handed back, and spends
+        none of the sign-in attempts `login/factor` counts: `429` once it
+        is spent, while codes and recovery codes still work. A browser
+        the account remembers has a limit of its own beside it. A banned
+        address is `429` unless the browser is one the account
+        remembers.
       security:
         - pendingLoginCookie: []
       parameters:

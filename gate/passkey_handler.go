@@ -531,12 +531,25 @@ func (g *Gate) isLastUsableAdminPasskey(user *gauntlet.User, credID []byte) bool
 // step. It is reached with the pending-login cookie handleLogin set,
 // before any session exists (exemptPaths).
 //
-// It takes the same login-limiter reservations as login/factor -- the
-// address and the account, with the pending login's AfterReset honoured
-// -- and keeps them, so a password alone cannot mint challenges without
-// limit. login/factor gives them back when the assertion this begin
-// mints signs the user in; a server-side failure here gives them back at
-// once.
+// Each begin is counted on the account's own begin budget
+// (gauntlet.LoginLimiter.ReserveFactorBegin, #85), so a password alone
+// mints at most the limiter's threshold of challenges per window,
+// however many addresses it comes from. It takes nothing from the login
+// budget a wrong guess is limited by and is never handed back by
+// login/factor, so no request returns a reservation another took
+// (docs/design.md, "One rule for every budget"); a server-side failure
+// here hands it back at once. Not the address's
+// challenge budget the login page's passkey sign-in spends
+// (passkeyBeginKey): filling that must not refuse an account's second
+// step.
+//
+// When the budget is full, a browser the account remembers begins on
+// a budget of its own, as reserveLogin gives it one past a lockout
+// (#44): a stranger holding the password cannot keep the owner's own
+// browser from its passkey. A banned address is refused here as
+// reserveLogin refuses it, with the same known-browser exception. The
+// account's lockout is not read here: login/factor reads it, and a
+// challenge for a locked account completes nothing.
 func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -561,16 +574,28 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodPasskey, st.AfterReset, now)
+	address := g.cfg.ClientIP(r)
+	_, banned := g.deps.Limiter.AddressBanned(address, now)
+	if banned && g.isKnownBrowser(r, user.ID, now) {
+		banned = false
+	}
+	known := false
+	ok = !banned && g.deps.Limiter.ReserveFactorBegin(user.ID, false, now)
+	if !ok && !banned && g.isKnownBrowser(r, user.ID, now) {
+		known = true
+		ok = g.deps.Limiter.ReserveFactorBegin(user.ID, true, now)
+	}
 	if !ok {
+		res := loginReservation{address: address, refusal: gauntlet.SignInRateLimited}
+		g.recordSignIn(r, loginEvent(user, "", res.refusal, gauntlet.SignInMethodPasskey), res, now)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	options, sealed, err := g.deps.Passkeys.BeginLogin(user)
 	if err != nil {
 		// This server's failure, not the caller's attempt.
-		g.releaseLogin(res, now)
+		g.deps.Limiter.ReleaseFactorBegin(user.ID, known, now)
 		g.logError("beginning passkey sign-in for " + user.Username + ": " + err.Error())
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey sign-in", nil)
 		return
@@ -594,9 +619,9 @@ const passkeyStartAgain = "start passkey sign-in again"
 // every refusal and returns false; on success it writes nothing and
 // returns true, and the caller completes the login.
 //
-// A refused assertion keeps the reservations, like a wrong code. A
-// clone warning -- the library's verdict that the counter failed to
-// advance (never for 0 -> 0, how most platform passkeys behave) --
+// A refused assertion keeps this request's reservations, like a wrong
+// code. A clone warning -- the library's verdict that the counter
+// failed to advance (never for 0 -> 0, how most platform passkeys behave) --
 // refuses the login, is audited with both counts, leaves the stored
 // count alone and leaves the ceremony cookie in place. Otherwise
 // RecordPasskeyAssertionIfFresh decides and records under the store's
@@ -641,11 +666,10 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 	case assertionRefused:
 		return refuse(classInvalidCredentials, passkeyNotVerified)
 	case assertionBackendFailed:
-		// Both reservations go back -- this request's and the one
-		// login/factor/begin took for the challenge -- or a backend
-		// outage would cost an attempt per try and end in a 429 for an
-		// owner who never guessed wrong.
-		g.releaseLogin(res, now)
+		// This request's reservation goes back, or a backend outage
+		// would cost an attempt per try and end in a 429 for an owner
+		// who never guessed wrong. login/factor/begin took none on
+		// these buckets.
 		g.releaseLogin(res, now)
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return false
