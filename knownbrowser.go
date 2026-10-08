@@ -136,7 +136,8 @@ func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (str
 
 // ClearKnownBrowsers forgets every browser accountID remembers, so none
 // of them keeps an allowance any longer, and with them the countries it
-// signs in from and its last place (#55): sign out everywhere forgets
+// signs in from and its last place (#55), and an administrator's
+// allowance of its next sign-in (#81): sign out everywhere forgets
 // what the account trusts, so the next sign-in sets a fresh baseline. Called by sign out everywhere
 // -- whose own browser is then remembered again as its new session is
 // issued -- and done by IssueResetCode in its own write.
@@ -148,7 +149,7 @@ func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (str
 // be remembered.
 //
 // Refused with ErrUserNotFound for an account that does not exist; an
-// account remembering none of the three costs no write.
+// account remembering none of these costs no write.
 func (s *Store) ClearKnownBrowsers(accountID string) error {
 	s.reloadIfStale()
 	return s.mutate(func(st *storeState) error {
@@ -156,10 +157,11 @@ func (s *Store) ClearKnownBrowsers(accountID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil {
+		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil && u.SignInAllowedUntil.IsZero() {
 			return errNoChange
 		}
 		u.KnownBrowsers, u.SeenCountries, u.LastPlace = nil, nil, nil
+		u.SignInAllowedUntil = time.Time{}
 		return nil
 	})
 }
