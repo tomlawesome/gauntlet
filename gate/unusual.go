@@ -134,7 +134,9 @@ type UnusualSignInDetail struct {
 	// Reason, under block, says why: policy, decide-failed,
 	// decide-timeout, decide-invalid, notify-failed or prove-failed. On the notice of
 	// a block let through by a lone admin's escape code (#66, ADR-0011)
-	// it is "escape", with SessionRef set.
+	// it is "escape", with SessionRef set. On the notice of a sign-in let
+	// through by an admin's allowance (#81) it is "allowed", with
+	// SessionRef set.
 	Reason string
 }
 
@@ -261,8 +263,12 @@ func (g *Gate) answerStopped(w http.ResponseWriter, r *http.Request, v unusualVe
 	}
 }
 
-// stopsSignIn reports whether v is confirm, prove or block.
+// stopsSignIn reports whether v is confirm, prove or block, and not let
+// through by an administrator's allowance (#81).
 func (v unusualVerdict) stopsSignIn() bool {
+	if v.allowed {
+		return false
+	}
 	switch v.action {
 	case UnusualSignInConfirm, UnusualSignInProve, UnusualSignInBlock:
 		return true
@@ -426,16 +432,32 @@ type unusualVerdict struct {
 	// confirmed, with escape=used in the audit detail, and a notice
 	// whose Reason is "escape".
 	escape bool
+	// allowed marks a sign-in the policy would have held or refused,
+	// let through by an administrator's allowance of the account's next
+	// sign-in (#81, gauntlet.User.SignInAllowedUntil). action keeps the
+	// policy's answer. completeSignIn records it confirmed, with
+	// allowed=used in the audit detail, and a notice whose Reason is
+	// "allowed".
+	allowed bool
 }
 
 // escapeUsedNote is the audit note a sign-in completed with an escape
 // code carries (#66), after unusual= and action=.
 const escapeUsedNote = "escape=used; "
 
+// allowanceUsedNote is the audit note a sign-in let through by an
+// administrator's allowance carries (#81), in escapeUsedNote's place.
+const allowanceUsedNote = "allowed=used; "
+
 // judgeSignIn judges user's completed sign-in from place: read-only,
 // and skipped altogether when the policy turns every signal off. When
 // a signal is kept and the policy has a Decide, Decide's answer
-// replaces the settings' (decide).
+// replaces the settings' (decide). A verdict that would hold or refuse
+// the sign-in while an administrator's allowance of the account's next
+// sign-in is live (#81) is marked allowed, last, so the signals and
+// Decide's answer are judged and recorded in full first, and the
+// admin's step-up-authenticated say-so beats even a Decide answering
+// block.
 func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet.SignInMethod, place signInPlace, now time.Time) unusualVerdict {
 	if g.judgesNothing() {
 		return unusualVerdict{}
@@ -451,6 +473,9 @@ func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet
 	}
 	if v.action == UnusualSignInProve {
 		v.action = g.resolveProve(user, method)
+	}
+	if v.stopsSignIn() && user.SignInAllowed(now) {
+		v.allowed = true
 	}
 	return v
 }
@@ -541,7 +566,7 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *AccountNotice {
 	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, method, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
-	ev.Client.Unusual, ev.Confirmed = signals, v.escape
+	ev.Client.Unusual, ev.Confirmed = signals, v.escape || v.allowed
 	if signals == 0 {
 		if v.escape {
 			g.recordSignInNote(r, ev, res, escapeUsedNote, now)
@@ -554,6 +579,9 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	if v.escape {
 		note += escapeUsedNote
 	}
+	if v.allowed {
+		note += allowanceUsedNote
+	}
 	notify := g.noticeAllowed(user.ID, now)
 	if notify != "" {
 		note += "notify=" + notify + "; "
@@ -565,6 +593,9 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	detail := &UnusualSignInDetail{Action: v.action, Signals: signals, Method: method, Client: sess.Client, SessionRef: sess.Ref()}
 	if v.escape {
 		detail.Reason = v.reason
+	}
+	if v.allowed {
+		detail.Reason = "allowed"
 	}
 	return &AccountNotice{
 		Kind: NoticeUnusualSignIn, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
