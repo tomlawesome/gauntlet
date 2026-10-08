@@ -1,6 +1,6 @@
 # ADR-0004: The passkey ceremony is a leaf package behind a seam in the root
 
-**Status:** Proposed (design by Fable 5.1 on #20; owner decisions of
+**Status:** Accepted, shipped in v0.2.0 (design on #20; owner decisions of
 2026-09-30 and 2026-10-01 recorded below). Decision 5's "no discoverable
 or passwordless login" and its unset resident-key preference are
 superseded by ADR-0012.
@@ -191,5 +191,12 @@ mikroview's fake authenticator copies and this module reuses.
   2026-10-01).
 - `github.com/go-webauthn/webauthn` joins the modules `govulncheck` and
   the licence gate watch on every pipeline.
-
-Written by Fable 5.1, 2026-10-02.
+- Status note (v0.3.0 audit, 2026-10-08): built and shipped in v0.2.0 (the `passkey`
+  package and `gate`'s passkey routes); the **Status** line above was
+  never moved from Proposed.
+- Status note (v0.3.0 audit, 2026-10-08): decision 2's "two sealing keys" is now three:
+  ADR-0012 (#77) added a third, for passkey-alone sign-in, so each
+  ceremony's state opens only for its own ceremony.
+- Status note (v0.3.0 audit, 2026-10-08): decision 3's "two cookies" is now three:
+  ADR-0012 (#77) added `gate_passkey_signin` on `/api/auth`. The two
+  named here are unchanged, and all three last five minutes.

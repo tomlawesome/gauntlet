@@ -183,8 +183,8 @@ func isUpperHex(s string, n int) bool {
 // and its signature, the exact files the pipeline published, placed
 // there by scripts/update-blocklist.sh as a release step.
 //
-// Until the first signed CI run there is no real list, and
-// embedded/PLACEHOLDER stands in for it; see Embedded.
+// A tree without the real list carries embedded/PLACEHOLDER instead,
+// as it did before the first signed CI run; see Embedded.
 //
 //go:embed embedded
 var embeddedFS embed.FS

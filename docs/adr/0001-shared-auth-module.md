@@ -25,7 +25,7 @@ until mikroview itself moves onto it. This repository is that module.
    local accounts and roles, OIDC with a self-hosted-only policy and
    `(issuer, subject)` identity, opaque server-side sessions, and
    read-only/write-only tokens. The design is
-   [docs/design.md](../design.md) (Fable 5.1, 2026-09-26, from birdcage's
+   [docs/design.md](../design.md) (2026-09-26, from birdcage's
    `docs/design/gauntlet.md`).
 
 2. **Storage and logging are interfaces**, not this module's concern --
@@ -81,3 +81,10 @@ not any one issue:
   needs, not invented fresh.
 - Mikroview is not changed by this work. Its move onto this module is
   mikroview #1202, opened only when the owner says so.
+- Status note (v0.3.0 audit, 2026-10-08): decision 2's "one caller" for
+  `evict.DownTo` is out of date: the address-ban counts and bans map
+  (`addressban.go`) also call it.
+- Status note (v0.3.0 audit, 2026-10-08): the dependency and passkey lines
+  above are superseded: `github.com/go-webauthn/webauthn` was approved
+  on 2026-09-30 and the `passkey` package shipped in v0.2.0
+  ([ADR-0004](0004-passkey-ceremony.md)).

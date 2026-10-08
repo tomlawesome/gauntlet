@@ -90,5 +90,7 @@ house rule (2026-09-30).
 - Path versioning (`/api/auth/v2/...`) is not adopted: the routes are an
   embedded surface behind each app's own frontend, and the additive rule
   makes a second path prefix unnecessary until a major version.
-
-Written by Fable 5.1, 2026-09-30.
+- Status note (v0.3.0 audit, 2026-10-08): the ASVS line above is now a
+  measurement: [security-by-design.md](../security-by-design.md) holds
+  the requirement-by-requirement mapping ("Standards conformance: OWASP
+  ASVS (#33)").

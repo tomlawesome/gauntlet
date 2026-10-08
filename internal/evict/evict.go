@@ -1,5 +1,6 @@
 // Copied from mikroview's internal/evict/evict.go, unchanged: this
-// module's only caller is LoginLimiter (ratelimit.go), for the same
+// module's callers are LoginLimiter (ratelimit.go) and the address
+// ban (addressban.go), for the same
 // reason mikroview keeps one implementation rather than several
 // hand-copied ones (docs/design.md §1.1).
 //

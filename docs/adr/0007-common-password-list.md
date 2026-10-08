@@ -145,5 +145,15 @@ is about 410 KB.
   `DefaultURL`, `DefaultRefreshInterval`, `MinRefreshInterval`. The
   signature format is internal (`internal/listsig`).
 - Each scheduled run downloads 20-40 GB from HIBP on the `light` lane.
+- Status note (v0.3.0 audit, 2026-10-08): the first signing key
+  (`blocklist/keys/pwlist-2026.pub`) and a first signed list
+  (`blocklist/embedded/top10k.txt` and `.sig`, built 2026-10-03) are
+  committed. The first consequence above describes the state before
+  that: `Embedded()` now returns a real list, the keyring is not empty,
+  and the age check in `release:version` has a list to measure.
+- Status note (v0.3.0 audit, 2026-10-08): decision 6 says the embedded copy is all the
+  published files; it is two of the three. `update-blocklist.sh`
+  copies `top10k.txt` and `top10k.txt.sig`, and the `.sha256` file is
+  published but not embedded.
 
 Written from the design on #52, 2026-10-02.

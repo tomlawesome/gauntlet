@@ -49,26 +49,38 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    there's no second button to press. It creates the tag `v<VERSION>`
    and the GitLab release at that commit, using release-cli (GitLab's
    tool for cutting a release from a CI job). The tag and release are
-   created as whoever pressed release:version. `v*` tags are protected,
-   so only the owner can press the button.
+   created as whoever pressed release:version. `v*` tags are protected
+   (a GitLab setting that limits who may create them), so only the owner
+   can press the button.
 
 4. Once release:gitlab creates the tag, its own pipeline runs
    **sync:mirror-to-github**, which pushes the tag to the public mirror
-   at `github.com/tomlawesome/gauntlet`. This job only appears when the
-   project's `MIRROR_TO_GITHUB` CI/CD variable is set to `true` -- only
-   the owner sets it.
+   at `github.com/tomlawesome/gauntlet`. It needs two project CI/CD
+   variables, both protected, which only the owner sets:
+   - `MIRROR_TO_GITHUB` = `true`: without it the job does not appear at
+     all.
+   - `GITHUB_MIRROR_SSH_KEY`: the private SSH key that may push to the
+     mirror. Create it with type **File**, not the default Variable:
+     the job reads the key from a file, so a plain Variable stops the
+     job with `GITHUB_MIRROR_SSH_KEY must be a File-type CI/CD variable`
+     before the key can reach the log. If the variable is missing, or the tag is not protected (a
+     protected variable reaches only protected tags and branches), the
+     job fails with
+     `GITHUB_MIRROR_SSH_KEY is not set -- is v<VERSION> protected?`.
 
    Check the tag arrived:
    ```
    gh api repos/tomlawesome/gauntlet/git/ref/tags/v<VERSION> --jq .object.type
    ```
-   - `tag` means it arrived correctly: GitLab creates releases as
-     annotated tags, which carry their own object instead of just
-     pointing at a commit
-   - `commit` means a plain commit ref landed instead of the annotated
-     tag -- the push went wrong
+   - `tag` means it arrived correctly. GitLab makes release tags as
+     annotated tags, which store their own message and author.
+   - `commit` means only a bare pointer to the commit arrived, without
+     the release message: the push went wrong. Do not announce the
+     version yet -- once anyone fetches a tag through the public Go
+     module proxy, the proxy records it for good. Read the
+     sync:mirror-to-github job's log to see what was pushed.
    - a 404 means the tag hasn't reached GitHub yet -- give the sync job
-     more time, or check that it ran
+     more time, or check that it ran.
 
 Apps then take it with `go get github.com/tomlawesome/gauntlet@v<VERSION>`.
 
@@ -95,22 +107,30 @@ the run of 2026-10-03.
 None of this can be done by an assistant: it needs root on the runner
 host, a private key, a GitHub token and project settings.
 
-**1. The signing key.** On a private machine, with this repository
-checked out:
+**1. The signing key.** The `.key` file can sign a password list that
+every application trusts: anyone who gets it can slip in a bad list.
+So make it on a private machine, and never put it in the repository or
+a chat.
+
+On that machine, with this repository checked out, make a folder for
+the key (keygen does not create one), then the key pair:
 ```
+mkdir -m 700 ~/gauntlet-signing
 go run ./cmd/pwlist keygen --out ~/gauntlet-signing --name pwlist-2026
 ```
-This writes `pwlist-2026.key` (the private half, mode 0600) and
-`pwlist-2026.pub`, and prints the key's id. OpenSSL makes the same two
-files if you would rather not run Go there:
+This writes `pwlist-2026.key` (the private half, readable only by you)
+and `pwlist-2026.pub` (the public half), and prints the key's id. It
+refuses to overwrite a key that is already there.
+
+If that machine has no Go, OpenSSL makes the same two files. The last
+line makes the private half readable only by you:
 ```
 openssl genpkey -algorithm ed25519 -out pwlist-2026.key
 openssl pkey -in pwlist-2026.key -pubout -out pwlist-2026.pub
 chmod 600 pwlist-2026.key
 ```
-Commit only the `.pub`, as
-`blocklist/keys/pwlist-2026.pub`, through an ordinary merge request.
-The `.key` never enters the repository or chat.
+Commit only the `.pub`, as `blocklist/keys/pwlist-2026.pub`, through
+an ordinary merge request.
 
 **2. The GitHub token.** Create a
 [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
@@ -124,42 +144,80 @@ updating and applications keep the last list. Do not turn on GitHub's
 *immutable releases* for this repository: the
 `pwned-top10k-current` release's files are replaced every run.
 
-**3. The key and the token on the runner host.** As root, put each in
-its own directory, owned by the runner's user (two directories, so
-each runner mounts only its own secret):
+**3. The key and the token on the runner host.** The runner host is
+the machine where GitLab's runner program (`gitlab-runner`) runs the
+CI jobs. Work there as root (the administrator account), because
+`/etc` is only writable by root.
+
+Each secret gets its own folder, owned by the runner's user, so each
+runner can be given only its own secret. What each line below does:
+
+- line 1 makes the two folders, which only the runner's user can open;
+- line 2 copies the signing key into the first, readable only by that
+  user;
+- line 3 asks you to type the GitHub token and saves it into the
+  second. It does not show the token on screen, and keeps it off the
+  command line and out of shell history;
+- line 4 gives the runner's user ownership of the token file.
+
 ```
 install -d -m 0700 -o gitlab-runner -g gitlab-runner /etc/gauntlet-signing /etc/gauntlet-github
 install -m 0600 -o gitlab-runner -g gitlab-runner /path/to/pwlist-2026.key /etc/gauntlet-signing/pwlist-2026.key
 ( umask 077 && IFS= read -r -s -p 'GitHub token: ' t && printf '%s\n' "$t" > /etc/gauntlet-github/token ); echo
 chown gitlab-runner:gitlab-runner /etc/gauntlet-github/token
 ```
-`read -s` keeps the token off the command line and out of shell
-history. These are birdcage's steps
-([its docs/releasing.md](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/releasing.md),
-setup §2-3) with gauntlet's names, and its two traps apply here too.
-First: rootless Docker runs the job container's root as the runner's
-own host user, not real root, so a file left owned by root would be
-unreadable inside the job -- the commands above already chown each
-secret to `gitlab-runner` for that reason. Second: rootless Docker
-only sees directories under `/etc` that existed when its daemon
-started, so a directory created afterwards is invisible to it until a
-restart, even though the file is plainly there.
 
-Restart that user's Docker once after creating the directories above
-(this stops any job running on the host):
+The runner's Docker is rootless: run by the `gitlab-runner` user
+rather than by root. That brings two traps:
+
+- Inside a job, "root" is really the `gitlab-runner` user, so a file
+  owned by real root cannot be read there. That is why the lines above
+  give each file to `gitlab-runner`.
+- Rootless Docker only sees folders under `/etc` that existed when it
+  started. A folder made afterwards is invisible to jobs until Docker
+  restarts, even though the file is plainly there.
+
+So restart that user's Docker once, now. **This stops any job running
+on the host**, so do it when nothing important is running:
 ```
 sudo -u gitlab-runner XDG_RUNTIME_DIR=/run/user/$(id -u gitlab-runner) \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u gitlab-runner)/bus \
   systemctl --user restart docker
 ```
+The two variables tell `systemctl` where the `gitlab-runner` user's
+own service manager is; without them, running it from another account
+fails with a connection error. Success prints nothing. Later reboots
+need nothing: the folders exist before Docker starts.
+
 The signing key has no password: `blocklist:sign` signs with nobody
 present. What protects each secret is that only one runner mounts it.
 
-**4. Two runners: `gauntlet-signing` and `gauntlet-publish`.**
-Register two project runners on that host for this project, each with
-the docker executor. Set each **protected** (so it refuses jobs from
-unprotected branches) and **locked to this project**, with "run
-untagged jobs" off. In their `config.toml` entries:
+**4. Two runners: `gauntlet-signing` and `gauntlet-publish`.** Each
+holds one secret, so each must run only its one job: `blocklist:sign`
+asks for a runner tagged `gauntlet-signing`, and `blocklist:publish`
+for one tagged `gauntlet-publish`.
+
+Create each in
+[Settings > CI/CD](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/ci_cd),
+**Runners > New project runner**:
+
+- **Tags**: `gauntlet-signing` for the first, `gauntlet-publish` for
+  the second.
+- **Run untagged jobs**: off, so no other job can land on a runner
+  that holds a secret.
+- **Protected**: on, so it refuses jobs from unprotected branches,
+  which anyone with push access could write.
+- **Lock to current projects**: on, so no other project can use it.
+
+GitLab then shows a `gitlab-runner register` command. Run it on the
+runner host, the same way that host's other runners were registered.
+Leave `--token` off the command and paste the token when it asks, so
+the token stays out of shell history. When it asks for an executor,
+answer `docker` (each job then runs in its own Docker container).
+
+Then add these lines to each runner's entry in `config.toml`, the
+file where `gitlab-runner` keeps its runners (`gitlab-runner list`
+prints its path):
 ```toml
 # in the gauntlet-signing runner's [[runners]] entry (blocklist:sign only)
 [runners.docker]
@@ -173,22 +231,31 @@ environment = ["GAUNTLET_GITHUB_RELEASE_TOKEN_FILE=/etc/gauntlet-github/token"]
   host = "unix:///run/user/988/docker.sock"
   volumes = ["/etc/gauntlet-github:/etc/gauntlet-github:ro", "/cache"]
 ```
-Use the runner user's real uid in place of `988`. The `environment`
-line must sit above the first `[runners.…]` heading in that entry
-(`[runners.cache]` or `[runners.docker]`): below one, TOML files it
-under that section and the job never sees it. The
-`environment` line tells the job where the token file is; it holds a
-path, never the token. Each job fails at once if its file is not there.
+What the lines do:
 
-**5. The schedule.** In
+- `host` points the runner at the `gitlab-runner` user's own Docker.
+  Replace `988` with that user's number, which `id -u gitlab-runner`
+  prints.
+- `volumes` shares the secret's folder into the job read-only (`ro`),
+  so a job can read the secret but never change it.
+- `environment` tells the publish job where the token file is. It
+  holds a path, never the token. It must sit above the first
+  `[runners.…]` heading in that entry (`[runners.cache]` or
+  `[runners.docker]`): below one, TOML files it under that section and
+  the job never sees it.
+
+`gitlab-runner` notices the edited file by itself within a few seconds.
+Each job fails at once if its secret file is not there.
+
+**5. The schedule.** Each monthly run downloads 20-40 GB from HIBP and
+takes about four hours, so check the host's bandwidth and runner
+capacity first. Then, in
 [Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules),
 create a schedule: description `blocklist`, target branch `dev`, a
 monthly interval (for example `17 3 2 * *`, 03:17 UTC on the 2nd), and
 a variable `BLOCKLIST_BUILD` = `true`.
 
-Each run downloads 20-40 GB
-from HIBP over about four hours. Leave duplicate generic packages
-allowed under
+Leave duplicate generic packages allowed under
 [Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries):
 each run uploads the list again to the `current` version, which is
 overwritten every month by design, so refusing duplicates would fail
@@ -206,32 +273,51 @@ is the first real list.
 ### Trying the build without publishing
 
 From any branch, [run a pipeline](https://gitlab.tomlawson.io/ai/gauntlet/-/pipelines/new)
-with the variable `BLOCKLIST_SAMPLE` = `true`. Only `blocklist:build`
-runs, over the first 2,048 prefixes (a few MB from HIBP); its output
-is marked as a sample, which nothing will sign, publish or accept.
+with the variable `BLOCKLIST_SAMPLE` = `true`. `blocklist:build` runs
+over only the first 2,048 of the 1,048,576 groups HIBP serves its
+hashes in (each group is the hashes sharing one 5-character start).
+That is 1/512 of a full run, so roughly 40-80 MB in all. Its output is
+stamped as a sample, which signing, publishing and every application
+refuse.
+
+On a branch other than `dev`, `blocklist:build` is the only job. On
+`dev` the lint and test jobs run as well, as they do for every `dev`
+pipeline.
 
 ### Rotating the signing key
 
-Generate a new pair (step 1) and commit the new `.pub` beside the old
-one; release. Put the new `.key` beside the old one in
-`/etc/gauntlet-signing/`, so each run signs with both. A release later,
-remove the old `.pub` and the old `.key`.
+1. Generate a new pair (step 1 above) and commit the new `.pub` beside
+   the old one; release.
+2. Put the new `.key` beside the old one in `/etc/gauntlet-signing/`,
+   so each run signs with both. Applications on the previous release
+   trust only the old key, so the list must carry both signatures for
+   a while.
+3. After the next release, once applications have upgraded, remove the
+   old `.pub` and the old `.key`.
 
 ## Dependency updates (Renovate)
 
-Once a week Renovate compares everything gauntlet pins with its newest
-release and opens a merge request to `dev` for whatever is behind
-(#63): the Go modules in `go.mod` and `gate/contracttest/go.mod`, the
-Go and Alpine images and Renovate's own image in `.gitlab-ci.yml`, and
-the tools CI installs at fixed versions (golangci-lint, govulncheck,
-gitleaks, go-licenses). Every non-major update arrives together in one
-merge request; a major one arrives on its own. A security fix from the
-OSV advisory database does not wait for Monday: a second schedule runs
-Renovate every day for security fixes only, and the fix's merge request
-opens on the first daily run after the advisory appears. What it
-watches and why is in `renovate.json`; the `renovate` job in
-`.gitlab-ci.yml` runs it; both are copied from orbit's. The daily run
-adds `renovate-security.json`, which turns every other update off.
+Renovate is a bot that checks for newer versions of what gauntlet
+depends on (#63). Once a week it compares each pinned (fixed) version
+with the newest release, and opens a merge request to `dev` for
+whatever is behind. It watches:
+
+- Go libraries, in `go.mod` and `gate/contracttest/go.mod`;
+- Docker images in `.gitlab-ci.yml`: Go, Alpine, and Renovate's own;
+- the tools CI installs at a fixed version: golangci-lint,
+  govulncheck, gitleaks and go-licenses.
+
+Every non-major update arrives together in one merge request; a major
+one arrives on its own.
+
+A security fix from the OSV advisory database (a public list of known
+flaws) does not wait for Monday: a second schedule runs Renovate every
+day for security fixes only, and the fix's merge request opens on the
+first daily run after the advisory appears.
+
+What it watches and why is in `renovate.json`, and the `renovate` job
+in `.gitlab-ci.yml` runs it. The daily run adds
+`renovate-security.json`, which turns every other update off.
 
 Renovate only opens merge requests. Each one runs the normal pipeline
 and is merged by hand like any other. The apidiff tool is the one pin
@@ -298,6 +384,8 @@ request it would open, and no warning about a dependency it could not
 look up. Then delete `RENOVATE_DRY_RUN`; the next Monday's run opens
 merge requests.
 
-If a run fails at start-up after Renovate bumped its own image, revert
-that bump and add the version to the `renovate/renovate` rule in
-`renovate.json`.
+If the `renovate` job fails as soon as it starts, just after an update
+to Renovate's own image was merged, undo that merge. Then, in
+`renovate.json`, add the bad version to the `allowedVersions` pattern
+of the `renovate/renovate` rule, which lists the versions to skip, so
+it is not offered again.

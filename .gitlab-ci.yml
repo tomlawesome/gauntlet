@@ -287,7 +287,7 @@ test:contract:
 #
 # The sample path: a pipeline run by hand from any branch with
 # BLOCKLIST_SAMPLE=true runs blocklist:build alone over the first 2,048
-# prefixes (about 2 MB from HIBP instead of 20-40 GB). Its output is
+# prefixes (roughly 40-80 MB from HIBP instead of 20-40 GB). Its output is
 # marked `# sample:`, which `pwlist sign`, `pwlist verify` and every
 # Refresher refuse, and sign and publish never run for it.
 .blocklist_full: &blocklist_full
@@ -542,6 +542,9 @@ sync:mirror-to-github:
     # GitLab's variable editor trims the key's final newline and OpenSSH
     # refuses a key without one; put it back, and prove the key loads
     # before trying GitHub -- without printing any of it.
+    # A plain variable holds the key text, not a path; reading it as a
+    # path would print the key in the shell's error, so refuse first.
+    - test -f "$GITHUB_MIRROR_SSH_KEY" || { echo "GITHUB_MIRROR_SSH_KEY must be a File-type CI/CD variable"; exit 1; }
     - tr -d '\r' < "$GITHUB_MIRROR_SSH_KEY" > ~/.ssh/mirror_key && chmod 600 ~/.ssh/mirror_key
     - '[ -n "$(tail -c1 ~/.ssh/mirror_key)" ] && echo >> ~/.ssh/mirror_key || true'
     - 'head -1 ~/.ssh/mirror_key | grep -q "PRIVATE KEY" || { echo "GITHUB_MIRROR_SSH_KEY does not begin with a PRIVATE KEY header"; exit 1; }'

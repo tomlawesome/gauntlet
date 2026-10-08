@@ -107,7 +107,7 @@ info:
     answers `404`, `login/factor` answers `404` to an `assertion`, the
     session body has no `passkeys` and `login` never offers `passkey`.
     While the application's relying party is not ready (no usable public
-    URL), the two begin routes, `register/finish` and the assertion step
+    URL), every passkey begin route, `register/finish` and the assertion step
     answer `409` naming the reason; list, rename and delete keep working.
 
     **Signing in with a passkey alone** (#77). When the application turns

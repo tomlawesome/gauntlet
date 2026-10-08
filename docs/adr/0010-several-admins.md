@@ -1,6 +1,7 @@
 # ADR-0010: Several admins; the last is protected
 
-**Status:** Accepted (owner decisions 2026-10-04 on #67 and #75)
+**Status:** Accepted (owner decisions 2026-10-04 on #67 and #75);
+decision 3 amended by ADR-0013
 **Date:** 2026-10-05
 **Relates to:** #67 (this change), #75 (role change between user and
 viewer, folded in), #44 (the unlock code, now the lone operator's
@@ -127,3 +128,11 @@ the step-up).
   `POST /api/auth/password`; until it does, every step-up route answers
   409 telling it to; and the last admin holding a local password can be
   neither demoted nor deleted (`ErrLastLocalAdmin`, 409 `last-admin`).
+- Status note (v0.3.0 audit, 2026-10-08): decision 2's step-up is no longer named
+  `recheckUnlockSelf`: it is the shared `recheckStepUp` in `gate`, used
+  by user creation, the role route and the admin unlock route, on the
+  same re-check budget.
+- Status note (v0.3.0 audit, 2026-10-08): decision 3 has one more refusal:
+  [ADR-0013](0013-sso-group-roles.md) (#76) answers 409
+  `role-managed-by-sso` to a change to `user` or `viewer` on a non-admin
+  SSO account when a groups map is configured.

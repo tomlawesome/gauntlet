@@ -142,3 +142,7 @@ browser and a code typed into the same page. No new concept: it is
 - An application that ships no log (`Config.Log` nil) and no
   `Config.OnEscapeCode` offers no escape; the lone admin's remedy there
   is as before.
+- Status note (v0.3.0 audit, 2026-10-08): decision 1 names two paths; a code is also
+  issued on the passkey-alone path ([ADR-0012](0012-passkey-alone-sign-in.md))
+  under the same conditions. It is still never issued on the SSO
+  callback.
