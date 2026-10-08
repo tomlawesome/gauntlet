@@ -240,7 +240,11 @@ paths:
         confirmation code the application delivers (`200`
         `{"confirm": true}`, the confirm cookie set and no session
         cookie; `POST /api/auth/login/confirm` finishes it). The response
-        never says which signal was raised or where a code went.
+        never says which signal was raised or where a code went. Codes
+        sent are limited per account (#84): past the limit a sign-in
+        that would be held is answered `429` `rate-limited` instead, with
+        no code and no cookie. The second-factor and passkey steps do the
+        same.
 
         A `403` `sign-in-refused` for an admin whom no other admin can act
         for may also set the escape cookie (#66): the code that lets that

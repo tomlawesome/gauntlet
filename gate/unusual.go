@@ -178,18 +178,36 @@ func (g *Gate) callBounded(ctx context.Context, fn func(context.Context) error) 
 	}
 }
 
+// stopOutcome is how stopSignIn ended.
+type stopOutcome int
+
+const (
+	// stopRefused: the attempt was refused (answer sign-in-refused).
+	stopRefused stopOutcome = iota
+	// stopHeld: a confirmation code went out, or a passkey is owed
+	// (answer heldChallenge).
+	stopHeld
+	// stopLimited: held for a code, and the account's
+	// confirmation-code budget is spent (#84). No code, ticket or
+	// cookie; answer 429 rate-limited.
+	stopLimited
+)
+
 // stopSignIn is confirm, prove and block for a judged sign-in, after the
 // caller has handed the limiter back and dropped the pending login. It
-// reports whether the sign-in is held (a confirmation code went out, or
-// a passkey is owed: answer heldChallenge); if not, the attempt was
-// refused (answer sign-in-refused) and notice is the block notice to
-// send once the response is written, nil for none. A confirm whose code
-// could not be delivered is refused as notify-failed: no code reached
-// anyone; a prove whose ticket could not be made, as prove-failed. A
-// lone admin, refused or held, also gets the escape code (startEscape,
-// #66), except on the SSO callback: every admin keeps a local password
-// (ADR-0010).
-func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (confirmSent bool, notice *AccountNotice) {
+// reports whether the sign-in is held, refused or past the send limit;
+// when refused, notice is the block notice to send once the response is
+// written, nil for none. A confirm whose code could not be delivered is
+// refused as notify-failed: no code reached anyone; a prove whose ticket
+// could not be made, as prove-failed. A lone admin, refused or held,
+// also gets the escape code (startEscape, #66), except on the SSO
+// callback: every admin keeps a local password (ADR-0010).
+//
+// A confirm past the account's confirmation-code budget (#84) is
+// stopLimited: no code, no block notice and no escape code, and a
+// rate_limited row (recordSendLimited). Nothing here takes or returns a
+// reservation on the login buckets.
+func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) (stopOutcome, *AccountNotice) {
 	reason := v.reason
 	// A lone admin held for a passkey they have lost, or for a code that
 	// never arrives, would be held again on every attempt with nobody to
@@ -197,19 +215,50 @@ func (g *Gate) stopSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet
 	// block. The held challenge is answered as before.
 	switch v.action {
 	case UnusualSignInConfirm:
-		if g.startConfirm(w, r, user, res, method, place, v.signals, now) {
+		switch g.startConfirm(w, r, user, res, method, place, v.signals, now) {
+		case confirmSent:
 			g.startEscape(w, r, user, res, method, place, v.signals, now)
-			return true, nil
+			return stopHeld, nil
+		case confirmLimited:
+			g.recordSendLimited(r, user, res, method, v.signals, now)
+			return stopLimited, nil
 		}
 		reason = "notify-failed"
 	case UnusualSignInProve:
 		if g.startProve(w, r, user, res, method, v.signals, now) {
 			g.startEscape(w, r, user, res, method, place, v.signals, now)
-			return true, nil
+			return stopHeld, nil
 		}
 		reason = "prove-failed"
 	}
-	return false, g.refuseSignIn(w, r, user, res, method, place, v.signals, reason, now)
+	return stopRefused, g.refuseSignIn(w, r, user, res, method, place, v.signals, reason, now)
+}
+
+// recordSendLimited records a held sign-in refused by the send limit
+// (#84) as rate_limited with its signals: a rated Warn line, never
+// user.login_failed, so it counts toward neither the address ban nor a
+// lockout -- the accounting a refused login/passkey/begin has. Only the
+// address is taken from res: the attempt's own reservation was handed
+// back, and any lockout it decided with it.
+func (g *Gate) recordSendLimited(r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, signals gauntlet.SignInSignals, now time.Time) {
+	ev := loginEvent(user, "", gauntlet.SignInRateLimited, method)
+	ev.Client.Unusual = signals
+	g.recordSignIn(r, ev, loginReservation{address: res.address, refusal: gauntlet.SignInRateLimited}, now)
+}
+
+// answerStopped writes the JSON answer to a sign-in stopSignIn stopped:
+// the held challenge, 429 rate-limited past the send limit, or
+// sign-in-refused, sending notice once the refusal is written.
+func (g *Gate) answerStopped(w http.ResponseWriter, r *http.Request, v unusualVerdict, out stopOutcome, notice *AccountNotice) {
+	switch out {
+	case stopHeld:
+		writeJSON(w, http.StatusOK, g.heldChallenge(v))
+	case stopLimited:
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
+	default:
+		writeSignInRefused(w)
+		g.notify(r.Context(), notice)
+	}
 }
 
 // stopsSignIn reports whether v is confirm, prove or block.
@@ -225,7 +274,7 @@ func (v unusualVerdict) stopsSignIn() bool {
 var confirmChallenge = map[string]bool{"confirm": true}
 
 // heldChallenge is the 200 a held sign-in gets (stopSignIn answered
-// true for it): confirmChallenge, or for prove {"prove": "passkey",
+// stopHeld for it): confirmChallenge, or for prove {"prove": "passkey",
 // "passkeyOrigin": ...}, where the origin is what the browser's
 // navigator.credentials.get() must be run against, as the second-step
 // answer's is.

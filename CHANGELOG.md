@@ -288,6 +288,21 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **Confirmation codes and escape codes are limited per account** (#84).
+  A sign-in held for a code hands its attempt back to the login
+  limiter, so someone holding the password could repeat it without limit
+  and flood the owner's mailbox with confirmation codes, or a lone
+  admin's server log with escape codes. Each code is now counted per
+  account as it is sent, the limiter's threshold per window (5 per 5
+  minutes at the usual settings), confirmation and escape codes
+  separately, and never handed back, a failed delivery included. Past
+  it, a held sign-in is answered `429 rate-limited` with no code, ticket
+  or cookie (the SSO callback redirects `ssoError=refused`), recorded as
+  `rate_limited`, and a lone admin gets no escape code. A browser the
+  account knows is never held, so is unaffected; an admin's unlock
+  (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
+  `LoginLimiter.ReserveDelivery`. Additive.
+
 - A running accounts or tokens store no longer adopts an older, valid
   copy of its file put back while the service runs, which undid later
   changes and revived revoked tokens. Each document now carries a save

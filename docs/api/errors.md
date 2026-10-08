@@ -309,8 +309,10 @@ named under the class it shares, below.
 - **Status:** 429. **Title:** Too many attempts.
 - Too many attempts from this client address, or against this account,
   in the current window, or from an address banned for 24 hours after
-  100 failed sign-ins (#70). `detail` is always "too many attempts, try
-  again later": the ban reads as the address limit does.
+  100 failed sign-ins (#70), or, for a sign-in that would be held for
+  a confirmation code, too many codes already sent to the account in
+  the window (#84). `detail` is always "too many attempts, try again
+  later": the ban reads as the address limit does.
 - Returned by every rate-limited route: login, the password-only resume of
   a timed-out session (#71), the second-factor step,
   the confirmation-code step (#55), registration, the admin and lone-admin unlock routes, and every

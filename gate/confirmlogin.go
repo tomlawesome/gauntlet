@@ -138,29 +138,61 @@ type ConfirmCode struct {
 	At     time.Time
 }
 
+// The send budgets (#84): gauntlet.LoginLimiter.ReserveDelivery's
+// channels, one for confirmation codes and one for escape codes, so a
+// lone admin held for a code is not charged twice and the mailbox and
+// the server's log each get their own bound.
+const (
+	deliveryChannelConfirm = "confirm"
+	deliveryChannelEscape  = "escape"
+)
+
+// confirmOutcome is how startConfirm ended.
+type confirmOutcome int
+
+const (
+	// confirmFailed: no code reached anyone, and no ticket exists
+	// (notify-failed).
+	confirmFailed confirmOutcome = iota
+	// confirmSent: the code went out and the ticket cookie is set.
+	confirmSent
+	// confirmLimited: the account's confirmation-code budget for this
+	// window is spent (#84); nothing was minted or sent.
+	confirmLimited
+)
+
 // startConfirm mints a code and its ticket for user's sign-in, asks the
 // application to deliver it -- synchronously, before the response, under
 // decideTimeout (callBounded) -- and only then sets the ticket cookie
 // and records confirm_sent with the signals (no audit record, as
-// password_ok writes none). Nothing is written to the account. It
-// reports whether the code went out; when it did not
-// (Config.DeliverConfirmCode failed, panicked or outlasted the
-// deadline), no ticket or cookie exists and the caller refuses the
-// attempt (notify-failed).
-func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, now time.Time) bool {
+// password_ok writes none). Nothing is written to the account.
+//
+// Before minting anything it counts the send on the account's
+// confirmation-code budget (ReserveDelivery, #84): refused, it answers
+// confirmLimited with no code, ticket or cookie. The count is kept
+// whatever happens next, a failed delivery included, since the mailer
+// may have sent it and a mail outage must not become a refund loop.
+// When the code did not go out (Config.DeliverConfirmCode failed,
+// panicked or outlasted the deadline) it answers confirmFailed, no
+// ticket or cookie exists, and the caller refuses the attempt
+// (notify-failed).
+func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, now time.Time) confirmOutcome {
 	deliver := g.cfg.DeliverConfirmCode
 	if deliver == nil {
-		return false
+		return confirmFailed
+	}
+	if !g.deps.Limiter.ReserveDelivery(deliveryChannelConfirm, user.ID, now) {
+		return confirmLimited
 	}
 	shown, digits, err := newConfirmCode()
 	if err != nil {
 		g.logError(err.Error())
-		return false
+		return confirmFailed
 	}
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		g.logError("gate: generating a confirm ticket id: " + err.Error())
-		return false
+		return confirmFailed
 	}
 	ticket, err := confirmLoginCodec.seal(confirmLoginState{
 		UserID: user.ID, IssuedAt: now, ID: hex.EncodeToString(id),
@@ -168,7 +200,7 @@ func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntl
 	})
 	if err != nil {
 		g.logError(err.Error())
-		return false
+		return confirmFailed
 	}
 	client := place.client
 	client.Unusual = signals
@@ -179,13 +211,13 @@ func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntl
 	}
 	if err := g.callBounded(r.Context(), func(ctx context.Context) error { return deliver(ctx, c) }); err != nil {
 		g.logError(fmt.Sprintf("gate: Config.DeliverConfirmCode could not take the confirmation code for account %q: %q", user.Username, err.Error()))
-		return false
+		return confirmFailed
 	}
 	g.writeCookie(w, confirmLoginCookieName, ticket, confirmLoginCookiePath, int(ConfirmCodeLifetime.Seconds()))
 	ev := loginEvent(user, "", gauntlet.SignInConfirmSent, method)
 	ev.Client.Unusual = signals
 	g.recordSignIn(r, ev, res, now)
-	return true
+	return confirmSent
 }
 
 func (g *Gate) clearConfirmLoginCookie(w http.ResponseWriter) {

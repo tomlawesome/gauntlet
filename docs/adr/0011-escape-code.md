@@ -72,6 +72,12 @@ browser and a code typed into the same page. No new concept: it is
    refused attempt: a new refusal overwrites the cookie. There is no
    throttle beyond the login limiter, since every refusal already cost
    the password and the second factor.
+   **Status (2026-10-08, #84):** the login limiter does not count a
+   refused or held sign-in, whose attempt is handed back, so this left
+   escape codes unbounded. Each is now counted per account as it is
+   issued (`LoginLimiter.ReserveDelivery`, its own channel); past the
+   limit the refusal or hold carries no escape code. See
+   `docs/design.md` §1.3.
 5. **Entry.** `POST /api/auth/login/escape`, body `{"code": ...}`,
    session-exempt, CSRF header required. It is `handleLoginConfirm` with
    the escape cookie, codec and spent set and the reset-code form of the

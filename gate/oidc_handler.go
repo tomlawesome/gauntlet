@@ -353,8 +353,8 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	place := g.placeOf(r, "")
 	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodSSO, place, now)
 	if verdict.stopsSignIn() {
-		sent, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
-		if sent {
+		out, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
+		if out == stopHeld {
 			// The frontend asks for the code and posts it to
 			// login/confirm, which holds the ticket this set -- or,
 			// held for a passkey, runs login/prove/begin and posts
@@ -366,6 +366,9 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, g.cfg.LoginPath+query, http.StatusFound)
 			return
 		}
+		// Refused, or past the send limit (#84): the frontend's text is
+		// generic either way, so both redirect refused; only a refusal
+		// carries a notice.
 		g.redirectWithSSOError(w, r, "refused")
 		g.notify(r.Context(), notice)
 		return

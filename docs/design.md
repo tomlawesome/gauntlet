@@ -343,6 +343,7 @@ func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
+func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back
 type AccountLockouts interface {                                    // *Store implements it
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
@@ -535,6 +536,26 @@ between cannot take it; the account's own limit still applies. Other
 names tried from that address stay refused.
 Re-checking a signed-in caller's own password has its own per-account
 budget, memory only.
+
+One rule holds every budget above together (#84, owner 2026-10-08): a
+reservation on the login buckets (address, unknown name, account) lives
+and dies inside one request. Anything that must be bounded across
+requests gets a bucket of its own that is counted, never refunded:
+challenge minting (`passkey-begin:`) and code delivery. A sign-in held
+for a confirmation code proved every credential, so its attempt goes
+back to the login buckets in that request (a correct credential is no
+failure, SP 800-63B-4 §3.2.2); what is bounded instead is the send.
+`ReserveDelivery` counts each code as it goes out -- confirmation codes
+and escape codes on channels of their own, the limiter's threshold per
+window per account and channel, in the account map, memory only -- and
+keeps the count whether or not the delivery reported an error. Past it,
+a held sign-in is answered `429 rate-limited` with no code, ticket or
+cookie, and a lone admin's refusal or hold carries no escape code. A
+completed sign-in leaves the count alone, so the owner signing in on a
+known browser -- never held, so never sending -- cannot refill a
+stranger's budget; `LoginLimiter.UnlockLogin` empties it, and a restart
+clears it. Rate limiting out-of-band code delivery is the standard
+control (SP 800-63B-4 §3.1.3.2, ASVS 5.0 6.6.3, OWASP MFA cheat sheet).
 
 The address ban (#70, owner 2026-10-05; `addressban.go`) is a
 fail2ban-style source-address ban beside the capped account lockout
@@ -983,8 +1004,12 @@ and with neither `Config.Log` nor `Config.OnEscapeCode` nothing is
 issued. `gate.New` refuses an unknown action, `confirm` with
 no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with
 no `Config.Locate` (`prove` needs nothing wired). A `flag` or `block` notice through `Config.Notices`
-is rate-limited to once an account per hour; a `confirm` code has no
-limit, since the notice is the code the person is waiting for.
+is rate-limited to once an account per hour. A `confirm` code and an
+escape code are not held back by that, since each is the code the
+person is waiting for, but each is counted on the account's send budget
+(`ReserveDelivery`, #84, §1.3): past it, the sign-in is answered `429
+rate-limited` (the SSO callback redirects `ssoError=refused`) with no
+code, recorded as `rate_limited`, with no notice and no escape code.
 
 **Account notices (#73, folding in #53 and #55).** `Config.Notices`
 (`AccountNotifier`) is the one hook for every account event this module
@@ -1513,6 +1538,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
 | The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual. Since the v0.3.0 audit (#79) the code is also issued when the admin's sign-in is held for a code or a passkey (`confirm`, `prove`), so a lost passkey or an undelivered code has the same way out |
+| A password holder flooding the owner's mailbox or the server's log with codes | each confirmation code and escape code is counted per account as it is sent (`ReserveDelivery`, #84): five per five-minute window each at the consumers' defaults, never handed back, a failed delivery included; past it the held sign-in gets `429 rate-limited` and nothing is sent |
 | A log-written escape code that an attacker reads | someone who can read the log already owns the host and holds the setup and unlock codes; without the log, a thief holding the password and second factor has the ticket but no code, and the code without that browser's ticket is nothing. Eighty bits behind the login limiter, one outstanding per refused attempt, single use, gone at expiry or restart |
 
 ### Fail-closed list

@@ -217,7 +217,8 @@ it says so instead of repeating the reasoning.
 | 6.5.6 any factor revocable | 3 | Met | `ClearTOTP`, `DeletePasskey`, `ClearAllSecondFactors`, admin routes |
 | 6.5.7 biometrics only as a second factor | 3 | Met | A passkey's local biometric never reaches gauntlet, only the user-verified flag the authenticator signs. A passkey signing in alone (#77, ADR-0012) requires that flag, so any biometric is used together with possession of the key and never by itself; as a second step behind a password the passkey is still treated as possession only |
 | 6.5.8 TOTP checked against server time | 3 | Met | `VerifyTOTP(now)` takes the server clock; `gate.Config.Now` is the application's, never the client's |
-| 6.6.x out-of-band (SMS, push) | 2–3 | N/A | None offered |
+| 6.6.x out-of-band (SMS, push) | 2–3 | N/A | None offered as a sign-in factor |
+| 6.6.3 out-of-band codes rate limited | 2 | Met | The unusual-sign-in confirmation code (`Config.DeliverConfirmCode`) and the lone admin's escape code are each counted per account as they are sent (`LoginLimiter.ReserveDelivery`, #84): the limiter's threshold per window, per account and channel, never handed back; past it the held sign-in gets `429 rate-limited` and nothing is sent. Guesses at either code are on the login limiter (`gate/confirmlogin.go`, `gate/escapelogin.go`). See 800-63B-4 §3.1.3.2 |
 | 6.7.1 verification keys protected from modification | 3 | Met | Passkey public keys live in the trusted accounts store (trust boundary section above) |
 | 6.7.2 challenge at least 64 bits, unique | 3 | Met | 32-byte library challenge, spent once (`passkey/challenges.go`, ADR-0004 decision 5) |
 | 6.8.1 identity namespaced by IdP | 2 | Met | `(issuer, subject)` is the key (`user.go:104`, `store.go` `ByOIDCIdentity`) |

@@ -106,6 +106,11 @@ remembers, and let the application decide what happens next.
    day, replaced it with the two hooks above before this issue's code
    shipped, so there never was a release carrying the single-purpose
    field.)
+   **Status (2026-10-08, #84):** the "no rate limit" assumed the login
+   limiter bounded held sign-ins; it does not, since a held sign-in's
+   attempt is handed back. Codes are now counted per account as they are
+   sent (`LoginLimiter.ReserveDelivery`); past the limit the sign-in gets
+   `429 rate-limited` and no code. See `docs/design.md` §1.3.
 9. **The answer says only what is needed.** Before a session exists,
    nothing says which signal was raised, which country the account
    uses, or, under `confirm`, which address the code went to: the 200,
