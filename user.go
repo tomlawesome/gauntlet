@@ -63,9 +63,10 @@ type User struct {
 	// before SessionsEndedAt existed record an SSO link here too.
 	PasswordChangedAt time.Time `json:"passwordChangedAt,omitzero"`
 	// SessionsEndedAt is when every session issued before it was ended,
-	// whatever ended them: a new password, a reset code, an SSO link
-	// (#28). It lets a session be invalidated by a change that happens
-	// in a *different process* -- a CLI recovery tool has no access to a
+	// whatever ended them: a new password, a reset code, an SSO link, a
+	// role downgrade, or a run of second-factor failures (#28, #44). It
+	// lets a session be invalidated by a change that happens in a
+	// *different process* -- a CLI recovery tool has no access to a
 	// running server's in-memory SessionStore -- since a session's
 	// IssuedAt is compared against it through the persisted store (see
 	// SessionCutoff). Gauntlet's own field: mikroview's documents lack
@@ -85,9 +86,10 @@ type User struct {
 	// apart -- both are valid Argon2id strings -- so this has to be
 	// recorded rather than inferred from the credential.
 	HasLocalPassword bool `json:"hasLocalPassword"`
-	// RoleChangedAt records the last admin transfer touching this
-	// account, on both sides of it. For the audit trail and the UI only:
-	// authorization always reads Role, never this.
+	// RoleChangedAt records the last time this account's role changed:
+	// an admin transfer (on both sides of it), SetRole, or the role an
+	// SSO sign-in took from the provider's groups. For the audit trail
+	// and the UI only: authorization always reads Role, never this.
 	RoleChangedAt time.Time `json:"roleChangedAt,omitzero"`
 	// ResetCodeHash is the Argon2id hash of the one-time code an admin
 	// issued for this account -- the same hash function and parameters a
@@ -212,8 +214,8 @@ type User struct {
 	RecoveryCodes []RecoveryCode `json:"recoveryCodes,omitempty"`
 	// Passkeys are this account's registered WebAuthn credentials -- zero
 	// or more, unlike TOTPSecret's single shared secret. The ceremony
-	// (passkey/, G8) is not part of this module in v0.1.0; this package
-	// only stores what it would produce.
+	// is in the gauntlet/passkey package (G8); this package only stores
+	// what it produces.
 	Passkeys []Passkey `json:"passkeys,omitempty"`
 	// HeldEnrolment is the account's first second factor and its
 	// recovery codes, saved together but not live until the account's
