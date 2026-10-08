@@ -50,6 +50,30 @@ type userSummary struct {
 	// whether or not the application wires passkeys: an account carried
 	// over from mikroview's documents may hold some either way.
 	PasskeyCount int `json:"passkeyCount"`
+	// HeldForPasskey is true when the admin passkey rule is on (#82) and
+	// this is an admin holding no passkey usable here: Protect holds it
+	// at the passkey door (or, with no local password, the password door
+	// first), so an admin sees who is stuck.
+	HeldForPasskey bool `json:"heldForPasskey"`
+}
+
+// heldForPasskey reports whether u, read with its passkeys (Users.Get,
+// not a List copy, which blanks them), is an admin the passkey door
+// holds for want of a passkey usable here (#82).
+func (g *Gate) heldForPasskey(u *gauntlet.User) bool {
+	return g.adminPasskeyRuleOn() && u.Role == gauntlet.RoleAdmin && g.usablePasskeyCount(u) == 0
+}
+
+// heldForPasskeyByID is heldForPasskey for an account known by ID, read
+// again with its passkeys. Only an admin is read, and only while the
+// rule is on, so the users list costs nothing extra otherwise
+// (gauntlet #42).
+func (g *Gate) heldForPasskeyByID(id string, role gauntlet.Role) bool {
+	if !g.adminPasskeyRuleOn() || role != gauntlet.RoleAdmin {
+		return false
+	}
+	u, ok := g.deps.Users.Get(id)
+	return ok && g.heldForPasskey(u)
 }
 
 // handleCreateUser lets an existing admin add another account -- the
@@ -110,8 +134,14 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if user.Role == gauntlet.RoleAdmin {
 		detail += "; granting admin's password and second factor re-entered"
 	}
+	// A new account holds no passkey, so a new admin is held at the
+	// passkey door from its first request while the rule is on (#82).
+	held := g.heldForPasskey(user)
+	if held {
+		detail += "; held for a passkey"
+	}
 	g.audit(r, auditActor(r), "user.create", user.Username, detail)
-	writeJSON(w, http.StatusCreated, map[string]any{"username": user.Username, "role": user.Role})
+	writeJSON(w, http.StatusCreated, map[string]any{"username": user.Username, "role": user.Role, "heldForPasskey": held})
 	if user.Role == gauntlet.RoleAdmin {
 		g.notify(r.Context(), &AccountNotice{
 			Kind: NoticeRoleChanged, UserID: user.ID, Username: user.Username, Role: user.Role, At: now, By: auditActor(r),
@@ -155,6 +185,7 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			SSO:              u.OIDCIssuer != "",
 			HasTOTP:          u.HasActiveTOTP(),
 			PasskeyCount:     u.PasskeyCount(),
+			HeldForPasskey:   g.heldForPasskeyByID(u.ID, u.Role),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -500,6 +531,11 @@ type setRoleResponse struct {
 	// SessionsEnded is true when the change was a downgrade, which ends
 	// every session the account held.
 	SessionsEnded bool `json:"sessionsEnded"`
+	// HeldForPasskey is true when the account is now an admin holding no
+	// passkey usable here while the admin passkey rule is on (#82): the
+	// role is granted, and Protect holds the account at the passkey door
+	// from its next request until it registers one.
+	HeldForPasskey bool `json:"heldForPasskey"`
 }
 
 // roleManagedBySSO reports whether the identity provider's groups decide
@@ -606,9 +642,16 @@ func (g *Gate) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	if ended {
 		detail += "; sessions ended: all"
 	}
+	// SetRole's copy has its passkeys blanked, so the account is read
+	// again to tell a usable passkey from a stale one.
+	held := g.heldForPasskeyByID(changed.ID, changed.Role)
+	if held {
+		detail += "; held for a passkey"
+	}
 	g.audit(r, by, "user.role_changed", changed.Username, detail)
 	writeJSON(w, http.StatusOK, setRoleResponse{
 		Username: changed.Username, From: string(from), To: string(changed.Role), SessionsEnded: ended,
+		HeldForPasskey: held,
 	})
 	g.notify(r.Context(), &AccountNotice{
 		Kind: NoticeRoleChanged, UserID: changed.ID, Username: changed.Username, Role: changed.Role, At: now, By: by,

@@ -354,7 +354,7 @@ func contractAdminPasskey(t *testing.T, c *contractChecker) {
 	u := ts.URL
 	admin := c.client()
 	c.do(admin, u, call{method: "POST", path: "/api/auth/register", body: registerRequest{"admin", adminPass, code}}, 201, nil)
-	enrolTOTPFactor(t, c, u, admin, adminPass)
+	codes := enrolTOTPFactor(t, c, u, admin, adminPass)
 
 	var state sessionResponse
 	c.do(admin, u, call{method: "GET", path: "/api/auth/session"}, 200, &state)
@@ -380,6 +380,27 @@ func contractAdminPasskey(t *testing.T, c *contractChecker) {
 		t.Errorf("session after registering a passkey = %+v, want mustEnrolPasskey false", state)
 	}
 	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, nil)
+
+	// A new admin is created held for a passkey, and the list says so.
+	var created struct {
+		HeldForPasskey bool `json:"heldForPasskey"`
+	}
+	c.do(admin, u, call{method: "POST", path: "/api/auth/users", body: createUserRequest{
+		Username: "second", Password: "contract-second-password", Role: "admin", AdminPassword: adminPass, AdminCode: codes[0],
+	}}, 201, &created)
+	var rows []struct {
+		Username       string `json:"username"`
+		HeldForPasskey bool   `json:"heldForPasskey"`
+	}
+	c.do(admin, u, call{method: "GET", path: "/api/auth/users"}, 200, &rows)
+	for _, row := range rows {
+		if want := row.Username == "second"; row.HeldForPasskey != want {
+			t.Errorf("users list %s heldForPasskey = %t, want %t", row.Username, row.HeldForPasskey, want)
+		}
+	}
+	if !created.HeldForPasskey {
+		t.Error("a new admin was not reported held for a passkey")
+	}
 }
 
 // contractUnusualSignIns covers the unusual-sign-in answers (#55) on a

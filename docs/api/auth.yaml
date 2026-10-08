@@ -1763,7 +1763,10 @@ paths:
         re-check budget (`429` once it is spent), and nothing is created.
         The two fields are not read for any other role. The password is
         checked as every new password is (see `changePassword`); a refused
-        one is `400`, with the reason.
+        one is `400`, with the reason. While the application requires
+        every admin to hold a passkey (#82), a new admin is created held
+        at the `must-enrol-passkey` door until it registers one
+        (`heldForPasskey`).
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1794,7 +1797,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Account"
+                $ref: "#/components/schemas/CreatedAccount"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1896,7 +1899,12 @@ paths:
         tier than before) ends every session the account holds, the
         caller's own included when it is their own account; a grant ends
         none. Audited as `user.role_changed` with actor, from and to, and
-        told to the application as `role-changed`.
+        told to the application as `role-changed`. While the application
+        requires every admin to hold a passkey (#82), a grant to an
+        account holding none usable here still succeeds, and the account
+        is held at the `must-enrol-passkey` door from its next request
+        until it registers one (`heldForPasskey`; the audit detail says
+        "held for a passkey").
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2901,7 +2909,7 @@ components:
     SetRoleResponse:
       type: object
       additionalProperties: false
-      required: [username, from, to, sessionsEnded]
+      required: [username, from, to, sessionsEnded, heldForPasskey]
       properties:
         username:
           type: string
@@ -2912,6 +2920,9 @@ components:
         sessionsEnded:
           type: boolean
           description: True when the change was a downgrade, which ended every session the account held.
+        heldForPasskey:
+          type: boolean
+          description: True when the account is now an admin holding no passkey usable here while the application requires one (#82); it is held at the `must-enrol-passkey` door from its next request until it registers one.
     PasswordRequest:
       type: object
       additionalProperties: false
@@ -3113,6 +3124,18 @@ components:
           type: string
         role:
           $ref: "#/components/schemas/Role"
+    CreatedAccount:
+      type: object
+      additionalProperties: false
+      required: [username, role, heldForPasskey]
+      properties:
+        username:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        heldForPasskey:
+          type: boolean
+          description: True when the new account is an admin and the application requires every admin to hold a passkey (#82); it is held at the `must-enrol-passkey` door until it registers one.
     ConfirmationChallenge:
       type: object
       additionalProperties: false
@@ -3230,7 +3253,7 @@ components:
     UserSummary:
       type: object
       additionalProperties: false
-      required: [id, username, role, createdAt, hasLocalPassword, sso, hasTOTP, passkeyCount]
+      required: [id, username, role, createdAt, hasLocalPassword, sso, hasTOTP, passkeyCount, heldForPasskey]
       properties:
         id:
           type: string
@@ -3255,6 +3278,9 @@ components:
         passkeyCount:
           type: integer
           description: How many passkeys the account holds.
+        heldForPasskey:
+          type: boolean
+          description: True when the application requires every admin to hold a passkey (#82) and this admin holds none usable here, so it is held at a door until it registers one.
     Token:
       type: object
       additionalProperties: false
