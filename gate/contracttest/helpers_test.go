@@ -128,6 +128,9 @@ func newGateWith(t *testing.T, deps gate.Deps, configure func(*gate.Config)) *ga
 		ClientIP:        func(*http.Request) string { return "198.51.100.1" },
 		ProductName:     testProductName,
 		LoginPath:       testLoginPath,
+		// Several fixtures wire a relying party that is not ready, which
+		// "required" refuses at start; a test about the rule sets it.
+		AdminPasskey: gate.AdminPasskeyOptional,
 	}
 	if configure != nil {
 		configure(&cfg)

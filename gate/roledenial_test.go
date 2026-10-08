@@ -64,6 +64,7 @@ func bogusRoleFixture(t *testing.T) (*Gate, *httptest.Server, *http.Cookie) {
 		CSRFHeaderValue: testCSRFValue,
 		ClientIP:        func(r *http.Request) string { return "198.51.100.1" },
 		ProductName:     testProductName,
+		AdminPasskey:    AdminPasskeyOptional,
 	}, Deps{Users: users, Sessions: sessions, Tokens: tokens, Limiter: limiter})
 	if err != nil {
 		t.Fatal(err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,6 +49,7 @@ func validConfig() Config {
 		CSRFHeaderValue: "app",
 		ClientIP:        func(r *http.Request) string { return "1.2.3.4" },
 		ProductName:     "Test Product",
+		AdminPasskey:    AdminPasskeyOptional,
 	}
 }
 
@@ -241,5 +243,63 @@ func TestNewRefusesASharedIssuerItsPolicyDoesNotPin(t *testing.T) {
 	deps.OIDCPolicy = pinned
 	if _, err := New(validConfig(), deps); err != nil {
 		t.Errorf("a shared issuer with its tenant pinned was refused: %v", err)
+	}
+}
+
+// TestNewRequiresTheAdminPasskeyRule pins #82 decision 4: the app says
+// whether every admin must hold a passkey, with no default either way.
+// New refuses an unset or unknown value, and refuses "required" unless
+// a relying party is wired and ready, rather than lock every admin out
+// or silently waive the rule. The chosen value is logged once.
+func TestNewRequiresTheAdminPasskeyRule(t *testing.T) {
+	cases := []struct {
+		name     string
+		rule     AdminPasskeyRule
+		passkeys gauntlet.PasskeyCeremony
+		want     []string // substrings of the refusal; nil means New succeeds
+	}{
+		{"unset", "", nil, []string{"Config.AdminPasskey", "not set", "AdminPasskeyRequired", "AdminPasskeyOptional"}},
+		{"unknown value", "sometimes", nil, []string{"Config.AdminPasskey", `"sometimes"`}},
+		{"required, no passkeys wired", AdminPasskeyRequired, nil, []string{"Config.AdminPasskey", "Deps.Passkeys is nil", "AdminPasskeyOptional"}},
+		{"required, relying party on an IP", AdminPasskeyRequired, mustRelyingParty(t, "https://192.0.2.10"), []string{"Config.AdminPasskey", "(ip)", "AdminPasskeyOptional"}},
+		{"required, no public URL", AdminPasskeyRequired, mustRelyingParty(t, ""), []string{"Config.AdminPasskey", "(unset)"}},
+		{"required, plain http", AdminPasskeyRequired, mustRelyingParty(t, "http://app.example"), []string{"Config.AdminPasskey", "(insecure)"}},
+		{"optional, no passkeys", AdminPasskeyOptional, nil, nil},
+		{"optional, relying party not ready", AdminPasskeyOptional, mustRelyingParty(t, "https://192.0.2.10"), nil},
+		{"required, ready relying party", AdminPasskeyRequired, mustRelyingParty(t, passkeyTestPublicURL), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &messageRecorder{}
+			cfg := validConfig()
+			cfg.AdminPasskey = tc.rule
+			cfg.Log = slog.New(rec)
+			deps := validDeps(t)
+			deps.Passkeys = tc.passkeys
+			_, err := New(cfg, deps)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("New = %v, want it to start", err)
+				}
+				var logged []string
+				for _, m := range rec.msgs {
+					if strings.Contains(m, "admin passkey rule") {
+						logged = append(logged, m)
+					}
+				}
+				if want := "gate: admin passkey rule: " + string(tc.rule); len(logged) != 1 || logged[0] != want {
+					t.Errorf("New logged %q, want exactly %q once", logged, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("New started, want a refusal")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("New = %q, want it to name %q", err, w)
+				}
+			}
+		})
 	}
 }

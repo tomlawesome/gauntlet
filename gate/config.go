@@ -20,6 +20,31 @@ type Auditor interface {
 	Record(actor, action, target, detail string)
 }
 
+// AdminPasskeyRule says whether every admin account must hold a passkey
+// (#82, ADR-0015): Config.AdminPasskey. There is no default, and the
+// zero value means "not set", which New refuses: the application's
+// admin makes a conscious choice either way, so the application never
+// fails silently -- neither running admins without the rule nor
+// locking them out by surprise.
+type AdminPasskeyRule string
+
+const (
+	// AdminPasskeyRequired: every admin account holds at least one
+	// passkey usable at this deployment's public URL (an authenticator
+	// app may be held as well, never instead). Until it does, Protect
+	// holds the account at the passkey door, which still admits
+	// registering one. Needs a ready relying party: New refuses this
+	// value while Deps.Passkeys is nil or its Status is not
+	// gauntlet.PasskeyStatusReady.
+	AdminPasskeyRequired AdminPasskeyRule = "required"
+	// AdminPasskeyOptional: the application waives the rule, and an
+	// admin's second factor may be any kind, as every other account's
+	// is. For an application reached over plain http or by IP address,
+	// where browsers cannot make a passkey, or one that wires no
+	// passkeys at all.
+	AdminPasskeyOptional AdminPasskeyRule = "optional"
+)
+
 // Config configures a Gate. Everything here is a per-application value
 // mikroview hard-coded (CookieName, CSRFHeaderValue) -- docs/design.md
 // §1.5. What is NOT here, because it is security behaviour rather than
@@ -142,6 +167,15 @@ type Config struct {
 	// keeps its password either way: a passkey replaces it at sign-in,
 	// never in the account.
 	PasskeySignIn bool
+	// AdminPasskey says whether every admin account must hold a passkey
+	// (#82, ADR-0015). Required, with no default: New refuses an unset
+	// or unknown value, so the application's admin chooses consciously
+	// and the application never fails silently. AdminPasskeyRequired
+	// also needs a ready relying party (Deps.Passkeys wired, Status
+	// ready), or New refuses to start; AdminPasskeyOptional is for an
+	// application reached over plain http or by IP address, or one that
+	// wires no passkeys. New logs the chosen value.
+	AdminPasskey AdminPasskeyRule
 	// UnusualSignIns is what a sign-in from a new browser, a new country
 	// or an impossible distance away does (#55; unusual.go). The zero
 	// value flags each one: the sign-in completes and is marked on the
@@ -176,9 +210,11 @@ type Deps struct {
 	// passkeys: Routes still registers every passkey route, and each
 	// answers 404, the session body leaves out "passkeys", and the
 	// password step never offers "passkey" -- the same shape as OIDC
-	// being nil. Not checked by New: nil is a valid choice, and a
-	// relying party that is not ready is a reported state, not a wiring
-	// mistake.
+	// being nil. With Config.AdminPasskey set to AdminPasskeyOptional,
+	// New does not check it: nil is a valid choice, and a relying party
+	// that is not ready is a reported state, not a wiring mistake. With
+	// AdminPasskeyRequired, New refuses nil and a relying party that is
+	// not ready (#82).
 	Passkeys gauntlet.PasskeyCeremony
 	// SignIns is the sign-in history (#53): every sign-in attempt is
 	// appended to it, and GET /api/auth/sign-ins lets an admin page
@@ -317,6 +353,9 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 	if err := checkUnusualPolicy(cfg); err != nil {
 		return nil, err
 	}
+	if err := checkAdminPasskeyRule(cfg, deps); err != nil {
+		return nil, err
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -327,6 +366,7 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 		kindHandlers: make(map[gauntlet.TokenKind]http.Handler),
 		notices:      warnRater{interval: &unusualNoticeInterval},
 	}
+	g.logInfo("gate: admin passkey rule: " + string(cfg.AdminPasskey))
 	if cfg.PasskeySignIn {
 		if _, ok := deps.Passkeys.(gauntlet.PasskeySignIn); !ok {
 			g.logWarn("gate: Config.PasskeySignIn is set but Deps.Passkeys is nil or does not implement gauntlet.PasskeySignIn; the passkey sign-in routes answer 404")
@@ -341,6 +381,30 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 		g.logWarn("gate: Config.SecureCookie is false: the session cookie is sent over plain HTTP and has no __Host- prefix; set it to true where TLS terminates")
 	}
 	return g, nil
+}
+
+// checkAdminPasskeyRule is New's check of Config.AdminPasskey (#82,
+// ADR-0015): set, known, and -- for AdminPasskeyRequired -- backed by a
+// ready relying party. A relying party's status is fixed by
+// configuration, so refusing here is seen once, by the operator, rather
+// than by every admin at a door they cannot pass.
+func checkAdminPasskeyRule(cfg Config, deps Deps) error {
+	switch cfg.AdminPasskey {
+	case AdminPasskeyRequired:
+		switch {
+		case deps.Passkeys == nil:
+			return errors.New("gate: Config.AdminPasskey is required, but Deps.Passkeys is nil; wire gauntlet/passkey or set gate.AdminPasskeyOptional")
+		case deps.Passkeys.Status() != gauntlet.PasskeyStatusReady:
+			return fmt.Errorf("gate: Config.AdminPasskey is required, but the relying party is not ready (%s); fix the public URL or set gate.AdminPasskeyOptional", deps.Passkeys.Status())
+		}
+	case AdminPasskeyOptional:
+		// nothing to check
+	case "":
+		return errors.New("gate: Config.AdminPasskey is not set; choose gate.AdminPasskeyRequired or gate.AdminPasskeyOptional")
+	default:
+		return fmt.Errorf("gate: Config.AdminPasskey %q is not a known value; choose gate.AdminPasskeyRequired or gate.AdminPasskeyOptional", cfg.AdminPasskey)
+	}
+	return nil
 }
 
 // now is the current time as Protect and every handler see it.
@@ -384,8 +448,15 @@ func auditActor(r *http.Request) string {
 	return auditActorInvariantViolation
 }
 
-// logWarn and logError are nil-safe wrappers around Config.Log, the same
-// discard-on-nil convention as gauntlet.Options.Log.
+// logInfo, logWarn and logError are nil-safe wrappers around
+// Config.Log, the same discard-on-nil convention as
+// gauntlet.Options.Log.
+func (g *Gate) logInfo(msg string) {
+	if g.cfg.Log != nil {
+		g.cfg.Log.Info(msg)
+	}
+}
+
 func (g *Gate) logWarn(msg string) {
 	if g.cfg.Log != nil {
 		g.cfg.Log.Warn(msg)

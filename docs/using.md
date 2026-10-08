@@ -92,6 +92,7 @@ g, err := gate.New(gate.Config{
 	CSRFHeaderValue: "myapp",
 	ProductName:     "myapp",
 	ClientIP:        func(r *http.Request) string { return r.RemoteAddr },
+	AdminPasskey:    gate.AdminPasskeyOptional, // or gate.AdminPasskeyRequired; there is no default
 	Log:             logger,
 }, gate.Deps{Users: store, Sessions: sessions, Tokens: tokens, Limiter: limiter})
 
