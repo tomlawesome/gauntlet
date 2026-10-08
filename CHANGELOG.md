@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-08
+
 Reading notes for this release:
 
 - "ADR-NNNN" points to an architecture decision record in
