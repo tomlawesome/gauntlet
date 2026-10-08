@@ -981,12 +981,12 @@ const MaxSessionEndReason = 200 // characters
 // text, never markup. At most one flag or block notice per account per
 // hour (unusualNoticeInterval); a held one is notify=quiet in the audit.
 type UnusualSignInDetail struct {
-    Action     UnusualSignInAction // flag, confirm or block
+    Action     UnusualSignInAction // flag or block; with Reason "allowed" (#81), the policy's answer the allowance overrode: confirm, prove or block
     Signals    gauntlet.SignInSignals
     Method     gauntlet.SignInMethod
     Client     gauntlet.SessionClient // address, agent (text) and country
     SessionRef string // flag: the ref the session list shows, so a message can say "end this session"
-    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid, notify-failed or prove-failed
+    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid, notify-failed or prove-failed; "escape" (#66) or "allowed" (#81) on a sign-in let through
 }
 
 // deprecated (#53, kept a minor release, ADR-0002 decision 2): Notices

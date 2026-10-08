@@ -112,7 +112,8 @@ type UnusualSignInCase struct {
 }
 
 // UnusualSignInDetail is NoticeUnusualSignIn's detail (Config.Notices):
-// an unusual sign-in flagged or blocked. It never carries the account's
+// an unusual sign-in flagged or blocked, or one an administrator's
+// allowance let through (#81). It never carries the account's
 // coordinates. The application chooses the wording, address and
 // channel; it should treat Client.UserAgent as text, never markup.
 //
@@ -124,7 +125,10 @@ type UnusualSignInCase struct {
 // account per hour is sent; one held back is "notify=quiet" in the
 // audit.
 type UnusualSignInDetail struct {
-	// Action is what happened: flag or block.
+	// Action is what happened: flag or block. On the notice of a
+	// sign-in an administrator's allowance let through (Reason
+	// "allowed", #81) it is what the policy would have done instead:
+	// confirm, prove or block.
 	Action  UnusualSignInAction
 	Signals gauntlet.SignInSignals
 	Method  gauntlet.SignInMethod
