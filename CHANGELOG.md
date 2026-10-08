@@ -76,6 +76,11 @@ Low-severity findings from the v0.3.0 audit (#80):
   out never worked). The change is refused instead: `POST
   /api/auth/password` answers `409 conflict` and saves nothing, and
   `Store.SetPassword` returns the new `ErrResetDuringChange`. Additive.
+- `Store.ClearAllSecondFactors` on an account with nothing to clear
+  returns the new `ErrNoSecondFactors` and writes nothing, as
+  `ClearPasskeys` answers `ErrNoPasskeys`, instead of saving and
+  reporting success. A recovery tool built on it can now say there was
+  nothing to remove rather than that everything was.
 
 ## [0.3.0] - 2026-10-08
 
