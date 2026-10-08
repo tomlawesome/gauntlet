@@ -8,30 +8,31 @@ set -euo pipefail
 #      that once it exists.
 #   2. VERSION sorts above every v* tag already cut, so a VERSION typed
 #      too low can never be published (the proxy can't un-publish).
-#   3. The commit being tagged is the current tip of dev, so an old
-#      pipeline's release button can't tag a commit dev has moved past.
+#   3. The commit being tagged is the current tip of main, the release
+#      branch (#88; it was dev before), so an old pipeline's release
+#      button can't tag a commit main has moved past.
 # Pure string logic, no network calls, so release-version-check_test.sh
 # can feed it canned input offline.
 #
 # Usage:
-#   release-version-check.sh VERSION REMOTE_TAGS DEV_SHA COMMIT_SHA
+#   release-version-check.sh VERSION REMOTE_TAGS MAIN_SHA COMMIT_SHA
 #
 #   VERSION      contents of the VERSION file, e.g. "0.2.1"
 #   REMOTE_TAGS  output of `git ls-remote --tags origin` (may be empty)
-#   DEV_SHA      sha of origin/dev, e.g. from
-#                `git ls-remote origin refs/heads/dev | cut -f1`
+#   MAIN_SHA     sha of origin/main, e.g. from
+#                `git ls-remote origin refs/heads/main | cut -f1`
 #   COMMIT_SHA   the commit being tagged, e.g. $CI_COMMIT_SHA
 #
 # On success prints "RELEASE_TAG=v<VERSION>" and exits 0.
 
 if [ "$#" -ne 4 ]; then
-  echo "usage: release-version-check.sh VERSION REMOTE_TAGS DEV_SHA COMMIT_SHA" >&2
+  echo "usage: release-version-check.sh VERSION REMOTE_TAGS MAIN_SHA COMMIT_SHA" >&2
   exit 1
 fi
 
 version="$1"
 remote_tags="$2"
-dev_sha="$3"
+main_sha="$3"
 commit_sha="$4"
 
 # 1. Strict semantic version: exactly three numeric, dot-separated parts,
@@ -62,9 +63,9 @@ if [ -n "$existing_versions" ]; then
   fi
 fi
 
-# 3. The commit being tagged must be the current tip of dev.
-if [ "$commit_sha" != "$dev_sha" ]; then
-  echo "commit $commit_sha is not the current tip of dev ($dev_sha) -- use the latest dev pipeline." >&2
+# 3. The commit being tagged must be the current tip of main.
+if [ "$commit_sha" != "$main_sha" ]; then
+  echo "commit $commit_sha is not the current tip of main ($main_sha) -- use the pipeline of the newest commit on main." >&2
   exit 1
 fi
 

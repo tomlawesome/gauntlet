@@ -2,6 +2,12 @@
 
 Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
 
+A release is cut on `main`, and only on `main` (#88, owner 2026-10-08:
+"release is on main, dev and preview are not a release"). A new version
+travels `dev` -> `preview` -> `main` by merge request, and the release
+button exists only in `main`'s pipelines. A version that is on `dev` or
+`preview` but not yet on `main` has not been released.
+
 1. Check the release audit is finished. Every version has a release
    audit: an issue labelled `security` in that version's milestone. It
    must be closed, with a comment that links each finding to its fix.
@@ -29,21 +35,39 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    than 90 days ago. "Nothing to commit" just means the embedded list
    is already the newest.
 
-3. Once that merge request lands on `dev`, click **CI/CD > Pipelines**
-   and open the pipeline for the merge commit -- it's the top row.
-   Click **release:version**. It can only be pressed once every job in
-   the lint and test stages has passed.
+3. Once that merge request lands on `dev`, promote it to `preview`:
+   open a merge request from `dev` to `preview`. Its pipeline runs every
+   lint and test job, and `preview`'s own pipeline runs them all again
+   once it lands. `preview` is the pre-release stage, the last stop
+   before a release. Gauntlet has no jobs that run only on `preview`
+   yet, so its bar is the same full set of lint and test jobs `dev`
+   runs. Nothing is ever pushed straight to `preview` or `main`.
+
+4. Once `preview`'s pipeline is green, open a merge request from
+   `preview` to `main`. Merging it puts a merge commit on `main`, and
+   `main`'s pipeline for that commit runs every lint and test job once
+   more.
+
+5. Click **CI/CD > Pipelines** and open `main`'s pipeline for that
+   merge commit -- the newest row whose branch is `main`. Click
+   **release:version**. It can only be pressed once every job in that
+   pipeline's lint and test stages has passed. `dev` and `preview`
+   pipelines have no release button at all.
 
    release:version refuses to cut a tag in four cases:
    - the tag already exists -- bump `VERSION` and merge again
    - `VERSION` isn't a plain three-part version, or doesn't sort above
      the newest tag already cut -- fix the `VERSION` file and merge
      again
-   - the commit isn't the current tip of `dev` -- you opened an old
-     pipeline; open the pipeline for the newest commit on `dev` instead
+   - the commit isn't the current tip of `main` -- you opened an old
+     pipeline; open the pipeline for the newest commit on `main`
+     instead
    - the common-password list in `blocklist/embedded/` is still the
      placeholder, or was built more than 90 days ago -- run
      `scripts/update-blocklist.sh` as in step 2 and merge again
+
+   "Merge again" means the whole route: a merge request into `dev`,
+   then steps 3 and 4 to bring it to `main`.
 
    Once release:version succeeds, **release:gitlab** runs by itself --
    there's no second button to press. It creates the tag `v<VERSION>`
@@ -53,7 +77,10 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    (a GitLab setting that limits who may create them), so only the owner
    can press the button.
 
-4. Once release:gitlab creates the tag, its own pipeline runs
+   The version is released once this tag exists on `main`'s commit --
+   not before.
+
+6. Once release:gitlab creates the tag, its own pipeline runs
    **sync:mirror-to-github**, which pushes the tag to the public mirror
    at `github.com/tomlawesome/gauntlet`. It needs two project CI/CD
    variables, both protected, which only the owner sets:
@@ -82,7 +109,38 @@ Gauntlet ships a tag, cut from CI. Nobody creates a `v*` tag by hand.
    - a 404 means the tag hasn't reached GitHub yet -- give the sync job
      more time, or check that it ran.
 
+7. Back-merge. Each promotion's merge commit lands only on the branch
+   that received it, so `preview` is now behind `main`, and the next
+   promotion would report the branches as out of step. Open a merge
+   request from `main` to `preview` and merge it. Then do the same from
+   `preview` to `dev` if GitLab shows `dev` as behind `preview`.
+   Neither merge changes any files.
+
 Apps then take it with `go get github.com/tomlawesome/gauntlet@v<VERSION>`.
+
+v0.3.0 was tagged on a `dev` commit (e8b0009), before this order
+existed. Its tag stays where it is -- a published tag is never moved.
+It counts as released once `main` has that commit, through the usual
+`dev` -> `preview` -> `main` merge requests.
+
+## What the owner checks once (#88)
+
+The release button moved from `dev`'s pipeline to `main`'s. Two GitLab
+settings decide who may press it there; nothing in this repository can
+change them.
+
+- In
+  [Settings > Repository > Protected branches](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/repository),
+  `main` is listed, with **Allowed to merge** set to the people who may
+  release (Maintainers, or only you) and **Allowed to push and merge**
+  set to **No one**. GitLab lets someone run a manual job on a
+  protected branch only if they may merge into it, so this list is
+  who can press release:version. Pushing set to No one keeps `main`
+  reachable by merge request only.
+- In the same page's **Protected tags**, `v*` still lists you under
+  **Allowed to create**. That has not changed, but release:gitlab
+  creates the tag as the person who pressed the button, so the two
+  lists must agree.
 
 ## The common-password list
 
@@ -280,9 +338,9 @@ That is 1/512 of a full run, so roughly 40-80 MB in all. Its output is
 stamped as a sample, which signing, publishing and every application
 refuse.
 
-On a branch other than `dev`, `blocklist:build` is the only job. On
-`dev` the lint and test jobs run as well, as they do for every `dev`
-pipeline.
+On a branch other than `dev`, `preview` or `main`, `blocklist:build`
+is the only job. On those three the lint and test jobs run as well, as
+they do for every pipeline there.
 
 ### Rotating the signing key
 

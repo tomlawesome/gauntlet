@@ -1,10 +1,12 @@
 # GitLab is where gauntlet is developed and released (AGENTS.md); this
 # file is the CI that gates every merge request and every push to the
-# default branch, `dev`. Modelled on birdcage's `.gitlab-ci.yml`, but far
-# smaller: gauntlet ships a tag, not an image, so there is no build,
-# image or live-stack e2e stage here -- see docs/testing.md. The
-# `release` stage is a button on a green `dev` pipeline that creates the
-# annotated `v<VERSION>` tag and its GitLab release (docs/releasing.md).
+# three long-lived branches, `dev` (the default), `preview` and `main`.
+# Modelled on birdcage's `.gitlab-ci.yml`, but far smaller: gauntlet
+# ships a tag, not an image, so there is no build, image or live-stack
+# e2e stage here -- see docs/testing.md. The `release` stage is a button
+# on a green `main` pipeline that creates the annotated `v<VERSION>` tag
+# and its GitLab release (#88, docs/releasing.md): a release is cut on
+# `main` only, never on `dev` or `preview` (owner, 2026-10-08).
 #
 # GitHub `tomlawesome/gauntlet` is a read-only public mirror (#17, owner
 # 2026-09-29): the `sync` stage pushes `dev`, `preview`, `main` and `v*`
@@ -47,9 +49,9 @@ default:
   # change (refs #24). Per job, each entry holds exactly what that job
   # builds and is warm from the next pipeline on.
   # Protected refs get their own cache. A merge-request pipeline can
-  # write anything into .gocache/, and a push pipeline on dev carries
-  # the protected variables in every job's environment, so the two must
-  # never share a cache entry.
+  # write anything into .gocache/, and a push pipeline on dev, preview or
+  # main carries the protected variables in every job's environment, so
+  # the two must never share a cache entry.
   cache:
     key:
       prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
@@ -86,15 +88,23 @@ variables:
 
 # Avoids the duplicate branch+MR pipeline birdcage's own `.gate` anchor
 # avoids: a merge request always gets a pipeline, and so does a push to
-# `dev` itself (in practice, a merge landing); a push to any other branch
-# does not, because that same commit already has -- or is about to get --
-# an MR pipeline covering it.
+# `dev`, `preview` or `main` itself (in practice, a merge or promotion
+# landing); a push to any other branch does not, because that same commit
+# already has -- or is about to get -- an MR pipeline covering it.
+# `preview` and `main` are listed as birdcage lists them (#88): the
+# release button on `main` waits for every lint and test job in that
+# same pipeline, so `main` must run them all -- without these two lines
+# a `main` pipeline would hold only the release and sync jobs, and the
+# button would be playable with no test run at all. Gauntlet has no
+# preview-only jobs yet, so the bar at both hops is this full gate.
 .gate: &gate
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH == "preview"
+    - if: $CI_COMMIT_BRANCH == "main"
 
 .git_safe: &git_safe
   before_script:
@@ -437,32 +447,38 @@ blocklist:publish:
 # RELEASE
 # ---------------------------------------------------------------------------
 # Birdcage's release:promote / release:gitlab pair, cut down: there are no
-# images, so the whole cut is "tag this commit". release:version is the
-# button; it reads the tracked VERSION file and refuses a tag that already
-# exists, so a forgotten bump fails closed. release:gitlab then creates
-# the annotated tag and the release. release-cli acts with the rights of
+# images, so the whole cut is "tag this commit". Like birdcage's, both
+# jobs exist only in `main` push pipelines (#88, owner 2026-10-08:
+# "release is on main, dev and preview are not a release"), so a version
+# reaches `dev`, then `preview` (by merge request), then `main` (by merge
+# request) before anyone can tag it. release:version is the button; it
+# reads the tracked VERSION file and refuses a tag that already exists,
+# so a forgotten bump fails closed. release:gitlab then creates the
+# annotated tag and the release. release-cli acts with the rights of
 # whoever pressed the button, and `v*` tags are protected, so only the
 # owner can actually cut one (#17). The tag's own pipeline runs the sync
 # job below, which carries the tag object to the GitHub mirror.
 #
 # release:version also rejects a VERSION that isn't a strict semantic
 # version, one that doesn't sort above every tag already cut, and a
-# commit that isn't the current tip of dev -- an old pipeline's button
-# must not tag a commit dev has moved past (refs #26). The checks are in
+# commit that isn't the current tip of main -- an old pipeline's button
+# must not tag a commit main has moved past (refs #26). The checks are in
 # scripts/release-version-check.sh so they can be tested offline.
 release:version:
   stage: release
   image: $ALPINE_IMAGE
   interruptible: false
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       when: manual
       # A manual job is allow_failure by default; forcing it false would
-      # leave every dev pipeline reading "blocked" for a release nobody
+      # leave every main pipeline reading "blocked" for a release nobody
       # intends to cut yet. A human is watching the job they pressed.
       allow_failure: true
   # No `needs:` on purpose: without one the button is not playable until
-  # every job in every earlier stage has passed, which is the bar.
+  # every job in every earlier stage of this `main` pipeline has passed,
+  # which is the bar. `.gate` above is what puts those jobs in a `main`
+  # pipeline at all.
   cache: []
   script:
     - apk add --no-cache git bash >/dev/null  # release-version-check.sh is bash (#56)
@@ -473,8 +489,8 @@ release:version:
       set -eu
       version="$(tr -d '[:space:]' < VERSION)"
       remote_tags="$(git ls-remote --tags origin)"
-      dev_sha="$(git ls-remote origin refs/heads/dev | cut -f1)"
-      scripts/release-version-check.sh "$version" "$remote_tags" "$dev_sha" "$CI_COMMIT_SHA" > release.env
+      main_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+      scripts/release-version-check.sh "$version" "$remote_tags" "$main_sha" "$CI_COMMIT_SHA" > release.env
       cat release.env
   artifacts:
     reports:
@@ -491,12 +507,16 @@ release:gitlab:
   image: registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
   interruptible: false
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
   needs:
     - job: release:version
       artifacts: true
   cache: []
   script:
+    # release:version is allow_failure, and a failed allow_failure job
+    # still satisfies `needs:`; without this an empty tag name would
+    # reach release-cli (birdcage #171).
+    - 'test -n "${RELEASE_TAG:-}" || { echo "no RELEASE_TAG: release:version did not finish"; exit 1; }'
     - echo "tagging $CI_COMMIT_SHA as $RELEASE_TAG"
   release:
     tag_name: $RELEASE_TAG
