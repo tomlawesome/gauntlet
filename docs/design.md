@@ -1440,6 +1440,22 @@ it. The data for all of this lives on `User`.
   live, then the codes are minted in a second write", where a crash or
   failed save between the two left a live factor with no codes
   (answered `partially-completed`).
+- **Regenerating recovery codes replaces the old set at once (#80
+  P1-S2, owner 2026-10-08).** `POST /api/auth/recovery-codes`
+  (`Store.GenerateRecoveryCodes`, behind the password re-check) saves ten
+  new codes in one write that replaces the old set, then writes the
+  reply that shows them, once. The old set stops working at the save.
+  A person who missed the new codes (a dropped connection, a closed
+  page) regenerates again; there is no pending set and no second
+  showing. If the save fails the old set stays and nothing is issued.
+  The major providers (GitHub, Google, Microsoft, 1Password, Dropbox)
+  do the same, and NIST SP 800-63B-4 §4.2.1.1 allows it: codes hashed,
+  single-use and throttled, a replacement requestable at any time. The
+  password re-check (ASVS 7.5.1) and its throttle already guard the
+  route. Applications are told to say "your previous recovery codes no
+  longer work" (`docs/using.md`). The first set is different: it waits
+  for `/recovery-codes/confirm` (#58, #30), and regeneration is
+  refused (409) while it is on hold.
 
 ### 1.7 Deliberately not in the module
 

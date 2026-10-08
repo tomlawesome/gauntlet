@@ -191,6 +191,27 @@ that cannot make a passkey cannot get past the door; use another. The
 setup, unlock and escape codes in the server's log still work as
 before.
 
+## Recovery codes
+
+Each account with a second factor holds ten single-use recovery codes.
+The first set is shown when the first factor is set up, and goes live
+only when the person confirms they have saved it
+(`POST /api/auth/recovery-codes/confirm`).
+
+A person can ask for a new set at any time
+(`POST /api/auth/recovery-codes`, behind their password). Regenerating
+replaces the old set at once, as GitHub, Google, Microsoft, 1Password
+and Dropbox do:
+
+- The new codes are in the reply and nowhere else. Show them on that
+  page, and give the person a way to save them.
+- The old set stops working the moment that reply is produced.
+- A person who missed the new codes (a dropped connection, a closed
+  page) regenerates again. There is no way to show the same codes twice.
+- Tell the person "your previous recovery codes no longer work", on the
+  page that shows the new ones and, if you send mail, in the message for
+  `gate.NoticeRecoveryCodesRegenerated` (see the next section).
+
 ## Tell the account's owner
 
 gauntlet sends no mail itself. To tell an account's owner that

@@ -1395,7 +1395,17 @@ paths:
     post:
       operationId: regenerateRecoveryCodes
       summary: Replace the caller's recovery codes
-      description: Password-gated (rate-limited re-check). Replaces the account's recovery codes with ten fresh ones, shown once. Refused on an account with no second factor. Other sessions are not ended.
+      description: |
+        Password-gated (rate-limited re-check). Replaces the account's
+        recovery codes with ten fresh ones, shown once, in this reply.
+        The old set stops working the moment the new one is saved, just
+        before the reply is written; if the save fails, the old set stays
+        and no codes are issued. Nothing can show the new codes again, so
+        a person who missed them (a dropped connection, a closed page)
+        regenerates again. Refused with `409` on an account with no
+        second factor, which includes a first factor still waiting for
+        `POST /api/auth/recovery-codes/confirm`. Other sessions are not
+        ended.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
