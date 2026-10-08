@@ -100,6 +100,12 @@ Low-severity findings from the v0.3.0 audit (#80):
   deadline, but answers that it sent it, is recorded as sent when it
   answers. Before, the sweep counted it unsent and a notifier that was
   always slow sent the owner the same notice every day.
+- The password list's stored copy (`blocklist.Refresher`) and the
+  country file and its `state.json` (`geoip`) keep their owner and group
+  when a refresh replaces them, as the account store's file has since
+  #79: a refresh run as another user, such as a CLI with sudo, no
+  longer leaves files the server cannot read or replace. All three now
+  share one writer.
 
 ## [0.3.0] - 2026-10-08
 
