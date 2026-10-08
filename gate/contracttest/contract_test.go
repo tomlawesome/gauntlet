@@ -461,12 +461,19 @@ func contractUnusualSignIns(t *testing.T, c *contractChecker) {
 	refused(c.do(stranger, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery[0]}}, 403, nil))
 
 	// The same under confirm: a new browser is sent a code, through the
-	// application, and finishes with POST /api/auth/login/confirm.
+	// application, and finishes with POST /api/auth/login/confirm. The
+	// gate's clock is moved past the resend cooldown (#83) before the
+	// second code.
 	users, code = openStore(t, persist.NewMemory())
 	codes := &codeCatcher{}
+	var (
+		clockMu sync.Mutex
+		ahead   time.Duration
+	)
 	g = newGateWith(t, gate.Deps{Users: users}, func(cfg *gate.Config) {
 		cfg.UnusualSignIns = gate.UnusualSignInPolicy{NewBrowser: gate.UnusualSignInConfirm}
 		cfg.DeliverConfirmCode = codes.deliver
+		cfg.Now = func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return time.Now().Add(ahead) }
 	})
 	ts = newTestServer(t, g)
 	u = ts.URL
@@ -485,6 +492,9 @@ func contractUnusualSignIns(t *testing.T, c *contractChecker) {
 	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/confirm", body: confirmCodeRequest{Code: codes.last()}}, 401, nil)
 
 	recovery = enrolTOTPFactor(t, c, u, admin, adminPass)
+	clockMu.Lock()
+	ahead = time.Minute
+	clockMu.Unlock()
 	newcomer = c.client()
 	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login", body: credentialsRequest{"admin", adminPass}}, 200, nil)
 	c.do(newcomer, u, call{method: "POST", path: "/api/auth/login/factor", body: loginFactorRequest{Code: recovery[0]}}, 200, &challenge)

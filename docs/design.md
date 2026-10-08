@@ -374,7 +374,7 @@ func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) // deprec
 func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)     // deprecated (#86): does nothing
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
-func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back
+func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back; a 30 s resend cooldown doubling per send, 5 an hour (#83)
 func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool // new (#82): a passkey step-up begin, per account, in the account map; counted, never handed back by a finish
 func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time)
 func (l *LoginLimiter) ReserveFactorBegin(accountID string, knownBrowser bool, now time.Time) bool // new (#85): a second-step passkey begin, per account (a known browser's own budget when knownBrowser), in the account map; counted, never handed back by the step it starts
@@ -478,11 +478,12 @@ Reasons for the *new* items:
   meaning is "the one principal an ingest token is bound to": a router in
   mikroview, nothing yet in birdcage (§2.3).
 
-**Sign-in limits at a glance** (#19, #44, #70, #84, #85). What an operator
-sees, with the limiter set to 5 attempts per 5 minutes (the application
-chooses both numbers in `NewLoginLimiter`, and the rows that say "5 in
-5 minutes" and the lockout lengths follow them; the 50, the second
-factor's 5, the 100 and the 24 hours are fixed):
+**Sign-in limits at a glance** (#19, #44, #70, #83, #84, #85). What an
+operator sees, with the limiter set to 5 attempts per 5 minutes (the
+application chooses both numbers in `NewLoginLimiter`, and the rows that
+say "5 in 5 minutes" and the lockout lengths follow them; the 50, the
+second factor's 5, the 100, the 24 hours and the send cooldown and
+hourly cap are fixed):
 
 | What happens | Limit | Result |
 |---|---|---|
@@ -492,6 +493,8 @@ factor's 5, the 100 and the 24 hours are fixed):
 | Failed attempts from one address (a right one does not count) | 5 in 5 minutes | `429 rate-limited` until the window passes; a password reset does not lift it (#86) |
 | Failed sign-ins from one address | 100 in 24 hours (`AddressBanFailures`) | the address is banned for 24 hours (`AddressBanDuration`) |
 | Codes sent for one account | 5 in 5 minutes, for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
+| Another code for one account, before the cooldown (#83) | 30 seconds after the first, doubling with each send in the last hour, at most 15 minutes, for each kind | `429 rate-limited`, nothing sent |
+| Codes sent for one account in an hour (#83) | 5, for each kind | `429 rate-limited`, nothing sent, until the oldest leaves the hour |
 | Passkey step-ups started by one account (#82) | 5 in 5 minutes, counted and never refunded | `429 rate-limited`, no challenge; the re-check budget is untouched |
 | Passkey second steps started for one account (#85) | 5 in 5 minutes, counted and never refunded; a browser the account remembers gets 5 more of its own | `429 rate-limited`, no challenge; codes and recovery codes still work, and the sign-in budget is untouched |
 | Sign-ins from a browser the account remembers, while it is locked out | 5 in 5 minutes | allowed, so a stranger cannot lock the owner out |
@@ -656,6 +659,16 @@ and code delivery.
   and escape codes on channels of their own, the limiter's threshold per
   window per account and channel, in the account map, memory only. It
   keeps the count whether or not the delivery reported an error.
+- Two fixed limits sit beside the window (#83), per account and channel,
+  counted the same way: a resend cooldown, 30 seconds after the first
+  send and doubling with each further send in the last hour, at most 15
+  minutes (a code's lifetime), and at most 5 sends in any hour. Thirty
+  seconds is the usual "resend code" delay; five an hour is the
+  limiter's usual five stretched over twelve windows, so filling the
+  window again and again cannot keep a trickle of codes going. A home
+  owner rarely needs a second code and never a sixth in an hour. A
+  refused send is not counted and does not push the wait out. No
+  `Retry-After` header: no other `429` here sends one.
 - Past it, a held sign-in is answered `429 rate-limited` with no code,
   ticket or cookie, and a lone admin's refusal or hold carries no escape
   code.
@@ -663,8 +676,10 @@ and code delivery.
   a known browser -- never held, so never sending -- cannot refill a
   stranger's budget. `LoginLimiter.UnlockLogin` empties it, and a
   restart clears it.
-- Rate limiting out-of-band code delivery is the standard control (SP
-  800-63B-4 §3.1.3.2, ASVS 5.0 6.6.3, OWASP MFA cheat sheet).
+- Rate limiting out-of-band code delivery is the standard control
+  against OTP flooding (SP 800-63B-4 §3.1.3.2, ASVS 5.0 6.6.3, OWASP MFA
+  cheat sheet); the growing cooldown and the hourly cap are its usual
+  shape (#83).
 
 **The address ban** (#70, owner 2026-10-05; `addressban.go`) bans the
 address a guesser connects from, as the tool fail2ban does. It sits
@@ -1785,7 +1800,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
 | The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual. Since the v0.3.0 audit (#79) the code is also issued when the admin's sign-in is held for a code or a passkey (`confirm`, `prove`), so a lost passkey or an undelivered code has the same way out |
-| A password holder flooding the owner's mailbox or the server's log with codes | each confirmation code and escape code is counted per account as it is sent (`ReserveDelivery`, #84): five per five-minute window each at the consumers' defaults, never handed back, a failed delivery included; past it the held sign-in gets `429 rate-limited` and nothing is sent |
+| A password holder flooding the owner's mailbox or the server's log with codes | each confirmation code and escape code is counted per account as it is sent (`ReserveDelivery`, #84): five per five-minute window each at the consumers' defaults, a resend cooldown of 30 seconds doubling per send, and five an hour (#83), never handed back, a failed delivery included; past it the held sign-in gets `429 rate-limited` and nothing is sent |
 | A log-written escape code that an attacker reads | someone who can read the log already owns the host and holds the setup and unlock codes; without the log, a thief holding the password and second factor has the ticket but no code, and the code without that browser's ticket is nothing. Eighty bits behind the login limiter, one outstanding per refused attempt, single use, gone at expiry or restart |
 
 ### Fail-closed list
