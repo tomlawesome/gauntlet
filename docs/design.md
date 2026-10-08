@@ -377,6 +377,8 @@ func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
 func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back
 func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool // new (#82): a passkey step-up begin, per account, in the account map; counted, never handed back by a finish
 func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time)
+func (l *LoginLimiter) ReserveFactorBegin(accountID string, knownBrowser bool, now time.Time) bool // new (#85): a second-step passkey begin, per account (a known browser's own budget when knownBrowser), in the account map; counted, never handed back by the step it starts
+func (l *LoginLimiter) ReleaseFactorBegin(accountID string, knownBrowser bool, now time.Time)
 type AccountLockouts interface {                                    // *Store implements it
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
@@ -476,7 +478,7 @@ Reasons for the *new* items:
   meaning is "the one principal an ingest token is bound to": a router in
   mikroview, nothing yet in birdcage (§2.3).
 
-**Sign-in limits at a glance** (#19, #44, #70, #84). What an operator
+**Sign-in limits at a glance** (#19, #44, #70, #84, #85). What an operator
 sees, with the limiter set to 5 attempts per 5 minutes (the application
 chooses both numbers in `NewLoginLimiter`, and the rows that say "5 in
 5 minutes" and the lockout lengths follow them; the 50, the second
@@ -491,6 +493,7 @@ factor's 5, the 100 and the 24 hours are fixed):
 | Failed sign-ins from one address | 100 in 24 hours (`AddressBanFailures`) | the address is banned for 24 hours (`AddressBanDuration`) |
 | Codes sent for one account | 5 in 5 minutes, for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
 | Passkey step-ups started by one account (#82) | 5 in 5 minutes, counted and never refunded | `429 rate-limited`, no challenge; the re-check budget is untouched |
+| Passkey second steps started for one account (#85) | 5 in 5 minutes, counted and never refunded; a browser the account remembers gets 5 more of its own | `429 rate-limited`, no challenge; codes and recovery codes still work, and the sign-in budget is untouched |
 | Sign-ins from a browser the account remembers, while it is locked out | 5 in 5 minutes | allowed, so a stranger cannot lock the owner out |
 
 A *door* is a check in `Protect` that blocks every route but a few until
@@ -620,8 +623,27 @@ together in one save, and they survive a restart as on the `*Store`.
 the login buckets (address, unknown name, account) lives and dies inside
 one request. Anything that must be bounded across requests gets a
 bucket of its own that is counted, never refunded: challenge minting
-(`passkey-begin:` per address, `passkey-stepup-begin:` per account for
-the passkey step-up, #82) and code delivery.
+(`passkey-begin:` per address for the login page's passkey sign-in,
+`passkey-stepup-begin:` per account for the passkey step-up, #82, and
+`passkey-factor-begin:` per account for the passkey second step, #85)
+and code delivery.
+
+- `login/factor/begin` counts on the account's own begin budget
+  (`ReserveFactorBegin`), not the login buckets, so `login/factor`
+  hands back only what it reserved itself (#85). Keyed per account,
+  since the password step has named it, so no flood of addresses
+  resets it; not the per-address `passkey-begin:` budget, which the
+  login page's passkey sign-in fills and which must not refuse an
+  account's second step. When it is full, a browser the account
+  remembers begins on a budget of its own (`passkey-factor-begin-known:`),
+  as it gets one past a lockout, so a stranger holding the password
+  cannot keep the owner from their passkey. A banned address is refused
+  there unless the browser is known. Begin also reads the account's
+  lockout and disable from its record, reserving nothing, and refuses a
+  locked account to an unknown browser and a disabled one to any, so
+  nobody touches a passkey for a sign-in that cannot complete;
+  `login/factor`'s reservation stays the authority.
+  `LoginLimiter.UnlockLogin` empties both budgets.
 
 - A sign-in held for a confirmation code proved every credential, so its
   attempt goes back to the login buckets in that request (a correct

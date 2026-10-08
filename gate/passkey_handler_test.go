@@ -1208,8 +1208,10 @@ func listedPasskeyCount(t *testing.T, admin *http.Client, ts *httptest.Server, u
 }
 
 // TestPasskeyLoginFactorBeginIsRateLimited: starting a passkey prompt
-// spends the pending login like every other second-step request -- the
-// same reservations on the same keys, refused once they run out.
+// is counted on a budget of the account's own (#85), refused once it
+// runs out, and spends none of the sign-in attempts a wrong guess is
+// limited by, nor the address's challenge budget the login page's
+// passkey sign-in spends.
 func TestPasskeyLoginFactorBeginIsRateLimited(t *testing.T) {
 	g, ts, _ := passkeyFixture(t)
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
@@ -1224,13 +1226,24 @@ func TestPasskeyLoginFactorBeginIsRateLimited(t *testing.T) {
 	resp := postJSON(t, pending, ts.URL+"/api/auth/login/factor/begin", struct{}{})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("begin number %d got %d, want 429 once the sign-in limiter is spent", threshold+1, resp.StatusCode)
+		t.Errorf("begin number %d got %d, want 429 once the account's begin budget is spent", threshold+1, resp.StatusCode)
 	}
-	if g.deps.Limiter.Allow("ip:198.51.100.1", time.Now()) {
-		t.Error("the begins were not counted against the address, the key the other steps share")
+	now := time.Now()
+	id := passkeyBilboID(t, g)
+	for i := range threshold {
+		if !g.deps.Limiter.Reserve("ip:198.51.100.1", now) {
+			t.Errorf("address: the begins spent %d of its %d sign-in attempts, want none", threshold-i, threshold)
+			break
+		}
 	}
-	if g.deps.Limiter.ReserveAccount(g.deps.Users, passkeyBilboID(t, g), time.Now()) {
-		t.Error("the begins were not counted against the account, the key the other steps share")
+	for i := range threshold {
+		if !g.deps.Limiter.ReserveAccount(g.deps.Users, id, now) {
+			t.Errorf("account: the begins spent %d of its %d sign-in attempts, want none", threshold-i, threshold)
+			break
+		}
+	}
+	if !g.deps.Limiter.Allow(passkeyBeginKey("198.51.100.1"), now) {
+		t.Error("the begins spent the address's login-page challenge budget")
 	}
 }
 
@@ -1684,8 +1697,8 @@ func TestPasskeyAssertionRefusedKeepsCookie(t *testing.T) {
 
 // TestPasskeyCounterSaveFailureDoesNotSpendBudget: a counter that cannot
 // be saved is the backend failing, not a wrong guess, so it hands back
-// this request's reservation and the one login/factor/begin took for its
-// challenge. Five such failures in a row -- the limiter's threshold --
+// this request's reservation (login/factor/begin took none on the login
+// budget). Five such failures in a row -- the limiter's threshold --
 // must leave the account free to sign in. Ported from the #20 review.
 func TestPasskeyCounterSaveFailureDoesNotSpendBudget(t *testing.T) {
 	g := passkeyGate(t)
