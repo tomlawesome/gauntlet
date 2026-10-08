@@ -30,7 +30,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/tomlawesome/gauntlet/persist"
@@ -647,8 +646,8 @@ func hashTokenValue(raw string) string {
 const MaxDeviceIDLen = 64
 
 // validDeviceID rejects a device scope that could not have come from a
-// real device. Control and Unicode formatting characters are refused
-// because this string reaches an operator's terminal and browser, and
+// real device. Control and Unicode formatting characters, and the line
+// and paragraph separators (unprintable), are refused because this string reaches an operator's terminal and browser, and
 // the length cap keeps an oversized value out of the token store.
 func validDeviceID(device string) bool {
 	if device == "" {
@@ -669,14 +668,14 @@ func validTokenName(name string) bool {
 }
 
 // printableWithin is the check validDeviceID and validTokenName share:
-// at most maxBytes of valid UTF-8, with no control or Unicode formatting
-// characters.
+// at most maxBytes of valid UTF-8, with no character unprintable
+// refuses.
 func printableWithin(s string, maxBytes int) bool {
 	if len(s) > maxBytes {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError {
+		if unprintable(r) || r == utf8.RuneError {
 			return false
 		}
 	}

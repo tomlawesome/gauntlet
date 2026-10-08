@@ -106,6 +106,13 @@ Low-severity findings from the v0.3.0 audit (#80):
   #79: a refresh run as another user, such as a CLI with sudo, no
   longer leaves files the server cannot read or replace. All three now
   share one writer.
+- The Unicode line and paragraph separators (U+2028, U+2029), which a
+  few mail and chat clients show as a new line, are now treated like
+  control characters wherever those are: dropped from a session's and a
+  sign-in record's browser and address and from a masked unknown
+  username, and refused in a new username, token name, token device ID
+  and an admin's sign-out-everywhere reason. An owner's notice can no
+  longer show a made-up extra line.
 
 ## [0.3.0] - 2026-10-08
 

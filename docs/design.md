@@ -1068,7 +1068,7 @@ every gauntlet session the account holds and forgets its remembered
 browsers -- all or nothing, no per-session admin route and no admin list
 of another account's sessions (owner, 2026-10-02). 409 for the caller's
 own account, 404 for none, 400 for a reason over 200 characters or holding a
-control or format character. Audited as `user.sessions_ended`. Once the
+control or format character or a line or paragraph separator. Audited as `user.sessions_ended`. Once the
 response is written, `Config.Notices` (or the deprecated `Config.Notify`)
 is called in its own goroutine with a 10-second deadline and `recover()`;
 an error or panic is one log line, and the response's `notified` means
