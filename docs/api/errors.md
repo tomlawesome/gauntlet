@@ -388,7 +388,10 @@ exists. Each pair is named under the class it shares, below.
     `POST /api/auth/unlock` (unlock-code guesses);
   - every re-check of the caller's own password or second factor, on
     the routes listed under `invalid-credentials` above, and
-    `POST /api/auth/totp/confirm`.
+    `POST /api/auth/totp/confirm`;
+  - `POST /api/auth/step-up/passkey/begin` (#82), once the account has
+    started its limit of passkey step-ups in the window; these are
+    counted on their own and never handed back.
 
 ## setup-required
 

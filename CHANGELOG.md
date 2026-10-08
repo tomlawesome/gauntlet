@@ -55,10 +55,13 @@ Reading notes for this release:
   options for the caller's own passkeys and sets a new five-minute
   ceremony cookie, `gate_passkey_stepup`; the route then takes
   `assertion` (`adminAssertion` on create) in place of `code`
-  (`adminCode`). Exactly one of the two, or `400`. Begin takes one
-  attempt from the account's password re-check budget until the
-  passkey passes; a wrong passkey is `401` `invalid-credentials` and
-  counts, and a missing or used ceremony is `401` `step-expired`. A
+  (`adminCode`). Exactly one of the two, or `400`. Begin is counted on
+  a per-account limit of its own, never handed back (`429` past it),
+  and takes nothing from the password re-check budget, so an abandoned
+  prompt costs no re-check; the passkey itself is checked on that
+  budget like a code. A wrong passkey is `401` `invalid-credentials`
+  and counts, and a missing or used ceremony is `401` `step-expired`
+  and does not. A
   passkey-only admin no longer spends a recovery code on every grant.
 - New Go API for #82, additive: the type `gate.AdminPasskeyRule`, its
   constants `gate.AdminPasskeyRequired` and `gate.AdminPasskeyOptional`,

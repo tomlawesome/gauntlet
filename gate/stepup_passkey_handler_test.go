@@ -108,15 +108,16 @@ func isAdmin(g *Gate, id string) bool {
 }
 
 // A passkey-only admin grants admin with the password and a passkey,
-// spending no recovery code. The begin holds one re-check, which the
-// finish hands back; the audit says a passkey was used.
+// spending no recovery code. The begin takes nothing from the re-check
+// budget; the finish reserves and hands back, as a code would; the audit
+// says a passkey was used.
 func TestStepUpWithAPasskeyGrantsAdmin(t *testing.T) {
 	g, ts, admin, fake, adminID, bilboID := passkeyStepUpFixture(t)
 	full := recheckRoom(g, adminID)
 
 	options := stepUpOptions(t, admin, ts)
-	if got := recheckRoom(g, adminID); got != full-1 {
-		t.Errorf("after begin the re-check budget has %d left, want %d: begin holds one", got, full-1)
+	if got := recheckRoom(g, adminID); got != full {
+		t.Errorf("after begin the re-check budget has %d left, want all %d: a begin is not a re-check", got, full)
 	}
 	status, body := grantAdmin(t, admin, ts, bilboID, setRoleRequest{Password: doorTestPassword, Assertion: signStepUp(t, fake, options)})
 	if status != http.StatusOK {
@@ -342,4 +343,68 @@ func startPasskeyLoginAs(t *testing.T, ts *httptest.Server, username, password s
 		t.Fatalf("password step = %d %s", status, body)
 	}
 	return client
+}
+
+// stepUpBeginRoom is how many step-up begins id's own counted bucket
+// has left, measured as recheckRoom measures.
+func stepUpBeginRoom(g *Gate, id string) int {
+	n := 0
+	for g.deps.Limiter.Reserve("passkey-stepup-begin:"+id, time.Now()) {
+		n++
+	}
+	for range n {
+		g.deps.Limiter.Release("passkey-stepup-begin:"+id, time.Now())
+	}
+	return n
+}
+
+// A passkey prompt that is cancelled, expires or is replaced costs no
+// re-check: begins that never finish leave the budget whole, so the
+// password re-check still works after as many of them as the budget
+// holds (docs/design.md, "One rule for every budget").
+func TestStepUpPasskeyBeginsDoNotSpendTheRecheckBudget(t *testing.T) {
+	g, ts, admin, _, adminID, _ := passkeyStepUpFixture(t)
+	full := recheckRoom(g, adminID)
+	for range full {
+		stepUpOptions(t, admin, ts)
+	}
+	if got := recheckRoom(g, adminID); got != full {
+		t.Fatalf("after %d unfinished begins the re-check budget has %d left, want all %d", full, got, full)
+	}
+	resp := postJSON(t, admin, ts.URL+passkeyRegisterBeginPath, passkeyRegisterBeginRequest{Password: doorTestPassword})
+	if status, body := readAll(t, resp); status != http.StatusOK {
+		t.Errorf("a password re-check after the begins = %d %s, want 200", status, body)
+	}
+}
+
+// Begins are bounded on a counted bucket of their own: past the limit
+// they are 429, and a successful step-up does not refund them.
+func TestStepUpPasskeyBeginsAreBoundedAndNeverRefunded(t *testing.T) {
+	g, ts, admin, fake, adminID, bilboID := passkeyStepUpFixture(t)
+	limit := stepUpBeginRoom(g, adminID)
+	var options *protocol.CredentialAssertion
+	for range limit {
+		options = stepUpOptions(t, admin, ts)
+	}
+	wantProblem(t, stepUpBegin(t, admin, ts), http.StatusTooManyRequests, classRateLimited)
+
+	if status, body := grantAdmin(t, admin, ts, bilboID, setRoleRequest{Password: doorTestPassword, Assertion: signStepUp(t, fake, options)}); status != http.StatusOK {
+		t.Fatalf("granting admin with the last begin's passkey = %d %s, want 200", status, body)
+	}
+	wantProblem(t, stepUpBegin(t, admin, ts), http.StatusTooManyRequests, classRateLimited)
+}
+
+// A dead or missing ceremony checks nothing, so it is not a failed
+// guess: the re-check budget is left whole.
+func TestStepUpPasskeyStepExpiredDoesNotCount(t *testing.T) {
+	g, ts, admin, fake, adminID, bilboID := passkeyStepUpFixture(t)
+	full := recheckRoom(g, adminID)
+	options := stepUpOptions(t, admin, ts)
+	admin.Jar.SetCookies(mustParseURL(t, ts.URL+"/api/auth"), []*http.Cookie{{Name: passkeyStepUpCookieName, Value: "tampered", Path: passkeyStepUpCookiePath}})
+	if status, body := grantAdmin(t, admin, ts, bilboID, setRoleRequest{Password: doorTestPassword, Assertion: signStepUp(t, fake, options)}); status != http.StatusUnauthorized {
+		t.Fatalf("a dead ceremony = %d %s, want 401", status, body)
+	}
+	if got := recheckRoom(g, adminID); got != full {
+		t.Errorf("after a dead ceremony the re-check budget has %d left, want all %d", got, full)
+	}
 }

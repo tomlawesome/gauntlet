@@ -30,10 +30,15 @@ const stepUpStartAgain = "start passkey step-up again"
 // cookie. Session-gated, so Protect has already checked the session and
 // the CSRF header. Takes no body.
 //
-// It reserves one re-check on the caller's budget and keeps it, as a
-// code would be counted, so a session cookie alone cannot mint
-// challenges without limit; a successful finish (recheckPasskey) hands it
-// back. Refuses with 404 while the application has no passkeys, 409 for
+// It takes nothing from the caller's re-check budget: a reservation
+// there lives and dies inside one request (docs/design.md, "One rule for
+// every budget"), and a prompt that is cancelled, expires or is replaced
+// must not cost a password change or an admin action a re-check. So that
+// a session cookie alone cannot mint challenges without limit, every
+// begin is counted on a bucket of its own (stepUpBeginKey), never
+// refunded, as login/passkey/begin's is per address; 429 when it is full.
+// A failure to start on this server's side hands its count back. Refuses
+// with 404 while the application has no passkeys, 409 for
 // a caller with no local password (refuseWithoutLocalPassword: the
 // password half of the step-up could never pass), 409 while the relying
 // party is not ready, and 409 for a caller holding no passkey usable
@@ -59,7 +64,8 @@ func (g *Gate) handleStepUpPasskeyBegin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	now := g.now()
-	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+	beginKey := stepUpBeginKey(user.ID)
+	if !g.deps.Limiter.Reserve(beginKey, now) {
 		g.recheckRefused(r, user)
 		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
@@ -67,7 +73,7 @@ func (g *Gate) handleStepUpPasskeyBegin(w http.ResponseWriter, r *http.Request) 
 	options, sealed, err := g.deps.Passkeys.BeginLogin(user)
 	if err != nil {
 		// This server's failure, not the caller's attempt.
-		g.deps.Limiter.ReleaseRecheck(user.ID, now)
+		g.deps.Limiter.Release(beginKey, now)
 		g.logError("beginning passkey step-up for " + user.Username + ": " + err.Error())
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey step-up", nil)
 		return
@@ -76,21 +82,30 @@ func (g *Gate) handleStepUpPasskeyBegin(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, options)
 }
 
+// stepUpBeginKey is the limiter bucket step-up/passkey/begin counts on
+// for the account accountID: its own, so minting challenges spends none
+// of the account's re-checks, and never refunded by a finish.
+func stepUpBeginKey(accountID string) string {
+	return "passkey-stepup-begin:" + accountID
+}
+
 // recheckPasskey is recheckSecondFactor for a passkey: assertion is the
 // browser's answer to the options handleStepUpPasskeyBegin gave, finished
 // against the ceremony in the gate_passkey_stepup cookie for user -- the
 // caller -- so another account's passkey cannot verify. Call it only
 // after recheckPassword has passed.
 //
+// Throttled on the account's re-check budget, reserve-then-release
+// inside this request, as recheckSecondFactor is: 429 when it is spent.
 // A missing cookie or a dead ceremony (gauntlet.ErrPasskeyCeremonyInvalid:
-// expired, tampered with, already used) is 401 step-expired and clears
-// the cookie. An assertion that does not verify, or that the clone check
-// or the counter refuses (recordVerifiedAssertion, which audits a clone
-// warning), is 401 invalid-credentials carrying wrongMsg and counts as a
-// failed re-check: the reservation the begin took is kept. Success clears
-// the cookie and hands that reservation back. A counter that could not be
-// saved is the backend failing, not a wrong guess: 500, and the
-// reservation goes back too.
+// expired, tampered with, already used) checks nothing, so it hands the
+// reservation back, answers 401 step-expired and clears the cookie. An
+// assertion that does not verify, or that the clone check or the counter
+// refuses (recordVerifiedAssertion, which audits a clone warning), is 401
+// invalid-credentials carrying wrongMsg and keeps the reservation: a
+// failed re-check. Success clears the cookie and hands it back. A counter
+// that could not be saved is the backend failing, not a wrong guess: 500,
+// and the reservation goes back too.
 //
 // Writes every refusal itself.
 func (g *Gate) recheckPasskey(w http.ResponseWriter, r *http.Request, user *gauntlet.User, assertion json.RawMessage, wrongMsg string, now time.Time) bool {
@@ -101,11 +116,20 @@ func (g *Gate) recheckPasskey(w http.ResponseWriter, r *http.Request, user *gaun
 		g.writePasskeysNotReady(w)
 		return false
 	}
-	cookie, err := r.Cookie(passkeyStepUpCookieName)
-	if err != nil {
+	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
+		g.recheckRefused(r, user)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
+		return false
+	}
+	expired := func() bool {
+		g.deps.Limiter.ReleaseRecheck(user.ID, now)
 		g.clearPasskeyStepUpCookie(w)
 		writeUnauthorized(w, classStepExpired, stepUpStartAgain)
 		return false
+	}
+	cookie, err := r.Cookie(passkeyStepUpCookieName)
+	if err != nil {
+		return expired()
 	}
 	refuse := func() bool {
 		g.recheckFailed(r, user, gauntlet.SignInFactorRefused, gauntlet.SignInMethodPasskey)
@@ -114,9 +138,7 @@ func (g *Gate) recheckPasskey(w http.ResponseWriter, r *http.Request, user *gaun
 	}
 	verified, err := g.deps.Passkeys.FinishLogin(user, cookie.Value, assertion)
 	if errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
-		g.clearPasskeyStepUpCookie(w)
-		writeUnauthorized(w, classStepExpired, stepUpStartAgain)
-		return false
+		return expired()
 	}
 	if err != nil {
 		return refuse()

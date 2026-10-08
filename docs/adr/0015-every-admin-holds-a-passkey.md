@@ -102,9 +102,14 @@ emergency-access accounts).
    login ceremony for the caller's own usable passkeys through
    `Deps.Passkeys` and seals it in its own five-minute cookie,
    `gate_passkey_stepup`, so a sign-in's ceremony cookie is never
-   finished here nor this one at a sign-in. Begin takes one re-check
-   from the account's budget and keeps it until the assertion passes,
-   so a session alone cannot mint challenges without limit. The `passkey/`
+   finished here nor this one at a sign-in. Following the budget rule
+   (docs/design.md, "One rule for every budget"), begin takes nothing
+   from the account's re-check budget, so a cancelled or expired prompt
+   costs no re-check; each begin is counted on a per-account bucket of
+   its own, never refunded, so a session alone cannot mint challenges
+   without limit. The finish reserves a re-check in its own request and
+   hands it back on success, as a code does; a wrong assertion keeps
+   it. The `passkey/`
    leaf rule holds: `gate` still imports neither `gauntlet/passkey` nor
    the WebAuthn library.
 

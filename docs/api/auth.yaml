@@ -685,9 +685,13 @@ paths:
         `adminAssertion`) field, beside the password, in place of a code.
         Takes no body.
 
-        Takes one attempt from the account's password re-check budget and
-        keeps it until the assertion passes, so a session alone cannot
-        start ceremonies without limit (`429` once the budget is spent).
+        Takes nothing from the account's password re-check budget, so a
+        prompt that is cancelled or expires costs no re-check. Each begin
+        is counted on a limit of its own for the account (the limiter's
+        threshold per window), never handed back, so a session alone
+        cannot start ceremonies without limit: `429` once it is spent.
+        The route that takes the `assertion` checks it on the re-check
+        budget, as it checks a code.
         `404` while the application has no passkeys; `409` while its
         relying party is not ready, when the caller holds no passkey
         usable at this address, or when the caller has no local password

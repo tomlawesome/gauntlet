@@ -488,6 +488,7 @@ factor's 5, the 100 and the 24 hours are fixed):
 | Failed attempts from one address (a right one does not count) | 5 in 5 minutes | `429 rate-limited` until the window passes |
 | Failed sign-ins from one address | 100 in 24 hours (`AddressBanFailures`) | the address is banned for 24 hours (`AddressBanDuration`) |
 | Codes sent for one account | 5 in 5 minutes, for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
+| Passkey step-ups started by one account (#82) | 5 in 5 minutes, counted and never refunded | `429 rate-limited`, no challenge; the re-check budget is untouched |
 | Sign-ins from a browser the account remembers, while it is locked out | 5 in 5 minutes | allowed, so a stranger cannot lock the owner out |
 
 A *door* is a check in `Protect` that blocks every route but a few until
@@ -617,7 +618,8 @@ together in one save, and they survive a restart as on the `*Store`.
 the login buckets (address, unknown name, account) lives and dies inside
 one request. Anything that must be bounded across requests gets a
 bucket of its own that is counted, never refunded: challenge minting
-(`passkey-begin:`) and code delivery.
+(`passkey-begin:` per address, `passkey-stepup-begin:` per account for
+the passkey step-up, #82) and code delivery.
 
 - A sign-in held for a confirmation code proved every credential, so its
   attempt goes back to the login buckets in that request (a correct
@@ -1057,13 +1059,17 @@ account's), on the account's `ReserveRecheck` budget: either missing
 needs none. Since #82 a passkey stands in for the code: `POST
 /api/auth/step-up/passkey/begin` (session-gated, no body) starts a login
 ceremony for the caller's own usable passkeys through
-`Deps.Passkeys.BeginLogin`, sets `gate_passkey_stepup` and keeps one
-re-check reserved; the route then takes `password` and `assertion`
-(`adminAssertion` on create) in place of the code -- exactly one of the
-two, else 400 -- and `recheckPasskey` finishes the ceremony for the
-caller, refuses a clone warning, records the counter and hands the
-reservation back. A wrong assertion is 401 and counts; a missing or
-dead ceremony is 401 `step-expired`. So a passkey-only admin no longer
+`Deps.Passkeys.BeginLogin` and sets `gate_passkey_stepup`. It takes
+nothing from the re-check budget: each begin is counted on its own
+per-account bucket (`passkey-stepup-begin:`), never refunded, 429 when
+full, so an abandoned prompt costs no re-check (the budget rule above).
+The route then takes `password` and `assertion` (`adminAssertion` on
+create) in place of the code -- exactly one of the two, else 400 -- and
+`recheckPasskey` reserves a re-check in that request, finishes the
+ceremony for the caller, refuses a clone warning, records the counter
+and hands the reservation back. A wrong assertion is 401 and keeps it; a
+missing or dead ceremony checks nothing, hands it back and is 401
+`step-expired`. So a passkey-only admin no longer
 spends a recovery code per grant. While every admin must hold a passkey
 (§1.6), a grant to an account with none usable here still succeeds, and
 the account is held at the passkey door from its next request: the role
