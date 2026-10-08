@@ -67,6 +67,10 @@ Low-severity findings from the v0.3.0 audit (#80):
 - A sign-in with the old password that was already being checked when
   a password change or an admin reset landed is refused, rather than
   given a session the change was meant to end.
+- Holding a first second factor (`HoldFirstPasskey`, `HoldFirstTOTP`)
+  refuses an account that already has one, or has one on hold, before
+  minting the ten recovery codes, rather than hashing all ten and
+  throwing them away.
 
 ## [0.3.0] - 2026-10-08
 
