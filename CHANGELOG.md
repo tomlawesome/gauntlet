@@ -415,7 +415,10 @@ Reading notes for this release:
   account's second step, and a browser the account remembers has a
   limit of its own beside it, so a stranger holding the password cannot
   keep the owner from their passkey. A banned address is still refused
-  at begin unless the browser is known. An admin's unlock
+  at begin unless the browser is known, and so is a locked account
+  (recorded as `locked`) or a disabled one (to any browser): begin reads
+  the lockout without reserving anything, so no prompt is shown for a
+  sign-in that cannot complete. An admin's unlock
   (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
   `LoginLimiter.ReserveFactorBegin` and `ReleaseFactorBegin`. Additive.
 

@@ -547,9 +547,15 @@ func (g *Gate) isLastUsableAdminPasskey(user *gauntlet.User, credID []byte) bool
 // a budget of its own, as reserveLogin gives it one past a lockout
 // (#44): a stranger holding the password cannot keep the owner's own
 // browser from its passkey. A banned address is refused here as
-// reserveLogin refuses it, with the same known-browser exception. The
-// account's lockout is not read here: login/factor reads it, and a
-// challenge for a locked account completes nothing.
+// reserveLogin refuses it, with the same known-browser exception.
+//
+// The account's lockout and disable are read from its record, not
+// reserved, so there is nothing to hand back: a locked account is
+// refused here (429, recorded as locked) unless the browser is one it
+// remembers, and a disabled one always, as reserveLogin would refuse
+// them, so nobody is asked to touch a passkey for a sign-in that cannot
+// complete. login/factor's reservation stays the authority, and also
+// sees a lockout this process decided but could not save.
 func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -574,19 +580,35 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	address := g.cfg.ClientIP(r)
-	_, banned := g.deps.Limiter.AddressBanned(address, now)
-	if banned && g.isKnownBrowser(r, user.ID, now) {
-		banned = false
+	// The cookie is read at most once, and only when a refusal turns on
+	// it, as reserveLogin reads it.
+	knownRead, known := false, false
+	isKnown := func() bool {
+		if !knownRead {
+			knownRead, known = true, g.isKnownBrowser(r, user.ID, now)
+		}
+		return known
 	}
-	known := false
-	ok = !banned && g.deps.Limiter.ReserveFactorBegin(user.ID, false, now)
-	if !ok && !banned && g.isKnownBrowser(r, user.ID, now) {
-		known = true
-		ok = g.deps.Limiter.ReserveFactorBegin(user.ID, true, now)
+	res := loginReservation{address: g.cfg.ClientIP(r)}
+	_, banned := g.deps.Limiter.AddressBanned(res.address, now)
+	switch {
+	case banned && !isKnown():
+		res.refusal = gauntlet.SignInRateLimited
+	case user.LoginDisabled(now):
+		res.refusal = gauntlet.SignInDisabled
+	case user.LoginLockedUntil.After(now) && !isKnown():
+		// Read, not reserved: nothing to hand back. login/factor's
+		// reservation stays the authority; this only spares the owner
+		// a passkey prompt that could not sign in.
+		res.refusal, res.lockedUntil = gauntlet.SignInLocked, user.LoginLockedUntil
 	}
-	if !ok {
-		res := loginReservation{address: address, refusal: gauntlet.SignInRateLimited}
+	onKnown := false
+	if res.refusal == "" && !g.deps.Limiter.ReserveFactorBegin(user.ID, false, now) {
+		if onKnown = isKnown(); !onKnown || !g.deps.Limiter.ReserveFactorBegin(user.ID, true, now) {
+			res.refusal = gauntlet.SignInRateLimited
+		}
+	}
+	if res.refusal != "" {
 		g.recordSignIn(r, loginEvent(user, "", res.refusal, gauntlet.SignInMethodPasskey), res, now)
 		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
@@ -595,7 +617,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 	options, sealed, err := g.deps.Passkeys.BeginLogin(user)
 	if err != nil {
 		// This server's failure, not the caller's attempt.
-		g.deps.Limiter.ReleaseFactorBegin(user.ID, known, now)
+		g.deps.Limiter.ReleaseFactorBegin(user.ID, onKnown, now)
 		g.logError("beginning passkey sign-in for " + user.Username + ": " + err.Error())
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey sign-in", nil)
 		return

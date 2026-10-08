@@ -648,8 +648,9 @@ paths:
         none of the sign-in attempts `login/factor` counts: `429` once it
         is spent, while codes and recovery codes still work. A browser
         the account remembers has a limit of its own beside it. A banned
-        address is `429` unless the browser is one the account
-        remembers.
+        address or a locked account is `429` unless the browser is one
+        the account remembers; a disabled account is `429` to any
+        browser.
       security:
         - pendingLoginCookie: []
       parameters:

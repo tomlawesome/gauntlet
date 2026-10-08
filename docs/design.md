@@ -638,8 +638,12 @@ and code delivery.
   remembers begins on a budget of its own (`passkey-factor-begin-known:`),
   as it gets one past a lockout, so a stranger holding the password
   cannot keep the owner from their passkey. A banned address is refused
-  there unless the browser is known; the lockout is read at
-  `login/factor`. `LoginLimiter.UnlockLogin` empties both budgets.
+  there unless the browser is known. Begin also reads the account's
+  lockout and disable from its record, reserving nothing, and refuses a
+  locked account to an unknown browser and a disabled one to any, so
+  nobody touches a passkey for a sign-in that cannot complete;
+  `login/factor`'s reservation stays the authority.
+  `LoginLimiter.UnlockLogin` empties both budgets.
 
 - A sign-in held for a confirmation code proved every credential, so its
   attempt goes back to the login buckets in that request (a correct

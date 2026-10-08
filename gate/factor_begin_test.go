@@ -169,3 +169,28 @@ func TestPasskeyFactorBeginAtABannedAddress(t *testing.T) {
 	}
 	passkeyLoginFactorBegin(t, known, e.ts)
 }
+
+// An unknown browser holding a pending login made before a lockout is
+// refused at begin, with no challenge to touch its passkey for: begin
+// reads the lockout without reserving anything, and login/factor still
+// decides.
+func TestPasskeyFactorBeginRefusesALockedAccountEarly(t *testing.T) {
+	e := newAloneEnv(t)
+	e.withFreshAddresses()
+	stranger := startPasskeyLogin(t, e.ts, passkeyBilboUsername, passkeyBilboPassword)
+	failLoginWindow(t, e.g, e.ts, e.clock, passkeyBilboUsername)
+
+	resp := postJSON(t, stranger, e.ts.URL+"/api/auth/login/factor/begin", struct{}{})
+	status, body := readAll(t, resp)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("begin during the lockout = %d %s, want 429", status, body)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == passkeyAssertCookieName && c.MaxAge >= 0 {
+			t.Error("begin during the lockout set a ceremony cookie")
+		}
+	}
+	if ev := lastEvent(t, e); ev.Outcome != gauntlet.SignInLocked || ev.LockedUntil.IsZero() || ev.Method != gauntlet.SignInMethodPasskey {
+		t.Errorf("event = %+v, want locked/passkey with its end", ev)
+	}
+}
