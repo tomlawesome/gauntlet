@@ -375,6 +375,8 @@ func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
 func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back
+func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool // new (#82): a passkey step-up begin, per account, in the account map; counted, never handed back by a finish
+func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time)
 type AccountLockouts interface {                                    // *Store implements it
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
@@ -1061,7 +1063,8 @@ needs none. Since #82 a passkey stands in for the code: `POST
 ceremony for the caller's own usable passkeys through
 `Deps.Passkeys.BeginLogin` and sets `gate_passkey_stepup`. It takes
 nothing from the re-check budget: each begin is counted on its own
-per-account bucket (`passkey-stepup-begin:`), never refunded, 429 when
+per-account bucket (`LoginLimiter.ReserveStepUpBegin`, in the account
+map, so no flood of addresses can reset it), never refunded, 429 when
 full, so an abandoned prompt costs no re-check (the budget rule above).
 The route then takes `password` and `assertion` (`adminAssertion` on
 create) in place of the code -- exactly one of the two, else 400 -- and

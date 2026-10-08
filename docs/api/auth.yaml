@@ -3347,7 +3347,7 @@ components:
             status:
               type: string
               enum: [ready, unset, ip, insecure]
-              description: Whether passkeys work here, and why not -- `unset` (no usable public URL), `ip` (it is an IP address), `insecure` (not https).
+              description: Whether passkeys work here, and why not -- `unset` (no usable public URL), `ip` (it is an IP address), `insecure` (plain http on any host but localhost).
             origin:
               type: string
               description: Present only when `status` is `ready`.

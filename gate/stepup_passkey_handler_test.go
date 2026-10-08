@@ -349,11 +349,11 @@ func startPasskeyLoginAs(t *testing.T, ts *httptest.Server, username, password s
 // has left, measured as recheckRoom measures.
 func stepUpBeginRoom(g *Gate, id string) int {
 	n := 0
-	for g.deps.Limiter.Reserve("passkey-stepup-begin:"+id, time.Now()) {
+	for g.deps.Limiter.ReserveStepUpBegin(id, time.Now()) {
 		n++
 	}
 	for range n {
-		g.deps.Limiter.Release("passkey-stepup-begin:"+id, time.Now())
+		g.deps.Limiter.ReleaseStepUpBegin(id, time.Now())
 	}
 	return n
 }

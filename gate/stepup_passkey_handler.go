@@ -35,8 +35,8 @@ const stepUpStartAgain = "start passkey step-up again"
 // every budget"), and a prompt that is cancelled, expires or is replaced
 // must not cost a password change or an admin action a re-check. So that
 // a session cookie alone cannot mint challenges without limit, every
-// begin is counted on a bucket of its own (stepUpBeginKey), never
-// refunded, as login/passkey/begin's is per address; 429 when it is full.
+// begin is counted on a bucket of its own
+// (LoginLimiter.ReserveStepUpBegin), never refunded, as login/passkey/begin's is per address; 429 when it is full.
 // A failure to start on this server's side hands its count back. Refuses
 // with 404 while the application has no passkeys, 409 for
 // a caller with no local password (refuseWithoutLocalPassword: the
@@ -64,8 +64,7 @@ func (g *Gate) handleStepUpPasskeyBegin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	now := g.now()
-	beginKey := stepUpBeginKey(user.ID)
-	if !g.deps.Limiter.Reserve(beginKey, now) {
+	if !g.deps.Limiter.ReserveStepUpBegin(user.ID, now) {
 		g.recheckRefused(r, user)
 		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
@@ -73,20 +72,13 @@ func (g *Gate) handleStepUpPasskeyBegin(w http.ResponseWriter, r *http.Request) 
 	options, sealed, err := g.deps.Passkeys.BeginLogin(user)
 	if err != nil {
 		// This server's failure, not the caller's attempt.
-		g.deps.Limiter.Release(beginKey, now)
+		g.deps.Limiter.ReleaseStepUpBegin(user.ID, now)
 		g.logError("beginning passkey step-up for " + user.Username + ": " + err.Error())
 		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey step-up", nil)
 		return
 	}
 	g.setPasskeyStepUpCookie(w, sealed)
 	writeJSON(w, http.StatusOK, options)
-}
-
-// stepUpBeginKey is the limiter bucket step-up/passkey/begin counts on
-// for the account accountID: its own, so minting challenges spends none
-// of the account's re-checks, and never refunded by a finish.
-func stepUpBeginKey(accountID string) string {
-	return "passkey-stepup-begin:" + accountID
 }
 
 // recheckPasskey is recheckSecondFactor for a passkey: assertion is the

@@ -64,6 +64,9 @@ Reading notes for this release:
   and counts, and a missing or used ceremony is `401` `step-expired`
   and does not. A
   passkey-only admin no longer spends a recovery code on every grant.
+  New `LoginLimiter.ReserveStepUpBegin` and `ReleaseStepUpBegin` hold
+  that limit in the account map, which no flood of addresses can
+  reset. Additive.
 - New Go API for #82, additive: the type `gate.AdminPasskeyRule`, its
   constants `gate.AdminPasskeyRequired` and `gate.AdminPasskeyOptional`,
   and the field `gate.Config.AdminPasskey`.

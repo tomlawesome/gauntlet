@@ -179,11 +179,14 @@ const lockoutRetryInterval = 30 * time.Second
 //
 // Sends of a code out of band (ReserveDelivery, #84) are a fourth, one
 // per channel: deliveryBucket + channel + ":" + account ID.
+//
+// Passkey step-up begins (ReserveStepUpBegin, #82) are a fifth.
 const (
 	loginBucket        = "login:"
 	recheckBucket      = "password-recheck:"
 	knownBrowserBucket = "known:"
 	deliveryBucket     = "deliver:"
+	stepUpBeginBucket  = "passkey-stepup-begin:"
 )
 
 // ErrLimiterConfig is returned by NewLoginLimiter for a threshold or
@@ -1046,6 +1049,32 @@ func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time)
 	}
 	l.accounts[key] = append(entries, now)
 	return true
+}
+
+// ReserveStepUpBegin counts one passkey step-up begin for accountID
+// (#82): threshold per window, per account, in the account map (never
+// evicted), so a session alone cannot mint challenges without limit and
+// no flood of addresses or made-up names can reset the count. Never
+// handed back by a finish, so begins spend none of the account's
+// re-checks; ReleaseStepUpBegin is only for a begin the server failed
+// to start, in the same request. Memory only: a restart clears it.
+func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := stepUpBeginBucket + accountID
+	entries := l.pruneIn(l.accounts, key, now)
+	if len(entries) >= l.threshold {
+		return false
+	}
+	l.accounts[key] = append(entries, now)
+	return true
+}
+
+// ReleaseStepUpBegin is Release for ReserveStepUpBegin.
+func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.releaseIn(l.accounts, stepUpBeginBucket+accountID, now)
 }
 
 // ReleaseRecheck is Release for ReserveRecheck.
