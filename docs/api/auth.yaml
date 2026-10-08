@@ -127,6 +127,17 @@ info:
     limit and ban like a password attempt, and meets the same doors after
     it (a forced password change still holds).
 
+    **Every admin holds a passkey** (#82). When the application requires
+    it (`Config.AdminPasskey`; it must say either way), an admin account
+    holding no passkey usable at this address is stopped at the
+    `must-enrol-passkey` door until it registers one (an authenticator app
+    does not open it; an admin with no local password meets
+    `must-change-password` first). The session body says so
+    (`mustEnrolPasskey`, `adminPasskeyRequired`), as do the role, create
+    and list routes (`heldForPasskey`). An admin cannot delete their own
+    last usable passkey (`409`). The step-up routes take a passkey in
+    place of a code, through `POST /api/auth/step-up/passkey/begin`.
+
     **First second factor: hold until confirmed** (#58). An account's
     first second factor -- its first passkey (`register/finish`) or its
     first authenticator app (`totp/confirm`) -- is saved together with

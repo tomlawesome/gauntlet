@@ -121,6 +121,9 @@ handler := g.Protect(mux) // serve this
   The login limiter and every audit record use it.
 - `SecureCookie` false logs one warning at start-up and sends the
   session cookie over plain HTTP; set it true wherever TLS terminates.
+- `AdminPasskey` is required, and has no default: say whether every
+  admin account must hold a passkey (see "Every admin holds a passkey"
+  below). `New` refuses to start while it is unset.
 - `New` fails closed: a missing store or CSRF value is an error, not a
   gate that panics on its first request.
 - API tokens reach the application only through handlers registered
@@ -153,6 +156,38 @@ Both are optional, and both answer 404 on their routes until wired:
   then also offers signing in with a passkey alone
   ([ADR-0012](adr/0012-passkey-alone-sign-in.md)). An application that
   never imports `gauntlet/passkey` never links the WebAuthn library.
+
+### Every admin holds a passkey
+
+`Config.AdminPasskey` says whether every admin account must hold a
+passkey ([ADR-0015](adr/0015-every-admin-holds-a-passkey.md), #82).
+There is no default: you choose, so the rule is never on or off by
+accident.
+
+- `gate.AdminPasskeyRequired`: an admin who holds no passkey that works
+  at this site's address is stopped at a door (`403`, `X-Auth-Gate:
+  must-enrol-passkey`) until they register one, which the door still
+  lets them do. An authenticator app alone does not open it. Use this
+  wherever the application is served over https on a domain name and
+  sets `Deps.Passkeys`. `New` refuses to start with it while
+  `Deps.Passkeys` is nil, or its public URL is unset, an IP address or
+  plain http -- browsers cannot make a passkey for any of those, so the
+  door could never open.
+- `gate.AdminPasskeyOptional`: admins may hold any second factor, as
+  every other account may. Use this for an application reached over
+  plain http or by IP address, or one that wires no passkeys.
+
+`New` logs the choice at start-up ("gate: admin passkey rule:
+required"). Users and viewers are never affected.
+
+**Upgrading to this version.** Add the line to your `gate.Config`
+before you upgrade; without it the application will not start. If
+you choose `AdminPasskeyRequired`, have each admin register a passkey
+before upgrading: an admin without one is stopped at their next
+request after the upgrade and has to register one there. A browser
+that cannot make a passkey cannot get past the door; use another. The
+setup, unlock and escape codes in the server's log still work as
+before.
 
 ## Tell the account's owner
 

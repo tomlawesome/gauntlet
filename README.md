@@ -74,8 +74,8 @@ in [docs/using.md](docs/using.md).
 - [docs/design.md](docs/design.md): the design, package by package.
 - [docs/adr/](docs/adr/): one architecture decision record (ADR) per
   decision, from why the module exists
-  ([ADR-0001](docs/adr/0001-shared-auth-module.md)) to accepting
-  Google's shared SSO issuer (ADR-0014).
+  ([ADR-0001](docs/adr/0001-shared-auth-module.md)) to requiring a
+  passkey on every admin account (ADR-0015).
 - [docs/api/auth.yaml](docs/api/auth.yaml): every route, as an OpenAPI
   contract.
 - [docs/api/errors.md](docs/api/errors.md): every error body.

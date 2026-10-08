@@ -77,7 +77,7 @@ exists. Each pair is named under the class it shares, below.
   | `POST /api/auth/password` | Wrong current password | "current password is incorrect" |
   | `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST /api/auth/recovery-codes`, `POST /api/auth/passkeys/register/begin`, `DELETE /api/auth/passkeys/{id}`, `POST /api/auth/oidc/link`, `POST /api/auth/logout-all` (an account with a local password) | Wrong password at the re-check of the caller's own password | "incorrect password" |
   | `POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`, `DELETE /api/auth/users/{id}`, `DELETE /api/auth/users/{id}/totp`, `DELETE /api/auth/users/{id}/passkeys` | Wrong password at the re-check of the calling admin's own password (#72) | "incorrect password" |
-  | `POST /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant the admin role (#67); `POST /api/auth/users/{id}/unlock` on the caller's own account | Wrong password or second-factor code at the caller's re-check | "incorrect password or code" |
+  | `POST /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant the admin role (#67); `POST /api/auth/users/{id}/unlock` on the caller's own account | Wrong password, second-factor code or passkey (#82) at the caller's re-check | "incorrect password or code" |
   | Any route, at `gate.Protect` | A bearer token that matches no registered kind, is revoked or expired, or an `Authorization` header that is not a well-formed `Bearer <token>` | "invalid or revoked token" |
 
 - `detail` differs between routes, but within one route it never
@@ -92,7 +92,7 @@ exists. Each pair is named under the class it shares, below.
   - at `Protect`, a token of an unknown type, a revoked token, an
     expired token and a malformed `Authorization` header;
   - every refused passkey, at `login/factor`, `login/passkey`,
-    `login/prove` and `reauthenticate`: a wrong signature, a clone
+    `login/prove`, `reauthenticate` and the step-up re-check (#82): a wrong signature, a clone
     warning (the passkey's use counter went backwards or did not move,
     which suggests a copied key; a counter that stays at 0 is normal
     and accepted), or a passkey removed from the account
@@ -153,6 +153,7 @@ exists. Each pair is named under the class it shares, below.
   | `POST /api/auth/login/confirm` | The confirm cookie: missing, expired, tampered with, already used, issued for a passkey instead of a code, or the account was deleted since (#55) |
   | `POST /api/auth/login/prove/begin`, `POST /api/auth/login/prove` | The same, issued for a code instead of a passkey; and, at `prove`, an expired or used passkey ceremony (#65) |
   | `POST /api/auth/login/escape` | The escape cookie, for the same reasons (#66) |
+  | `POST /api/auth/users`, `PUT /api/auth/users/{id}/role` and `POST /api/auth/users/{id}/unlock`, with a passkey in place of a code (#82) | The step-up ceremony cookie `POST /api/auth/step-up/passkey/begin` set: missing, expired, tampered with or already used. A sign-in's ceremony cookie is never read here |
 
 - A frontend restarts the flow from its first step -- there is nothing
   left for a retry at this step to complete.
@@ -169,7 +170,8 @@ exists. Each pair is named under the class it shares, below.
   every route including those that need no session (`register`,
   `login`, `unlock`, ...). A *door* is a hold that keeps a session away
   from everything except one required step, such as changing its
-  password; see `must-change-password` and `must-enrol-factor` below.
+  password; see `must-change-password`, `must-enrol-factor` and
+  `must-enrol-passkey` below.
 - `detail` is always "missing required header".
 
 ## forbidden
@@ -220,7 +222,13 @@ exists. Each pair is named under the class it shares, below.
 - **Status:** 403. **Title:** Password change required.
 - The session is stopped at the forced-password-change door: an
   administrator reset the account, five second-factor steps in a row
-  failed, or a sign-in found the password breached. Carries
+  failed, or a sign-in found the password breached. While the
+  application requires every admin to hold a passkey (#82), an admin
+  with no local password -- an account that signs in through single
+  sign-on and was made an admin -- is held here too, with `detail`
+  "this admin account has no local password -- set one before going
+  any further": a passkey can only be registered on an account with a
+  password, so it sets one first, from a fresh single sign-on. Carries
   `X-Auth-Gate: must-change-password` -- a frontend matches this header,
   never the `detail` text, to route the session straight to the one
   door that gets it out: `POST /api/auth/password`.
@@ -239,6 +247,31 @@ exists. Each pair is named under the class it shares, below.
   `POST /api/auth/recovery-codes/confirm`, while the door holds.
 - A new first factor does not count until the user confirms they saved
   its recovery codes (#58). Until then the session stays at this door.
+- An admin held for a passkey sees `must-enrol-passkey` instead, even
+  with no factor at all (below).
+
+## must-enrol-passkey
+
+- **Status:** 403. **Title:** Passkey registration required.
+- The application requires every admin to hold a passkey
+  (`gate.Config.AdminPasskey` set to `gate.AdminPasskeyRequired`, #82),
+  and this admin account holds none that works at this site's address.
+  An authenticator app does not count, and nor does a passkey
+  registered under an earlier address. Carries `X-Auth-Gate:
+  must-enrol-passkey`; a frontend matches this header, never `detail`,
+  to route the session to passkey registration.
+- Returned by `gate.Protect` for every route except the same ones
+  `must-enrol-factor` admits (passkey register begin and finish, TOTP
+  enrol and confirm, `POST /api/auth/recovery-codes/confirm`), while
+  the door holds. It opens at the next request after a passkey is
+  registered and, for a first factor, its recovery codes confirmed.
+- Checked after `must-change-password` and before `must-enrol-factor`:
+  an admin with no factor at all is told the one thing that opens this
+  door. Users and viewers never see it.
+- An account made an admin, created as one, or set up as the first
+  account is held here from its next request; so is an admin whose
+  passkeys another admin cleared. `GET /api/auth/session`'s
+  `mustEnrolPasskey` says when it holds.
 
 ## invalid-request
 
@@ -283,6 +316,9 @@ exists. Each pair is named under the class it shares, below.
     waiting to confirm;
   - the route refuses to act on this account: the caller's own, or one
     that already holds the role asked for;
+  - an admin removing their own last passkey that works at this
+    address, while the application requires admin passkeys (#82):
+    "register another passkey first";
   - passkeys are not yet set up for this site's address, or the
     account's single sign-on link cannot be used.
 

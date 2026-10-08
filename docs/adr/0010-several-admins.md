@@ -1,7 +1,7 @@
 # ADR-0010: Several admins; the last is protected
 
 **Status:** Accepted (owner decisions 2026-10-04 on #67 and #75);
-decision 3 amended by ADR-0013
+decision 3 amended by ADR-0013; decisions 2 and 5 amended by ADR-0015
 **Date:** 2026-10-05
 **Relates to:** #67 (this change), #75 (role change between user and
 viewer, folded in), #44 (the unlock code, now the lone operator's
@@ -136,3 +136,16 @@ the step-up).
   [ADR-0013](0013-sso-group-roles.md) (#76) answers 409
   `role-managed-by-sso` to a change to `user` or `viewer` on a non-admin
   SSO account when a groups map is configured.
+- Status note (#82, 2026-10-08): decision 2's step-up also accepts a
+  passkey in place of the code
+  ([ADR-0015](0015-every-admin-holds-a-passkey.md) decision 6): the
+  password and an assertion from `POST /api/auth/step-up/passkey/begin`,
+  on the same re-check budget, so a passkey-only admin no longer spends
+  a recovery code per grant. While the application requires admin
+  passkeys, a grant to an account with none usable is still made, and
+  the account is held at the passkey door until it registers one.
+- Status note (#82, 2026-10-08): decision 5's local password is now
+  enforced at the door for an admin while the application requires admin
+  passkeys (ADR-0015 decision 5): an SSO-only admin is held at the
+  `must-change-password` door until it sets one, then at the passkey
+  door.

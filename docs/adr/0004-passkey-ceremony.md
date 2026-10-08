@@ -3,7 +3,8 @@
 **Status:** Accepted, shipped in v0.2.0 (design on #20; owner decisions of
 2026-09-30 and 2026-10-01 recorded below). Decision 5's "no discoverable
 or passwordless login" and its unset resident-key preference are
-superseded by ADR-0012.
+superseded by ADR-0012. Decisions 3 and 4 are amended by ADR-0015 (see
+the status notes at the end).
 **Date:** 2026-10-02
 **Relates to:** #20 (G8, this change), ADR-0001 (mikroview is the
 reference), ADR-0002 (additive API, apidiff, OpenAPI contract),
@@ -200,3 +201,13 @@ mikroview's fake authenticator copies and this module reuses.
 - Status note (v0.3.0 audit, 2026-10-08): decision 3's "two cookies" is now three:
   ADR-0012 (#77) added `gate_passkey_signin` on `/api/auth`. The two
   named here are unchanged, and all three last five minutes.
+- Status note (#82, 2026-10-08): decisions 3 and 4 are amended by
+  [ADR-0015](0015-every-admin-holds-a-passkey.md). `Deps.Passkeys` nil
+  and a relying party that is not ready (`unset`, `ip`, `insecure`)
+  still boot, but only for an application that sets
+  `gate.Config.AdminPasskey` to `gate.AdminPasskeyOptional`; with
+  `gate.AdminPasskeyRequired`, `gate.New` refuses to start, naming the
+  status. Every application now sets the field, so "always boots" is
+  the application's explicit choice rather than the default. A fourth
+  ceremony cookie, `gate_passkey_stepup` on `/api/auth`, five minutes,
+  carries a passkey step-up.
