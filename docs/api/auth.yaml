@@ -251,10 +251,12 @@ paths:
         `{"confirm": true}`, the confirm cookie set and no session
         cookie; `POST /api/auth/login/confirm` finishes it). The response
         never says which signal was raised or where a code went. Codes
-        sent are limited per account (#84): past the limit a sign-in
-        that would be held is answered `429` `rate-limited` instead, with
-        no code and no cookie. The second-factor and passkey steps do the
-        same.
+        sent are limited per account (#84, #83): a second code waits 30
+        seconds after the first, each further one in the hour twice as
+        long, and no more than five go out in an hour. Past the limit a
+        sign-in that would be held is answered `429` `rate-limited`
+        instead, with no code and no cookie. The second-factor and
+        passkey steps do the same.
 
         A `403` `sign-in-refused` for an admin whom no other admin can act
         for may also set the escape cookie (#66): the code that lets that

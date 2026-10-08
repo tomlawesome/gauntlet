@@ -6,6 +6,17 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **Confirmation codes and escape codes wait between sends, and five an
+  hour at most** (#83). The per-window send limit (#84) let someone
+  holding the password ask for a code every minute, window after window.
+  Each account and kind of code now also has a resend cooldown, 30
+  seconds after the first code and doubling with each further one in
+  the last hour (at most 15 minutes), and a cap of five codes in any
+  hour, both fixed. Inside the cooldown or past the cap a held sign-in
+  is answered `429 rate-limited` with no code, as at the window's limit;
+  a refused request is not counted. An admin's unlock
+  (`LoginLimiter.UnlockLogin`) or a restart clears both. No API change.
+
 - **Starting a passkey second step spends no sign-in attempts** (#85).
   `login/factor/begin` used to take an attempt on the address's and
   the account's sign-in limits and `login/factor` handed it back in a

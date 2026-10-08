@@ -172,7 +172,8 @@ const lockoutRetryInterval = 30 * time.Second
 // #44) is a third, kept apart from the login budget it stands in for.
 //
 // Sends of a code out of band (ReserveDelivery, #84) are a fourth, one
-// per channel: deliveryBucket + channel + ":" + account ID.
+// per channel: deliveryBucket + channel + ":" + account ID, each send
+// kept for the longer of the window and sendCapPeriod (#83).
 //
 // Passkey step-up begins (ReserveStepUpBegin, #82) are a fifth, and
 // second-step passkey begins (ReserveFactorBegin, #85) a sixth, with a
@@ -186,6 +187,44 @@ const (
 	factorBeginBucket      = "passkey-factor-begin:"
 	knownFactorBeginBucket = "passkey-factor-begin-known:"
 )
+
+// The send limits beyond the window (#83), per account and channel,
+// fixed whatever NewLoginLimiter is given: a resend cooldown that starts
+// at sendCooldownBase and doubles with each send in the last
+// sendCapPeriod, up to maxSendCooldown, and at most maxSendsPerHour
+// sends in any sendCapPeriod. Sized for a self-hosted home app, where one
+// owner rarely needs a second code and never a sixth in an hour; rate
+// limiting out-of-band sends is SP 800-63B-4 §3.1.3.2, ASVS 5.0 6.6.3
+// and the OWASP MFA cheat sheet's control against OTP flooding.
+const (
+	// sendCooldownBase is the wait after a first send: the usual
+	// "resend code" delay, long enough to stop a burst and short enough
+	// for a slow mailbox.
+	sendCooldownBase = 30 * time.Second
+	// maxSendCooldown caps the doubling at a code's lifetime (the gate's
+	// ConfirmCodeLifetime and EscapeCodeLifetime), so a wait never
+	// outlasts the code it follows. maxSendsPerHour refuses the sixth
+	// send before the doubling reaches it.
+	maxSendCooldown = 15 * time.Minute
+	// sendCapPeriod is the cap's period, twelve of the consumers'
+	// five-minute windows, so filling the window over and over cannot
+	// keep a trickle of codes going.
+	sendCapPeriod = time.Hour
+	// maxSendsPerHour is the cap: the limiter's usual five, over an hour
+	// instead of a window.
+	maxSendsPerHour = 5
+)
+
+// sendCooldown is the wait after the latest send, when the last
+// sendCapPeriod holds n sends (n >= 1): sendCooldownBase, doubled for
+// each send before the latest, never over maxSendCooldown.
+func sendCooldown(n int) time.Duration {
+	d := sendCooldownBase
+	for i := 1; i < n && d < maxSendCooldown; i++ {
+		d *= 2
+	}
+	return min(d, maxSendCooldown)
+}
 
 // ErrLimiterConfig is returned by NewLoginLimiter for a threshold or
 // window that cannot run: threshold below one would block every login
@@ -384,6 +423,10 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 		l.pruneLocked(key, now)
 	}
 	for key := range l.accounts {
+		if strings.HasPrefix(key, deliveryBucket) {
+			l.sendsLocked(key, now)
+			continue
+		}
 		l.pruneIn(l.accounts, key, now)
 	}
 	target := evict.Target(maxLoginLimiterKeys)
@@ -1024,8 +1067,13 @@ func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool {
 }
 
 // ReserveDelivery counts one out-of-band delivery for accountID on
-// channel ("confirm", "escape"): threshold per window, per account and
-// channel, in the account map (never evicted). Never handed back: a
+// channel ("confirm", "escape"), per account and channel, in the account
+// map (never evicted), and refuses it past any of three limits: the
+// limiter's threshold per window; a resend cooldown since the latest
+// send, 30 seconds after one send in the last hour and doubling with
+// each further one (sendCooldown, #83); and five sends in any hour
+// (maxSendsPerHour, #83). A refused send is not counted, so it neither
+// spends the budget nor pushes the cooldown out. Never handed back: a
 // delivery that happened is a fact, and the mailer may have sent it
 // even when it reported an error.
 //
@@ -1034,20 +1082,39 @@ func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool {
 // attempt goes back to the login budget, and the send is what must be
 // bounded instead. Counted at the point of sending, within one request,
 // so there is nothing for a later request to hand back. UnlockLogin
-// empties the account's delivery budgets (an admin's unlock means "let
-// the owner in"); SignedIn does not, so the owner signing in on a known
-// browser cannot refill a stranger's sends. Memory only: a restart
-// clears it.
+// empties the account's delivery budgets, the cooldown and hourly cap
+// with them (an admin's unlock means "let the owner in"); SignedIn does
+// not, so the owner signing in on a known browser cannot refill a
+// stranger's sends. Memory only: a restart clears it.
 func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := deliveryBucket + channel + ":" + accountID
-	entries := l.pruneIn(l.accounts, key, now)
-	if len(entries) >= l.threshold {
-		return false
+	sends := l.sendsLocked(key, now)
+	if n := len(sends); n > 0 {
+		inHour, inWindow := 0, 0
+		for _, t := range sends {
+			if !t.Before(now.Add(-sendCapPeriod)) {
+				inHour++
+			}
+			if !t.Before(now.Add(-l.window)) {
+				inWindow++
+			}
+		}
+		if inHour >= maxSendsPerHour || inWindow >= l.threshold ||
+			now.Sub(sends[n-1]) < sendCooldown(max(inHour, 1)) {
+			return false
+		}
 	}
-	l.accounts[key] = append(entries, now)
+	l.accounts[key] = append(sends, now)
 	return true
+}
+
+// sendsLocked is pruneIn for a delivery key: its sends are kept for the
+// longer of the window and sendCapPeriod, so neither ReserveDelivery nor
+// evictOldestLocked's sweep drops one the hour still counts.
+func (l *LoginLimiter) sendsLocked(key string, now time.Time) []time.Time {
+	return dropBefore(l.accounts, key, now.Add(-max(l.window, sendCapPeriod)))
 }
 
 // ReserveStepUpBegin counts one passkey step-up begin for accountID
