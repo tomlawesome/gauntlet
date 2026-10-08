@@ -127,11 +127,14 @@ type RefreshConfig struct {
 //
 // Any failure -- the network, the download host, a refused file, the disk --
 // logs one Warn and leaves Current as it was. A list whose signature
-// verified but whose content was refused -- malformed, dated in the
-// future, or not newer -- is not downloaded again until the published
-// checksum changes, since signing the same bytes again cannot change
-// that verdict; a list refused for its signature is fetched again next
-// time, so a re-signed copy is picked up.
+// verified but whose content was refused as malformed or not newer is
+// not downloaded again until the published checksum changes, since
+// signing the same bytes again cannot change that verdict; a list
+// refused for its signature is fetched again next time, so a re-signed
+// copy is picked up. A list refused only for being dated in the future
+// is re-checked against the clock on every refresh instead, so it is
+// adopted as soon as the clock catches up, without waiting for a new
+// checksum.
 type Refresher struct {
 	url, sumURL, sigURL string
 	dir                 string
@@ -345,16 +348,22 @@ func (r *Refresher) refreshLocked(ctx context.Context) error {
 		return err
 	}
 	l, err := r.check(data, sig)
+	future := false
 	if err == nil && l.Built().After(r.now().Add(futureMargin)) {
 		err = contentError{fmt.Errorf("the list claims to be built at %s, in the future", l.Built().Format(time.RFC3339))}
+		future = true
 	}
 	if err == nil && !l.Built().After(cur.Built()) {
 		err = contentError{fmt.Errorf("the published list (built %s) is not newer than the one in use (built %s)",
 			l.Built().Format(time.RFC3339), cur.Built().Format(time.RFC3339))}
 	}
 	if err != nil {
+		// A future build time is not remembered: it is the clock, not
+		// the content, so the same checksum must be re-checked against
+		// r.now() on every refresh instead of being latched out until a
+		// differently-checksummed list appears.
 		var ce contentError
-		if errors.As(err, &ce) {
+		if errors.As(err, &ce) && !future {
 			r.refused, r.hasRefused = want, true
 		}
 		return err

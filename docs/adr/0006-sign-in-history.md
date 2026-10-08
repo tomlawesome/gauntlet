@@ -129,3 +129,15 @@ rows (owner, 2026-10-02).
   (ADR-0002); version 1 is this release's.
 - In-session re-checks are audited (#45) but are not rows: the caller
   already holds a session, and the history is of sign-ins.
+- Status note (v0.3.0 audit, 2026-10-08): the `signins` document is version 3, not 1
+  (decision 1 and the consequence above): ADR-0008 added the country
+  (version 2) and ADR-0009 the unusual-sign-in signals and the
+  confirmed flag (version 3).
+- Status note (v0.3.0 audit, 2026-10-08): decision 3's fold key also includes the
+  unusual-sign-in signals and the confirmed flag (ADR-0009), and the
+  failed-attempt budget also exempts a refused sign-in, a confirmation
+  code sent and an escape code issued, not only a success or a passed
+  password step.
+- Status note (v0.3.0 audit, 2026-10-08): decision 7's `GET /api/auth/sign-ins` also
+  takes `unusual=true` (rows that raised a signal, ADR-0009), `before`
+  and `limit`.

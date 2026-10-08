@@ -2,7 +2,10 @@
 
 package persist
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // fileLock is the non-unix stand-in: see filelock_unix.go. There is no
 // portable advisory-lock primitive in the stdlib outside unix, and
@@ -10,7 +13,7 @@ import "fmt"
 // one, so this fails loudly rather than silently running unlocked.
 type fileLock struct{}
 
-func lockFile(path string) (*fileLock, error) {
+func lockFile(ctx context.Context, path string) (*fileLock, error) {
 	return nil, fmt.Errorf("persist: the file backend needs an advisory file lock, which this platform build does not provide")
 }
 

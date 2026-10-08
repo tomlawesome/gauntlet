@@ -6,13 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // The lone-admin unlock code (#44). MaxConsecutiveLoginFailures failed
 // sign-ins in a row disable an account's local sign-in until an admin
-// unlocks it -- and when the account is the admin's own, no other admin
-// exists to do it (this package holds exactly one, ErrSingleAdmin). So
-// when the store opens and finds that admin disabled, it makes a
+// unlocks it -- and when every admin is disabled (a deployment with one
+// admin, or several all locked out; since #67 a second admin is the
+// first remedy, and this code the fallback), no admin remains to do it.
+// So when the store opens and finds that so, it makes a
 // one-time code and announces it in the server's log, as an empty store
 // announces its setup code (setupcode.go): taking the code needs access
 // to the server, not just its address, which is the trust boundary the
@@ -35,6 +37,13 @@ import (
 // or another (on the next reload). There is no clock expiry, as there is
 // none on the setup code: the code is 80 bits and a gate counts each
 // attempt against the client's address.
+//
+// A disable also lifts itself LoginDisableDuration after it began (#70),
+// and every check here reads it that way (User.LoginDisabled): a
+// disable the record still holds but that has run out issues no code,
+// and an outstanding code stops working once its disable runs out,
+// since the admin can sign in as normal. The store has no clock of its
+// own, so these read unlockCodeNow.
 //
 // It is issued only at OpenStore, never on a reload or as the limiter
 // disables the account at runtime: the owner's design writes it "at
@@ -72,26 +81,32 @@ var ErrUnlockCodeInvalid = errors.New("gauntlet: the username or unlock code is 
 func unlockCodeLogLine(username, code string) string {
 	return fmt.Sprintf("sign-in for the admin account %q is disabled after %d failed attempts in a row, and no other admin can unlock it -- "+
 		"lift the disable with unlock code %s (valid until the account is unlocked or this process restarts; "+
-		"the admin then signs in with their existing password and second factor)",
-		username, MaxConsecutiveLoginFailures, code)
+		"the admin then signs in with their existing password and second factor). "+
+		"Without it the disable lifts itself %s after it began",
+		username, MaxConsecutiveLoginFailures, code, LoginDisableDuration)
 }
 
+// unlockCodeNow is the clock the unlock code reads disables against:
+// time.Now, a variable so tests can set it.
+var unlockCodeNow = time.Now
+
 // lockedOutAdmin returns the admin account whose local sign-in is
-// disabled when no admin account remains that is not -- the case where
-// nobody can use the admin unlock route -- or nil.
+// disabled at now when no admin account remains that is not -- the case
+// where nobody can use the admin unlock route -- or nil.
 //
-// This package holds exactly one admin, so today that is "the admin, if
-// disabled"; the loop says the rule rather than the cardinality, as
-// HasLocalAdmin does, so a second admin able to unlock the first would
-// mean no code. With several all disabled, the first by username gets
-// it, deterministically.
-func (st *storeState) lockedOutAdmin() *User {
+// With several admins (#67) any one that is not disabled can unlock the
+// others, so there is no code; with all of them disabled, the first by
+// username gets it, deterministically. Disabled is User.LoginDisabled,
+// as everywhere else: a disable that has lifted itself (#70) leaves an
+// admin who can sign in, and a restart must not print a live code for
+// that account.
+func (st *storeState) lockedOutAdmin(now time.Time) *User {
 	var out *User
 	for _, u := range st.byID {
 		if u.Role != RoleAdmin {
 			continue
 		}
-		if u.LoginDisabledAt.IsZero() {
+		if !u.LoginDisabled(now) {
 			return nil
 		}
 		if out == nil || u.Username < out.Username {
@@ -101,18 +116,18 @@ func (st *storeState) lockedOutAdmin() *User {
 	return out
 }
 
-// issueUnlockCodeLocked makes a new code if the store opened with a
-// locked-out admin (lockedOutAdmin) and is persisted, and returns the
+// issueUnlockCodeLocked makes a new code if the store opened with an
+// admin locked out at now (lockedOutAdmin) and is persisted, and returns the
 // admin's username and the code's display form; ("", "") when none was
 // made. The caller announces it after releasing s.mu, so
 // Options.OnUnlockCode never runs under the store's lock. Called only
 // from OpenStore.
-func (s *Store) issueUnlockCodeLocked() (username, code string) {
+func (s *Store) issueUnlockCodeLocked(now time.Time) (username, code string) {
 	if !s.Persisted() || s.hasRefusedVersion {
 		s.unlockCodeHash, s.unlockCodeFor = nil, ""
 		return "", ""
 	}
-	admin := s.lockedOutAdmin()
+	admin := s.lockedOutAdmin(now)
 	if admin == nil {
 		s.unlockCodeHash, s.unlockCodeFor = nil, ""
 		return "", ""
@@ -120,8 +135,9 @@ func (s *Store) issueUnlockCodeLocked() (username, code string) {
 	if s.unlockCodeHash != nil && s.unlockCodeFor == admin.ID {
 		return "", ""
 	}
-	// The setup code's generator: same alphabet, length and grouping
-	// (80 bits), and only its hash is kept.
+	// The setup code's generator (NewOneTimeCode, which is also the
+	// escape code's, #66): same alphabet, length and grouping (80 bits),
+	// and only its hash is kept.
 	display, hash := newSetupCode()
 	s.unlockCodeHash, s.unlockCodeFor = hash, admin.ID
 	return admin.Username, display
@@ -129,7 +145,7 @@ func (s *Store) issueUnlockCodeLocked() (username, code string) {
 
 // retireUnlockCodeLocked ends the outstanding code once the account it
 // was made for is no longer the locked-out admin: unlocked, by the code
-// or any other way, or no longer the admin at all. Called wherever this
+// or any other way, its disable run out, or no longer the admin at all. Called wherever this
 // store installs a state -- a write (mutateLocked) or a load
 // (applyLoaded) -- so the code cannot outlive the disable it was for and
 // come back to life if the account is disabled again later.
@@ -137,7 +153,7 @@ func (s *Store) retireUnlockCodeLocked() {
 	if s.unlockCodeHash == nil {
 		return
 	}
-	if admin := s.lockedOutAdmin(); admin == nil || admin.ID != s.unlockCodeFor {
+	if admin := s.lockedOutAdmin(unlockCodeNow()); admin == nil || admin.ID != s.unlockCodeFor {
 		s.unlockCodeHash, s.unlockCodeFor = nil, ""
 	}
 }
@@ -187,7 +203,7 @@ func (s *Store) CheckUnlockCode(username, code string) (*User, error) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	admin := s.lockedOutAdmin()
+	admin := s.lockedOutAdmin(unlockCodeNow())
 	want := s.unlockCodeHash
 	if want == nil {
 		want = make([]byte, sha256.Size) // compared anyway; never a match on its own

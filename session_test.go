@@ -92,6 +92,34 @@ func TestSessionRevokeAllForUser(t *testing.T) {
 	}
 }
 
+// TestSessionRevokeAllForUserCountMatchesWhatItRevokes pins gauntlet#58
+// R5: a caller that counts live sessions separately and then calls
+// RevokeAllForUser can report one short when a login lands in between
+// -- the new session is revoked (RevokeAllForUser touches everything in
+// s.byUser at the moment its lock is taken) but was never in the
+// earlier count. RevokeAllForUserCount counts under that same lock, so
+// its return value always matches exactly what it ends, including a
+// session created an instant before the call -- there is no separate
+// count for a concurrent login to land after.
+func TestSessionRevokeAllForUserCountMatchesWhatItRevokes(t *testing.T) {
+	s := NewSessionStore(time.Hour, 0)
+	now := time.Now()
+	a1 := s.Create("user-1", now)
+	a2 := s.Create("user-1", now) // e.g. a login that lands just before the sign-out's own lock
+
+	n := s.RevokeAllForUserCount("user-1")
+
+	if n != 2 {
+		t.Errorf("RevokeAllForUserCount = %d, want 2", n)
+	}
+	if _, ok := s.Validate(a1.ID, now); ok {
+		t.Error("expected user-1's first session to be revoked")
+	}
+	if _, ok := s.Validate(a2.ID, now); ok {
+		t.Error("expected user-1's second session to be revoked too, and counted")
+	}
+}
+
 // The ceiling SessionTTL does not have (#294 item 3). Without it a
 // session used even once per ttl never expires, so a browser left signed
 // in on a shared machine stays valid indefinitely.
@@ -393,5 +421,79 @@ func TestSessionPerUserIndexFollowsEveryRemoval(t *testing.T) {
 	defer s.mu.Unlock()
 	if len(s.byUser) != 1 || len(s.byUser["live"]) != len(s.sessions) {
 		t.Errorf("index holds %d users (%d live sessions) for %d sessions, want only the live user's", len(s.byUser), len(s.byUser["live"]), len(s.sessions))
+	}
+}
+
+// CreateContinuing is how a route that rotates a session without a
+// credential (sign out everywhere) issues the new one: it keeps the
+// sign-in's IssuedAt, so the ceiling it was under does not move, and
+// its signals and method, while the client is the one given now.
+func TestSessionCreateContinuingKeepsTheCeiling(t *testing.T) {
+	const ttl = time.Hour
+	const maxLifetime = 24 * time.Hour
+	s := NewSessionStore(ttl, maxLifetime)
+	start := time.Now()
+	old := s.CreateFrom("u1", SessionClient{Address: "203.0.113.1", Unusual: SignalNewBrowser, Method: SignInMethodPassword}, start)
+
+	at := start.Add(23*time.Hour + 30*time.Minute)
+	sess := s.CreateContinuing(old, SessionClient{Address: "203.0.113.2\x1b", Unusual: 0, Method: SignInMethodPasskey}, at)
+
+	if sess.ID == old.ID || sess.UserID != "u1" {
+		t.Fatalf("continued session = %+v, want a new ID for u1", sess)
+	}
+	if !sess.IssuedAt.Equal(old.IssuedAt) {
+		t.Errorf("IssuedAt = %v, want the original %v", sess.IssuedAt, old.IssuedAt)
+	}
+	if want := start.Add(maxLifetime); !sess.ExpiresAt.Equal(want) {
+		t.Errorf("ExpiresAt = %v after the start, want the ceiling at %v", sess.ExpiresAt.Sub(start), maxLifetime)
+	}
+	if got := sess.Client; got.Address != "203.0.113.2" || got.Unusual != SignalNewBrowser || got.Method != SignInMethodPassword {
+		t.Errorf("client = %+v, want the new address cleaned and the old signals and method", got)
+	}
+	if _, ok := s.Validate(sess.ID, start.Add(maxLifetime).Add(-time.Minute)); !ok {
+		t.Fatal("the continued session was refused inside the ceiling")
+	}
+	if _, ok := s.Validate(sess.ID, start.Add(maxLifetime).Add(time.Second)); ok {
+		t.Error("the continued session outlived the original sign-in's ceiling")
+	}
+}
+
+// With no ceiling a continued session simply runs for the idle timeout.
+func TestSessionCreateContinuingWithNoCeiling(t *testing.T) {
+	s := NewSessionStore(time.Hour, 0)
+	start := time.Now()
+	old := s.Create("u1", start)
+	at := start.Add(48 * time.Hour)
+	sess := s.CreateContinuing(old, SessionClient{}, at)
+	if !sess.ExpiresAt.Equal(at.Add(time.Hour)) {
+		t.Errorf("ExpiresAt = %v, want now plus the idle timeout", sess.ExpiresAt.Sub(at))
+	}
+	if _, ok := s.Validate(sess.ID, at); !ok {
+		t.Error("the continued session was refused")
+	}
+}
+
+// EndSessionsForUser ends every session of the account, as
+// RevokeAllForUser does, but counts only the live ones: a session that
+// timed out and is kept only to be resumed is not in the person's own
+// list, so reporting it as one ended would disagree with that list.
+func TestSessionEndSessionsForUserCountsOnlyLiveSessions(t *testing.T) {
+	s := NewSessionStore(time.Hour, 24*time.Hour)
+	t0 := time.Now()
+	idle := s.Create("u1", t0)
+	now := t0.Add(2 * time.Hour)
+	live := s.Create("u1", now)
+	if _, ok := s.Resumable(idle.ID, now); !ok {
+		t.Fatal("the idle session is not resumable; the test needs it to be")
+	}
+
+	if n := s.EndSessionsForUser("u1", now); n != 1 {
+		t.Errorf("EndSessionsForUser = %d, want 1 live session", n)
+	}
+	if _, ok := s.Validate(live.ID, now); ok {
+		t.Error("the live session survived")
+	}
+	if _, ok := s.Resumable(idle.ID, now); ok {
+		t.Error("the timed-out session survived and can still be resumed")
 	}
 }

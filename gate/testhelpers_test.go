@@ -112,6 +112,7 @@ func newTestGateWithUsers(t *testing.T, users *gauntlet.Store) *Gate {
 		ClientIP:        func(r *http.Request) string { return "198.51.100.1" },
 		ProductName:     testProductName,
 		LoginPath:       testLoginPath,
+		AdminPasskey:    AdminPasskeyOptional, // no passkeys are wired at New; a test about the rule turns it on
 	}, Deps{Users: users, Sessions: sessions, Tokens: tokens, Limiter: limiter})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -206,6 +207,27 @@ func doJSON(t *testing.T, client *http.Client, method, url string, body any) *ht
 	return resp
 }
 
+// problemBody is an RFC 9457 error body's fields -- for a test that
+// checks one of them by name rather than as a substring of the raw
+// body. See problem_test.go for the class-shape tests this also backs.
+type problemBody struct {
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// decodeProblem decodes raw as a problemBody, failing the test if it is
+// not JSON.
+func decodeProblem(t *testing.T, raw []byte) problemBody {
+	t.Helper()
+	var p problemBody
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("decoding a problem body: %v: %s", err, raw)
+	}
+	return p
+}
+
 func mustCookieJar(t *testing.T) http.CookieJar {
 	t.Helper()
 	jar, err := cookiejar.New(nil)
@@ -251,10 +273,11 @@ func registerAdminNoFactor(t *testing.T, ts *httptest.Server, username, password
 }
 
 // enrolTOTPFactor drives TOTP enrol+confirm end to end for client,
-// already signed in with password and holding no second factor yet --
-// the same two-step ceremony totpEnrolAndConfirm (totp_handler_test.go)
-// drives for "bob", used here to clear the forced-enrolment door for an
-// account whose fixture is not about that door.
+// already signed in with password and holding no second factor yet,
+// then confirms the held app's recovery codes (#58) -- the same
+// ceremony totpEnrolAndConfirm (totp_handler_test.go) drives for "bob",
+// used here to clear the forced-enrolment door for an account whose
+// fixture is not about that door.
 func enrolTOTPFactor(t *testing.T, client *http.Client, ts *httptest.Server, password string) {
 	t.Helper()
 	resp := postJSON(t, client, ts.URL+"/api/auth/totp/enrol", totpEnrolRequest{Password: password})
@@ -278,4 +301,9 @@ func enrolTOTPFactor(t *testing.T, client *http.Client, ts *httptest.Server, pas
 		body, _ := io.ReadAll(confirmResp.Body)
 		t.Fatalf("confirming a TOTP factor: confirm returned %d: %s", confirmResp.StatusCode, body)
 	}
+	confirmEnrolmentOK(t, client, ts)
 }
+
+// testAdminPassword is the password the fixtures register "admin" with;
+// the admin routes that re-check the caller's password (#72) take it.
+const testAdminPassword = "password-placeholder-1"

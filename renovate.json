@@ -1,0 +1,151 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "description": [
+    "Renovate for gauntlet on gitlab.tomlawson.io (ai/gauntlet), copied from orbit's renovate.json and cut down to what gauntlet pins (#63): the Go modules in both go.mod files, the pipeline's images, and the Go tools .gitlab-ci.yml and scripts/ install at fixed versions. It runs once a week from the renovate job in .gitlab-ci.yml, and daily for security fixes only with renovate-security.json added on top; docs/releasing.md has the owner's one-time setup.",
+    "Go module versions are looked up from each module's own Git host, never through proxy.golang.org: the renovate job sets GOPROXY=direct, and GOPRIVATE for the owner's own modules. A first lookup through the public proxy records a version permanently, so the global rule is never to let one happen by accident.",
+    "Not watched, on purpose: golang.org/x/exp/cmd/apidiff, pinned by pseudo-version in scripts/apidiff.sh (CI-only, approved at that pin, owner 2026-09-30, AGENTS.md). golang.org/x/exp has no releases, only commits, and no manager here can rewrite a Go pseudo-version, so this file names it instead of pretending to cover it. It never ships: it only reads gauntlet's exported API in lint:apidiff. Bump it by hand when lint:apidiff fails to load the module under a new Go release, and look at it in each version's release audit.",
+    "The dependency dashboard is off, as on orbit (owner, 2026-09-08): a bot-written issue that never reaches a done state and is stale between runs.",
+    "This file is read two ways: as the repository config Renovate finds on dev, the default branch, and as the global config the renovate job points RENOVATE_CONFIG_FILE at. Both are the same file."
+  ],
+  "timezone": "Europe/London",
+  "schedule": [
+    "after 5:00am and before 6:15am on monday"
+  ],
+  "baseBranchPatterns": [
+    "dev"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "semanticCommits": "disabled",
+  "dependencyDashboard": false,
+  "pinDigests": true,
+  "prConcurrentLimit": 13,
+  "prHourlyLimit": 0,
+  "osvVulnerabilityAlerts": true,
+  "enabledManagers": [
+    "gomod",
+    "gitlabci",
+    "custom.regex"
+  ],
+  "gomod": {
+    "description": "Both modules: the library's go.mod and gate/contracttest/go.mod, the contract tests' own module (#30). The manager's default file pattern matches every go.mod in the repository. go mod tidy after each bump keeps go.sum complete, which lint:go's -mod=readonly build insists on.",
+    "postUpdateOptions": [
+      "gomodTidy"
+    ]
+  },
+  "customManagers": [
+    {
+      "description": "The pipeline pins its job images in the top-level variables block -- GOLANG_IMAGE and ALPINE_IMAGE -- and the jobs reference them as $GOLANG_IMAGE. The gitlabci manager reads image: keys, so it sees the references and never the pins. This reads the pins. The dependency-proxy prefix is skipped, so the lookup is the Docker Hub name (library/golang) the proxy fronts.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitlab-ci\\.yml$/"
+      ],
+      "matchStrings": [
+        "_IMAGE:\\s+(?:\\$\\{CI_DEPENDENCY_PROXY_(?:DIRECT_)?GROUP_IMAGE_PREFIX\\}/)?(?<depName>[^\\s:@]+):(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "description": "golangci-lint, built from source with `go install ...@vX.Y.Z` in lint:go and test:contract. No manager reads a version inside a shell command. A new major moves the module path (/v2 to /v3) as well as the version, so a major bump from here is wrong as written and needs the path changed by hand; majors are never grouped (see packageRules).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitlab-ci\\.yml$/"
+      ],
+      "matchStrings": [
+        "github\\.com/golangci/golangci-lint/v2/cmd/golangci-lint@(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "golangci-lint",
+      "packageNameTemplate": "golangci/golangci-lint",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "description": "govulncheck, installed at a fixed version in lint:vulncheck and named at the same version in AGENTS.md's check list, so both move together. golang.org/x/vuln is developed on go.googlesource.com; its tags are mirrored to github.com/golang/vuln, which is where this looks.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitlab-ci\\.yml$/",
+        "/^AGENTS\\.md$/"
+      ],
+      "matchStrings": [
+        "golang\\.org/x/vuln/cmd/govulncheck@(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "govulncheck",
+      "packageNameTemplate": "golang/vuln",
+      "datasourceTemplate": "github-tags"
+    },
+    {
+      "description": "gitleaks, installed at a fixed version in lint:secrets. The module path still says zricethezav/gitleaks; the project moved to the gitleaks organisation on GitHub, which is where its releases are published.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitlab-ci\\.yml$/"
+      ],
+      "matchStrings": [
+        "github\\.com/zricethezav/gitleaks/v8@(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "gitleaks",
+      "packageNameTemplate": "gitleaks/gitleaks",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "description": "go-licenses, the licence gate's scanner, pinned as GO_LICENSES_VERSION's default in scripts/licence-check.sh.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^scripts/licence-check\\.sh$/"
+      ],
+      "matchStrings": [
+        "GO_LICENSES_VERSION:-(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "go-licenses",
+      "packageNameTemplate": "google/go-licenses",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "description": "Security fixes do not wait for Monday. GitLab CE has no dependency-alert API for Renovate to read, so osvVulnerabilityAlerts above supplies the advisories, from the OSV database. Renovate ignores the schedule for a vulnerability fix, but it can only open one when it runs, so a second pipeline schedule runs it daily with renovate-security.json on top, which turns every other update off: a fix opens on the first daily run after its advisory reaches OSV.",
+    "enabled": true,
+    "schedule": [
+      "at any time"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Every non-major update, from every manager, lands as one merge request, as on orbit: one pipeline a week rather than one per dependency. Majors stay out of the group so a breaking change is reviewed on its own.",
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "groupName": "non-major updates"
+    },
+    {
+      "description": "The owner's own modules are never looked up. gate/contracttest/go.mod requires github.com/tomlawesome/gauntlet only to replace it with the checkout (replace => ../..), and a version lookup would ask the public module proxy about a module the owner publishes (AGENTS.md, global rules).",
+      "matchPackageNames": [
+        "github.com/tomlawesome/**"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Modules AGENTS.md approves at a named version (owner, 2026-09-30 and 2026-10-04). Renovate may offer newer versions of these on purpose -- staleness checking is the point of #63 -- but the approval names a version, so the merge request says what has to move with it.",
+      "matchPackageNames": [
+        "github.com/go-webauthn/webauthn",
+        "github.com/getkin/kin-openapi",
+        "github.com/oschwald/maxminddb-golang/v2",
+        "github.com/maxmind/mmdbwriter"
+      ],
+      "prBodyNotes": [
+        "AGENTS.md (\"Approved third-party modules\") names the version the owner approved for this module. Before merging: update that line, check that any new module this version pulls in is one the owner has approved, and confirm `lint:licences` is green."
+      ]
+    },
+    {
+      "description": "Renovate's own image, which the gitlabci manager finds in the renovate job. Same exclusion as orbit's: 44.63.0 and 44.64.0 do not start (their apk datasource imports `tar`, which the image lacks). Nothing in CI runs this job, so a bump is only proven by the next scheduled run: if that run fails at start-up, revert the bump and add the version here.",
+      "matchPackageNames": [
+        "renovate/renovate"
+      ],
+      "allowedVersions": "!/^44\\.6[34]\\.0$/"
+    }
+  ]
+}

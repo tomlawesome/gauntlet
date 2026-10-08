@@ -402,3 +402,124 @@ func TestFindOrCreateOIDCUserRollsBackOnPersistFailure(t *testing.T) {
 		t.Error("the identity index still resolves an account that was never durably created")
 	}
 }
+
+const ssoRolesIssuer = "https://idp.example"
+
+func signInWithRole(t *testing.T, s *Store, subject string, role Role, at time.Time) OIDCSignIn {
+	t.Helper()
+	in, err := s.FindOrCreateOIDCUserWithRole(ssoRolesIssuer, subject, subject, role, at)
+	if err != nil {
+		t.Fatalf("FindOrCreateOIDCUserWithRole(%q, %q): %v", subject, role, err)
+	}
+	return in
+}
+
+func TestFindOrCreateOIDCUserWithRoleCreatesAtThatRole(t *testing.T) {
+	s := newTestOIDCStore(t)
+
+	in := signInWithRole(t, s, "guest", RoleViewer, time.Now())
+	if !in.Created || in.User.Role != RoleViewer || in.RoleBefore != RoleViewer || in.SessionsEnded {
+		t.Errorf("got %+v, want created viewer with no change", in)
+	}
+	if u, _ := s.Get(in.User.ID); u.Role != RoleViewer {
+		t.Errorf("stored role = %q, want viewer", u.Role)
+	}
+}
+
+func TestFindOrCreateOIDCUserWithRoleUpgradeKeepsSessions(t *testing.T) {
+	s := newTestOIDCStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	signInWithRole(t, s, "guest", RoleViewer, now)
+
+	later := now.Add(2 * time.Hour)
+	in := signInWithRole(t, s, "guest", RoleUser, later)
+	if in.Created || in.RoleBefore != RoleViewer || in.User.Role != RoleUser {
+		t.Errorf("got %+v, want viewer -> user on an existing account", in)
+	}
+	if in.SessionsEnded || !in.User.SessionsEndedAt.IsZero() {
+		t.Error("an upgrade ended the account's sessions")
+	}
+	if !in.User.RoleChangedAt.Equal(later) {
+		t.Errorf("RoleChangedAt = %v, want %v", in.User.RoleChangedAt, later)
+	}
+}
+
+func TestFindOrCreateOIDCUserWithRoleDowngradeEndsSessions(t *testing.T) {
+	s := newTestOIDCStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	signInWithRole(t, s, "staff", RoleUser, now)
+
+	// Inside lastLoginGranularity: the role change is still saved, not
+	// folded into the best-effort LastLogin path.
+	later := now.Add(time.Minute)
+	in := signInWithRole(t, s, "staff", RoleViewer, later)
+	if in.RoleBefore != RoleUser || in.User.Role != RoleViewer || !in.SessionsEnded {
+		t.Errorf("got %+v, want user -> viewer with sessions ended", in)
+	}
+	if !in.User.SessionsEndedAt.Equal(later) || !in.User.RoleChangedAt.Equal(later) {
+		t.Errorf("SessionsEndedAt %v, RoleChangedAt %v, want both %v", in.User.SessionsEndedAt, in.User.RoleChangedAt, later)
+	}
+	if u, _ := s.Get(in.User.ID); u.Role != RoleViewer || !u.SessionsEndedAt.Equal(later) {
+		t.Errorf("stored account = %+v, want viewer with sessions ended at %v", u, later)
+	}
+}
+
+func TestFindOrCreateOIDCUserWithRoleNeverTouchesAnAdmin(t *testing.T) {
+	s := newTestOIDCStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	in := signInWithRole(t, s, "boss", RoleUser, now)
+	if _, _, err := s.SetRole(in.User.ID, RoleAdmin, now); err != nil {
+		t.Fatal(err)
+	}
+
+	got := signInWithRole(t, s, "boss", RoleViewer, now.Add(time.Minute))
+	if got.User.Role != RoleAdmin || got.RoleBefore != RoleAdmin || got.SessionsEnded {
+		t.Errorf("got %+v, want the admin untouched", got)
+	}
+	if u, _ := s.Get(in.User.ID); u.Role != RoleAdmin {
+		t.Errorf("stored role = %q, want admin", u.Role)
+	}
+}
+
+func TestFindOrCreateOIDCUserWithRoleEmptyLeavesTheRoleAlone(t *testing.T) {
+	s := newTestOIDCStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	signInWithRole(t, s, "guest", RoleViewer, now)
+
+	got := signInWithRole(t, s, "guest", "", now.Add(time.Minute))
+	if got.User.Role != RoleViewer || got.RoleBefore != RoleViewer || got.SessionsEnded {
+		t.Errorf("got %+v, want the viewer left alone", got)
+	}
+	// And a never-seen identity is an ordinary user, as before.
+	if in := signInWithRole(t, s, "new", "", now); in.User.Role != RoleUser {
+		t.Errorf("new account role = %q, want user", in.User.Role)
+	}
+}
+
+func TestFindOrCreateOIDCUserWithRoleUnchangedWritesNothing(t *testing.T) {
+	b := &countingBackend{Memory: persist.NewMemory()}
+	s, _ := openLockoutStore(t, b)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	signInWithRole(t, s, "guest", RoleViewer, now)
+
+	before := b.saves.Load()
+	in := signInWithRole(t, s, "guest", RoleViewer, now.Add(time.Minute))
+	if in.SessionsEnded || in.RoleBefore != RoleViewer {
+		t.Errorf("got %+v, want no change", in)
+	}
+	if got := b.saves.Load() - before; got != 0 {
+		t.Errorf("a sign-in at the same role caused %d saves, want 0", got)
+	}
+}
+
+func TestFindOrCreateOIDCUserWithRoleRefusesAdminAndUnknown(t *testing.T) {
+	s := newTestOIDCStore(t)
+	for _, role := range []Role{RoleAdmin, "root"} {
+		if _, err := s.FindOrCreateOIDCUserWithRole(ssoRolesIssuer, "x", "x", role, time.Now()); err != ErrInvalidRole {
+			t.Errorf("role %q: err = %v, want ErrInvalidRole", role, err)
+		}
+	}
+	if s.Count() != 1 {
+		t.Errorf("Count() = %d, want 1: a refused call provisioned an account", s.Count())
+	}
+}

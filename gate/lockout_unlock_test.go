@@ -73,13 +73,14 @@ func TestFiveSecondFactorFailuresSignTheAccountOutEverywhere(t *testing.T) {
 	}
 }
 
-// disableAccount makes fifty failed sign-ins in a row on id, long
-// enough ago that every lockout they started has ended, leaving its
-// sign-in disabled.
+// disableAccount makes fifty failed sign-ins in a row on id, far enough
+// back that every lockout they started has ended (they run about eight
+// hours) and a couple of hours of the 24-hour disable (#70) have gone,
+// leaving its sign-in disabled.
 func disableAccount(t *testing.T, users *gauntlet.Store, id string) {
 	t.Helper()
 	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
-	at := time.Now().Add(-30 * 24 * time.Hour)
+	at := time.Now().Add(-10 * time.Hour)
 	for i := range gauntlet.MaxConsecutiveLoginFailures {
 		if !l.ReserveAccount(users, id, at) {
 			t.Fatalf("failure %d was refused", i+1)

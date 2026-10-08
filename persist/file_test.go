@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,30 +19,9 @@ import (
 // EncryptedFileBackend elsewhere in this package's public tests, but its
 // own conflict, error and atomic-write paths need covering in their own
 // right (issue #18 ported this from mikroview's internal/persist.FileBackend
-// verbatim; these pin the behaviour that porting must not change).
-
-func TestFileBackendRoundTripAndClose(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	if err := b.Close(); err != nil {
-		t.Errorf("Close on an unused backend: %v", err)
-	}
-
-	v, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	snap, err := b.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if string(snap.Payload) != `{"n":1}` || snap.Version != v || !snap.Exists {
-		t.Errorf("Load = %+v, want payload {\"n\":1}, version %d, exists true", snap, v)
-	}
-	if err := b.Close(); err != nil {
-		t.Errorf("Close after use: %v", err)
-	}
-}
+// verbatim; these pin the behaviour that porting must not change). The
+// backend contract itself -- round trip, conflicts, a second backend,
+// concurrent writers -- runs through persisttest in suite_test.go (#61).
 
 func TestFileBackendSaveWithoutPathErrors(t *testing.T) {
 	b := newFileBackend("")
@@ -50,29 +30,13 @@ func TestFileBackendSaveWithoutPathErrors(t *testing.T) {
 	}
 }
 
-func TestFileBackendDoubleCreateIsConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 0); err != nil {
-		t.Fatalf("first create: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":2}`), 0); err != ErrConflict {
-		t.Errorf("second create: got %v, want ErrConflict", err)
-	}
-}
-
-func TestFileBackendStaleWriteIsConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	v1, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":2}`), v1); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if _, err := b.Save(context.Background(), []byte(`{"n":3}`), v1); err != ErrConflict {
-		t.Errorf("stale write: got %v, want ErrConflict", err)
+// An empty path would otherwise read as a missing file, which Load
+// reports as a fresh install: the operator who forgot to configure the
+// path would see a setup page that then refuses the save.
+func TestFileBackendLoadWithoutPathErrors(t *testing.T) {
+	b := newFileBackend("")
+	if _, err := b.Load(context.Background()); err == nil {
+		t.Fatal("Load with no path configured succeeded, want an error")
 	}
 }
 
@@ -88,7 +52,7 @@ func TestFileBackendSaveWaitsForTheLock(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	held, err := lockFile(path + ".lock")
+	held, err := lockFile(context.Background(), path+".lock")
 	if err != nil {
 		t.Fatalf("lockFile: %v", err)
 	}
@@ -115,6 +79,46 @@ func TestFileBackendSaveWaitsForTheLock(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Save did not return after the lock was released")
+	}
+}
+
+// A Save stuck waiting for the sidecar lock must give up on its context
+// deadline rather than wait indefinitely for the other holder to release
+// it (#58, R14).
+func TestFileBackendSaveHonoursContextDeadlineWhileWaitingForTheLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	b := newFileBackend(path)
+	v1, err := b.Save(context.Background(), []byte(`{"n":1}`), 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	held, err := lockFile(context.Background(), path+".lock")
+	if err != nil {
+		t.Fatalf("lockFile: %v", err)
+	}
+	defer func() { _ = held.unlock() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Save(ctx, []byte(`{"n":2}`), v1)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Save returned %v, want context.DeadlineExceeded", err)
+		}
+		if elapsed := time.Since(start); elapsed > 1*time.Second {
+			t.Fatalf("Save took %v to honour its context deadline", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Save ignored its context deadline and is still waiting for the lock")
 	}
 }
 
@@ -167,14 +171,6 @@ func TestFileBackendConcurrentSavesNeverBothWinTheSameVersion(t *testing.T) {
 		if wins > 1 {
 			t.Fatalf("expect version %d won %d saves, want at most 1 -- a later rename silently discarded an earlier write", expect, wins)
 		}
-	}
-}
-
-func TestFileBackendExpectNonzeroButFileMissingIsConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	b := newFileBackend(path)
-	if _, err := b.Save(context.Background(), []byte(`{"n":1}`), 12345); err != ErrConflict {
-		t.Errorf("write against a nonexistent file expecting version 12345: got %v, want ErrConflict", err)
 	}
 }
 
@@ -406,5 +402,81 @@ func TestEveryBackendDescribeIsShortAndCarriesNoSecrets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWriteFileAtomicReportsAParentThatIsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "store")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The store's directory would have to be created inside a regular
+	// file: MkdirAll refuses, and the save reports that instead of
+	// pretending to have written anything.
+	if err := writeFileAtomic(filepath.Join(blocker, "store.json"), []byte("{}"), 0o600); err == nil {
+		t.Fatal("a save under a regular file succeeded")
+	}
+}
+
+func TestWriteFileAtomicReportsADirectoryItCannotWriteIn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere, so the refusal cannot be produced")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	// The temp file cannot be created, so nothing is renamed and the
+	// error comes back to the caller.
+	if err := writeFileAtomic(filepath.Join(dir, "store.json"), []byte("{}"), 0o600); err == nil {
+		t.Fatal("a save into a read-only directory succeeded")
+	}
+}
+
+func TestWriteFileAtomicReportsARenameItCannotMake(t *testing.T) {
+	dir := t.TempDir()
+	// A non-empty directory already sits where the store should go: the
+	// temp file is written, the rename over it is refused, and the error
+	// comes back instead of a store that silently went nowhere.
+	target := filepath.Join(dir, "store.json")
+	if err := os.MkdirAll(filepath.Join(target, "inside"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(target, []byte("{}"), 0o600); err == nil {
+		t.Fatal("renaming the store over a non-empty directory succeeded")
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, "store.json.tmp-*"))
+	if len(left) != 0 {
+		t.Fatalf("temp files left behind after the refused rename: %v", left)
+	}
+}
+
+func TestLockFileReportsAPathItCannotCreate(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "store.json")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The lock would have to live inside a regular file.
+	if _, err := lockFile(context.Background(), filepath.Join(blocker, "x.lock")); err == nil {
+		t.Fatal("creating a lock file inside a regular file succeeded")
+	}
+}
+
+func TestWriteFileAtomicReportsAStoreItCannotStat(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can stat anything, so the refusal cannot be produced")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	// The directory exists but cannot be searched: whether a store is
+	// already there is unknown, which is an error, not a fresh install.
+	if err := writeFileAtomic(filepath.Join(dir, "store.json"), []byte("{}"), 0o600); err == nil {
+		t.Fatal("a save into an unsearchable directory succeeded")
 	}
 }

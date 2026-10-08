@@ -39,9 +39,21 @@ type sessionRow struct {
 	SignedInAt time.Time `json:"signedInAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
 	// Address and UserAgent are as the browser presented them at sign-in
-	// (gauntlet.SessionClient), absent when none was recorded.
+	// (gauntlet.SessionClient), absent when none was recorded. Country
+	// is the one looked up for Address at sign-in (#54), absent when no
+	// lookup was configured or nothing was known for it.
 	Address   string `json:"address,omitempty"`
 	UserAgent string `json:"userAgent,omitempty"`
+	Country   string `json:"country,omitempty"`
+	// Unusual is the unusual-sign-in signals the session arrived with
+	// (#55), as an array of names; absent for an ordinary sign-in.
+	Unusual gauntlet.SignInSignals `json:"unusual,omitzero"`
+	// Method is how the sign-in was made (#77): password and code for a
+	// password then a second-factor code, passkey for a password then a
+	// passkey, passkey_alone for a passkey on its own, sso. Absent when
+	// the session recorded none. A resumed or rotated session keeps the
+	// method of the sign-in it continues.
+	Method gauntlet.SignInMethod `json:"method,omitempty"`
 }
 
 // sessionListResponse is GET /api/auth/sessions's body: an object
@@ -100,7 +112,7 @@ func (g *Gate) currentSessionID(r *http.Request) string {
 func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	live := g.liveSessions(user, g.now())
@@ -114,6 +126,9 @@ func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 			LastUsedAt: sess.LastUsedAt,
 			Address:    sess.Client.Address,
 			UserAgent:  sess.Client.UserAgent,
+			Country:    sess.Client.Country,
+			Unusual:    sess.Client.Unusual,
+			Method:     sess.Client.Method,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -141,7 +156,7 @@ func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	ref := r.PathValue("ref")
@@ -161,13 +176,13 @@ func (g *Gate) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !listed {
-		http.Error(w, "no such session", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such session", nil)
 		return
 	}
 	ended, ok := g.deps.Sessions.RevokeRef(user.ID, ref)
 	if !ok {
 		// Ended between the two steps, by another request or expiry.
-		http.Error(w, "no such session", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such session", nil)
 		return
 	}
 

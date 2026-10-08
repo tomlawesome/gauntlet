@@ -373,7 +373,7 @@ func TestBuildRetriesTransientFailures(t *testing.T) {
 				t.Fatalf("sleeps = %v", sl.d)
 			}
 			for i, d := range sl.d {
-				ceiling := min(minBackoff<<i, maxBackoff)
+				ceiling := backoffCeiling(i + 1)
 				if d < minBackoff || d > ceiling {
 					t.Errorf("backoff %d = %v, outside [%v, %v]", i+1, d, minBackoff, ceiling)
 				}
@@ -727,6 +727,22 @@ func TestBackoffBounds(t *testing.T) {
 			}
 		}
 	}
+
+	// fetch retries up to maxAttempts-1 times (build.go's loop runs
+	// attempt 1..maxAttempts, sleeping before attempts 2..maxAttempts,
+	// i.e. with n = 1..maxAttempts-1). The documented 8 s ceiling
+	// (maxBackoff) must actually be reachable within that budget, not
+	// just approached (#58, F3).
+	last := maxAttempts - 1
+	if got := backoffCeiling(last); got != maxBackoff {
+		t.Fatalf("backoffCeiling(%d) = %v, want the documented ceiling %v to be reached by the last retry a fetch makes", last, got, maxBackoff)
+	}
+	// Reached, not merely equalled by a cap that was never approached:
+	// the retry before the last one must still be climbing toward it.
+	if got := backoffCeiling(last - 1); got >= maxBackoff {
+		t.Fatalf("backoffCeiling(%d) = %v, already at the ceiling one retry early", last-1, got)
+	}
+
 	if d := backoff(1, 30*time.Second); d != 30*time.Second {
 		t.Fatalf("Retry-After 30s gave %v", d)
 	}

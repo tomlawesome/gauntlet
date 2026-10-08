@@ -63,43 +63,50 @@ func validSessionEndReason(reason string) bool {
 // MaxSessionEndReason characters, or holding a control or format character.
 // The body is optional.
 //
-// Once the response is written, Config.Notify, if set, is asked to tell
-// the account's owner (notifySessionsEnded); "notified" in the response
-// says it was asked.
+// Once the response is written, Config.Notices, or the deprecated
+// Config.Notify, if either is set, is asked to tell the account's owner
+// (notifySessionsEnded); "notified" in the response says it was asked.
 func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req adminLogoutAllRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	if !validSessionEndReason(req.Reason) {
-		http.Error(w, fmt.Sprintf("the reason must be at most %d characters of plain text", MaxSessionEndReason), http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, fmt.Sprintf("the reason must be at most %d characters of plain text", MaxSessionEndReason), nil)
 		return
 	}
 	caller := UserFromContext(r)
 	if caller != nil && caller.ID == id {
-		http.Error(w, "use sign out everywhere for your own sessions", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "use sign out everywhere for your own sessions", nil)
 		return
 	}
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
-		http.Error(w, "no such user", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
 		return
 	}
 
 	now := g.now()
-	// Counted as the account's own list counts them: a session issued
-	// before its cutoff is no longer live, and is not one this ended.
-	ended := len(g.liveSessions(target, now))
-	g.deps.Sessions.RevokeAllForUser(target.ID)
+	// Dropped first, as the account's own session list drops them: a
+	// session issued before its cutoff is no longer live and should not
+	// be reported as one this ended. The count itself comes from
+	// EndSessionsForUser below, under the same lock as the revoke --
+	// counting separately beforehand would miss a session a login lands
+	// between the count and the revoke (gauntlet#58 R5). It counts only
+	// sessions still live at now, so a session that timed out and is
+	// kept only to be resumed is ended but not reported, as the list
+	// does not show it either.
+	_ = g.liveSessions(target, now)
+	ended := g.deps.Sessions.EndSessionsForUser(target.ID, now)
 	browsers := "remembered browsers forgotten"
 	if err := g.deps.Users.ClearKnownBrowsers(target.ID); err != nil {
 		g.logError("forgetting the browsers account " + target.ID + " remembers: " + err.Error())
 		browsers = "remembered browsers could not be forgotten"
 	}
 
-	notified := g.cfg.Notify != nil
+	notified := g.cfg.Notify != nil || g.cfg.Notices != nil
 	notify := "none"
 	if notified {
 		notify = "requested"
@@ -109,7 +116,7 @@ func (g *Gate) handleAdminLogoutAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, adminLogoutAllResponse{Username: target.Username, Ended: ended, Notified: notified})
 
 	if notified {
-		g.notifySessionsEnded(r.Context(), SessionsEndedNotice{
+		g.notifySessionsEnded(r.Context(), target.Role, SessionsEndedNotice{
 			UserID:   target.ID,
 			Username: target.Username,
 			EndedBy:  auditActor(r),

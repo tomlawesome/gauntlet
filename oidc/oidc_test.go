@@ -3,6 +3,7 @@ package oidc
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	gooidc "github.com/coreos/go-oidc/v3/oidc"
 
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 )
@@ -116,11 +119,11 @@ func TestNewFailsClosedOnUnreachableProvider(t *testing.T) {
 	}
 }
 
-// TestNewRefusesMultiTenantIssuer proves New enforces the same
-// self-hosted-only policy AllowIssuer does, rather than relying entirely
-// on callers to check first -- docs/design.md §4 promises multi-tenant
+// TestNewRefusesMultiTenantIssuer proves New enforces the same rule
+// AllowIssuerWithPolicy does, rather than relying entirely on callers to
+// check first: with no tenant pinned in Config.Policy, multi-tenant
 // issuers are refused at startup, not just discoverable-but-rejected
-// later. The context deadline means this test hangs instead of passing
+// later (ADR-0014). The context deadline means this test hangs instead of passing
 // if the check were missing: New would otherwise go on to dial the real
 // accounts.google.com/login.microsoftonline.com discovery endpoint.
 func TestNewRefusesMultiTenantIssuer(t *testing.T) {
@@ -139,6 +142,61 @@ func TestNewRefusesMultiTenantIssuer(t *testing.T) {
 		if !errors.Is(err, ErrMultiTenantIssuer) {
 			t.Errorf("New(%q) error = %v, want errors.Is(err, ErrMultiTenantIssuer)", issuer, err)
 		}
+	}
+}
+
+// sharedIssuerDiscovery serves a discovery document that names issuer,
+// so a test can stand in for a shared provider without dialling it:
+// go-oidc's InsecureIssuerURLContext lets New discover it from this
+// server's own URL.
+func sharedIssuerDiscovery(t *testing.T, issuer string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 issuer,
+			"authorization_endpoint": issuer + "/authorize",
+			"token_endpoint":         issuer + "/token",
+			"jwks_uri":               issuer + "/jwks",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestNewChecksTheDiscoveredIssuerAgainstPolicy proves New applies
+// Config.Policy to the issuer the provider names, not only to the URL it
+// was given (ADR-0014): a shared issuer reached through another URL is
+// refused without the tenant pin and accepted with it, and Issuer
+// reports that issuer for gate's own check.
+func TestNewChecksTheDiscoveredIssuerAgainstPolicy(t *testing.T) {
+	const google = "https://accounts.google.com"
+	srv := sharedIssuerDiscovery(t, google)
+	ctx := gooidc.InsecureIssuerURLContext(context.Background(), google)
+	cfg := Config{
+		IssuerURL:   srv.URL,
+		ClientID:    "test-client",
+		RedirectURL: "https://app.example/callback",
+	}
+
+	if _, err := New(ctx, cfg); !errors.Is(err, ErrMultiTenantIssuer) {
+		t.Fatalf("New with an empty Policy = %v, want ErrMultiTenantIssuer", err)
+	}
+
+	cfg.Policy = Policy{RequiredClaims: map[string][]string{"hd": {"example.com"}}}
+	c, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New with the hd claim pinned: %v", err)
+	}
+	if got := c.Issuer(); got != google {
+		t.Errorf("Issuer() = %q, want %q", got, google)
+	}
+}
+
+func TestIssuerIsTheConfiguredSelfHostedIssuer(t *testing.T) {
+	fp := testutil.NewFakeProvider(t)
+	if got := testClient(t, fp).Issuer(); got != fp.Issuer() {
+		t.Errorf("Issuer() = %q, want %q", got, fp.Issuer())
 	}
 }
 

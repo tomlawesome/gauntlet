@@ -48,6 +48,14 @@
 # #52: blocklist is new at 95.5%, internal/listsig at 97.8% and
 # cmd/pwlist at 90.7%. What they leave uncovered is mostly a failing
 # disk or JSON encoder, and pwlist's main() itself.
+# #54: geoip is new at 92.1%. What it leaves uncovered is mostly a
+# failing disk, and a file that opens but whose lookups fail.
+# #61: persist/persisttest is new at 94.3%, from running it against
+# Memory and against fakes broken on purpose. What it leaves uncovered
+# is the skip for a backend without VersionReader (covered from persist's
+# own tests, which this per-package figure does not count) and failures
+# no fake produces, such as a Load that errors or a Save returning
+# version 0.
 
 floors:
   persist: 90
@@ -63,3 +71,5 @@ floors:
   blocklist: 95
   internal/listsig: 97
   cmd/pwlist: 90
+  geoip: 92
+  persist/persisttest: 94

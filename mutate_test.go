@@ -74,7 +74,7 @@ func usernamesIn(t *testing.T, m *persist.Memory) []string {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	st, err := decodeAccounts(snap.Payload)
+	st, err := decodeAccounts(snap.Payload, 0)
 	if err != nil {
 		t.Fatalf("decoding the saved document: %v", err)
 	}
@@ -313,8 +313,8 @@ func TestMutateOpErrorChangesNothing(t *testing.T) {
 }
 
 // TestMutateRefusesToWriteOverADocumentItCannotApply: the fresh document
-// the other process wrote fails the same check OpenStore applies (two
-// admins). Where SaveWithRetry would have written this store's document
+// the other process wrote fails the same check OpenStore applies (no
+// admin). Where SaveWithRetry would have written this store's document
 // over it, the write must fail, say why, and leave both the operator's
 // document on disk and this store's memory as they were.
 func TestMutateRefusesToWriteOverADocumentItCannotApply(t *testing.T) {
@@ -337,14 +337,14 @@ func TestMutateRefusesToWriteOverADocumentItCannotApply(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if _, err := m.Save(context.Background(), []byte(twoAdminsDocument), snap.Version); err != nil {
+		if _, err := m.Save(context.Background(), []byte(noAdminDocument), snap.Version); err != nil {
 			t.Error(err)
 		}
 	}
 
 	_, err = s.DeleteUser(bob.ID)
-	if !errors.Is(err, errMultipleAdmins) {
-		t.Fatalf("DeleteUser over a two-admin document = %v, want errMultipleAdmins", err)
+	if !errors.Is(err, errNoAdmin) {
+		t.Fatalf("DeleteUser over a no-admin document = %v, want errNoAdmin", err)
 	}
 	if errors.Is(err, ErrSaveConflict) {
 		t.Error("a refused document is not the same failure as a writer that never stops")
@@ -353,7 +353,7 @@ func TestMutateRefusesToWriteOverADocumentItCannotApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(snap.Payload) != twoAdminsDocument {
+	if string(snap.Payload) != noAdminDocument {
 		t.Errorf("the refused document was overwritten:\n%s", snap.Payload)
 	}
 	if !storeHas(s, "bob") {

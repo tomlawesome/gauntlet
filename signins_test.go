@@ -232,6 +232,35 @@ func TestSignInHistoryCapDropsTheOldest(t *testing.T) {
 	}
 }
 
+// TestOpenSignInHistoryLoweredMaxRowsLogsTheDrop pins gauntlet#58 S3:
+// opening over a document that already holds more rows than a newly
+// lowered MaxRows drops the oldest ones in memory (saved so at the
+// next save) with nothing logged, so an operator who tightens MaxRows
+// gets no record that history was actually lost.
+func TestOpenSignInHistoryLoweredMaxRowsLogsTheDrop(t *testing.T) {
+	b := persist.NewMemory()
+	h := openTestHistory(t, b, SignInHistoryOptions{MaxRows: 10})
+	for i := range 8 {
+		h.Record(successFrom("u1", "bob", fmt.Sprintf("192.0.2.%d", i)), signInBase.Add(time.Duration(i)*time.Minute))
+	}
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &signInLogRecorder{}
+	h2 := openTestHistory(t, b, SignInHistoryOptions{MaxRows: 5, Log: slog.New(logs)})
+	total, _ := h2.Summary()
+	if total != 5 {
+		t.Fatalf("Summary total = %d, want 5", total)
+	}
+	if n := logs.count("MaxRows"); n != 1 {
+		t.Errorf("messages mentioning MaxRows = %d, want exactly 1 logging the drop: %v", n, logs.all())
+	}
+}
+
 // MaxRows: zero is the default, above the ceiling or negative refused.
 func TestOpenSignInHistoryMaxRows(t *testing.T) {
 	h := openTestHistory(t, nil, SignInHistoryOptions{})
@@ -591,6 +620,38 @@ func TestSignInHistoryRemovedDocumentLogsOnceAndKeepsMemory(t *testing.T) {
 	}
 }
 
+// TestSignInHistoryReadNoticesANullDocumentWithoutASave pins
+// gauntlet#58 (fix review FR3): save never runs while nothing is
+// dirty, so a document replaced with the JSON literal null while no
+// one is signing in used to go unnoticed until the next sign-in's
+// save finally looked. List and Summary now check for themselves.
+func TestSignInHistoryReadNoticesANullDocumentWithoutASave(t *testing.T) {
+	m := persist.NewMemory()
+	logs := &signInLogRecorder{}
+	h := openTestHistory(t, m, SignInHistoryOptions{Log: slog.New(logs)})
+	h.Record(successFrom("u1", "bob", "192.0.2.1"), signInBase)
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := m.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Save(context.Background(), []byte("null"), snap.Version); err != nil {
+		t.Fatal(err)
+	}
+
+	h.List(SignInQuery{})
+	total, _ := h.Summary()
+	if total != 1 {
+		t.Errorf("Summary total = %d, want the in-memory row kept (1) -- nothing should be overwritten", total)
+	}
+	if n := logs.count("null"); n != 1 {
+		t.Errorf("messages mentioning null = %d, want exactly 1 logging the replacement without any sign-in or save", n)
+	}
+}
+
 // signInLogRecorder keeps every message logged.
 type signInLogRecorder struct {
 	mu   sync.Mutex
@@ -627,7 +688,8 @@ func (r *signInLogRecorder) count(substr string) int {
 // unwrapped backend, and one that does not hold together are refused.
 func TestOpenSignInHistoryRefusesWhatItCannotRead(t *testing.T) {
 	cases := map[string]string{
-		"newer version":     `{"version":2,"nextSeq":1,"rows":[]}`,
+		"newer version":     `{"version":4,"nextSeq":1,"rows":[]}`,
+		"unknown signal":    `{"version":3,"nextSeq":2,"rows":[{"seq":1,"at":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z","count":1,"outcome":"success","unusual":["teleport"]}]}`,
 		"sealed":            `{"sealed":"AAAA"}`,
 		"rows out of order": `{"version":1,"nextSeq":3,"rows":[{"seq":2,"at":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z","count":1,"outcome":"success"},{"seq":1,"at":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z","count":1,"outcome":"success"}]}`,
 		"seq past nextSeq":  `{"version":1,"nextSeq":1,"rows":[{"seq":1,"at":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z","count":1,"outcome":"success"}]}`,
@@ -644,7 +706,7 @@ func TestOpenSignInHistoryRefusesWhatItCannotRead(t *testing.T) {
 		})
 	}
 	m := persist.NewMemory()
-	primeMemory(t, m, `{"version":2,"nextSeq":1,"rows":[]}`)
+	primeMemory(t, m, `{"version":4,"nextSeq":1,"rows":[]}`)
 	if _, err := OpenSignInHistory(m, SignInHistoryOptions{}); !errors.Is(err, errNewerDocument) {
 		t.Errorf("newer document: %v, want errNewerDocument", err)
 	}
@@ -699,8 +761,12 @@ func TestSignInHistoryOverEncryptKeepsRowsOutOfStorage(t *testing.T) {
 	}
 }
 
-// testdata/signins-v1.json is a version-1 document as this build writes
-// it: it loads, lists as written, and saves back to the same JSON.
+// testdata/signins-v1.json is a version-1 document as this build wrote
+// it before #54: it loads with every row's country blank (ADR-0002
+// decision 1), lists as written, and the next save stamps it at the
+// current version (signInsDocumentVersion), as an older accounts or
+// tokens document is stamped at its own current version on save
+// (TestAV010AccountsDocumentLoadsAndGainsAVersion).
 func TestSignInHistoryVersion1FixtureRoundTrips(t *testing.T) {
 	raw, err := os.ReadFile("testdata/signins-v1.json")
 	if err != nil {
@@ -723,22 +789,190 @@ func TestSignInHistoryVersion1FixtureRoundTrips(t *testing.T) {
 	if fmt.Sprintf("%+v", rows) != fmt.Sprintf("%+v", want) {
 		t.Errorf("rows =\n%+v\nwant\n%+v", rows, want)
 	}
+	for _, r := range rows {
+		if r.Client.Country != "" {
+			t.Errorf("row %d has country %q, want blank from a version-1 document", r.Seq, r.Client.Country)
+		}
+	}
 
-	// Saved back unchanged in meaning.
+	// Saved back unchanged in meaning, but stamped at the current
+	// version: a version-1 document loaded by this build and saved
+	// becomes version 2, the same as an older accounts or tokens
+	// document gains its build's current version on save.
 	h.Record(successFrom("u1", "bob", "192.0.2.1"), signInBase)
 	if err := h.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	f := storedSignIns(t, m)
-	if f.Version != 1 || f.NextSeq != 9 || len(f.Rows) != 5 || f.Rows[4].Seq != 8 {
+	if f.Version != signInsDocumentVersion || f.NextSeq != 9 || len(f.Rows) != 5 || f.Rows[4].Seq != 8 {
 		t.Errorf("saved document: version %d, nextSeq %d, %d rows", f.Version, f.NextSeq, len(f.Rows))
 	}
 	var before, after map[string]any
 	_ = json.Unmarshal(raw, &before)
-	reencoded, _ := json.Marshal(signInFile{Version: f.Version, NextSeq: 8, Rows: f.Rows[:4]})
+	reencoded, _ := json.Marshal(signInFile{Version: 1, NextSeq: 8, Rows: f.Rows[:4]})
 	_ = json.Unmarshal(reencoded, &after)
 	if fmt.Sprint(before) != fmt.Sprint(after) {
 		t.Errorf("the fixture's rows did not save back as they were:\n%v\n%v", before, after)
+	}
+}
+
+// testdata/signins-v2.json is a version-2 document (#54): some rows
+// carry a country, one has none (not known), none carries a signal or
+// a confirmation (they read as none and false), and it saves back with
+// nothing added or dropped but the version.
+func TestSignInHistoryVersion2FixtureRoundTrips(t *testing.T) {
+	raw, err := os.ReadFile("testdata/signins-v2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := persist.NewMemory()
+	primeMemory(t, m, string(raw))
+	h := openTestHistory(t, m, SignInHistoryOptions{})
+	rows, _ := h.List(SignInQuery{})
+	want := []SignInRow{
+		{Seq: 2, At: time.Date(2026, 10, 2, 9, 20, 0, 0, time.UTC), Until: time.Date(2026, 10, 2, 9, 20, 0, 0, time.UTC), Count: 1, Username: "Hu••••••••", Outcome: SignInNoSuchUser, Method: SignInMethodPassword, Client: SessionClient{Address: "203.0.113.9"}},
+		{Seq: 1, At: time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC), Until: time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC), Count: 1, UserID: "7d2e9b10", Username: "admin", Outcome: SignInSuccess, Method: SignInMethodCode, Client: SessionClient{Address: "2001:db8::1", UserAgent: "Mozilla/5.0", Country: "GB"}},
+	}
+	if fmt.Sprintf("%+v", rows) != fmt.Sprintf("%+v", want) {
+		t.Errorf("rows =\n%+v\nwant\n%+v", rows, want)
+	}
+	for _, r := range rows {
+		if r.Client.Unusual != 0 || r.Confirmed {
+			t.Errorf("row %d from a version-2 document carries %v, confirmed %v", r.Seq, r.Client.Unusual, r.Confirmed)
+		}
+	}
+	h.Record(successFrom("u1", "bob", "192.0.2.1"), signInBase)
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f := storedSignIns(t, m)
+	if f.Version != signInsDocumentVersion {
+		t.Errorf("saved at version %d, want %d", f.Version, signInsDocumentVersion)
+	}
+	var before, after map[string]any
+	_ = json.Unmarshal(raw, &before)
+	reencoded, _ := json.Marshal(signInFile{Version: 2, NextSeq: 3, Rows: f.Rows[:2]})
+	_ = json.Unmarshal(reencoded, &after)
+	if fmt.Sprint(before) != fmt.Sprint(after) {
+		t.Errorf("the version-2 rows did not save back as they were:\n%v\n%v", before, after)
+	}
+}
+
+// testdata/signins-v3.json is a version-3 document (#55): rows carry
+// their signals and whether a confirmation code completed them, and it
+// round-trips on save, nothing added or dropped.
+func TestSignInHistoryVersion3FixtureRoundTrips(t *testing.T) {
+	raw, err := os.ReadFile("testdata/signins-v3.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := persist.NewMemory()
+	primeMemory(t, m, string(raw))
+	h := openTestHistory(t, m, SignInHistoryOptions{})
+	rows, _ := h.List(SignInQuery{})
+	both := SignalNewBrowser | SignalNewCountry
+	if len(rows) != 3 || rows[0].Client.Unusual != both || !rows[0].Confirmed || rows[0].Outcome != SignInSuccess ||
+		rows[1].Client.Unusual != both || rows[1].Confirmed || rows[1].Outcome != SignInConfirmSent ||
+		rows[2].Client.Unusual != 0 || rows[2].Confirmed {
+		t.Fatalf("rows = %+v", rows)
+	}
+	h.Record(successFrom("u1", "bob", "192.0.2.1"), signInBase) // so there is something to save
+	if err := h.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f := storedSignIns(t, m)
+	var before, after map[string]any
+	_ = json.Unmarshal(raw, &before)
+	reencoded, _ := json.Marshal(signInFile{Version: 3, NextSeq: 4, Rows: f.Rows[:3]})
+	_ = json.Unmarshal(reencoded, &after)
+	if fmt.Sprint(before) != fmt.Sprint(after) {
+		t.Errorf("an unchanged version-3 document did not save back as it was:\n%v\n%v", before, after)
+	}
+}
+
+// An unusual success never folds into an ordinary one from the same
+// address, nor a confirmed one into one that was not; one with the same
+// signals does fold.
+func TestSignInHistoryFoldsByUnusualAndConfirmed(t *testing.T) {
+	h := openTestHistory(t, nil, SignInHistoryOptions{})
+	plain := successFrom("u1", "bob", "203.0.113.5")
+	odd := plain
+	odd.Client.Unusual = SignalNewCountry
+	oddConfirmed := odd
+	oddConfirmed.Confirmed = true
+	odder := plain
+	odder.Client.Unusual = SignalNewCountry | SignalNewBrowser
+	for i, ev := range []SignInEvent{plain, odd, odd, oddConfirmed, odder, plain} {
+		h.Record(ev, signInBase.Add(time.Duration(i)*time.Minute))
+	}
+	rows, _ := h.List(SignInQuery{})
+	if len(rows) != 4 {
+		t.Fatalf("%d rows, want 4: plain (2), new-country (2), confirmed (1), both (1): %+v", len(rows), rows)
+	}
+	counts := map[string]int{}
+	for _, r := range rows {
+		counts[fmt.Sprintf("%s/%v", r.Client.Unusual, r.Confirmed)] = r.Count
+	}
+	want := map[string]int{"/false": 2, "new-country/false": 2, "new-country/true": 1, "new-browser,new-country/false": 1}
+	if fmt.Sprint(counts) != fmt.Sprint(want) {
+		t.Errorf("rows by signals = %v, want %v", counts, want)
+	}
+}
+
+// refused and confirm_sent cost a full credential and are never
+// budgeted; confirm_refused is a failure like any other.
+func TestSignInHistoryBudgetsTheNewOutcomes(t *testing.T) {
+	h := openTestHistory(t, nil, SignInHistoryOptions{})
+	for i := range maxNewFailureRowsPerSpan {
+		h.Record(failedFrom("u1", "bob", fmt.Sprintf("192.0.2.%d", i)), signInBase)
+	}
+	for i, o := range []SignInOutcome{SignInRefused, SignInConfirmSent, SignInConfirmRefused} {
+		ev := failedFrom("u2", "carol", fmt.Sprintf("198.51.100.%d", i))
+		ev.Outcome = o
+		h.Record(ev, signInBase)
+	}
+	rows, _ := h.List(SignInQuery{Limit: 3})
+	if rows[0].Outcome != SignInUnrecorded || rows[1].Outcome != SignInConfirmSent || rows[2].Outcome != SignInRefused {
+		t.Errorf("newest rows = %v %v %v, want confirm_refused folded into unrecorded, confirm_sent and refused kept",
+			rows[0].Outcome, rows[1].Outcome, rows[2].Outcome)
+	}
+}
+
+// List with Unusual returns only rows carrying a signal.
+func TestSignInHistoryListUnusual(t *testing.T) {
+	h := openTestHistory(t, nil, SignInHistoryOptions{})
+	plain := successFrom("u1", "bob", "203.0.113.5")
+	h.Record(plain, signInBase)
+	odd := successFrom("u1", "bob", "203.0.113.6")
+	odd.Client.Unusual = SignalNewBrowser
+	h.Record(odd, signInBase.Add(time.Minute))
+	refused := failedFrom("u1", "bob", "203.0.113.7")
+	refused.Outcome, refused.Client.Unusual = SignInRefused, SignalImpossibleTravel
+	h.Record(refused, signInBase.Add(2*time.Minute))
+	h.Record(failedFrom("u1", "bob", "203.0.113.8"), signInBase.Add(3*time.Minute))
+	rows, more := h.List(SignInQuery{Unusual: true})
+	if more || len(rows) != 2 || rows[0].Outcome != SignInRefused || rows[1].Client.Address != "203.0.113.6" {
+		t.Errorf("unusual rows = %+v", rows)
+	}
+	if all, _ := h.List(SignInQuery{}); len(all) != 4 {
+		t.Errorf("without the filter: %d rows", len(all))
+	}
+}
+
+// Record keeps Country as recordSignIn built it: not cleaned (it is not
+// client-supplied text), and -- per this file's fold rule -- never
+// overwritten by a later attempt folded into the same row.
+func TestSignInHistoryRecordKeepsCountryAndNeverFoldsIt(t *testing.T) {
+	h := openTestHistory(t, nil, SignInHistoryOptions{})
+	first := failedFrom("u1", "bob", "203.0.113.5")
+	first.Client.Country = "GB"
+	h.Record(first, signInBase)
+	again := failedFrom("u1", "bob", "203.0.113.5")
+	again.Client.Country = "FR" // a later attempt folds in; its country is dropped
+	h.Record(again, signInBase.Add(time.Minute))
+	rows, _ := h.List(SignInQuery{})
+	if len(rows) != 1 || rows[0].Count != 2 || rows[0].Client.Country != "GB" {
+		t.Errorf("rows = %+v, want one row, count 2, country GB (the first attempt's)", rows)
 	}
 }
 

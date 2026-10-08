@@ -31,11 +31,11 @@ func TestEveryAuditRecordCarriesTheAddress(t *testing.T) {
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	_, _, _ = totpEnrolAndConfirm(t, bob, ts)
 	_ = postJSON(t, bob, ts.URL+"/api/auth/recovery-codes", recoveryCodesRegenerateRequest{Password: totpBobPassword}).Body.Close()
-	_ = postJSON(t, bob, ts.URL+"/api/auth/logout-all", nil).Body.Close()
+	_ = postJSON(t, bob, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword}).Body.Close()
 	_ = postJSON(t, bob, ts.URL+changePasswordPath, changePasswordRequest{CurrentPassword: totpBobPassword, NewPassword: "a-new-bob-password-9"}).Body.Close()
 	_ = deleteJSON(t, bob, ts.URL+"/api/auth/totp", totpDeleteRequest{Password: "a-new-bob-password-9"}).Body.Close()
 
-	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "ci"})
+	resp := postJSON(t, admin, ts.URL+"/api/tokens", createTokenRequest{Name: "ci", Password: testAdminPassword})
 	var tok struct {
 		ID string `json:"id"`
 	}
@@ -47,10 +47,10 @@ func TestEveryAuditRecordCarriesTheAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = deleteJSON(t, admin, ts.URL+"/api/tokens/"+tok.ID, nil).Body.Close()
-	_ = postJSON(t, admin, ts.URL+"/api/auth/users/"+bobID+"/reset-password", nil).Body.Close()
+	_ = postJSON(t, admin, ts.URL+"/api/auth/users/"+bobID+"/reset-password", adminStepUpRequest{Password: testAdminPassword}).Body.Close()
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users/"+bobID+"/unlock", nil).Body.Close()
 	_ = postJSON(t, admin, ts.URL+"/api/auth/users/"+carol.ID+"/logout-all", nil).Body.Close()
-	_ = deleteJSON(t, admin, ts.URL+"/api/auth/users/"+carol.ID, nil).Body.Close()
+	_ = deleteJSON(t, admin, ts.URL+"/api/auth/users/"+carol.ID, adminStepUpRequest{Password: testAdminPassword}).Body.Close()
 	_ = postJSON(t, admin, ts.URL+"/api/auth/logout", nil).Body.Close()
 
 	audit.mu.Lock()

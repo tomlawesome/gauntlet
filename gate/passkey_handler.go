@@ -20,8 +20,9 @@ import (
 // implemented by gauntlet/passkey); this file never imports the
 // WebAuthn library or gauntlet/passkey. It owns everything either side
 // of the ceremony: the two cookies (passkey_cookie.go), sessions,
-// recovery codes, the login limiter and audit, in the shape the TOTP
-// routes (totp_handler.go) already have.
+// recovery codes (held with the account's first factor until confirmed,
+// #58), the login limiter and audit, in the shape the TOTP routes
+// (totp_handler.go) already have.
 //
 // Divergences from mikroview, each deliberate (ADR-0004):
 //   - Deps.Passkeys nil answers 404 on every passkey route, as OIDC-off
@@ -44,7 +45,7 @@ import (
 // (Deps.Passkeys nil), and reports whether it did.
 func (g *Gate) passkeysOff(w http.ResponseWriter, r *http.Request) bool {
 	if g.deps.Passkeys == nil {
-		http.NotFound(w, r)
+		writeProblem(w, http.StatusNotFound, classNotFound, "", nil)
 		return true
 	}
 	return false
@@ -61,13 +62,14 @@ func (g *Gate) passkeysReady() bool {
 // /api/auth/session's passkeys.status, so this only has to be
 // diagnosable.
 func (g *Gate) writePasskeysNotReady(w http.ResponseWriter) {
-	http.Error(w, fmt.Sprintf("passkeys are not available on this deployment (%s)", g.deps.Passkeys.Status()), http.StatusConflict)
+	writeProblem(w, http.StatusConflict, classConflict, fmt.Sprintf("passkeys are not available on this deployment (%s)", g.deps.Passkeys.Status()), nil)
 }
 
 // usablePasskeyCount is how many of u's passkeys are registered under
 // the relying party's current RP ID -- 0 whenever it is not ready. A
 // passkey registered under an earlier public URL is stale: still listed
-// and removable, never offered at login.
+// and removable, never offered at login. A passkey on hold (#58) is not
+// in u.Passkeys at all, so never counts.
 func (g *Gate) usablePasskeyCount(u *gauntlet.User) int {
 	if !g.passkeysReady() {
 		return 0
@@ -116,15 +118,17 @@ func toPasskeySummary(pk gauntlet.Passkey, currentRPID string) passkeySummary {
 }
 
 // handlePasskeysList answers the caller's own passkeys, stale ones
-// included. UserFromContext's copy is fresh enough: nothing earlier in
-// this request wrote to it.
+// included. A passkey on hold (#58) is left out: it is not live until
+// its recovery codes are confirmed, and the list, the session body's
+// count and sign-in all agree on that. UserFromContext's copy is fresh
+// enough: nothing earlier in this request wrote to it.
 func (g *Gate) handlePasskeysList(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	currentRPID := g.deps.Passkeys.RPID()
@@ -157,30 +161,39 @@ type passkeyRegisterBeginRequest struct {
 // 409 before any body is read (ruling R4 -- its identity provider owns
 // its identity, and a local factor behind no local password protects
 // nothing); then the password, before readiness, so the refusal costs
-// the same whether or not passkeys work here.
+// the same whether or not passkeys work here. An account with a first
+// factor on hold (#58) is told 409 after the password: one enrolment at
+// a time.
 func (g *Gate) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	if !user.LocalPassword() {
-		http.Error(w, "this account signs in through your identity provider -- a passkey is not offered", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account signs in through your identity provider -- a passkey is not offered", nil)
 		return
 	}
 	var req passkeyRegisterBeginRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	// The freshly authenticated copy is also the re-read the exclude
 	// list needs: this account's passkeys as of now, not as of Protect's
 	// session check.
-	current, ok := g.recheckPassword(w, r, user, req.Password, "incorrect password", g.now())
+	now := g.now()
+	current, ok := g.recheckPassword(w, r, user, req.Password, "incorrect password", now)
 	if !ok {
+		return
+	}
+	// One enrolment at a time (#58): a first factor held for its codes
+	// to be confirmed is confirmed or expires before another starts.
+	if current.EnrolmentHeld(now) {
+		g.writeAuthError(w, r, gauntlet.ErrEnrolmentHeld, http.StatusConflict, classConflict)
 		return
 	}
 	if !g.passkeysReady() {
@@ -190,7 +203,7 @@ func (g *Gate) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request
 	options, sealed, err := g.deps.Passkeys.BeginRegistration(current)
 	if err != nil {
 		g.logError("beginning passkey registration for " + current.Username + ": " + err.Error())
-		http.Error(w, "unable to start passkey registration", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey registration", nil)
 		return
 	}
 	g.setPasskeyRegisterCookie(w, sealed)
@@ -209,28 +222,41 @@ type passkeyRegisterFinishRequest struct {
 type passkeyRegisterFinishResponse struct {
 	Passkey passkeySummary `json:"passkey"`
 	// RecoveryCodes is null except when this was the account's first
-	// second factor of either kind. No omitempty: the frontend contract
-	// is `recoveryCodes: [...]|null`, not an absent key.
+	// second factor of either kind: then the ten codes, in clear,
+	// exactly once, saved with the passkey and held with it until
+	// POST /api/auth/recovery-codes/confirm (#58). No omitempty: the
+	// frontend contract is `recoveryCodes: [...]|null`, not an absent
+	// key.
 	RecoveryCodes []string `json:"recoveryCodes"`
-	// AlreadyIssued is true when the account already held recovery codes
-	// -- totpConfirmResponse's field of the same name and meaning. A mint
-	// failure is its own 500, so null here only ever means "already
-	// issued".
+	// PendingConfirmation is true when the passkey and RecoveryCodes are
+	// on hold: not live, not listed and not a sign-in factor until the
+	// caller confirms the codes were saved. Unconfirmed after
+	// gauntlet.HeldEnrolmentLifetime, both are deleted.
+	PendingConfirmation bool `json:"pendingConfirmation,omitempty"`
+	// AlreadyIssued is true when the passkey was added live to an
+	// account that already had a second factor: the account keeps the
+	// one set of recovery codes it has, so none are issued.
 	AlreadyIssued bool `json:"alreadyIssued,omitempty"`
 }
 
 // handlePasskeyRegisterFinish completes the registration register/begin
-// started: verify, AddPasskey, and -- on the account's first factor --
-// revoke every session, reissue this browser's, and mint recovery codes.
+// started. On the account's first second factor (#58) the passkey and
+// ten new recovery codes are saved together, in one write, on hold
+// (gauntlet.Store.HoldFirstPasskey), and the codes are answered once:
+// nothing goes live, no session is rotated and nothing is audited until
+// the caller confirms the codes were saved (handleEnrolmentConfirm).
+// On an account that already has a second factor the passkey is added
+// live at once (AddPasskey), with no codes, and audited here.
 //
 // The ceremony ends at the first finish the library accepts (ruling S1
 // on #20): one password-proved begin stores at most one passkey. Its
 // sealed cookie's hash is claimed in spentRegistrations after
-// FinishRegistration accepts and before AddPasskey writes, so of two
+// FinishRegistration accepts and before the store writes, so of two
 // finishes racing on one cookie only one can store; a stored passkey
-// (200), a store refusal (409 duplicate or limit, 500 on a failed save)
-// and a lost race all end it, and the cookie is cleared with the answer.
-// A cookie already spent is refused once the body has been read.
+// (200), a store refusal (409 duplicate, limit or an enrolment already
+// on hold; 500 on a failed save) and a lost race all end it, and the
+// cookie is cleared with the answer. A cookie already spent is refused
+// once the body has been read.
 //
 // Refusals that do not end the ceremony are the library's, told apart
 // from a dead ceremony by gauntlet.ErrPasskeyCeremonyInvalid: a dead
@@ -251,7 +277,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	if !g.passkeysReady() {
@@ -263,21 +289,21 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// leaves a live ceremony alone instead of reporting it dead.
 	var req passkeyRegisterFinishRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
 	cookie, err := r.Cookie(passkeyRegisterCookieName)
 	if err != nil {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
 	now := g.now()
 	key := registrationKey(cookie.Value)
 	if spentRegistrations.Spent(key, now) {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
 
@@ -285,18 +311,18 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// requests have written since Protect resolved the session.
 	current, ok := g.deps.Users.Get(user.ID)
 	if !ok {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	pk, err := g.deps.Passkeys.FinishRegistration(current, cookie.Value, req.Credential)
 	if errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
 	if err != nil {
-		http.Error(w, "that passkey couldn't be registered -- try again", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "that passkey couldn't be registered -- try again", nil)
 		return
 	}
 	// The library accepted it: from here the ceremony is spent, whatever
@@ -305,60 +331,64 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// later), plus the set's grace of another lifetime.
 	if !spentRegistrations.Claim(key, now.Add(passkeyCeremonyCookieMaxAge), now) {
 		g.clearPasskeyRegisterCookie(w)
-		writeUnauthorized(w, "start registration again")
+		writeUnauthorized(w, classStepExpired, "start registration again")
 		return
 	}
+	g.clearPasskeyRegisterCookie(w) // spent whatever the store answers: begin again
 
 	pk.Name = req.Name
 	pk.CreatedAt = now
-	wasFirstFactor := !current.HasSecondFactor()
+	rpID := g.deps.Passkeys.RPID()
+
+	if !current.HasSecondFactor() {
+		// The first factor: held with its codes, in one write. The store
+		// decides again under its lock, so of two first factors racing
+		// only one is held, and one that lost to a factor going live in
+		// between is added live below instead.
+		held, codes, err := g.deps.Users.HoldFirstPasskey(current.ID, pk, now)
+		if err == nil {
+			writeJSON(w, http.StatusOK, passkeyRegisterFinishResponse{
+				Passkey:             toPasskeySummary(held, rpID),
+				RecoveryCodes:       codes,
+				PendingConfirmation: true,
+			})
+			return
+		}
+		if !errors.Is(err, gauntlet.ErrSecondFactorExists) {
+			g.writePasskeyStoreError(w, r, err)
+			return
+		}
+	}
 
 	stored, err := g.deps.Users.AddPasskey(current.ID, pk)
 	if err != nil {
-		g.clearPasskeyRegisterCookie(w) // the ceremony is spent: begin again
-		status := http.StatusInternalServerError
-		if errors.Is(err, gauntlet.ErrPasskeyDuplicate) || errors.Is(err, gauntlet.ErrPasskeyLimitReached) {
-			status = http.StatusConflict
-		}
-		g.writeAuthError(w, r, err, status)
+		g.writePasskeyStoreError(w, r, err)
 		return
 	}
-
-	// Mint-if-absent under the store's lock -- never re-mint, and never
-	// let two first factors racing each other both mint (see
-	// handleTOTPConfirm's identical call).
-	codes, alreadyIssued, mintErr := g.deps.Users.GenerateRecoveryCodesIfAbsent(current.ID, now)
-
-	// The passkey is live from AddPasskey on, so rotation and the audit
-	// record happen whether or not the mint worked: no retry could do
-	// them later, since begin now excludes this passkey.
-	if wasFirstFactor {
-		g.deps.Sessions.RevokeAllForUser(current.ID)
-		g.issueSession(w, r, current.ID, now)
-	}
-	g.clearPasskeyRegisterCookie(w)
 	// Quoted, as from= and the other user-supplied fields are: the name
 	// is the user's own text, and a newline or terminal escape in it
 	// must not forge or hide a line in the audit log.
-	detail := fmt.Sprintf("name=%q", stored.Name)
-	if mintErr != nil {
-		detail += "; recovery codes could not be saved"
-	}
-	g.audit(r, current.Username, "account.passkey_added", current.Username, detail)
-
-	if mintErr != nil {
-		// Not answered like "already issued" (null codes, 200): nothing
-		// was ever issued for this account to fall back on.
-		g.logError("generating recovery codes for " + current.Username + " after registering a passkey: " + mintErr.Error())
-		http.Error(w, "the passkey is now active, but recovery codes could not be saved -- generate a new set from account settings", http.StatusInternalServerError)
-		return
-	}
-
+	g.audit(r, current.Username, "account.passkey_added", current.Username, fmt.Sprintf("name=%q", stored.Name))
 	writeJSON(w, http.StatusOK, passkeyRegisterFinishResponse{
-		Passkey:       toPasskeySummary(stored, g.deps.Passkeys.RPID()),
-		RecoveryCodes: codes,
-		AlreadyIssued: alreadyIssued,
+		Passkey:       toPasskeySummary(stored, rpID),
+		RecoveryCodes: nil,
+		AlreadyIssued: true,
 	})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorAdded, UserID: current.ID, Username: current.Username, Role: current.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: stored.Name},
+	})
+}
+
+// writePasskeyStoreError answers a refused passkey save: 409 for a
+// duplicate, a full account or an enrolment already on hold, 500
+// otherwise.
+func (g *Gate) writePasskeyStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	status, class := http.StatusInternalServerError, classServerError
+	if errors.Is(err, gauntlet.ErrPasskeyDuplicate) || errors.Is(err, gauntlet.ErrPasskeyLimitReached) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
+		status, class = http.StatusConflict, classConflict
+	}
+	g.writeAuthError(w, r, err, status, class)
 }
 
 // -- PATCH /api/auth/passkeys/{id} ----------------------------------------
@@ -376,26 +406,26 @@ func (g *Gate) handlePasskeyRename(w http.ResponseWriter, r *http.Request) {
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	var req passkeyRenameRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	credID, err := base64.RawURLEncoding.DecodeString(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, "invalid passkey id", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid passkey id", nil)
 		return
 	}
 	pk, err := g.deps.Users.RenamePasskey(user.ID, credID, req.Name)
 	if err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrPasskeyNotFound) {
-			status = http.StatusNotFound
+			status, class = http.StatusNotFound, classNotFound
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 	writeJSON(w, http.StatusOK, toPasskeySummary(pk, g.deps.Passkeys.RPID()))
@@ -412,23 +442,39 @@ type passkeyDeleteRequest struct {
 // that leaves the account with no second factor, every session on it is
 // revoked and signedOut says so -- the store has already cleared the
 // recovery codes in the same write.
+//
+// While the admin passkey rule is on (#82 decision 3), an admin's own
+// last usable passkey is refused with 409 before the password is
+// checked (isLastUsableAdminPasskey): the person removing it is present
+// and can register another first, as GitHub and Google ask of a last
+// second factor. A stale passkey is always deletable, and another
+// admin's clear-all (handlePasskeysAdminClear) stays open as the way
+// back for a lost one. The door is the invariant: two concurrent
+// deletes that leave none hold the account at its next request.
 func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
 	}
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	var req passkeyDeleteRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 	credID, err := base64.RawURLEncoding.DecodeString(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, "invalid passkey id", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid passkey id", nil)
+		return
+	}
+	// Before the password re-check, so it costs no re-check budget: the
+	// refusal does not depend on the password.
+	if g.isLastUsableAdminPasskey(user, credID) {
+		writeProblem(w, http.StatusConflict, classConflict,
+			"this is the only passkey that can sign this admin account in -- register another passkey first", nil)
 		return
 	}
 
@@ -439,11 +485,11 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 
 	removed, err := g.deps.Users.DeletePasskey(user.ID, credID)
 	if err != nil {
-		status := http.StatusInternalServerError
+		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrPasskeyNotFound) {
-			status = http.StatusNotFound
+			status, class = http.StatusNotFound, classNotFound
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -455,6 +501,28 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 
 	g.audit(r, user.Username, "account.passkey_removed", user.Username, fmt.Sprintf("name=%q", removed.Name))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "signedOut": signedOut})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: removed.Name},
+	})
+}
+
+// isLastUsableAdminPasskey reports whether credID is user's only
+// passkey usable under the current RP ID, user is an admin, and the
+// admin passkey rule is on (#82).
+func (g *Gate) isLastUsableAdminPasskey(user *gauntlet.User, credID []byte) bool {
+	if !g.adminPasskeyRuleOn() || user.Role != gauntlet.RoleAdmin || !g.passkeysReady() {
+		return false
+	}
+	// The caller's copy from context is fresh enough: nothing earlier in
+	// this request wrote the account.
+	rpID := g.deps.Passkeys.RPID()
+	for _, pk := range user.Passkeys {
+		if bytes.Equal(pk.ID, credID) {
+			return pk.RPID == rpID && g.usablePasskeyCount(user) == 1
+		}
+	}
+	return false
 }
 
 // -- POST /api/auth/login/factor/begin ------------------------------------
@@ -481,7 +549,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 	user, ok := g.deps.Users.Get(st.UserID)
 	if !ok {
 		g.clearPendingLoginCookie(w)
-		writeUnauthorized(w, "sign in again")
+		writeUnauthorized(w, classStepExpired, "sign in again")
 		return
 	}
 	if !g.passkeysReady() {
@@ -489,7 +557,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if g.usablePasskeyCount(user) == 0 {
-		http.Error(w, "this account has no passkey usable at this address", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account has no passkey usable at this address", nil)
 		return
 	}
 
@@ -504,7 +572,7 @@ func (g *Gate) handleLoginFactorBegin(w http.ResponseWriter, r *http.Request) {
 		// This server's failure, not the caller's attempt.
 		g.releaseLogin(res, now)
 		g.logError("beginning passkey sign-in for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to start passkey sign-in", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start passkey sign-in", nil)
 		return
 	}
 	g.setPasskeyAssertCookie(w, sealed)
@@ -543,11 +611,11 @@ const passkeyStartAgain = "start passkey sign-in again"
 // passkeyNotVerified and keeps it, so a corrected assertion can still
 // finish inside the window.
 func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, user *gauntlet.User, assertion json.RawMessage, res loginReservation, now time.Time) bool {
-	refuse := func(msg string) bool {
+	refuse := func(class problemClass, msg string) bool {
 		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodPasskey), res, now)
-		writeUnauthorized(w, msg)
+		writeUnauthorized(w, class, msg)
 		return false
 	}
 	if !g.passkeysReady() {
@@ -557,20 +625,62 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 	cookie, err := r.Cookie(passkeyAssertCookieName)
 	if err != nil {
 		g.clearPasskeyAssertCookie(w)
-		return refuse(passkeyStartAgain)
+		return refuse(classStepExpired, passkeyStartAgain)
 	}
 
 	verified, err := g.deps.Passkeys.FinishLogin(user, cookie.Value, assertion)
 	if errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
 		g.clearPasskeyAssertCookie(w)
-		return refuse(passkeyStartAgain)
+		return refuse(classStepExpired, passkeyStartAgain)
 	}
 	if err != nil {
-		return refuse(passkeyNotVerified)
+		return refuse(classInvalidCredentials, passkeyNotVerified)
 	}
 
+	switch g.recordVerifiedAssertion(r, user, verified, now) {
+	case assertionRefused:
+		return refuse(classInvalidCredentials, passkeyNotVerified)
+	case assertionBackendFailed:
+		// Both reservations go back -- this request's and the one
+		// login/factor/begin took for the challenge -- or a backend
+		// outage would cost an attempt per try and end in a 429 for an
+		// owner who never guessed wrong.
+		g.releaseLogin(res, now)
+		g.releaseLogin(res, now)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
+		return false
+	}
+
+	g.clearPasskeyAssertCookie(w)
+	return true
+}
+
+// assertionOutcome is how recordVerifiedAssertion ended.
+type assertionOutcome int
+
+const (
+	// assertionAccepted: the count is recorded; the assertion may sign in.
+	assertionAccepted assertionOutcome = iota
+	// assertionRefused: a clone warning, a passkey removed since the
+	// ceremony read the account, or a counter that did not advance.
+	assertionRefused
+	// assertionBackendFailed: the counter could not be saved. Not the
+	// caller's doing: the request is answered 500 and its reservations
+	// handed back.
+	assertionBackendFailed
+)
+
+// recordVerifiedAssertion is what both passkey sign-in paths do once the
+// ceremony has said the signature checked out (verified): refuse a clone
+// warning -- the library's verdict that the counter failed to advance
+// (never for 0 -> 0, how most platform passkeys behave) -- auditing it
+// with both counts and leaving the stored count alone, and otherwise let
+// RecordPasskeyAssertionIfFresh decide and record under the store's lock,
+// so two copies of one assertion cannot both win. It writes no response
+// and touches no reservation: each caller decides what a refusal costs.
+func (g *Gate) recordVerifiedAssertion(r *http.Request, user *gauntlet.User, verified gauntlet.PasskeyAssertion, now time.Time) assertionOutcome {
 	if verified.CloneWarning {
-		// "unknown" when the passkey was removed between FinishLogin's
+		// "unknown" when the passkey was removed between the ceremony's
 		// read of the account and this one.
 		stored := "unknown"
 		for _, pk := range user.Passkeys {
@@ -581,35 +691,27 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 		g.audit(r, user.Username, "account.passkey_clone_suspected", user.Username,
 			fmt.Sprintf("credential=%s presentedCount=%d storedCount=%s",
 				base64.RawURLEncoding.EncodeToString(verified.CredentialID), verified.SignCount, stored))
-		return refuse(passkeyNotVerified)
+		return assertionRefused
 	}
 
 	accepted, err := g.deps.Users.RecordPasskeyAssertionIfFresh(user.ID, verified.CredentialID, verified.SignCount, now)
 	switch {
 	case errors.Is(err, gauntlet.ErrPasskeyNotFound), errors.Is(err, gauntlet.ErrUserNotFound):
-		// Removed since FinishLogin read the account: nothing to sign in
-		// with any more.
-		return refuse(passkeyNotVerified)
+		// Removed since the ceremony read the account: nothing to sign
+		// in with any more.
+		return assertionRefused
 	case err != nil:
 		// A counter that could not be saved is refused (accepted is
 		// false), but as the backend failing, not a wrong guess -- the
 		// same stance as the TOTP branch's VerifyAndRecordTOTP error. A
 		// failed save on a 0 -> 0 login never gets here: the store logs
-		// it and accepts. Both reservations go back -- this request's and
-		// the one login/factor/begin took for the challenge -- or a
-		// backend outage would cost an attempt per try and end in a 429
-		// for an owner who never guessed wrong.
-		g.releaseLogin(res, now)
-		g.releaseLogin(res, now)
+		// it and accepts.
 		g.logError("recording passkey assertion for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to complete sign-in", http.StatusInternalServerError)
-		return false
+		return assertionBackendFailed
 	case !accepted:
-		return refuse(passkeyNotVerified)
+		return assertionRefused
 	}
-
-	g.clearPasskeyAssertCookie(w)
-	return true
+	return assertionAccepted
 }
 
 // -- DELETE /api/auth/users/{id}/passkeys ---------------------------------
@@ -618,31 +720,63 @@ func (g *Gate) verifyPasskeyAssertion(w http.ResponseWriter, r *http.Request, us
 // user's account -- handleTOTPAdminClear's twin, including refusing the
 // caller's own account: an admin who lost their own factor has no
 // console tool in this module (docs/design.md §1.7). ClearPasskeys drops
-// the recovery codes only when no factor of either kind is left.
+// the recovery codes only when no factor of either kind is left. The
+// caller's own password is asked for again on the request (#72). An
+// account with no passkeys is answered 200 with cleared false, and
+// nothing is recorded or sent. While the admin passkey rule is on, an
+// admin target is held at the passkey door afterwards (#82), and the
+// audit detail says so.
 func (g *Gate) handlePasskeysAdminClear(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
 	}
+	var req adminStepUpRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "user id is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
-		http.Error(w, "an administrator cannot clear their own passkeys here", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot clear their own passkeys here", nil)
+		return
+	}
+	if !g.recheckAdminPassword(w, r, req.Password, g.now()) {
 		return
 	}
 
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
-		http.Error(w, "no such user", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
 		return
 	}
 	if err := g.deps.Users.ClearPasskeys(id); err != nil {
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		// The account is already in the state asked for, so this is a
+		// success, but one that changed nothing: no record and no notice
+		// of a removal that did not happen.
+		if errors.Is(err, gauntlet.ErrNoPasskeys) {
+			writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": false})
+			return
+		}
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 
-	g.audit(r, auditActor(r), "user.passkeys_cleared", target.Username, "passkeys removed by admin")
+	by := auditActor(r)
+	detail := "passkeys removed by admin"
+	// The way back for an admin who lost a passkey stays open (#82
+	// decision 3): the account is held at the passkey door from its
+	// next request until it registers one.
+	if g.adminPasskeyRuleOn() && target.Role == gauntlet.RoleAdmin {
+		detail += "; admin held for a passkey"
+	}
+	g.audit(r, by, "user.passkeys_cleared", target.Username, detail)
 	writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": true})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: target.ID, Username: target.Username, Role: target.Role, At: g.now(), By: by,
+		SecondFactor: &SecondFactorDetail{Method: "passkey", All: true},
+	})
 }

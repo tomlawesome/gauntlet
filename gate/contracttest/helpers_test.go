@@ -98,6 +98,13 @@ func openStore(t *testing.T, backend persist.Backend) (*gauntlet.Store, string) 
 // token and limiter stores wherever deps leaves one nil.
 func newGate(t *testing.T, deps gate.Deps) *gate.Gate {
 	t.Helper()
+	return newGateWith(t, deps, nil)
+}
+
+// newGateWith is newGate with configure applied to the Config before
+// gate.New sees it.
+func newGateWith(t *testing.T, deps gate.Deps, configure func(*gate.Config)) *gate.Gate {
+	t.Helper()
 	if deps.Tokens == nil {
 		tokens, err := gauntlet.OpenTokenStore(persist.NewMemory(), gauntlet.TokenOptions{})
 		if err != nil {
@@ -115,13 +122,20 @@ func newGate(t *testing.T, deps gate.Deps) *gate.Gate {
 	if deps.Sessions == nil {
 		deps.Sessions = gauntlet.NewSessionStore(gauntlet.MaxSessionIdle, gauntlet.MaxSessionLifetime)
 	}
-	g, err := gate.New(gate.Config{
+	cfg := gate.Config{
 		CookieName:      testCookieName,
 		CSRFHeaderValue: testCSRFValue,
 		ClientIP:        func(*http.Request) string { return "198.51.100.1" },
 		ProductName:     testProductName,
 		LoginPath:       testLoginPath,
-	}, deps)
+		// Several fixtures wire a relying party that is not ready, which
+		// "required" refuses at start; a test about the rule sets it.
+		AdminPasskey: gate.AdminPasskeyOptional,
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+	g, err := gate.New(cfg, deps)
 	if err != nil {
 		t.Fatalf("gate.New: %v", err)
 	}
@@ -182,7 +196,10 @@ func newOIDCTestServer(t *testing.T) (*oidc.StateCodec, *httptest.Server, *testu
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec, Passkeys: rp})
+	// Roles from groups (#76): the fake provider's default claims carry no
+	// group, so an SSO sign-in lands on the viewer fallback.
+	policy := oidc.Policy{RoleFromGroups: map[string]string{"staff": "user"}}
+	g := newGate(t, gate.Deps{Users: users, OIDC: client, OIDCState: codec, OIDCPolicy: policy, Passkeys: rp})
 	ts := newTestServer(t, g)
 
 	b, err := json.Marshal(registerRequest{"setup-admin", "setup-admin-password", code})
@@ -245,7 +262,8 @@ func totpCounterNow(now time.Time) uint64 {
 }
 
 // enrolTOTPFactor drives TOTP enrol+confirm end to end for client,
-// already signed in with password and holding no second factor yet --
+// already signed in with password and holding no second factor yet,
+// then confirms the held app's recovery codes (#58) --
 // the minimal way to clear the forced-enrolment door gate/protect.go
 // holds shut for every local-password account (#49), for a fixture
 // whose point is not that door.
@@ -262,8 +280,13 @@ func enrolTOTPFactor(t *testing.T, c *contractChecker, base string, client *http
 	code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))
 	var confirmed totpConfirmResponse
 	c.do(client, base, call{method: "POST", path: "/api/auth/totp/confirm", body: totpConfirmRequest{Code: code}}, 200, &confirmed)
+	c.do(client, base, call{method: "POST", path: enrolmentConfirmPath}, 200, nil)
 	return confirmed.RecoveryCodes
 }
+
+// enrolmentConfirmPath is where a held first factor's recovery codes
+// are confirmed (#58).
+const enrolmentConfirmPath = "/api/auth/recovery-codes/confirm"
 
 func mustCookieJar(t *testing.T) http.CookieJar {
 	t.Helper()
@@ -319,9 +342,10 @@ type passkeyRow struct {
 }
 
 type passkeyRegisterFinishResponse struct {
-	Passkey       passkeyRow `json:"passkey"`
-	RecoveryCodes []string   `json:"recoveryCodes"`
-	AlreadyIssued bool       `json:"alreadyIssued"`
+	Passkey             passkeyRow `json:"passkey"`
+	RecoveryCodes       []string   `json:"recoveryCodes"`
+	PendingConfirmation bool       `json:"pendingConfirmation"`
+	AlreadyIssued       bool       `json:"alreadyIssued"`
 }
 
 type changePasswordRequest struct {
@@ -330,9 +354,25 @@ type changePasswordRequest struct {
 }
 
 type createUserRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Role     string `json:"role"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	Role          string `json:"role"`
+	AdminPassword string `json:"adminPassword,omitempty"`
+	AdminCode     string `json:"adminCode,omitempty"`
+}
+
+type setRoleRequest struct {
+	Role      string          `json:"role"`
+	Password  string          `json:"password,omitempty"`
+	Code      string          `json:"code,omitempty"`
+	Assertion json.RawMessage `json:"assertion,omitempty"`
+}
+
+type setRoleResponse struct {
+	Username      string `json:"username"`
+	From          string `json:"from"`
+	To            string `json:"to"`
+	SessionsEnded bool   `json:"sessionsEnded"`
 }
 
 type totpEnrolRequest struct {
@@ -352,9 +392,12 @@ type recoveryCodesRegenerateRequest struct {
 }
 
 type createTokenRequest struct {
-	Name   string `json:"name"`
-	Kind   string `json:"kind"`
-	Device string `json:"device"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Device   string `json:"device"`
+	Password string `json:"password"`
+	// ExpiresAt is left out of the body when nil (#74).
+	ExpiresAt *string `json:"expiresAt,omitempty"`
 }
 
 type sessionResponse struct {
@@ -362,10 +405,15 @@ type sessionResponse struct {
 	Authenticated bool   `json:"authenticated"`
 	Role          string `json:"role"`
 	SignedInSince string `json:"signedInSince"`
-	Passkeys      *struct {
+	// MustEnrolPasskey and AdminPasskeyRequired report the admin passkey
+	// rule (#82).
+	MustEnrolPasskey     bool  `json:"mustEnrolPasskey"`
+	AdminPasskeyRequired *bool `json:"adminPasskeyRequired"`
+	Passkeys             *struct {
 		Count  int    `json:"count"`
 		Status string `json:"status"`
 		Origin string `json:"origin"`
+		SignIn bool   `json:"signIn"`
 	} `json:"passkeys"`
 }
 
@@ -380,8 +428,15 @@ type totpEnrolResponse struct {
 }
 
 type totpConfirmResponse struct {
-	AlreadyIssued bool     `json:"alreadyIssued"`
-	RecoveryCodes []string `json:"recoveryCodes"`
+	Enabled             bool     `json:"enabled"`
+	AlreadyIssued       bool     `json:"alreadyIssued"`
+	PendingConfirmation bool     `json:"pendingConfirmation"`
+	RecoveryCodes       []string `json:"recoveryCodes"`
+}
+
+type enrolmentConfirmResponse struct {
+	Confirmed bool   `json:"confirmed"`
+	Factor    string `json:"factor"`
 }
 
 type recoveryCodesRegenerateResponse struct {
@@ -422,4 +477,5 @@ type tokenResponse struct {
 	Kind       gauntlet.TokenKind `json:"kind"`
 	Value      string             `json:"value"`
 	LastUsedAt time.Time          `json:"lastUsedAt"`
+	ExpiresAt  time.Time          `json:"expiresAt"`
 }

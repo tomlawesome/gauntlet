@@ -44,6 +44,8 @@ type IDTokenClaims struct {
 	Email             string `json:"email,omitempty"`
 	EmailVerified     bool   `json:"email_verified,omitempty"`
 	PreferredUsername string `json:"preferred_username,omitempty"`
+	// Groups is the "groups" claim; omitted when nil.
+	Groups []string `json:"groups,omitempty"`
 }
 
 // FakeProvider is a minimal in-process OIDC provider for testing gauntlet's

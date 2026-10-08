@@ -5,7 +5,9 @@
 **Amended:** 2026-10-01 -- decision 1, stored-document versions (#29);
 decision 5, ASVS moved out of v0.2.0 (#31). 2026-10-02 -- decision 1,
 added fields raise the version (#28); decision 1, a third stored
-document, the sign-in history (#53, ADR-0006)
+document, the sign-in history (#53, ADR-0006). 2026-10-03 -- decision 5,
+the error-format switch moved earlier, to before mikroview's migration
+(#23, owner 2026-10-03)
 **Relates to:** [ADR-0001](0001-shared-auth-module.md), #22 (CI compatibility
 checks), #23 (Problem Details errors), mikroview #1202
 
@@ -63,9 +65,14 @@ house rule (2026-09-30).
 5. **Timing.** OpenAPI and `apidiff` land in v0.2.0; the frontends
    cannot tell. Measuring the security requirements against ASVS comes
    in a later release, not v0.2.0 (owner, 2026-10-01): the mapping is
-   #33, in v0.3.0. The error format switches to Problem Details only when
-   mikroview's frontend moves onto gauntlet (#23, with mikroview #1202),
-   because it changes what that frontend parses today.
+   #33, in v0.3.0. The error format switches to RFC 9457 Problem Details
+   now, in this release, not timed to mikroview's migration onto gauntlet
+   (#23, owner 2026-10-03, superseding this decision's original
+   "only when mikroview's frontend moves onto gauntlet"): neither
+   mikroview nor birdcage parses gauntlet's error bodies yet, so nothing
+   is broken by switching first, and mikroview then migrates onto
+   gauntlet's error format once (mikroview #1202) instead of once onto
+   the old shape and again onto Problem Details.
 
 ## Consequences
 
@@ -83,5 +90,7 @@ house rule (2026-09-30).
 - Path versioning (`/api/auth/v2/...`) is not adopted: the routes are an
   embedded surface behind each app's own frontend, and the additive rule
   makes a second path prefix unnecessary until a major version.
-
-Written by Fable 5.1, 2026-09-30.
+- Status note (v0.3.0 audit, 2026-10-08): the ASVS line above is now a
+  measurement: [security-by-design.md](../security-by-design.md) holds
+  the requirement-by-requirement mapping ("Standards conformance: OWASP
+  ASVS (#33)").

@@ -14,7 +14,7 @@ import (
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// accountsFixture is a version-5 accounts document, written out by hand
+// accountsFixture is a version-8 accounts document, written out by hand
 // and frozen: it is the stored format as birdcage and mikroview hold it
 // on disk, not what this build's structs happen to produce. A renamed
 // or dropped JSON tag changes what loading it and saving it back
@@ -23,13 +23,19 @@ import (
 // one was before #29, could never do. Change it only alongside a new
 // document version (see docversion.go).
 //
+// Its seq (#59) is 1, as if this were a document already saved once --
+// a no-op save (below) bumps it to 2, since the counter goes up on
+// every save, changed or not; bumpedSeq below is that one step.
+//
 // Mikroview users.json-shaped, plus gauntlet's own sessionsEndedAt,
-// loginLockedUntil, loginLockoutCount, loginDisabledAt, knownBrowsers
-// and breachCheckPending, never real user data: an admin with every field
-// populated, including every second-factor kind (TOTP, two recovery
-// codes, a passkey, an outstanding reset code, a lockout, a count of
-// lockouts, a disabled sign-in, a remembered browser, a breach check
-// still to make --
+// loginLockedUntil, loginLockoutCount, loginDisabledAt, knownBrowsers,
+// breachCheckPending, totpPendingSince, heldEnrolment, seenCountries
+// and lastPlace, never real
+// user data: an admin with every field populated, including every
+// second-factor kind (TOTP, two recovery codes, a passkey, an
+// outstanding reset code, a lockout, a count of lockouts, a disabled
+// sign-in, a remembered browser, a breach check still to make, an
+// enrolment on hold, a remembered country and last place --
 // data shape only; a real account would not carry all of these live at
 // once), a plain local user, an SSO-linked account with no local
 // password, and a roleless legacy account (loads as-is; see
@@ -37,7 +43,8 @@ import (
 // not hashes of anything: nothing here authenticates. Users are in the
 // username order a save writes them in.
 const accountsFixture = `{
-  "version": 5,
+  "version": 9,
+  "seq": 1,
   "users": [
     {
       "id": "admin-id-0001",
@@ -52,6 +59,7 @@ const accountsFixture = `{
       "roleChangedAt": "2026-01-02T03:05:05Z",
       "resetCodeHash": "$argon2id$fixture-reset-code-hash",
       "resetCodeExpiresAt": "2026-01-03T03:04:05Z",
+      "resetCodeSpentHash": "$argon2id$fixture-spent-reset-code-hash",
       "mustChangePassword": true,
       "breachCheckPending": true,
       "loginLockedUntil": "2026-01-02T03:19:05Z",
@@ -60,12 +68,27 @@ const accountsFixture = `{
       "knownBrowsers": [
         {
           "hash": "fixture-known-browser-hash",
-          "issuedAt": "2026-01-02T04:04:05Z"
+          "issuedAt": "2026-01-02T04:04:05Z",
+          "confirmed": true
         }
       ],
+      "seenCountries": [
+        {
+          "code": "GB",
+          "lastAt": "2026-01-02T04:04:05Z"
+        }
+      ],
+      "lastPlace": {
+        "country": "GB",
+        "latitude": 51.5,
+        "longitude": -0.12,
+        "radiusKm": 20,
+        "at": "2026-01-02T04:04:05Z"
+      },
       "totpSecret": "JBSWY3DPEHPK3PXP",
       "totpConfirmedAt": "2026-01-02T03:04:05Z",
       "totpLastCounter": 99,
+      "totpPendingSince": "2026-01-02T03:03:05Z",
       "recoveryCodes": [
         {
           "hash": "fixture-recovery-hash-a"
@@ -95,7 +118,30 @@ const accountsFixture = `{
           "createdAt": "2026-01-02T03:04:05Z",
           "lastUsedAt": "2026-01-02T05:04:05Z"
         }
-      ]
+      ],
+      "heldEnrolment": {
+        "kind": "passkey",
+        "passkey": {
+          "id": "Zml4dHVyZS1oZWxkLWNyZWRlbnRpYWw=",
+          "publicKey": "Zml4dHVyZS1oZWxkLXB1YmxpYy1rZXk=",
+          "signCount": 0,
+          "flags": {
+            "userPresent": true,
+            "userVerified": true,
+            "backupEligible": false,
+            "backupState": false
+          },
+          "rpId": "example.test",
+          "name": "Spare key",
+          "createdAt": "2026-01-02T05:10:05Z"
+        },
+        "recoveryCodes": [
+          {
+            "hash": "fixture-held-recovery-hash"
+          }
+        ],
+        "heldUntil": "2026-01-02T05:20:05Z"
+      }
     },
     {
       "id": "bob-id-0002",
@@ -134,7 +180,9 @@ const accountsFixture = `{
 func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	assertFixtureCoversEveryField(t, accountsFixture,
 		reflect.TypeFor[storeFile](), reflect.TypeFor[User](), reflect.TypeFor[RecoveryCode](),
-		reflect.TypeFor[Passkey](), reflect.TypeFor[PasskeyFlags](), reflect.TypeFor[KnownBrowser]())
+		reflect.TypeFor[Passkey](), reflect.TypeFor[PasskeyFlags](), reflect.TypeFor[KnownBrowser](),
+		reflect.TypeFor[HeldEnrolment](), reflect.TypeFor[SeenCountry](), reflect.TypeFor[LastPlace](),
+		reflect.TypeFor[Location]())
 
 	m := persist.NewMemory()
 	primeMemory(t, m, accountsFixture)
@@ -156,9 +204,13 @@ func TestMikroviewUsersJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after save: %v", err)
 	}
-	if string(snap.Payload) != accountsFixture {
-		t.Errorf("saved document differs from the frozen fixture:\n--- fixture ---\n%s\n--- saved ---\n%s",
-			accountsFixture, snap.Payload)
+	// The sequence counter (#59) goes up by one on every save, changed
+	// or not, so the saved document is the fixture with seq advanced
+	// one step, not byte-identical to it.
+	want := bumpedSeq(t, accountsFixture)
+	if string(snap.Payload) != want {
+		t.Errorf("saved document differs from the frozen fixture (with seq advanced one save):\n--- want ---\n%s\n--- saved ---\n%s",
+			want, snap.Payload)
 	}
 
 	// Reload: a second Store opened fresh against the saved document
@@ -187,13 +239,93 @@ const lockoutLines = "      \"loginLockoutCount\": 2,\n" +
 const knownBrowserLines = "      \"knownBrowsers\": [\n" +
 	"        {\n" +
 	"          \"hash\": \"fixture-known-browser-hash\",\n" +
-	"          \"issuedAt\": \"2026-01-02T04:04:05Z\"\n" +
+	"          \"issuedAt\": \"2026-01-02T04:04:05Z\",\n" +
+	"          \"confirmed\": true\n" +
 	"        }\n" +
 	"      ],\n"
 
 // breachLines is the field accounts version 5 (#43) added, as the
 // every-field fixture spells it.
 const breachLines = "      \"breachCheckPending\": true,\n"
+
+// seqLine is the top-level counter accounts version 6 (#59) added, as
+// the every-field fixture spells it. Unlike lockoutLines and the other
+// per-field lines above, this one sits outside "users" (fixtureAtVersion
+// finds it the same way regardless).
+const seqLine = "  \"seq\": 1,\n"
+
+// holdLines are the fields accounts version 7 (#58) added, as the
+// every-field fixture spells them: totpPendingLine inside the admin's
+// TOTP fields, heldLines closing its record (with the comma that ends
+// the passkeys before it).
+const totpPendingLine = "      \"totpPendingSince\": \"2026-01-02T03:03:05Z\",\n"
+
+const heldLines = ",\n" +
+	"      \"heldEnrolment\": {\n" +
+	"        \"kind\": \"passkey\",\n" +
+	"        \"passkey\": {\n" +
+	"          \"id\": \"Zml4dHVyZS1oZWxkLWNyZWRlbnRpYWw=\",\n" +
+	"          \"publicKey\": \"Zml4dHVyZS1oZWxkLXB1YmxpYy1rZXk=\",\n" +
+	"          \"signCount\": 0,\n" +
+	"          \"flags\": {\n" +
+	"            \"userPresent\": true,\n" +
+	"            \"userVerified\": true,\n" +
+	"            \"backupEligible\": false,\n" +
+	"            \"backupState\": false\n" +
+	"          },\n" +
+	"          \"rpId\": \"example.test\",\n" +
+	"          \"name\": \"Spare key\",\n" +
+	"          \"createdAt\": \"2026-01-02T05:10:05Z\"\n" +
+	"        },\n" +
+	"        \"recoveryCodes\": [\n" +
+	"          {\n" +
+	"            \"hash\": \"fixture-held-recovery-hash\"\n" +
+	"          }\n" +
+	"        ],\n" +
+	"        \"heldUntil\": \"2026-01-02T05:20:05Z\"\n" +
+	"      }"
+
+// unusualLines are the fields accounts version 8 (#55) added, as the
+// every-field fixture spells them.
+const unusualLines = "      \"seenCountries\": [\n" +
+	"        {\n" +
+	"          \"code\": \"GB\",\n" +
+	"          \"lastAt\": \"2026-01-02T04:04:05Z\"\n" +
+	"        }\n" +
+	"      ],\n" +
+	"      \"lastPlace\": {\n" +
+	"        \"country\": \"GB\",\n" +
+	"        \"latitude\": 51.5,\n" +
+	"        \"longitude\": -0.12,\n" +
+	"        \"radiusKm\": 20,\n" +
+	"        \"at\": \"2026-01-02T04:04:05Z\"\n" +
+	"      },\n"
+
+// bumpedSeq returns doc with its "seq" advanced by one -- what one more
+// no-op save produces, since the counter #59 added goes up on every
+// save, changed or not. A document with no "seq" field at all (one
+// fixtureAtVersion built below version 6, where the field does not
+// exist yet) reads as zero and is stamped at 1 on that save instead.
+func bumpedSeq(t *testing.T, doc string) string {
+	t.Helper()
+	const marker = `"seq": `
+	if i := strings.Index(doc, marker); i >= 0 {
+		numStart := i + len(marker)
+		numEnd := numStart + strings.IndexByte(doc[numStart:], ',')
+		n, err := strconv.Atoi(doc[numStart:numEnd])
+		if err != nil {
+			t.Fatalf("fixture seq is not a number: %v", err)
+		}
+		return doc[:numStart] + strconv.Itoa(n+1) + doc[numEnd:]
+	}
+	const versionMarker = `"version": `
+	vi := strings.Index(doc, versionMarker)
+	if vi < 0 {
+		t.Fatal("fixture has no version field to stamp a seq line after")
+	}
+	lineEnd := strings.IndexByte(doc[vi:], '\n') + vi + 1
+	return doc[:lineEnd] + seqLine + doc[lineEnd:]
+}
 
 // fixtureAtVersion is the every-field fixture without the given lines
 // and with its version set to version: an older document, as the build
@@ -207,9 +339,9 @@ func fixtureAtVersion(t *testing.T, version int, without ...string) string {
 		}
 		doc = strings.Replace(doc, line, "", 1)
 	}
-	const current = `"version": 5,`
+	const current = `"version": 9,`
 	if !strings.Contains(doc, current) {
-		t.Fatal("the every-field fixture is no longer at version 5")
+		t.Fatal("the every-field fixture is no longer at version 9")
 	}
 	return strings.Replace(doc, current, `"version": `+strconv.Itoa(version)+`,`, 1)
 }
@@ -232,25 +364,28 @@ func openSaveAndCompare(t *testing.T, doc, want string) *Store {
 		t.Fatal(err)
 	}
 	if string(snap.Payload) != want {
-		t.Errorf("a saved older document differs from the fixture at version 5 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
+		t.Errorf("a saved older document differs from the fixture at version 9 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
 			want, snap.Payload)
 	}
 	return s
 }
 
-// TestAVersion1AccountsDocumentOpensAndSavesAsVersion5: version 2
+// TestAVersion1AccountsDocumentOpensAndSavesAsVersion8: version 2
 // (#28) only added sessionsEndedAt, version 3 (#44) only
 // loginLockoutCount and loginDisabledAt, version 4 (#44) only
-// knownBrowsers and version 5 (#43) only breachCheckPending, none of
-// which a version-1 document -- gauntlet v0.2.0's, or mikroview's --
-// carries, and all of which read correctly as zero, so no migration code
-// exists. The every-field fixture without them, at version 1, opens with
-// them zero and the session cutoff at passwordChangedAt, and its next
-// save writes exactly the fixture without them, now at version 5.
-func TestAVersion1AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
+// knownBrowsers, version 5 (#43) only breachCheckPending, version 6
+// (#59) only the top-level seq, and version 7 (#58) only
+// totpPendingSince and heldEnrolment, none of which a version-1 document --
+// gauntlet v0.2.0's, or mikroview's -- carries, and all of which read
+// correctly as zero, so no migration code exists. The every-field
+// fixture without them, at version 1, opens with them zero and the
+// session cutoff at passwordChangedAt, and its next save writes exactly
+// the fixture without the others, now at version 9 and seq 1 (stamped
+// from zero).
+func TestAVersion1AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	const sessionsLine = "      \"sessionsEndedAt\": \"2026-01-02T03:06:05Z\",\n"
-	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines, knownBrowserLines, breachLines)
-	want := fixtureAtVersion(t, 5, sessionsLine, lockoutLines, knownBrowserLines, breachLines)
+	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, sessionsLine, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v1, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -269,17 +404,17 @@ func TestAVersion1AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
 	}
 }
 
-// TestAVersion2AccountsDocumentOpensAndSavesAsVersion5: version 3 (#44)
+// TestAVersion2AccountsDocumentOpensAndSavesAsVersion8: version 3 (#44)
 // added loginLockoutCount and loginDisabledAt, which a version-2
 // document does not carry and which read correctly as zero -- no
 // lockouts counted, sign-in not disabled: no build that wrote version 2
 // counted either. The every-field fixture without them (or the later
-// versions' knownBrowsers and breachCheckPending), at version 2, opens
-// with both zero, its lockout still in force, and saves back as exactly
-// the fixture without them at version 5.
-func TestAVersion2AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
-	v2 := fixtureAtVersion(t, 2, lockoutLines, knownBrowserLines, breachLines)
-	want := fixtureAtVersion(t, 5, lockoutLines, knownBrowserLines, breachLines)
+// versions' knownBrowsers, breachCheckPending and seq), at version 2,
+// opens with both zero, its lockout still in force, and saves back as
+// exactly the fixture without the others at version 9, seq stamped at 1.
+func TestAVersion2AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
+	v2 := fixtureAtVersion(t, 2, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v2, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -295,17 +430,18 @@ func TestAVersion2AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
 	}
 }
 
-// TestAVersion3AccountsDocumentOpensAndSavesAsVersion5: version 4 (#44)
+// TestAVersion3AccountsDocumentOpensAndSavesAsVersion8: version 4 (#44)
 // added knownBrowsers, which a version-3 document does not carry and
 // which reads correctly as none remembered: no browser carries a token
 // a build without the field issued. The every-field fixture without it
-// (or version 5's breachCheckPending), at version 3, opens with no
-// browser remembered and everything else intact, and saves back as
-// exactly the fixture without them at version 5 -- after which a build
-// reading only up to version 3 refuses it (errNewerDocument).
-func TestAVersion3AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
-	v3 := fixtureAtVersion(t, 3, knownBrowserLines, breachLines)
-	want := fixtureAtVersion(t, 5, knownBrowserLines, breachLines)
+// (or version 5's breachCheckPending and version 6's seq), at version 3,
+// opens with no browser remembered and everything else intact, and
+// saves back as exactly the fixture without the others at version 9,
+// seq stamped at 1 -- after which a build reading only up to version 3
+// refuses it (errNewerDocument).
+func TestAVersion3AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
+	v3 := fixtureAtVersion(t, 3, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v3, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -323,20 +459,21 @@ func TestAVersion3AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
 	}
 }
 
-// TestAVersion4AccountsDocumentOpensAndSavesAsVersion5: version 5 (#43)
+// TestAVersion4AccountsDocumentOpensAndSavesAsVersion8: version 5 (#43)
 // added breachCheckPending, which a version-4 document does not carry
 // and which reads correctly as false -- no breach check owed: no build
 // that wrote version 4 accepted a password HIBP had not answered for.
-// The every-field fixture without it, at version 4, opens with no
-// recheck pending and everything else intact, and saves back as exactly
-// the fixture without it at version 5 -- after which a build reading
-// only up to version 4 refuses it (errNewerDocument), rather than drop
-// a recheck that is owed. A version-5 document with the mark set opens
-// with it set and round-trips (TestMikroviewUsersJSONFixtureRoundTrips-
-// ByteIdentical, on the every-field fixture).
-func TestAVersion4AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
-	v4 := fixtureAtVersion(t, 4, breachLines)
-	want := fixtureAtVersion(t, 5, breachLines)
+// The every-field fixture without it (or version 6's seq), at version 4,
+// opens with no recheck pending and everything else intact, and saves
+// back as exactly the fixture without them at version 9, seq stamped at
+// 1 -- after which a build reading only up to version 4 refuses it
+// (errNewerDocument), rather than drop a recheck that is owed. A
+// version-6 document with the mark set opens with it set and round-trips
+// (TestMikroviewUsersJSONFixtureRoundTripsByteIdentical, on the
+// every-field fixture).
+func TestAVersion4AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
+	v4 := fixtureAtVersion(t, 4, breachLines, seqLine, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, breachLines, totpPendingLine, heldLines, unusualLines)
 
 	s := openSaveAndCompare(t, v4, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -353,9 +490,67 @@ func TestAVersion4AccountsDocumentOpensAndSavesAsVersion5(t *testing.T) {
 		t.Errorf("a version-4 build reading what this one saves: %v, want errNewerDocument", err)
 	}
 
-	v5 := openSaveAndCompare(t, accountsFixture, accountsFixture)
-	if admin, _ := v5.Get("admin-id-0001"); !admin.BreachCheckPending {
-		t.Error("BreachCheckPending did not load from a version-5 document")
+	v8 := openSaveAndCompare(t, accountsFixture, bumpedSeq(t, accountsFixture))
+	if admin, _ := v8.Get("admin-id-0001"); !admin.BreachCheckPending {
+		t.Error("BreachCheckPending did not load from a version-8 document")
+	}
+}
+
+// TestAVersion5AccountsDocumentOpensAndSavesAsVersion8 is #59's own
+// migration step: version 6 added the top-level seq counter, which a
+// version-5 document -- the one the build immediately before this one
+// writes -- does not carry, and which reads correctly as zero (no save
+// has happened under this process's watch yet). The every-field fixture
+// without it (or version 7's fields) opens with every other field intact
+// and saves back as exactly the fixture without version 7's fields, seq
+// stamped at 1 -- an older document loading
+// with the counter at zero and being stamped on its next save, as
+// docs/design.md §4 describes.
+func TestAVersion5AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
+	v5 := fixtureAtVersion(t, 5, seqLine, totpPendingLine, heldLines, unusualLines)
+	want := fixtureAtVersion(t, 9, totpPendingLine, heldLines, unusualLines)
+
+	s := openSaveAndCompare(t, v5, want)
+	admin, ok := s.Get("admin-id-0001")
+	if !ok {
+		t.Fatal("the admin did not load")
+	}
+	if !admin.BreachCheckPending || len(admin.KnownBrowsers) != 1 {
+		t.Error("the version-5 document's fields did not load")
+	}
+}
+
+// TestAVersion6AccountsDocumentOpensAndSavesAsVersion8 is #58's own
+// migration step: version 7 added totpPendingSince and heldEnrolment,
+// which a version-6 document does not carry and which read correctly as
+// zero and nil -- nothing on hold. The every-field fixture without them
+// opens with every other field intact and saves back as exactly the
+// fixture without them at version 9 -- after which a build reading only
+// up to version 6 refuses it (errNewerDocument), rather than drop an
+// enrolment on hold.
+func TestAVersion6AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
+	v6 := fixtureAtVersion(t, 6, totpPendingLine, heldLines, unusualLines)
+	want := bumpedSeq(t, fixtureAtVersion(t, 9, totpPendingLine, heldLines, unusualLines))
+
+	s := openSaveAndCompare(t, v6, want)
+	admin, ok := s.Get("admin-id-0001")
+	if !ok {
+		t.Fatal("the admin did not load")
+	}
+	if admin.HeldEnrolment != nil || !admin.TOTPPendingSince.IsZero() {
+		t.Errorf("a version-6 document loaded a hold %+v and pending-since %v, want neither", admin.HeldEnrolment, admin.TOTPPendingSince)
+	}
+	if len(admin.Passkeys) != 1 || !admin.BreachCheckPending {
+		t.Error("the version-6 document's other fields did not load")
+	}
+	if err := checkDocumentVersion("accounts", accountsDocumentVersion, 6); !errors.Is(err, errNewerDocument) {
+		t.Errorf("a version-6 build reading what this one saves: %v, want errNewerDocument", err)
+	}
+
+	v8 := openSaveAndCompare(t, accountsFixture, bumpedSeq(t, accountsFixture))
+	admin, _ = v8.Get("admin-id-0001")
+	if admin.HeldEnrolment == nil || admin.HeldEnrolment.Passkey == nil || admin.HeldEnrolment.Passkey.Name != "Spare key" {
+		t.Errorf("the version-7 hold did not load: %+v", admin.HeldEnrolment)
 	}
 }
 
@@ -401,5 +596,41 @@ func assertFixtureCoversEveryField(t *testing.T, fixture string, types ...reflec
 	slices.Sort(missing)
 	if len(missing) > 0 {
 		t.Errorf("the frozen fixture does not populate: %s", strings.Join(missing, ", "))
+	}
+}
+
+// TestAVersion7AccountsDocumentOpensAndSavesAsVersion8 is #55's own
+// migration step: version 8 added seenCountries and lastPlace, which a
+// version-7 document does not carry and which read correctly as nothing
+// remembered -- so the first sign-in after the upgrade sets a baseline
+// and raises nothing. The every-field fixture without them opens with
+// every other field intact and saves back as exactly the fixture
+// without them at version 9 -- after which a build reading only up to
+// version 7 refuses it (errNewerDocument), rather than drop what the
+// account remembers.
+func TestAVersion7AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
+	v7 := fixtureAtVersion(t, 7, unusualLines)
+	want := bumpedSeq(t, fixtureAtVersion(t, 9, unusualLines))
+
+	s := openSaveAndCompare(t, v7, want)
+	admin, ok := s.Get("admin-id-0001")
+	if !ok {
+		t.Fatal("the admin did not load")
+	}
+	if admin.SeenCountries != nil || admin.LastPlace != nil {
+		t.Errorf("a version-7 document loaded countries %+v and place %+v, want neither", admin.SeenCountries, admin.LastPlace)
+	}
+	if len(admin.KnownBrowsers) != 1 || admin.HeldEnrolment == nil {
+		t.Error("the version-7 document's other fields did not load")
+	}
+	if err := checkDocumentVersion("accounts", accountsDocumentVersion, 7); !errors.Is(err, errNewerDocument) {
+		t.Errorf("a version-7 build reading what this one saves: %v, want errNewerDocument", err)
+	}
+
+	v8 := openSaveAndCompare(t, accountsFixture, bumpedSeq(t, accountsFixture))
+	admin, _ = v8.Get("admin-id-0001")
+	want8 := LastPlace{Country: "GB", Location: Location{Latitude: 51.5, Longitude: -0.12, RadiusKm: 20}, At: admin.KnownBrowsers[0].IssuedAt}
+	if len(admin.SeenCountries) != 1 || admin.SeenCountries[0].Code != "GB" || admin.LastPlace == nil || *admin.LastPlace != want8 {
+		t.Errorf("the version-8 countries and place did not load: %+v %+v", admin.SeenCountries, admin.LastPlace)
 	}
 }

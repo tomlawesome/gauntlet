@@ -1,17 +1,18 @@
 package gauntlet
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
-// tokensFixture is a version-1 tokens document, written out by hand and
+// tokensFixture is a version-3 tokens document, written out by hand and
 // frozen, for the same reason as accountsFixture (roundtrip_test.go): a
 // renamed or dropped JSON tag on Token must fail the round trip below.
 // Change it only alongside a new document version.
@@ -23,6 +24,51 @@ import (
 // each hashedValue is hashTokenValue of its raw value, exactly what a
 // real TokenStore would have written for it.
 const tokensFixture = `{
+  "version": 3,
+  "seq": 4,
+  "tokens": [
+    {
+      "id": "token-id-0001",
+      "name": "birdcage",
+      "kind": "api",
+      "hashedValue": "4974e92fc97ec37e76aa819a8798344bec8f7f9761ae79e320466ddce1be67c2",
+      "createdAt": "2026-01-02T03:04:05Z",
+      "expiresAt": "2027-01-02T03:04:05Z"
+    },
+    {
+      "id": "token-id-0002",
+      "name": "router-1",
+      "kind": "ingest",
+      "device": "router-1",
+      "hashedValue": "78bfe5d78db6eb1fc4664928a6648a1a2d181ed90872f71b501d6865640afa20",
+      "createdAt": "2026-01-02T03:05:05Z",
+      "lastUsedAt": "2026-01-02T05:04:05Z",
+      "expiresAt": "2027-01-02T03:05:05Z",
+      "expiryWarnedAt": "2026-12-30T03:00:00Z",
+      "createdBy": "user-admin",
+      "createdByUsername": "admin"
+    },
+    {
+      "id": "token-id-0003",
+      "name": "droplist-pull",
+      "kind": "droplist-pull",
+      "hashedValue": "a61a27d3cc5217aa8c66d5b48d520ce4591320abab88927151299610166d9e94",
+      "createdAt": "2026-01-02T03:06:05Z"
+    }
+  ]
+}`
+
+// tokensFixtureV1 is the version-1 tokens document the tests froze before
+// #74, kept so a document from that era still opens (see
+// TestAnOlderTokensDocumentStillOpens): no expiry field, no seq counter.
+//
+// Mikroview tokens.json-shaped: an "api" row, an "ingest" row with
+// every field populated, and a "droplist-pull" row (mikroview's own
+// third kind, #1224). Every raw value behind a hashedValue is invented
+// for this test (the raw* constants below), never a real credential;
+// each hashedValue is hashTokenValue of its raw value, exactly what a
+// real TokenStore would have written for it.
+const tokensFixtureV1 = `{
   "version": 1,
   "tokens": [
     {
@@ -99,9 +145,12 @@ func TestMikroviewTokensJSONFixtureRoundTripsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after save: %v", err)
 	}
-	if !bytes.Equal(snap.Payload, original) {
-		t.Errorf("saved document differs from the original fixture:\n--- original ---\n%s\n--- saved ---\n%s",
-			original, snap.Payload)
+	// The no-op save above counts one more save: seq 4 becomes 5, and
+	// nothing else about the document moves.
+	want := strings.Replace(string(original), `"seq": 4,`, `"seq": 5,`, 1)
+	if string(snap.Payload) != want {
+		t.Errorf("saved document differs from the original fixture (seq counted once):\n--- want ---\n%s\n--- saved ---\n%s",
+			want, snap.Payload)
 	}
 
 	// Now exercise authentication on s1: the droplist-pull row must
@@ -182,5 +231,62 @@ func TestAnUnknownKindNeverAuthenticatesRegardlessOfWant(t *testing.T) {
 	}
 	if len(s.List()) != 1 {
 		t.Errorf("List() = %d, want 1 -- the unknown-kind row must still be listed and revocable", len(s.List()))
+	}
+}
+
+// TestAnOlderTokensDocumentStillOpens is #74's compatibility check: the
+// version-1 document frozen before expiry existed, and a version-2 one
+// (seq, no expiry), still open; their tokens read as never expiring, as
+// they were issued; they authenticate; and the next save writes the
+// current version with the expiry fields left out.
+func TestAnOlderTokensDocumentStillOpens(t *testing.T) {
+	const v2 = `{"version": 2, "seq": 3, "tokens": [` +
+		`{"id": "token-id-0001", "name": "birdcage", "kind": "api", ` +
+		`"hashedValue": "4974e92fc97ec37e76aa819a8798344bec8f7f9761ae79e320466ddce1be67c2", "createdAt": "2026-01-02T03:04:05Z"}]}`
+	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC) // years on: no expiry means still good
+
+	for name, doc := range map[string]string{"version 1": tokensFixtureV1, "version 2": v2} {
+		t.Run(name, func(t *testing.T) {
+			m := persist.NewMemory()
+			primeMemory(t, m, doc)
+			s, err := OpenTokenStore(m, TokenOptions{})
+			if err != nil {
+				t.Fatalf("OpenTokenStore: %v", err)
+			}
+			for _, tok := range s.List() {
+				if !tok.ExpiresAt.IsZero() || !tok.ExpiryWarnedAt.IsZero() {
+					t.Errorf("token %s reads with an expiry %v / warning %v, want none", tok.ID, tok.ExpiresAt, tok.ExpiryWarnedAt)
+				}
+			}
+			if _, ok := s.Authenticate("fixture-api-raw-token-does-not-exist", TokenKindAPI, now); !ok {
+				t.Error("the old unprefixed, never-expiring token no longer authenticates")
+			}
+			if err := s.mutate(func(*tokenState) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			snap, err := m.Load(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(snap.Payload), `"version": 3`) || strings.Contains(string(snap.Payload), "expiresAt") {
+				t.Errorf("saved document should be version 3 with no expiry fields:\n%s", snap.Payload)
+			}
+		})
+	}
+}
+
+// TestANewerTokensDocumentIsRefused: a build that reads up to version 3
+// refuses version 4, so a rollback never saves a document back without
+// a field it does not know -- and this version's own number is what an
+// older build (reading up to 2) refuses, checked through the same
+// version check.
+func TestANewerTokensDocumentIsRefused(t *testing.T) {
+	m := persist.NewMemory()
+	primeMemory(t, m, `{"version": 4, "seq": 1, "tokens": []}`)
+	if _, err := OpenTokenStore(m, TokenOptions{}); !errors.Is(err, errNewerDocument) {
+		t.Errorf("OpenTokenStore of a version-4 document = %v, want errNewerDocument", err)
+	}
+	if err := checkDocumentVersion("API tokens", tokensDocumentVersion, 2); !errors.Is(err, errNewerDocument) {
+		t.Errorf("a build reading up to version 2 accepted this build's version %d: %v", tokensDocumentVersion, err)
 	}
 }

@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/tomlawesome/gauntlet"
@@ -8,7 +9,9 @@ import (
 
 // -- Authenticator-app second factor (docs/design.md §1.6) -------------
 //
-// Four routes: enrol and confirm start and finish setting one up, DELETE
+// Four routes: enrol and confirm start and finish setting one up (an
+// account's first second factor is then held until POST
+// /api/auth/recovery-codes/confirm, recoverycodes_handler.go, #58), DELETE
 // is the account owner turning it off with their password, and the
 // admin route at the end is the Users-group path for a lost phone when
 // the password still works. The fifth route this feature needs, POST
@@ -34,14 +37,16 @@ type totpEnrolResponse struct {
 // handleTOTPEnrol starts authenticator-app enrolment for the signed-in
 // caller's own account: a fresh secret is generated and stored pending,
 // not active until handleTOTPConfirm proves a code was produced from it
-// (see gauntlet.Store.SetPendingTOTPSecret). Enrolling again before
+// (see gauntlet.Store.SetPendingTOTPSecretAt), within
+// gauntlet.TOTPPendingLifetime of now (#58). Enrolling again before
 // confirming simply replaces the pending secret -- that store method's
 // own behaviour -- so this handler doesn't need to notice that case
-// specially.
+// specially. Refused 409 while a first factor is on hold for its
+// recovery codes to be confirmed (#58): one enrolment at a time.
 func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 	// SSO accounts are never offered a local factor: their identity
@@ -51,13 +56,13 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	// local password (provisioned or converted to SSO-only) that has
 	// nothing here to gate a factor behind.
 	if !user.LocalPassword() {
-		http.Error(w, "this account signs in through your identity provider -- an authenticator app is not offered", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "this account signs in through your identity provider -- an authenticator app is not offered", nil)
 		return
 	}
 
 	var req totpEnrolRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -71,16 +76,16 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	secret, err := gauntlet.GenerateTOTPSecret()
 	if err != nil {
 		g.logError("generating TOTP secret for " + user.Username + ": " + err.Error())
-		http.Error(w, "unable to start enrolment", http.StatusInternalServerError)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start enrolment", nil)
 		return
 	}
 	encoded := gauntlet.EncodeTOTPSecret(secret)
-	if err := g.deps.Users.SetPendingTOTPSecret(user.ID, encoded); err != nil {
-		status := http.StatusInternalServerError
-		if err == gauntlet.ErrTOTPAlreadyActive {
-			status = http.StatusConflict
+	if err := g.deps.Users.SetPendingTOTPSecretAt(user.ID, encoded, now); err != nil {
+		status, class := http.StatusInternalServerError, classServerError
+		if errors.Is(err, gauntlet.ErrTOTPAlreadyActive) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
+			status, class = http.StatusConflict, classConflict
 		}
-		g.writeAuthError(w, r, err, status)
+		g.writeAuthError(w, r, err, status, class)
 		return
 	}
 
@@ -95,42 +100,60 @@ type totpConfirmRequest struct {
 }
 
 type totpConfirmResponse struct {
+	// Enabled is true when the app is live: confirmed on an account that
+	// already had a second factor. False while PendingConfirmation is
+	// true.
 	Enabled bool `json:"enabled"`
 	// RecoveryCodes is the only place the ten codes ever exist in clear
-	// outside a person's own saved copy -- see
-	// gauntlet.Store.GenerateRecoveryCodes. Nothing on this account can
-	// show them again; losing this response before saving it means
-	// removing the factor and enrolling again.
+	// outside a person's own saved copy, sent when this app is the
+	// account's first second factor. Nothing on this account can show
+	// them again; losing this response before saving it means waiting
+	// for the hold to expire and enrolling again.
 	//
-	// nil (JSON null) when AlreadyIssued is true: "mint if absent, never
-	// re-mint" -- see GenerateRecoveryCodesIfAbsent's own doc comment.
+	// nil (JSON null) when AlreadyIssued is true: an account keeps one
+	// set of recovery codes across all its factors.
 	RecoveryCodes []string `json:"recoveryCodes"`
-	// AlreadyIssued is true when this account already held recovery
-	// codes before this confirm call.
+	// PendingConfirmation is true when the app and RecoveryCodes are on
+	// hold (#58): neither is live until POST
+	// /api/auth/recovery-codes/confirm, and both are deleted if that
+	// does not come within gauntlet.HeldEnrolmentLifetime.
+	PendingConfirmation bool `json:"pendingConfirmation,omitempty"`
+	// AlreadyIssued is true when the app went live on an account that
+	// already had a second factor, whose recovery codes stand.
 	AlreadyIssued bool `json:"alreadyIssued,omitempty"`
 }
 
-// handleTOTPConfirm activates the pending secret handleTOTPEnrol stored,
-// checking one code against it, and is the only place the ten recovery
-// codes are minted and returned.
+// handleTOTPConfirm checks one code against the pending secret
+// handleTOTPEnrol stored.
 //
-// Confirming ends every other session on this account: turning on a
-// second factor is exactly the moment a stale or forgotten session
-// elsewhere should not get to ride along unchallenged without ever
-// having to prove it. Same shape as handleChangePassword --
-// RevokeAllForUser, then reissue this browser its own fresh session --
-// since SessionStore.RevokeAllForUser has no notion of "except the
-// caller".
+// On the account's first second factor (#58) the app and ten new
+// recovery codes are saved together, in one write, on hold
+// (gauntlet.Store.HoldFirstTOTP), and the codes are answered once:
+// nothing goes live, no session is rotated and nothing is audited until
+// the caller confirms the codes were saved (handleEnrolmentConfirm,
+// which does all three).
+//
+// On an account that already has a second factor (a passkey) the app is
+// confirmed live at once, with no codes, and confirming ends every other
+// session on the account: turning on a second factor is exactly the
+// moment a stale or forgotten session elsewhere should not get to ride
+// along unchallenged without ever having to prove it. Same shape as
+// handleChangePassword -- RevokeAllForUser, then reissue this browser
+// its own fresh session -- since SessionStore.RevokeAllForUser has no
+// notion of "except the caller".
+//
+// A pending secret set more than gauntlet.TOTPPendingLifetime ago is
+// refused 401 step-expired: scan a new code.
 func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	var req totpConfirmRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -141,15 +164,25 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// has to see that write.
 	current, ok := g.deps.Users.Get(user.ID)
 	if !ok {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
+	// An app already held for its codes to be confirmed is not confirmed
+	// again here, and neither is one beside a held passkey.
+	if current.EnrolmentHeld(now) {
+		g.writeAuthError(w, r, gauntlet.ErrEnrolmentHeld, http.StatusConflict, classConflict)
+		return
+	}
 	// Same "nothing pending" test ConfirmTOTP makes, asked first: with no
 	// secret to check against, VerifyTOTP would fail every code and the
 	// caller would be told to check their clock instead of the 409.
 	if current.TOTPSecret == "" || !current.TOTPConfirmedAt.IsZero() {
-		g.writeAuthError(w, r, gauntlet.ErrNoPendingTOTP, http.StatusConflict)
+		g.writeAuthError(w, r, gauntlet.ErrNoPendingTOTP, http.StatusConflict, classConflict)
+		return
+	}
+	if !current.TOTPPending(now) {
+		writeUnauthorized(w, classStepExpired, "this authenticator app setup has expired -- start again and scan the new code")
 		return
 	}
 
@@ -157,69 +190,68 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// as recheckPassword does: this route asks only for the session
 	// cookie, so without it a stolen cookie could guess the six digits
 	// without limit while the owner's enrolment is pending -- and a hit
-	// signs the owner out and hands over the recovery codes.
+	// plants a factor and hands over the recovery codes.
+	//
+	// Both refusals are recorded as every other in-session re-check's
+	// are (recheckPassword, recheckSecondFactor): a run of wrong codes
+	// here is the same guessing from a stolen cookie, and would otherwise
+	// leave no audit line and no Warn for anyone to notice.
 	if !g.deps.Limiter.ReserveRecheck(user.ID, now) {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		g.recheckRefused(r, user)
+		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return
 	}
 	matched, ok := gauntlet.VerifyTOTP(current.TOTPSecret, req.Code, now, current.TOTPLastCounter)
 	if !ok {
-		http.Error(w, "that code didn't match -- check your authenticator app's clock and try again", http.StatusBadRequest)
+		g.recheckFailed(r, user, gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "that code didn't match -- check your authenticator app's clock and try again", nil)
 		return
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
-	if err := g.deps.Users.ConfirmTOTP(user.ID, now, matched); err != nil {
-		status := http.StatusInternalServerError
-		if err == gauntlet.ErrNoPendingTOTP {
-			status = http.StatusConflict
+	if !current.HasSecondFactor() {
+		// The first factor: held with its codes, in one write. The store
+		// decides again under its lock; one that lost to a passkey going
+		// live in between is confirmed live below instead.
+		codes, err := g.deps.Users.HoldFirstTOTP(user.ID, current.TOTPSecret, matched, now)
+		if err == nil {
+			writeJSON(w, http.StatusOK, totpConfirmResponse{RecoveryCodes: codes, PendingConfirmation: true})
+			return
 		}
-		g.writeAuthError(w, r, err, status)
+		if !errors.Is(err, gauntlet.ErrSecondFactorExists) {
+			g.writeTOTPConfirmError(w, r, err)
+			return
+		}
+	}
+
+	if err := g.deps.Users.ConfirmTOTP(user.ID, now, matched); err != nil {
+		g.writeTOTPConfirmError(w, r, err)
 		return
 	}
 
-	// The factor is committed from here on, so every other session ends
-	// here too -- before the recovery codes, whose failure below must
-	// not leave a session from before the factor alive against an
-	// account that now requires it.
+	// The factor is committed from here on, so every other session ends.
+	method := g.sessionMethod(r, user.ID, now)
 	g.deps.Sessions.RevokeAllForUser(user.ID)
-	g.issueSession(w, r, user.ID, now)
+	g.issueSession(w, r, user.ID, method, now)
 
-	// Mint-if-absent, atomically under the store's lock: a snapshot
-	// taken before this call and a separate unconditional
-	// GenerateRecoveryCodes would leave a window where two concurrent
-	// first enrolments both saw no codes yet and both minted, the second
-	// silently replacing what the first had already shown. See
-	// GenerateRecoveryCodesIfAbsent's own doc comment.
-	codes, alreadyIssued, err := g.deps.Users.GenerateRecoveryCodesIfAbsent(user.ID, now)
-	if err != nil {
-		// The factor is active at this point regardless -- ConfirmTOTP
-		// already committed. Told to the caller plainly rather than
-		// reported as a clean success: they are about to be shown
-		// nothing to fall back on if the app is ever lost. Recovering
-		// from here is DELETE /api/auth/totp followed by enrolling
-		// again, same as any other abandoned enrolment.
-		//
-		// JSON with totpActive rather than plain text: a frontend may not
-		// read the message, and a bare 500 reads as "setup failed" while
-		// the factor is on and this browser holds a new session.
-		g.logError("generating recovery codes for " + user.Username + " after confirming TOTP: " + err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error":      "the authenticator app is now active, but recovery codes could not be generated -- remove it and enrol again from account settings",
-			"totpActive": true,
-		})
-		return
+	g.audit(r, user.Username, "account.totp_enabled", user.Username, "authenticator app confirmed; existing recovery codes unchanged")
+
+	writeJSON(w, http.StatusOK, totpConfirmResponse{Enabled: true, RecoveryCodes: nil, AlreadyIssued: true})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorAdded, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "totp"},
+	})
+}
+
+// writeTOTPConfirmError answers a refused confirmation: 409 when there
+// is nothing pending any more or another enrolment is on hold, 500
+// otherwise.
+func (g *Gate) writeTOTPConfirmError(w http.ResponseWriter, r *http.Request, err error) {
+	status, class := http.StatusInternalServerError, classServerError
+	if errors.Is(err, gauntlet.ErrNoPendingTOTP) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
+		status, class = http.StatusConflict, classConflict
 	}
-	detail := "authenticator app confirmed"
-	if alreadyIssued {
-		detail += "; existing recovery codes unchanged"
-	} else {
-		detail += "; recovery codes issued"
-	}
-
-	g.audit(r, user.Username, "account.totp_enabled", user.Username, detail)
-
-	writeJSON(w, http.StatusOK, totpConfirmResponse{Enabled: true, RecoveryCodes: codes, AlreadyIssued: alreadyIssued})
+	g.writeAuthError(w, r, err, status, class)
 }
 
 type totpDeleteRequest struct {
@@ -233,17 +265,18 @@ type totpEnrolRequest struct {
 // handleTOTPDelete turns off the signed-in caller's own authenticator-
 // app factor, gated by their password -- the one self-service way to
 // remove it; the admin route at the end of this file is the only other
-// path, for when the password is what's lost instead.
+// path, for when the password is what's lost instead. An account with
+// no authenticator app is answered 404, and nothing else happens.
 func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r)
 	if user == nil {
-		writeUnauthorized(w, "sign in first")
+		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return
 	}
 
 	var req totpDeleteRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
 
@@ -254,7 +287,15 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.deps.Users.ClearTOTP(user.ID); err != nil {
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		// Nothing to remove is the 404 passkey delete answers, and comes
+		// before every revoke, record and notice below: a second click on
+		// "Disable" must not sign the owner out everywhere or tell them a
+		// factor was removed when none was.
+		if errors.Is(err, gauntlet.ErrNoTOTP) {
+			writeProblem(w, http.StatusNotFound, classNotFound, "this account has no authenticator app", nil)
+			return
+		}
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 
@@ -272,6 +313,10 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 
 	g.audit(r, user.Username, "account.totp_disabled", user.Username, "removed by account owner")
 	writeJSON(w, http.StatusOK, map[string]any{"disabled": true, "signedOut": signedOut})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
+		SecondFactor: &SecondFactorDetail{Method: "totp"},
+	})
 }
 
 // handleTOTPAdminClear lets an admin remove another user's authenticator-
@@ -283,27 +328,55 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 // design.md §1.7 -- the recovery-key CLI stays mikroview's own), so
 // self-clearing here would need its own separate justification this
 // route was never meant to provide.
+//
+// The caller's own password is asked for again on the request (#72,
+// ASVS 7.5.3): stripping a colleague's second factor is exactly what a
+// stolen admin session would be used for.
+//
+// An account with no authenticator app is answered 200 with cleared
+// false, and nothing is recorded or sent.
 func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
+	var req adminStepUpRequest
+	if err := g.decodeJSONBody(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "user id is required", http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "user id is required", nil)
 		return
 	}
 	if caller := UserFromContext(r); caller != nil && caller.ID == id {
-		http.Error(w, "an administrator cannot clear their own authenticator app here", http.StatusConflict)
+		writeProblem(w, http.StatusConflict, classConflict, "an administrator cannot clear their own authenticator app here", nil)
+		return
+	}
+
+	if !g.recheckAdminPassword(w, r, req.Password, g.now()) {
 		return
 	}
 
 	target, ok := g.deps.Users.Get(id)
 	if !ok {
-		http.Error(w, "no such user", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "no such user", nil)
 		return
 	}
 	if err := g.deps.Users.ClearTOTP(id); err != nil {
-		g.writeAuthError(w, r, err, http.StatusInternalServerError)
+		// The account is already in the state asked for, so this is a
+		// success, but one that changed nothing: no record and no notice
+		// of a removal that did not happen.
+		if errors.Is(err, gauntlet.ErrNoTOTP) {
+			writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": false})
+			return
+		}
+		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}
 
-	g.audit(r, auditActor(r), "user.totp_cleared", target.Username, "authenticator app removed by admin")
+	by := auditActor(r)
+	g.audit(r, by, "user.totp_cleared", target.Username, "authenticator app removed by admin")
 	writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": true})
+	g.notify(r.Context(), &AccountNotice{
+		Kind: NoticeSecondFactorRemoved, UserID: target.ID, Username: target.Username, Role: target.Role, At: g.now(), By: by,
+		SecondFactor: &SecondFactorDetail{Method: "totp", All: true},
+	})
 }

@@ -10,10 +10,18 @@ set -euo pipefail
 # Usage: scripts/apidiff.sh [BASE_REF]
 #   BASE_REF defaults to the newest v* tag reachable from HEAD.
 #
-# apidiff is golang.org/x/exp/cmd/apidiff, run with `go run` at a pinned
-# pseudo-version so it never enters go.mod (approved for CI only, owner
-# 2026-09-30). apidiff itself always exits 0; this script fails on any
-# line of its -incompatible report instead.
+# apidiff is golang.org/x/exp/cmd/apidiff at a pinned pseudo-version
+# (approved for CI only, owner 2026-09-30). It is built with `go install`
+# from a temporary directory into a temporary GOBIN, so neither the tool
+# nor its dependencies ever enter this module's go.mod or go.sum, and the
+# binary is then run directly. apidiff itself always exits 0; this script
+# fails on any line of its -incompatible report instead.
+#
+# The script also fails if go.mod or go.sum changed while it ran (#62): a
+# stray go.sum line is easy to commit by accident. apidiff reads this
+# module through `go list`, so GOFLAGS is forced to -mod=readonly here --
+# with -mod=mod in the environment (a `go env -w GOFLAGS=-mod=mod` on the
+# host) Go would otherwise be free to add lines to go.sum.
 
 APIDIFF_VERSION="${APIDIFF_VERSION:-v0.0.0-20260908205506-85c1c2202aba}"
 APIDIFF="golang.org/x/exp/cmd/apidiff@${APIDIFF_VERSION}"
@@ -45,23 +53,45 @@ if [ -n "$base_major" ] && [ "$new_major" -gt "$base_major" ]; then
   exit 0
 fi
 
+# Fingerprint go.mod and go.sum before anything runs a go command here.
+sums() { cat go.mod go.sum 2>/dev/null | cksum; }
+before="$(sums)"
+untouched() {
+  if [ "$(sums)" != "$before" ]; then
+    echo "apidiff: FAIL -- go.mod or go.sum changed while this script ran:" >&2
+    git status --short -- go.mod go.sum >&2 || true
+    echo "Discard the change (git checkout -- go.mod go.sum) and report it on #62." >&2
+    return 1
+  fi
+}
+
+export GOFLAGS=-mod=readonly
 module="$(go list -m)"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# The check runs on every exit, so a run that fails part-way still
+# reports a changed go.sum.
+trap 'rc=$?; rm -rf "$work"; untouched || rc=1; exit "$rc"' EXIT
 
 # Same reason as licence-check.sh: build the tool with the toolchain
 # this module selects, not an older default one.
 export GOTOOLCHAIN="${GOTOOLCHAIN:-$(go env GOVERSION)}"
 
+# Outside the module: `go install pkg@version` ignores any go.mod, and
+# running it from an empty directory makes that impossible to get wrong.
+mkdir "$work/bin" "$work/tool"
+(cd "$work/tool" && GOBIN="$work/bin" go install "$APIDIFF")
+apidiff="$work/bin/apidiff"
+
 mkdir "$work/old"
 git archive "$base" | tar -x -C "$work/old"
 # apidiff loads a module from the directory holding its go.mod.
-(cd "$work/old" && go run "$APIDIFF" -m -w "$work/old.api" "$module")
-go run "$APIDIFF" -m -w "$work/new.api" "$module"
+(cd "$work/old" && "$apidiff" -m -w "$work/old.api" "$module")
+"$apidiff" -m -w "$work/new.api" "$module"
+untouched
 
 echo "apidiff: $module, $base -> working tree"
-go run "$APIDIFF" -m "$work/old.api" "$work/new.api"
-incompatible="$(go run "$APIDIFF" -m -incompatible "$work/old.api" "$work/new.api")"
+"$apidiff" -m "$work/old.api" "$work/new.api"
+incompatible="$("$apidiff" -m -incompatible "$work/old.api" "$work/new.api")"
 if [ -n "$incompatible" ]; then
   echo
   echo "apidiff: FAIL -- incompatible changes since $base:" >&2

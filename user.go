@@ -1,29 +1,3 @@
-// Package gauntlet implements local username/password authentication:
-// user accounts and roles (this file), Argon2id password hashing
-// (password.go), username validation (username.go), and random id
-// generation (id.go). It also owns OIDC/SSO identity storage and
-// just-in-time provisioning (Store.FindOrCreateOIDCUser) -- the OIDC
-// protocol itself lives in the separate gauntlet/oidc package, which
-// this package doesn't import.
-//
-// The types here start from mikroview's internal/auth/store.go, with
-// its names kept (docs/adr/0001-shared-auth-module.md decision 3;
-// docs/design.md §1.3), plus what gauntlet added: User.clone for the
-// copy-then-save writes (Store.mutate) and the unexported
-// totpSecretBlanked mark and blankedPasskeyCount count that let a
-// blanked copy still answer HasActiveTOTP, HasSecondFactor and
-// PasskeyCount. The stored fields are
-// mikroview's, byte for byte, plus gauntlet's own that mikroview's
-// documents lack and read as zero: loginLockedUntil (#19),
-// sessionsEndedAt (#28), and loginLockoutCount, loginDisabledAt and
-// knownBrowsers (#44). User carries every field mikroview's own
-// User carries -- including TOTP, recovery codes, reset codes and
-// passkeys -- because Store persists the whole document on every save
-// (docs/design.md Summary): a field this package didn't know about would
-// be silently dropped on the first write. The methods that generate, verify or
-// clear those fields live beside them: totp.go, recoverycodes.go,
-// resetcode.go and passkeys.go; the predicates docs/design.md §1.3
-// lists (LocalPassword, HasActiveTOTP, HasSecondFactor) are below.
 package gauntlet
 
 import (
@@ -129,6 +103,16 @@ type User struct {
 	// issued. Checked against, never the only check -- see
 	// User.resetCodeLive.
 	ResetCodeExpiresAt time.Time `json:"resetCodeExpiresAt,omitzero"`
+	// ResetCodeSpentHash keeps ResetCodeHash once a sign-in has spent
+	// the code, until the forced change it led to is made. The code was
+	// a password someone else saw -- the admin who issued it, and
+	// whatever carried it to the account's owner -- and the forced
+	// change exists to retire it, so Store.PasswordMatches refuses it as
+	// the new password. Set by Authenticate in the write that spends the
+	// code; cleared by SetPassword, by a new IssueResetCode, and
+	// wherever ResetCodeHash is voided. Never a way in: nothing signs in
+	// against it.
+	ResetCodeSpentHash string `json:"resetCodeSpentHash,omitempty"`
 	// MustChangePassword is set by an admin reset, and by a LoginLimiter
 	// once a run of second-factor failures shows someone else knows the
 	// password (SecondFactorFailed, #44). It is cleared only where a new
@@ -169,10 +153,14 @@ type User struct {
 	// LoginDisabledAt is when this account's local sign-in was disabled
 	// after MaxConsecutiveLoginFailures failures in a row (#44), zero
 	// while it is not. A disabled account is refused at the password step
-	// exactly as a locked one is, for good: it does not time out, no
-	// sign-in can complete while it is in force, and a new password does
-	// not lift it. Only UnlockLogin does. It disables the local password sign-in, not
-	// the account's sessions, its SSO identity or its second factors.
+	// exactly as a locked one is: no sign-in can complete while it is in
+	// force, and a new password does not lift it. UnlockLogin does, and
+	// so does the clock: it lifts itself LoginDisableDuration after this
+	// time (#70), and the next attempt then restarts the count of
+	// failures. The field keeps the old time until then, so read it with
+	// LoginDisabled, not as non-zero. It disables the local password
+	// sign-in, not the account's sessions, its SSO identity or its second
+	// factors.
 	LoginDisabledAt time.Time `json:"loginDisabledAt,omitzero"`
 	// KnownBrowsers are the browsers that have completed a sign-in on
 	// this account and keep a small allowance of their own while it is
@@ -183,6 +171,15 @@ type User struct {
 	// (ClearKnownBrowsers) and IssueResetCode clear them. Gauntlet's own
 	// field: older documents lack it and read it as none remembered.
 	KnownBrowsers []KnownBrowser `json:"knownBrowsers,omitempty"`
+	// SeenCountries are the countries this account's completed sign-ins
+	// came from (#55; unusual.go): at most MaxSeenCountries, each for
+	// SeenCountryLifetime after its latest sign-in. LastPlace is where
+	// its latest located sign-in came from, for impossible travel.
+	// RememberSignIn keeps both; they are cleared wherever KnownBrowsers
+	// are. Never shown by any route. Gauntlet's own fields: older
+	// documents lack them and read them as nothing remembered.
+	SeenCountries []SeenCountry `json:"seenCountries,omitempty"`
+	LastPlace     *LastPlace    `json:"lastPlace,omitempty"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
@@ -201,6 +198,13 @@ type User struct {
 	// most recently accepted code, so that code (or an earlier one still
 	// inside the verification window) cannot be replayed.
 	TOTPLastCounter uint64 `json:"totpLastCounter,omitzero"`
+	// TOTPPendingSince is when the pending (scanned, not yet confirmed)
+	// TOTPSecret was set: it stops being confirmable TOTPPendingLifetime
+	// later (#58; see TOTPPending). Zero once the secret is confirmed or
+	// cleared. A pending secret from a document written before this
+	// field existed reads it as zero, and so as expired: enrolling again
+	// is all it costs. Gauntlet's own field.
+	TOTPPendingSince time.Time `json:"totpPendingSince,omitzero"`
 	// RecoveryCodes are the single-use fallback codes for signing in
 	// without the authenticator app -- hashed with HashPassword, the same
 	// Argon2id treatment a password gets, never stored in clear.
@@ -211,6 +215,14 @@ type User struct {
 	// (passkey/, G8) is not part of this module in v0.1.0; this package
 	// only stores what it would produce.
 	Passkeys []Passkey `json:"passkeys,omitempty"`
+	// HeldEnrolment is the account's first second factor and its
+	// recovery codes, saved together but not live until the account's
+	// owner confirms they have saved the codes (#58; enrolhold.go). Nil
+	// when nothing is on hold. Nothing that reads Passkeys,
+	// RecoveryCodes or the TOTP fields sees what is held here, so a held
+	// factor signs nobody in and HasSecondFactor stays false until
+	// Store.ConfirmHeldEnrolment moves it across. Gauntlet's own field.
+	HeldEnrolment *HeldEnrolment `json:"heldEnrolment,omitempty"`
 
 	// totpSecretBlanked is set only on a copy blankCredentials has
 	// blanked, and only when it blanked a TOTPSecret that was there, so
@@ -240,6 +252,7 @@ func (u *User) blankCredentials() {
 	// code *is* the password.
 	u.PasswordHash = ""
 	u.ResetCodeHash = ""
+	u.ResetCodeSpentHash = ""
 	// TOTPSecret is worse than a verifier hash if it leaked -- it's the
 	// actual shared secret, good for minting valid codes indefinitely,
 	// not just checking one. RecoveryCodes are hashes only, same
@@ -258,6 +271,10 @@ func (u *User) blankCredentials() {
 	// still answer truly on the copy (see blankedPasskeyCount).
 	u.blankedPasskeyCount += len(u.Passkeys)
 	u.Passkeys = nil
+	// A held enrolment carries a passkey's public key or the pending
+	// TOTP enrolment's code hashes: the same material as the fields
+	// above, not yet live.
+	u.HeldEnrolment = nil
 	// A known browser's hash is a verifier for the token that browser
 	// carries, so it goes too; when each was remembered stays, which is
 	// what an account list would show. A new slice, never the stored
@@ -278,11 +295,19 @@ func (u *User) clone() *User {
 	cp := *u
 	cp.RecoveryCodes = slices.Clone(u.RecoveryCodes)
 	cp.KnownBrowsers = slices.Clone(u.KnownBrowsers)
+	cp.SeenCountries = slices.Clone(u.SeenCountries)
+	if u.LastPlace != nil {
+		place := *u.LastPlace
+		cp.LastPlace = &place
+	}
 	if u.Passkeys != nil {
 		cp.Passkeys = make([]Passkey, len(u.Passkeys))
 		for i := range u.Passkeys {
 			cp.Passkeys[i] = u.Passkeys[i].clone()
 		}
+	}
+	if u.HeldEnrolment != nil {
+		cp.HeldEnrolment = u.HeldEnrolment.clone()
 	}
 	return &cp
 }
@@ -301,6 +326,13 @@ func (u *User) SessionCutoff() time.Time {
 	}
 	return u.PasswordChangedAt
 }
+
+// LoginDisabled reports whether the account's local sign-in is disabled
+// at now (#70): LoginDisabledAt is set and LoginDisableDuration has not
+// yet passed since. A disable that has run out reads as not disabled,
+// though the field still carries its time until the next attempt clears
+// it.
+func (u *User) LoginDisabled(now time.Time) bool { return loginDisabledAt(u.LoginDisabledAt, now) }
 
 // LocalPassword reports whether this account has a real, user-chosen
 // password that may be reset.
@@ -324,7 +356,8 @@ func (u *User) HasActiveTOTP() bool {
 //
 // Every passkey counts here regardless of whether it's stale: staleness
 // only affects whether a passkey can complete a *login*, not whether the
-// account is considered to have a second factor at all.
+// account is considered to have a second factor at all. A factor on
+// hold (HeldEnrolment) does not count: it is not live until confirmed.
 func (u *User) HasSecondFactor() bool {
 	return u.HasActiveTOTP() || u.PasskeyCount() > 0
 }

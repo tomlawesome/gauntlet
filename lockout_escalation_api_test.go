@@ -24,11 +24,11 @@ func mustGet(t *testing.T, s *Store, id string) *User {
 }
 
 // lockoutFor is one window, then three times the one before, capped at
-// 24 hours -- or at the window itself, when that is longer.
+// one hour (#70) -- or at the window itself, when that is longer.
 func TestLockoutForEscalatesAndCaps(t *testing.T) {
 	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
 	for n, minutes := range map[int]time.Duration{
-		0: 5, 1: 5, 2: 15, 3: 45, 4: 135, 5: 405, 6: 1215, 7: 1440, 8: 1440, 1000: 1440,
+		0: 5, 1: 5, 2: 15, 3: 45, 4: 60, 5: 60, 6: 60, 7: 60, 8: 60, 1000: 60,
 	} {
 		if got := l.lockoutFor(n); got != minutes*time.Minute {
 			t.Errorf("lockoutFor(%d) = %v, want %v", n, got, minutes*time.Minute)
@@ -67,8 +67,8 @@ func TestLockoutRecordCarriesTheCountAndTheDisable(t *testing.T) {
 	if !u.LoginDisabledAt.Equal(fiftieth) {
 		t.Errorf("LoginDisabledAt = %v after the fiftieth failure, want %v", u.LoginDisabledAt, fiftieth)
 	}
-	if u.LoginLockoutCount != 10 || !u.LoginLockedUntil.Equal(fiftieth.Add(24*time.Hour)) {
-		t.Errorf("the fiftieth failure recorded lockout %d until %v, want the tenth, 24h on", u.LoginLockoutCount, u.LoginLockedUntil)
+	if u.LoginLockoutCount != 10 || !u.LoginLockedUntil.Equal(fiftieth.Add(time.Hour)) {
+		t.Errorf("the fiftieth failure recorded lockout %d until %v, want the tenth, an hour on", u.LoginLockoutCount, u.LoginLockedUntil)
 	}
 }
 
@@ -216,7 +216,7 @@ func TestUnsavedDisableIsEnforcedAndSavedLater(t *testing.T) {
 	if !mustGet(t, s, id).LoginDisabledAt.IsZero() {
 		t.Fatal("test setup: the disable was saved although every save failed")
 	}
-	later := at.Add(365 * 24 * time.Hour)
+	later := at.Add(23 * time.Hour) // still inside the 24 hours (#70)
 	if l.ReserveAccount(s, id, later) {
 		t.Fatal("an unsaved disable was not enforced from memory")
 	}
@@ -232,7 +232,7 @@ func TestUnsavedDisableIsEnforcedAndSavedLater(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mustNewLoginLimiter(t, 5, 5*time.Minute).ReserveAccount(restarted, id, later.Add(time.Hour)) {
+	if mustNewLoginLimiter(t, 5, 5*time.Minute).ReserveAccount(restarted, id, later.Add(time.Minute)) {
 		t.Error("a restart after the backend recovered lifted the disable")
 	}
 }
@@ -344,5 +344,28 @@ func TestSecondFactorRunIgnoresAChangeDateUnderALockout(t *testing.T) {
 	if !u.MustChangePassword || !u.SessionsEndedAt.Equal(fifth) {
 		t.Errorf("five second-factor failures under a lockout: MustChangePassword %v, SessionsEndedAt %v; want true, %v",
 			u.MustChangePassword, u.SessionsEndedAt, fifth)
+	}
+}
+
+// An SSO-only account has no password to change: five second-factor
+// failures end its sessions but do not set MustChangePassword, which
+// would shut it out behind a door that refuses it.
+func TestSecondFactorFailuresOnAnSSOOnlyAccountEndSessionsOnly(t *testing.T) {
+	s, _ := openLockoutStore(t, persist.NewMemory())
+	u, _, err := s.FindOrCreateOIDCUser("https://idp.example", "subject-frodo", "frodo", escalationStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := mustNewLoginLimiter(t, 5, 5*time.Minute)
+	for i := 1; i <= 5; i++ {
+		l.SecondFactorFailed(s, u.ID, escalationStart.Add(time.Duration(i)*time.Minute))
+	}
+	fifth := escalationStart.Add(5 * time.Minute)
+	got := mustGet(t, s, u.ID)
+	if got.MustChangePassword {
+		t.Error("five second-factor failures required an SSO-only account to change a password it has not got")
+	}
+	if !got.SessionsEndedAt.Equal(fifth) {
+		t.Errorf("SessionsEndedAt = %v, want %v", got.SessionsEndedAt, fifth)
 	}
 }

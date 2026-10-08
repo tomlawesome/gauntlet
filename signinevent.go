@@ -30,6 +30,23 @@ const (
 	// SignInSSORefused is an identity the provider vouched for that this
 	// deployment's SSO policy refused.
 	SignInSSORefused SignInOutcome = "sso_refused"
+	// SignInRefused is a sign-in whose every credential was right but
+	// which gate's unusual-sign-in policy refused (#55, the block
+	// action): no session.
+	SignInRefused SignInOutcome = "refused"
+	// SignInConfirmSent is a sign-in whose every credential was right
+	// and which owes a confirmation code (#55, the confirm action): a
+	// code was sent through the application, no session yet.
+	SignInConfirmSent SignInOutcome = "confirm_sent"
+	// SignInConfirmRefused is a wrong confirmation code.
+	SignInConfirmRefused SignInOutcome = "confirm_refused"
+	// SignInEscapeIssued is a lone admin's sign-in whose every credential
+	// was right and which the policy refused (#66): an escape code was
+	// written to the server's log, no session yet. A refused row is
+	// recorded with it.
+	SignInEscapeIssued SignInOutcome = "escape_issued"
+	// SignInEscapeRefused is a wrong escape code.
+	SignInEscapeRefused SignInOutcome = "escape_refused"
 	// SignInUnrecorded is a SignInHistory row standing for the failed
 	// attempts past a bucket's row budget (signins.go). gate never
 	// reports it as an event.
@@ -37,14 +54,30 @@ const (
 )
 
 // SignInMethod is what an attempt presented: a password, a code (TOTP
-// or recovery), a passkey assertion, or a single sign-on callback.
+// or recovery), a passkey assertion as the second step after a
+// password, a passkey assertion on its own (#77), a single sign-on
+// callback, or a password or passkey alone to resume a session that
+// timed out (#71).
 type SignInMethod string
 
 const (
 	SignInMethodPassword SignInMethod = "password"
 	SignInMethodCode     SignInMethod = "code"
 	SignInMethodPasskey  SignInMethod = "passkey"
-	SignInMethodSSO      SignInMethod = "sso"
+	// SignInMethodPasskeyAlone is a passkey assertion that verified the
+	// user, presented with no password before it (#77, ADR-0012): the
+	// authenticator's own check -- a PIN or a biometric, neither of which
+	// reaches gauntlet -- is the second factor, and the passkey itself
+	// the first.
+	SignInMethodPasskeyAlone SignInMethod = "passkey_alone"
+	SignInMethodSSO          SignInMethod = "sso"
+	// SignInMethodResume is the password-only (or, #77, user-verifying
+	// passkey-only) resume of a session that timed out through
+	// inactivity inside its lifetime ceiling
+	// (POST /api/auth/reauthenticate, #71). A SignInSuccess with this
+	// method issued a new session ID for the same sign-in, not a new
+	// sign-in.
+	SignInMethodResume SignInMethod = "resume"
 )
 
 // SignInEvent is one sign-in attempt as gate reports it (#45, #53).
@@ -59,7 +92,9 @@ type SignInEvent struct {
 	Outcome  SignInOutcome
 	Method   SignInMethod
 	// Client is the address and browser the attempt came from, as the
-	// application's ClientIP and the User-Agent header gave them.
+	// application's ClientIP and the User-Agent header gave them, with
+	// the country looked up and the unusual-sign-in signals raised
+	// (Client.Unusual, #55).
 	Client SessionClient
 	// LockedUntil is the end of the lockout this attempt started, or
 	// for a SignInLocked refusal the one in force. Zero otherwise.
@@ -67,4 +102,7 @@ type SignInEvent struct {
 	// Disabled is set on the failed attempt that disabled the account's
 	// sign-in, and on a SignInDisabled refusal.
 	Disabled bool
+	// Confirmed is set on a SignInSuccess completed through a
+	// confirmation code (#55, gate's confirm step).
+	Confirmed bool
 }

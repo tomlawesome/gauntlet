@@ -13,6 +13,7 @@ import (
 
 	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // Every sign-in attempt is recorded (#45, #53): failures as
@@ -180,8 +181,10 @@ func TestSecondFactorSignInRecordsPasswordOKThenSuccess(t *testing.T) {
 	if len(failed) != 1 || failed[0].Detail != "outcome=factor_refused method=code "+fixtureFrom {
 		t.Errorf("user.login_failed = %+v, want one factor_refused by code", failed)
 	}
+	// The code step came from a browser bob had not signed in from
+	// before, which the default policy flags (#55) ahead of the rest.
 	logins := auditEntries(audit, "user.login")
-	if len(logins) != 1 || logins[0].Detail != "via second factor; "+fixtureFrom {
+	if len(logins) != 1 || logins[0].Detail != "unusual=new-browser; action=flag; via second factor; "+fixtureFrom {
 		t.Errorf("user.login = %+v, want one, via second factor with the address", logins)
 	}
 }
@@ -281,7 +284,7 @@ func TestDisableIsAuditedOnce(t *testing.T) {
 	if len(disabled) != 1 || !strings.HasPrefix(disabled[0].Detail, "after 50 consecutive failures; from=") {
 		t.Fatalf("account.disabled = %+v, want one", disabled)
 	}
-	clock.set(clock.now().Add(365 * 24 * time.Hour))
+	clock.set(clock.now().Add(2 * time.Hour)) // past the last lockout, inside the 24-hour disable
 	if r := tryLogin(t, ts, totpBobUsername, totpBobPassword); r.status != http.StatusTooManyRequests {
 		t.Fatalf("an attempt on a disabled account: status %d", r.status)
 	}
@@ -503,5 +506,51 @@ func TestWarnRatingIsBoundedBeyondTheKeyCap(t *testing.T) {
 	logs.mu.Unlock()
 	if n != 3 {
 		t.Errorf("50 keys past a cap of 2 made %d lines, want 3 (two keys and one shared)", n)
+	}
+}
+
+// A sign-in held for a passkey (#65) and completed by one is audited as
+// a passkey proof, not as a confirmation code.
+func TestAProvedSignInIsAuditedAsAPasskeyProof(t *testing.T) {
+	e := newProveEnv(t)
+	c := e.held(t)
+	if resp, body := e.prove(t, c, e.fake); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login/prove = %d %s", resp.StatusCode, body)
+	}
+	entry := findAuditEntry(t, e.g, "user.login")
+	if want := "unusual=new-browser; action=prove; via passkey proof" + fixtureFromSuffix; entry.Detail != want {
+		t.Errorf("user.login detail = %q, want %q", entry.Detail, want)
+	}
+}
+
+// A held sign-in whose remember write fails still says what was judged
+// and how the hold was answered: the session carries no signals then,
+// but the audit must not lose the action.
+func TestAHeldSignInKeepsItsActionWhenRememberingFails(t *testing.T) {
+	backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+	rec := &noticeRecorder{}
+	e := newUnusualEnvWith(t, backend, func(c *Config) {
+		c.UnusualSignIns = UnusualSignInPolicy{NewCountry: UnusualSignInConfirm}
+		c.Notices = rec
+		c.DeliverConfirmCode = rec.deliver
+	})
+	b := newTestBrowser(t)
+	e.mustSignIn(t, b, addrLondon)
+	e.advance(time.Hour)
+	if status, _ := e.signIn(t, b, addrParis); status != http.StatusOK {
+		t.Fatal("no challenge")
+	}
+	code := confirmCode(t, rec)
+	backend.left = 0
+	_, status, body := e.postConfirm(t, b, addrParis, code)
+	backend.left = -1
+	if status != http.StatusOK {
+		t.Fatalf("confirm = %d %s", status, body)
+	}
+	if got := e.newestSession(t).Client.Unusual; got != 0 {
+		t.Errorf("session signals = %q, want none after a failed remember write", got)
+	}
+	if entry, _ := e.lastAudit("user.login"); entry.Detail != `unusual=new-country; action=confirm; via confirmation code; from="`+addrParis+`"` {
+		t.Errorf("audit = %q", entry.Detail)
 	}
 }

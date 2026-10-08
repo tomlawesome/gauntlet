@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tomlawesome/gauntlet"
 )
 
 // POST /api/auth/users/{id}/logout-all (#53): an admin ends every
@@ -254,5 +256,66 @@ func TestAdminLogoutAllWithoutNotifier(t *testing.T) {
 	}
 	if !strings.Contains(findAuditEntry(t, g, "user.sessions_ended").Detail, "notify=none") {
 		t.Error("audit does not say no notification was asked for")
+	}
+}
+
+// Config.Notices, once set, carries sessions-ended as one AccountNotice
+// kind among the rest (#73) -- the generalised twin of
+// TestAdminLogoutAllNotifiesAfterTheResponse, which pins the deprecated
+// Config.Notify still working.
+func TestAdminLogoutAllNotifiesThroughNotices(t *testing.T) {
+	g, ts, admin, _ := adminLogoutFixture(t)
+	at := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	g.cfg.Now = func() time.Time { return at }
+	rec := &noticeRecorder{}
+	g.cfg.Notices = rec
+
+	bobID := totpBobID(t, g)
+	status, out, raw := adminLogoutAll(t, admin, ts, bobID, adminLogoutAllRequest{Reason: "lost phone"})
+	if status != http.StatusOK || !out.Notified {
+		t.Fatalf("status %d %q, want 200 with notified", status, raw)
+	}
+	n := lastNotice(t, g, rec, NoticeSessionsEnded)
+	if n.UserID != bobID || n.Username != totpBobUsername || n.Role != gauntlet.RoleUser || n.By != "admin" || !n.At.Equal(at) ||
+		n.SessionsEnded == nil || n.SessionsEnded.Reason != "lost phone" || n.SessionsEnded.Ended != 2 {
+		t.Errorf("notice = %+v", n)
+	}
+}
+
+// A session of bob's that timed out but is kept to be resumed is not
+// one bob's own list shows, so it is ended but not counted: the
+// response, the audit line and the notice agree with that list.
+func TestAdminLogoutAllCountsOnlyLiveSessions(t *testing.T) {
+	g, ts, admin, bobs := adminLogoutFixture(t)
+	clock := &escalationClock{t: time.Now()}
+	g.cfg.Now = clock.now
+	t0 := clock.now()
+	bobID := totpBobID(t, g)
+	laptop, phone := bobs[0], bobs[1]
+
+	// The phone and the admin stay in use; the laptop idles out but
+	// stays inside its ceiling.
+	clock.set(t0.Add(40 * time.Minute))
+	requireSignedIn(t, ts, []*http.Client{phone, admin}, true)
+	clock.set(t0.Add(70 * time.Minute))
+	if status, rows := listSessions(t, phone, ts); status != http.StatusOK || rows.Total != 1 {
+		t.Fatalf("bob's list = %d with %d rows, want the phone's alone", status, rows.Total)
+	}
+
+	status, out, raw := adminLogoutAll(t, admin, ts, bobID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status %d %q, want 200", status, raw)
+	}
+	if out.Ended != 1 {
+		t.Errorf("ended = %d, want the 1 live session", out.Ended)
+	}
+	entries := auditEntries(g.cfg.Audit.(*auditRecorder), "user.sessions_ended")
+	if len(entries) != 1 || !strings.Contains(entries[0].Detail, "(n=1)") {
+		t.Errorf("audit = %+v, want one entry counting 1 session", entries)
+	}
+	requireSignedIn(t, ts, []*http.Client{phone}, false)
+	resp, _ := reauth(t, laptop, ts, totpBobPassword)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("the laptop's timed-out session could still be resumed: %d", resp.StatusCode)
 	}
 }

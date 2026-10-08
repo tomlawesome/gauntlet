@@ -26,12 +26,20 @@ type signInRow struct {
 	UserID   string                 `json:"userId,omitempty"`
 	Username string                 `json:"username,omitempty"`
 	Method   gauntlet.SignInMethod  `json:"method,omitempty"`
-	// Address and UserAgent are the first attempt's, as
-	// gauntlet.SessionClient holds a session's.
+	// Address, UserAgent and Country are the first attempt's, as
+	// gauntlet.SessionClient holds a session's. Country is absent when
+	// no country was recorded for it (#54) -- no lookup configured, or
+	// nothing known for the address.
 	Address     string    `json:"address,omitempty"`
 	UserAgent   string    `json:"userAgent,omitempty"`
+	Country     string    `json:"country,omitempty"`
 	LockedUntil time.Time `json:"lockedUntil,omitzero"`
 	Disabled    bool      `json:"disabled,omitempty"`
+	// Unusual is the unusual-sign-in signals the attempt raised (#55),
+	// as an array of names, absent when none; Confirmed marks a sign-in
+	// completed through a confirmation code, absent when false.
+	Unusual   gauntlet.SignInSignals `json:"unusual,omitzero"`
+	Confirmed bool                   `json:"confirmed,omitempty"`
 }
 
 // signInListResponse is GET /api/auth/sign-ins's body.
@@ -52,12 +60,14 @@ var signInOutcomes = map[gauntlet.SignInOutcome]bool{
 	gauntlet.SignInSuccess: true, gauntlet.SignInPasswordOK: true, gauntlet.SignInNoSuchUser: true,
 	gauntlet.SignInWrongPassword: true, gauntlet.SignInFactorRefused: true, gauntlet.SignInLocked: true,
 	gauntlet.SignInDisabled: true, gauntlet.SignInRateLimited: true, gauntlet.SignInSSORefused: true,
-	gauntlet.SignInUnrecorded: true,
+	gauntlet.SignInUnrecorded: true, gauntlet.SignInRefused: true, gauntlet.SignInConfirmSent: true,
+	gauntlet.SignInConfirmRefused: true, gauntlet.SignInEscapeIssued: true, gauntlet.SignInEscapeRefused: true,
 }
 
 // signInQuery reads the route's query: user (an account id), address
-// (exact, at most gauntlet.MaxSessionAddress bytes), outcome, before (a
-// row's seq) and limit (1 to gauntlet.MaxSignInListLimit). reason says
+// (exact, at most gauntlet.MaxSessionAddress bytes), outcome, unusual
+// (only "true": rows that raised a signal, #55), before (a row's seq)
+// and limit (1 to gauntlet.MaxSignInListLimit). reason says
 // what is wrong with a value out of range, and is empty otherwise.
 func signInQuery(r *http.Request) (q gauntlet.SignInQuery, reason string) {
 	v := r.URL.Query()
@@ -71,6 +81,12 @@ func signInQuery(r *http.Request) (q gauntlet.SignInQuery, reason string) {
 		if !signInOutcomes[q.Outcome] {
 			return q, "unknown outcome"
 		}
+	}
+	if v.Has("unusual") {
+		if v.Get("unusual") != "true" {
+			return q, "unusual must be true"
+		}
+		q.Unusual = true
 	}
 	if b := v.Get("before"); b != "" {
 		n, err := strconv.ParseUint(b, 10, 64)
@@ -94,12 +110,12 @@ func signInQuery(r *http.Request) (q gauntlet.SignInQuery, reason string) {
 // adminOnly).
 func (g *Gate) handleSignInsList(w http.ResponseWriter, r *http.Request) {
 	if g.deps.SignIns == nil {
-		http.Error(w, "sign-in history is not configured", http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, classNotFound, "sign-in history is not configured", nil)
 		return
 	}
 	q, reason := signInQuery(r)
 	if reason != "" {
-		http.Error(w, reason, http.StatusBadRequest)
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, reason, nil)
 		return
 	}
 	rows, more := g.deps.SignIns.List(q)
@@ -109,8 +125,9 @@ func (g *Gate) handleSignInsList(w http.ResponseWriter, r *http.Request) {
 		resp.SignIns = append(resp.SignIns, signInRow{
 			Seq: row.Seq, At: row.At, Until: row.Until, Count: row.Count, Outcome: row.Outcome,
 			UserID: row.UserID, Username: row.Username, Method: row.Method,
-			Address: row.Client.Address, UserAgent: row.Client.UserAgent,
+			Address: row.Client.Address, UserAgent: row.Client.UserAgent, Country: row.Client.Country,
 			LockedUntil: row.LockedUntil, Disabled: row.Disabled,
+			Unusual: row.Client.Unusual, Confirmed: row.Confirmed,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

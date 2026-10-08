@@ -411,7 +411,7 @@ func TestSessionsLogoutAllLeavesOneRow(t *testing.T) {
 		t.Fatalf("before sign out everywhere, total = %d, want 3", list.Total)
 	}
 
-	resp := postJSON(t, laptop, ts.URL+"/api/auth/logout-all", nil)
+	resp := postJSON(t, laptop, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("logout-all returned %d", resp.StatusCode)
@@ -445,6 +445,24 @@ func TestSessionsListIsCappedWithTotal(t *testing.T) {
 	for i := 1; i < len(list.Sessions); i++ {
 		if list.Sessions[i].SignedInAt.After(list.Sessions[i-1].SignedInAt) {
 			t.Fatalf("row %d signed in after row %d: not newest first", i, i-1)
+		}
+	}
+}
+
+// The list says how each session's sign-in was made (#77): the password
+// then a code, here, for the phone; and the laptop's password sign-in,
+// whose session the TOTP confirmation rotated, keeps its method.
+func TestSessionsListShowsHowEachWasSignedIn(t *testing.T) {
+	_, ts, _, codes := sessionsFixture(t)
+	phone := signInBob(t, ts, "Safari/18.0 (phone)", "192.0.2.44", codes[0])
+
+	list := mustListSessions(t, phone, ts)
+	if got := currentRow(t, list).Method; got != gauntlet.SignInMethodCode {
+		t.Errorf("phone row method = %q, want code", got)
+	}
+	for _, row := range list.Sessions {
+		if !row.Current && row.Method != gauntlet.SignInMethodPassword {
+			t.Errorf("laptop row method = %q, want password (kept across the factor confirmation)", row.Method)
 		}
 	}
 }

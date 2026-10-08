@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,8 +27,8 @@ func knownCookieFrom(resp *http.Response) *http.Cookie {
 	return nil
 }
 
-// knownToken is the known-browser token client's jar would send to the
-// login routes, or "".
+// knownToken is the newest known-browser token client's jar would send
+// to the login routes -- the first of the cookie's tokens -- or "".
 func knownToken(t *testing.T, client *http.Client, ts *httptest.Server) string {
 	t.Helper()
 	u, err := url.Parse(ts.URL + loginPath)
@@ -36,7 +37,8 @@ func knownToken(t *testing.T, client *http.Client, ts *httptest.Server) string {
 	}
 	for _, c := range client.Jar.Cookies(u) {
 		if c.Name == knownBrowserCookieName {
-			return c.Value
+			first, _, _ := strings.Cut(c.Value, ".")
+			return first
 		}
 	}
 	return ""
@@ -113,7 +115,7 @@ func TestEverySessionIssueSetsTheKnownBrowserCookie(t *testing.T) {
 			t.Fatalf("%s = %d", name, resp.StatusCode)
 		}
 		c := knownCookieFrom(resp)
-		if c == nil || !g.deps.Users.KnowsBrowser(id, c.Value, g.now()) {
+		if c == nil || !g.deps.Users.KnowsBrowser(id, strings.Split(c.Value, ".")[0], g.now()) {
 			t.Errorf("%s set no known-browser cookie the account knows", name)
 		}
 	}
@@ -126,7 +128,7 @@ func TestEverySessionIssueSetsTheKnownBrowserCookie(t *testing.T) {
 	check("the second-factor step", submitLoginFactor(t, bob, ts, gauntlet.GenerateTOTPCode(secret, counter+1)))
 	check("a password change", postJSON(t, bob, ts.URL+"/api/auth/password",
 		changePasswordRequest{CurrentPassword: totpBobPassword, NewPassword: totpBobPassword + "-2"}))
-	check("sign out everywhere", postJSON(t, bob, ts.URL+"/api/auth/logout-all", nil))
+	check("sign out everywhere", postJSON(t, bob, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword + "-2"}))
 }
 
 // A stranger locks bob out; bob's own browser signs in all the same, on
@@ -184,7 +186,7 @@ func TestAKnownBrowserCannotPassOrOutlastTheDisable(t *testing.T) {
 	if u, _ := g.deps.Users.Get(id); u.LoginDisabledAt.IsZero() {
 		t.Fatal("the fiftieth failure, from the known browser, did not disable the account")
 	}
-	clock.set(clock.now().Add(48 * time.Hour))
+	clock.set(clock.now().Add(2 * time.Hour)) // past the last lockout, inside the 24-hour disable
 	if status := signInFrom(t, bob, ts, totpBobUsername, totpBobPassword); status != http.StatusTooManyRequests {
 		t.Errorf("the known browser's right password on a disabled account = %d, want 429", status)
 	}
@@ -206,7 +208,7 @@ func TestSignOutEverywhereAndAResetCodeForgetKnownBrowsers(t *testing.T) {
 		t.Fatal("precondition: browser B is not known")
 	}
 
-	if status, body := readAll(t, postJSON(t, browserA, ts.URL+"/api/auth/logout-all", nil)); status != http.StatusOK {
+	if status, body := readAll(t, postJSON(t, browserA, ts.URL+"/api/auth/logout-all", logoutAllRequest{Password: totpBobPassword})); status != http.StatusOK {
 		t.Fatalf("sign out everywhere = %d %s", status, body)
 	}
 	now := g.now()
@@ -221,7 +223,7 @@ func TestSignOutEverywhereAndAResetCodeForgetKnownBrowsers(t *testing.T) {
 		t.Errorf("after sign out everywhere the account remembers %d, want 1", len(u.KnownBrowsers))
 	}
 
-	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", nil)
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users/"+id+"/reset-password", adminStepUpRequest{Password: testAdminPassword})
 	if status, body := readAll(t, resp); status != http.StatusOK {
 		t.Fatalf("reset = %d %s", status, body)
 	}

@@ -13,6 +13,10 @@
 # variables only the owner sets; nothing here sets them, and without them
 # the job never runs.
 #
+# Renovate (#63) runs in the `maintenance` stage, only in the pipelines the
+# weekly `renovate` and daily `renovate-security` schedules start; see the
+# job at the end of the file.
+#
 # Runner lane (ai/agent-infra#3): `light` is 4 CPU / 6 GB, which is ample
 # for a dependency-free Go module. `big` is not needed here. The two
 # exceptions are the common-password list's blocklist:sign, on the
@@ -26,6 +30,7 @@ stages:
   - blocklist
   - release
   - sync
+  - maintenance
 
 default:
   tags: [light]
@@ -106,6 +111,11 @@ lint:go:
   script:
     - go build ./...
     - go vet ./...
+    # Leaf packages (AGENTS.md): gate and the root package must not link
+    # the WebAuthn library (passkey/) or the country-file reader (geoip/).
+    - |
+      leaked=$(go list -deps ./gate ./ | grep -i -E 'webauthn|maxminddb' || true)
+      [ -z "$leaked" ] || { echo "gate or the root package imports a leaf's library:"; echo "$leaked"; exit 1; }
     - |
       files=$(git ls-files '*.go')
       [ -n "$files" ] || { echo "git ls-files returned no Go files"; exit 1; }
@@ -117,6 +127,10 @@ lint:go:
     - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
     - golangci-lint run ./...
 
+# Two checks in one script: go-licenses holds every linked package's
+# licence to the allow-list, then licence-check-bundled.py looks inside
+# the same modules for vendored code with no licence of its own and for
+# embedded files, each of which needs a recorded review (#64).
 lint:licences:
   stage: lint
   image: $GOLANG_IMAGE
@@ -135,9 +149,10 @@ lint:vulncheck:
     - govulncheck ./...
 
 # The exported Go API against the last release tag (ADR-0002, #22):
-# fails on a removed or renamed identifier, passes on additions. apidiff
-# runs through `go run` at a pinned pseudo-version inside the script, so
-# it never enters go.mod; scripts/apidiff.sh runs the same check locally.
+# fails on a removed or renamed identifier, passes on additions. The
+# script installs apidiff at a pinned pseudo-version into a temporary
+# directory, so it never enters go.mod or go.sum, and fails if either
+# file changed during the run (#62); it runs the same check locally.
 # Full history and the tags are fetched so the base tag is there to diff.
 lint:apidiff:
   stage: lint
@@ -264,13 +279,15 @@ test:contract:
 #
 # Three jobs on three runners, so no one job or runner holds two of:
 # the network path to HIBP, the signing key, the publishing
-# credentials. build talks to HIBP and holds nothing; sign holds the key
-# and talks to nobody; publish holds the job token and the GitHub token
-# and checks the signature against the committed keys before uploading.
+# credentials. build talks to HIBP and holds nothing; sign holds the
+# key and reaches only its Go module proxy and container registry, to
+# build pwlist from this commit's source -- never HIBP or GitHub;
+# publish holds the job token and the GitHub token and checks the
+# signature against the committed keys before uploading.
 #
 # The sample path: a pipeline run by hand from any branch with
 # BLOCKLIST_SAMPLE=true runs blocklist:build alone over the first 2,048
-# prefixes (about 2 MB from HIBP instead of 20-40 GB). Its output is
+# prefixes (roughly 40-80 MB from HIBP instead of 20-40 GB). Its output is
 # marked `# sample:`, which `pwlist sign`, `pwlist verify` and every
 # Refresher refuse, and sign and publish never run for it.
 .blocklist_full: &blocklist_full
@@ -308,7 +325,10 @@ blocklist:build:
           - .gitlab-ci.yml
       paths:
         - .gocache/
-    - key: blocklist-checkpoint-$CI_PIPELINE_ID
+    # Prefixed like every other cache key: a pipeline on an unprotected
+    # branch must never seed the checkpoint the protected monthly build
+    # resumes from, whatever the project's cache-separation setting.
+    - key: $CI_COMMIT_REF_PROTECTED-blocklist-checkpoint-$CI_PIPELINE_ID
       paths:
         - .blocklist/
       when: always
@@ -522,6 +542,9 @@ sync:mirror-to-github:
     # GitLab's variable editor trims the key's final newline and OpenSSH
     # refuses a key without one; put it back, and prove the key loads
     # before trying GitHub -- without printing any of it.
+    # A plain variable holds the key text, not a path; reading it as a
+    # path would print the key in the shell's error, so refuse first.
+    - test -f "$GITHUB_MIRROR_SSH_KEY" || { echo "GITHUB_MIRROR_SSH_KEY must be a File-type CI/CD variable"; exit 1; }
     - tr -d '\r' < "$GITHUB_MIRROR_SSH_KEY" > ~/.ssh/mirror_key && chmod 600 ~/.ssh/mirror_key
     - '[ -n "$(tail -c1 ~/.ssh/mirror_key)" ] && echo >> ~/.ssh/mirror_key || true'
     - 'head -1 ~/.ssh/mirror_key | grep -q "PRIVATE KEY" || { echo "GITHUB_MIRROR_SSH_KEY does not begin with a PRIVATE KEY header"; exit 1; }'
@@ -536,3 +559,118 @@ sync:mirror-to-github:
     # release note gone. Fetch the ref first so it exists locally.
     - git fetch --no-tags origin "+$MIRROR_REF:$MIRROR_REF"
     - git push github "$MIRROR_REF:$MIRROR_REF"
+
+# ---------------------------------------------------------------------------
+# MAINTENANCE
+# ---------------------------------------------------------------------------
+# Renovate (#63), copied from orbit's `renovate` job: once a week it compares
+# every pinned dependency with its newest release and opens merge requests
+# for the ones that are behind. What it watches, how it groups and why is in
+# renovate.json at the repo root: both go.mod files, the images in this file,
+# and the Go tools this file and scripts/ install at fixed versions.
+#
+# The shared `light` lane, like every job here but the two blocklist ones
+# (AGENTS.md "Runner tags"). Orbit runs Renovate on `big` because an npm
+# lockfile update runs pnpm over its whole monorepo; here the heaviest step
+# is `go mod tidy` on a small module.
+#
+# Two CI/CD variables the owner creates under Settings > CI/CD > Variables
+# (docs/releasing.md, "Dependency updates"). Mask both. Protect both: the
+# schedule runs on `dev`, which is protected, so a protected variable reaches
+# this job and never reaches a merge request pipeline.
+#
+#   RENOVATE_TOKEN     A project access token on ai/gauntlet with the `api`
+#                      scope and the Developer role. `api` is what lets
+#                      Renovate read the repository, push branches and open
+#                      merge requests; a `read_api` token can look and never
+#                      write.
+#   GITHUB_COM_TOKEN   A github.com fine-grained personal access token with no
+#                      permissions granted at all -- public read only. Renovate
+#                      uses it to read release tags and release notes on
+#                      github.com, where most of gauntlet's modules and tools
+#                      live. Without it the unauthenticated GitHub API
+#                      rate-limits partway through a run.
+#
+# Neither value is ever printed: nothing below dumps an environment, and
+# LOG_LEVEL stays at info. `debug` logs the resolved configuration and would.
+#
+# One optional schedule variable picks the mode. RENOVATE_DRY_RUN=full makes a
+# run that reports what it would do and creates nothing, which is what the
+# first run should be. Delete the variable and the next run opens merge
+# requests. Renovate reads that name itself; the job only has to make an empty
+# value mean "unset", because Renovate accepts extract, lookup or full and
+# nothing else.
+#
+# A second schedule runs this job daily with RENOVATE_SECURITY_ONLY=true
+# (#79): docs/releasing.md promises a security fix opens a merge request
+# without waiting for Monday, and nothing else runs between Mondays. That
+# run adds renovate-security.json on top of renovate.json, through
+# Renovate's RENOVATE_ADDITIONAL_CONFIG_FILE, which turns every ordinary
+# update off and leaves vulnerability fixes on; everything else still
+# comes from renovate.json, so the two runs never drift apart.
+#
+# There is no `RENOVATE_ALLOWED_COMMANDS`: nothing needs a postUpgradeTask.
+# `go mod tidy` after a Go module bump is Renovate's own gomodTidy option.
+renovate:
+  stage: maintenance
+  # Pinned by digest, the way every other image here is: the same release
+  # and digest orbit's renovate job uses (44.83.2), so the two projects run
+  # one proven Renovate. renovate.json excludes 44.63.0 and 44.64.0, which do
+  # not start; Renovate offers its own next release in the weekly merge
+  # request, and that bump is only proven by the following scheduled run.
+  #
+  # The default image rather than `-full`: it carries Node only and installs
+  # the Go toolchain a run needs as it goes, for `go mod tidy`. `-full`
+  # preinstalls every ecosystem's tools and costs several gigabytes of pull on
+  # a shared runner every week.
+  image:
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/renovate/renovate:44.83.2@sha256:c1cb952b2e14a112d0d0c61987a10f60a2626fe9b9c1504436be46a17bd123bc
+    pull_policy: if-not-present
+  timeout: 1h
+  # A weekly maintenance run has nothing that could supersede it, and being
+  # cancelled part-way leaves half-written branches behind.
+  interruptible: false
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $RENOVATE == "true"
+  # Renovate keeps nothing here between runs; the Go module cache the other
+  # jobs share is no use to it.
+  cache: []
+  variables:
+    # The checkout exists only so RENOVATE_CONFIG_FILE below has a file to
+    # read. Renovate clones the repository it updates itself, elsewhere.
+    GIT_DEPTH: 1
+    RENOVATE_PLATFORM: gitlab
+    RENOVATE_ENDPOINT: $CI_API_V4_URL
+    RENOVATE_AUTODISCOVER: "false"
+    RENOVATE_REPOSITORIES: $CI_PROJECT_PATH
+    # Orbit hands Renovate its checkout's copy as global config because its
+    # default branch did not yet carry renovate.json. Gauntlet's default
+    # branch is `dev`, so the repository copy is found anyway and is the same
+    # file; this only keeps the job identical to orbit's.
+    RENOVATE_CONFIG_FILE: $CI_PROJECT_DIR/renovate.json
+    RENOVATE_ONBOARDING: "false"
+    RENOVATE_REQUIRE_CONFIG: "optional"
+    LOG_LEVEL: info
+    # Go module versions come from each module's own Git host, never from
+    # proxy.golang.org (#63, global rules): the first lookup of a version
+    # through the public proxy records it permanently. GOPRIVATE keeps the
+    # owner's own modules away from the proxy and the checksum database even
+    # for `go mod tidy`. Renovate's Go lookups read GOPROXY, and it hands
+    # both on to the `go mod tidy` it runs. The first dry run shows whether
+    # every lookup went to a Git host (docs/releasing.md).
+    GOPROXY: direct
+    GOPRIVATE: github.com/tomlawesome/*
+  script:
+    - |
+      set -eu
+      if [ -z "${RENOVATE_DRY_RUN:-}" ]; then
+        unset RENOVATE_DRY_RUN
+        echo "renovate: live run, merge requests will be created"
+      else
+        echo "renovate: dry run (${RENOVATE_DRY_RUN}), nothing will be created"
+      fi
+      if [ "${RENOVATE_SECURITY_ONLY:-}" = "true" ]; then
+        export RENOVATE_ADDITIONAL_CONFIG_FILE="$CI_PROJECT_DIR/renovate-security.json"
+        echo "renovate: security fixes only ($RENOVATE_ADDITIONAL_CONFIG_FILE)"
+      fi
+      renovate
