@@ -2,7 +2,9 @@ package gate
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -196,4 +198,177 @@ func TestAllowedSignInNoticeSaysAllowed(t *testing.T) {
 	if u.Reason != "allowed" || u.SessionRef == "" || u.SessionRef != sess.Ref() || u.Action != UnusualSignInBlock || u.Signals != gauntlet.SignalNewBrowser {
 		t.Errorf("notice detail = %+v (session ref %s)", u, sess.Ref())
 	}
+}
+
+// allowSignIn posts body to the allow-sign-in route for id as client.
+func allowSignIn(t *testing.T, client *http.Client, ts *httptest.Server, id string, body any) *http.Response {
+	t.Helper()
+	return postJSON(t, client, ts.URL+"/api/auth/users/"+id+"/allow-sign-in", body)
+}
+
+func TestAdminAllowsAnotherAccountsNextSignIn(t *testing.T) {
+	e, rec := newNotifiedEnv(t, UnusualSignInPolicy{NewBrowser: UnusualSignInBlock})
+	admin := e.adminNow(t)
+	now := e.clock.now()
+	resp := allowSignIn(t, admin, e.ts, e.bobID, adminStepUpRequest{Password: testAdminPassword})
+	status, body := readAll(t, resp)
+	if status != http.StatusOK {
+		t.Fatalf("allow-sign-in = %d %s", status, body)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(body), &fields); err != nil || len(fields) != 2 {
+		t.Errorf("body = %s, want exactly username and allowedUntil", body)
+	}
+	var out struct {
+		Username     string    `json:"username"`
+		AllowedUntil time.Time `json:"allowedUntil"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	until := now.Add(gauntlet.SignInAllowanceLifetime)
+	if out.Username != totpBobUsername || !out.AllowedUntil.Equal(until) {
+		t.Errorf("answer = %+v, want bob until %v", out, until)
+	}
+	if u, _ := e.g.deps.Users.Get(e.bobID); !u.SignInAllowed(now) || !u.SignInAllowedUntil.Equal(until) {
+		t.Errorf("stored allowance ends %v, want %v", u.SignInAllowedUntil, until)
+	}
+
+	entry, ok := e.lastAudit("user.sign_in_allowed")
+	if !ok || entry.Actor != "admin" || entry.Target != totpBobUsername ||
+		!strings.Contains(entry.Detail, "next sign-in allowed until "+until.Format(time.RFC3339)+" ") ||
+		strings.Contains(entry.Detail, "own account") {
+		t.Errorf("user.sign_in_allowed = %+v", entry)
+	}
+
+	e.g.notifying.Wait()
+	var notice *AccountNotice
+	for _, n := range rec.all() {
+		if n.Kind == NoticeSignInAllowed {
+			notice = &n
+		}
+	}
+	if notice == nil || notice.UserID != e.bobID || notice.Username != totpBobUsername || notice.Role != gauntlet.RoleUser ||
+		notice.By != "admin" || !notice.At.Equal(now) || notice.SignInAllowed == nil || !notice.SignInAllowed.Until.Equal(until) {
+		t.Errorf("notice = %+v", notice)
+	}
+
+	// A second call inside the window starts a fresh ten minutes.
+	e.advance(3 * time.Minute)
+	if status, body := readAll(t, allowSignIn(t, e.adminNow(t), e.ts, e.bobID, adminStepUpRequest{Password: testAdminPassword})); status != http.StatusOK {
+		t.Fatalf("a second allow-sign-in = %d %s", status, body)
+	}
+	if u, _ := e.g.deps.Users.Get(e.bobID); !u.SignInAllowedUntil.Equal(e.clock.now().Add(gauntlet.SignInAllowanceLifetime)) {
+		t.Errorf("after a second call the allowance ends %v", u.SignInAllowedUntil)
+	}
+}
+
+func TestAdminAllowsTheirOwnNextSignIn(t *testing.T) {
+	t.Run("code", func(t *testing.T) {
+		g := newTestGate(t)
+		g.cfg.Audit = &auditRecorder{}
+		ts := newTestServer(t, g)
+		admin := registerAdminNoFactor(t, ts, "admin", selfUnlockAdminPassword)
+		secret, _, counter := enrolAdminTOTP(t, admin, ts)
+		u, _ := g.deps.Users.ByUsername("admin")
+		resp := allowSignIn(t, admin, ts, u.ID, unlockSelfRequest{Password: selfUnlockAdminPassword, Code: gauntlet.GenerateTOTPCode(secret, counter+1)})
+		if status, body := readAll(t, resp); status != http.StatusOK {
+			t.Fatalf("own allow-sign-in with password and code = %d %s", status, body)
+		}
+		if got, _ := g.deps.Users.Get(u.ID); got.SignInAllowedUntil.IsZero() {
+			t.Error("no allowance recorded")
+		}
+		if e := findAuditEntry(t, g, "user.sign_in_allowed"); !strings.Contains(e.Detail, "; own account, password and second factor re-entered") {
+			t.Errorf("audit detail = %q", e.Detail)
+		}
+	})
+	t.Run("passkey", func(t *testing.T) {
+		g, ts, admin, fake, adminID, _ := passkeyStepUpFixture(t)
+		resp := allowSignIn(t, admin, ts, adminID, unlockSelfRequest{Password: doorTestPassword, Assertion: signStepUp(t, fake, stepUpOptions(t, admin, ts))})
+		if status, body := readAll(t, resp); status != http.StatusOK {
+			t.Fatalf("own allow-sign-in with password and passkey = %d %s", status, body)
+		}
+		if e := findAuditEntry(t, g, "user.sign_in_allowed"); !strings.Contains(e.Detail, "; own account, password and passkey re-entered") {
+			t.Errorf("audit detail = %q", e.Detail)
+		}
+	})
+}
+
+func TestAllowSignInRefusals(t *testing.T) {
+	allowed := func(g *Gate, id string) bool {
+		u, ok := g.deps.Users.Get(id)
+		return ok && !u.SignInAllowedUntil.IsZero()
+	}
+	t.Run("another account, no or wrong password", func(t *testing.T) {
+		g, ts, admin, id := stepUpFixture(t)
+		g.deps.Limiter = mustNewLoginLimiter(t, 2, time.Minute)
+		wantProblem(t, allowSignIn(t, admin, ts, id, adminStepUpRequest{}), http.StatusUnauthorized, classInvalidCredentials)
+		wantProblem(t, allowSignIn(t, admin, ts, id, adminStepUpRequest{Password: "not-the-password"}), http.StatusUnauthorized, classInvalidCredentials)
+		// Both counted on the re-check budget: the right one is now 429.
+		wantProblem(t, allowSignIn(t, admin, ts, id, adminStepUpRequest{Password: testAdminPassword}), http.StatusTooManyRequests, classRateLimited)
+		if allowed(g, id) {
+			t.Error("a refused request recorded an allowance")
+		}
+	})
+	t.Run("own account, no code", func(t *testing.T) {
+		g, ts, admin, _ := stepUpFixture(t)
+		u, _ := g.deps.Users.ByUsername("admin")
+		wantProblem(t, allowSignIn(t, admin, ts, u.ID, unlockSelfRequest{Password: testAdminPassword}), http.StatusBadRequest, classInvalidRequest)
+		if allowed(g, u.ID) {
+			t.Error("a refused request recorded an allowance")
+		}
+	})
+	t.Run("not an admin", func(t *testing.T) {
+		g, ts, _ := totpFixture(t)
+		bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+		totpEnrolAndConfirm(t, bob, ts) // past the enrolment door, so the role is what refuses
+		admin, _ := g.deps.Users.ByUsername("admin")
+		bobID := totpBobID(t, g)
+		wantProblem(t, allowSignIn(t, bob, ts, admin.ID, adminStepUpRequest{Password: totpBobPassword}), http.StatusForbidden, classForbidden)
+		wantProblem(t, allowSignIn(t, bob, ts, bobID, unlockSelfRequest{Password: totpBobPassword, Code: "123456"}), http.StatusForbidden, classForbidden)
+		if allowed(g, admin.ID) || allowed(g, bobID) {
+			t.Error("a non-admin recorded an allowance")
+		}
+	})
+	t.Run("unknown account", func(t *testing.T) {
+		_, ts, admin, _ := stepUpFixture(t)
+		wantProblem(t, allowSignIn(t, admin, ts, "no-such-id", adminStepUpRequest{Password: testAdminPassword}), http.StatusNotFound, classNotFound)
+	})
+	t.Run("SSO-only caller", func(t *testing.T) {
+		g, ts, _, id := stepUpFixture(t)
+		_, ann := ssoOnlyAdmin(t, g, ts, "subject-ann")
+		resp := allowSignIn(t, ann, ts, id, adminStepUpRequest{Password: "anything-at-all"})
+		if status, body := readAll(t, resp); status != http.StatusConflict || !strings.Contains(body, "local password") {
+			t.Errorf("allow-sign-in by an SSO-only admin = %d %s, want 409 naming the local password", status, body)
+		}
+		if allowed(g, id) {
+			t.Error("an SSO-only admin recorded an allowance")
+		}
+	})
+	t.Run("unreadable body", func(t *testing.T) {
+		g, ts, admin, id := stepUpFixture(t)
+		wantProblem(t, allowSignIn(t, admin, ts, id, "not an object"), http.StatusBadRequest, classInvalidRequest)
+		if allowed(g, id) {
+			t.Error("a bad body recorded an allowance")
+		}
+	})
+	t.Run("no CSRF header", func(t *testing.T) {
+		g, ts, admin, id := stepUpFixture(t)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/users/"+id+"/allow-sign-in",
+			strings.NewReader(`{"password":"`+testAdminPassword+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := admin.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status, body := readAll(t, resp); status != http.StatusForbidden {
+			t.Errorf("without the CSRF header = %d %s, want 403", status, body)
+		}
+		if allowed(g, id) {
+			t.Error("a request without the CSRF header recorded an allowance")
+		}
+	})
 }

@@ -11,7 +11,8 @@ import (
 // AccountNotifier is the one hook an application wires to hear about
 // account events -- a password reset, a second factor added or removed,
 // a lockout or disable, every session ended, an unusual sign-in (#73,
-// folding in #53 and #55), a role changed (#67) -- so it can tell the account's owner. nil
+// folding in #53 and #55), a role changed (#67), a sign-in allowed by an
+// admin (#81) -- so it can tell the account's owner. nil
 // (Config.Notices) means nobody is told; gauntlet sends nothing itself.
 //
 // AccountEvent is called after the response that caused it has been
@@ -47,6 +48,10 @@ const (
 	// than running it in the background, and an error from it means the
 	// notice is offered again at the next sweep.
 	NoticeTokenExpiring NoticeKind = "token-expiring"
+	// NoticeSignInAllowed (#81): an admin allowed the account's next
+	// sign-in from any browser or place, until SignInAllowedDetail.Until.
+	// By is the admin, who may be the account's own holder.
+	NoticeSignInAllowed NoticeKind = "sign-in-allowed"
 )
 
 // AccountNotice is what an AccountNotifier is told. Exactly one of the
@@ -74,6 +79,14 @@ type AccountNotice struct {
 	UnusualSignIn *UnusualSignInDetail
 	RoleChanged   *RoleChangeDetail
 	TokenExpiring *TokenExpiringDetail
+	SignInAllowed *SignInAllowedDetail
+}
+
+// SignInAllowedDetail is NoticeSignInAllowed's detail: when the
+// allowance ends. It ends sooner at the account's next completed
+// sign-in, which spends it.
+type SignInAllowedDetail struct {
+	Until time.Time
 }
 
 // TokenExpiringDetail is NoticeTokenExpiring's detail: which token, and
