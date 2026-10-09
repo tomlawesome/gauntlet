@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1207,9 +1208,10 @@ func TestRemovingTheLastPasskeyThenConfirmingTOTPKeepsRecoveryCodesConsistent(t 
 	if _, err := s.DeletePasskey(u.ID, []byte{1}); err != nil {
 		t.Fatalf("DeletePasskey: %v", err)
 	}
-	// The confirmation may be refused or may mint codes of its own; it
-	// may not leave a live app with no codes.
-	_ = s.ConfirmTOTP(u.ID, now, 42)
+	// With no other live factor the add side refuses, under the lock.
+	if err := s.ConfirmLaterTOTP(u.ID, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Errorf("ConfirmLaterTOTP after the last factor went = %v, want ErrNoOtherSecondFactor", err)
+	}
 	wantCodesToMatchFactors(t, s, u.ID, "passkey removed, then the app confirmed")
 }
 
@@ -1228,7 +1230,9 @@ func TestClearingTheLastTOTPThenAddingAPasskeyKeepsRecoveryCodesConsistent(t *te
 	if err := s.ClearTOTP(u.ID); err != nil {
 		t.Fatalf("ClearTOTP: %v", err)
 	}
-	_, _ = s.AddPasskey(u.ID, testPasskey(2, "late"))
+	if _, err := s.AddLaterPasskey(u.ID, testPasskey(2, "late")); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Errorf("AddLaterPasskey after the last factor went = %v, want ErrNoOtherSecondFactor", err)
+	}
 	wantCodesToMatchFactors(t, s, u.ID, "app cleared, then a passkey added")
 }
 
@@ -1252,14 +1256,14 @@ func TestConcurrentFactorChangesKeepRecoveryCodesConsistent(t *testing.T) {
 				}
 			},
 			a: func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
-			b: func(s *Store, id string) error { return s.ConfirmTOTP(id, now, 42) },
+			b: func(s *Store, id string) error { return s.ConfirmLaterTOTP(id, now, 42) },
 		},
 		{
 			name: "clear the only authenticator app while adding a passkey",
 			seed: func(t *testing.T, s *Store, id string) { seedTOTPWithCodes(t, s, id, now) },
 			a:    func(s *Store, id string) error { return s.ClearTOTP(id) },
 			b: func(s *Store, id string) error {
-				_, err := s.AddPasskey(id, testPasskey(2, "late"))
+				_, err := s.AddLaterPasskey(id, testPasskey(2, "late"))
 				return err
 			},
 		},
@@ -1332,5 +1336,99 @@ func TestConcurrentFactorChangesKeepRecoveryCodesConsistent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The additional-factor path: AddLaterPasskey stores a passkey, and
+// ConfirmLaterTOTP makes a pending app live, only beside a live second
+// factor -- decided under the store's lock -- and refuse with
+// ErrNoOtherSecondFactor, storing nothing, otherwise.
+func TestAddLaterPasskeySucceedsBesideALiveFactor(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTOTPWithCodes(t, s, u.ID, now)
+	before, _ := s.Get(u.ID)
+
+	pk, err := s.AddLaterPasskey(u.ID, testPasskey(5, "later"))
+	if err != nil {
+		t.Fatalf("AddLaterPasskey beside a live app: %v", err)
+	}
+	if pk.Name != "later" || len(pk.ID) != 1 || pk.ID[0] != 5 {
+		t.Errorf("returned passkey = %+v, want the one added", pk)
+	}
+	got, _ := s.Get(u.ID)
+	if len(got.Passkeys) != 1 || !got.HasActiveTOTP() {
+		t.Errorf("passkeys=%d totp=%v, want the new passkey beside the app", len(got.Passkeys), got.HasActiveTOTP())
+	}
+	if !reflect.DeepEqual(before.RecoveryCodes, got.RecoveryCodes) {
+		t.Error("adding a later passkey changed the recovery codes")
+	}
+}
+
+func TestAddLaterPasskeyRefusesWithoutALiveFactorAndStoresNothing(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddLaterPasskey(u.ID, testPasskey(5, "later")); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Fatalf("AddLaterPasskey on an account with no factor = %v, want ErrNoOtherSecondFactor", err)
+	}
+	got, _ := s.Get(u.ID)
+	if len(got.Passkeys) != 0 || len(got.RecoveryCodes) != 0 || got.HeldEnrolment != nil {
+		t.Errorf("a refused add stored something: passkeys=%d codes=%d held=%+v", len(got.Passkeys), len(got.RecoveryCodes), got.HeldEnrolment)
+	}
+}
+
+func TestConfirmLaterTOTPSucceedsBesideALiveFactor(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPasskeyWithCodes(t, s, u.ID, now)
+	if err := s.SetPendingTOTPSecretAt(u.ID, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.Get(u.ID)
+
+	if err := s.ConfirmLaterTOTP(u.ID, now, 42); err != nil {
+		t.Fatalf("ConfirmLaterTOTP beside a live passkey: %v", err)
+	}
+	got, _ := s.Get(u.ID)
+	if !got.HasActiveTOTP() || len(got.Passkeys) != 1 {
+		t.Errorf("totp=%v passkeys=%d, want the app live beside the passkey", got.HasActiveTOTP(), len(got.Passkeys))
+	}
+	if !reflect.DeepEqual(before.RecoveryCodes, got.RecoveryCodes) {
+		t.Error("confirming a later app changed the recovery codes")
+	}
+}
+
+func TestConfirmLaterTOTPRefusesWithoutALiveFactorAndLeavesItPending(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPendingTOTPSecretAt(u.ID, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConfirmLaterTOTP(u.ID, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Fatalf("ConfirmLaterTOTP on an account with no factor = %v, want ErrNoOtherSecondFactor", err)
+	}
+	got, _ := s.Get(u.ID)
+	if got.HasActiveTOTP() || len(got.RecoveryCodes) != 0 {
+		t.Errorf("a refused confirm went live: totp=%v codes=%d", got.HasActiveTOTP(), len(got.RecoveryCodes))
+	}
+	if got.TOTPSecret != testTOTPSecret || got.TOTPPendingSince.IsZero() || !got.TOTPConfirmedAt.IsZero() {
+		t.Errorf("the pending secret did not stay pending: secret=%q pendingSince=%v confirmedAt=%v",
+			got.TOTPSecret, got.TOTPPendingSince, got.TOTPConfirmedAt)
 	}
 }
