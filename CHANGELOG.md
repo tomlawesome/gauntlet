@@ -198,6 +198,18 @@ Low-severity findings from the v0.3.0 audit (#80):
   `ClearPasskeys` answers `ErrNoPasskeys`, instead of saving and
   reporting success. A recovery tool built on it can now say there was
   nothing to remove rather than that everything was.
+- A passkey-alone sign-in (`POST /api/auth/login/passkey`) whose user
+  handle names an account the credential cannot sign in to -- an
+  account with no local password, or a credential ID that is not one of
+  the account's passkeys under the current relying-party ID -- is no
+  longer charged to that account. The user handle is not covered by the
+  passkey's signature, so anyone holding any passkey could name any
+  account and lock or disable it. Such an attempt now answers `401
+  invalid-credentials` as before, is recorded as `no_such_user` with no
+  account, and reserves and counts nothing on the account (no lockout,
+  no disable, no notice); the address limits still apply, as for an
+  unknown handle. A passkey the account does hold whose assertion fails
+  is still `factor_refused` against the account.
 - A failed SSO callback's warning now ends with `cause="..."`: what the
   token endpoint answered (its status, error code and description, never
   its raw body), why the token did not verify, what the provider
