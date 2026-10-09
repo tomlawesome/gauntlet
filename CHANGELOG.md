@@ -50,6 +50,41 @@ All notable changes to this project are documented in this file.
   accepted before, so a deployment that has one now fails at startup
   until the entry is removed.
 
+- **A second factor added beside another never goes live without
+  recovery codes** (#80 A3b-R1). An enrolment begun while the account
+  had a second factor took the additional-factor path; if that factor
+  was removed before the new one was confirmed (which clears the
+  recovery codes), the new factor went live with none. The passkey
+  register-finish and authenticator-app confirm routes now use the new
+  `Store.AddLaterPasskey` and `Store.ConfirmLaterTOTP`, which refuse
+  with the new `ErrNoOtherSecondFactor` under the store lock when no
+  other factor is live; the route then holds the factor with its own
+  codes, as a first factor. If the factors change again in between it
+  answers 409 conflict, "start again". `AddPasskey` and `ConfirmTOTP`
+  are unchanged. Additive.
+- **Confirming an authenticator app beside a passkey checks the secret
+  it verified** (#93). The confirm route checked the code against the
+  pending secret, then made whatever secret was pending live; one
+  replaced in between (the enrolment started again in another tab) went
+  live unproven. `Store.ConfirmLaterTOTP` takes the verified secret and
+  refuses with `ErrNoPendingTOTP` if it changed. `ConfirmTOTP` is
+  unchanged and documents that it makes no such check.
+- **Regenerating recovery codes needs a live second factor at the
+  write** (#94). The route checked for a factor, then wrote the new set
+  unconditionally; a last factor removed in between left codes on an
+  account with no factor. New `Store.RegenerateRecoveryCodes` refuses
+  with `ErrNoSecondFactors` under the store lock, storing nothing, and
+  the route answers its existing 409. `GenerateRecoveryCodes` is
+  unchanged. Additive.
+- **A passkey stores at most eight well-formed transports** (#80
+  P2-R1). The transports a browser reports at registration were stored
+  as they came, so one registration could put an unbounded list of
+  arbitrary strings in the accounts document. `Store.AddPasskey` and
+  `Store.HoldFirstPasskey` now keep at most eight entries, each 1-32
+  bytes of printable ASCII, dropping any other entry and any repeat and
+  keeping the order sent. WebAuthn Level 3 s5.8.4 makes the list a hint
+  clients ignore unknown values in, so a registration is never refused
+  over it.
 - **Passkey names are refused if they are not plain text, and cleaned
   in notices** (#89). A passkey's name, chosen by whoever registers it,
   was passed into owner notices as it came, so a mail or chat client
@@ -188,6 +223,13 @@ All notable changes to this project are documented in this file.
   test job, as `dev`'s do (docs/releasing.md).
 
 ### Fixed
+
+- **An account deleted mid-request is told to sign in, not given a
+  500** (#95). Passkey register-finish, authenticator-app confirm and
+  recovery-code regenerate answered a store write that found the
+  account gone with 500 `server-error`; they now give the same 401
+  `sign-in-required` "sign in first" they give when it is gone at the
+  start of the request.
 
 Low-severity findings from the v0.3.0 audit (#80):
 

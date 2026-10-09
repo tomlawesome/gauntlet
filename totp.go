@@ -364,13 +364,44 @@ func (s *Store) SetPendingTOTPSecretAt(userID, encodedSecret string, now time.Ti
 // a state where accepting a code should change anything -- and
 // ErrEnrolmentHeld while an enrolment is on hold.
 //
-// This makes the app live at once, with no recovery codes: what gate
-// does for an account that already has a second factor (a passkey),
-// whose codes stand. An account's first factor is held instead, with
+// This makes the app live at once, with no recovery codes,
+// unconditionally: on an account with no other second factor that
+// leaves a live app with no codes, so gate uses ConfirmLaterTOTP, which
+// refuses that case. An account's first factor is held instead, with
 // its codes, until confirmed (HoldFirstTOTP, ConfirmHeldEnrolment;
 // #58). Verifying the code is the caller's job (VerifyTOTP above); this
 // only records the outcome.
+//
+// It does not check which secret is pending: a secret replaced since the
+// caller verified the code (SetPendingTOTPSecretAt) would be the one made
+// live. ConfirmLaterTOTP, which gate uses, takes the verified secret and
+// refuses if it changed (#93).
 func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter uint64) error {
+	return s.confirmTOTP(userID, "", confirmedAt, matchedCounter, false)
+}
+
+// ConfirmLaterTOTP is ConfirmTOTP for an app confirmed beside a live
+// second factor (a passkey), whose recovery codes stand: it refuses
+// with ErrNoOtherSecondFactor, leaving the secret pending, when the
+// account has none. That is decided in the same locked write that
+// makes the app live (check-and-set, as HoldFirstTOTP's
+// ErrSecondFactorExists is), so a passkey removed after the caller
+// looked -- which took the codes with it -- cannot leave this app live
+// with no codes (#80). The caller holds it instead, HoldFirstTOTP,
+// which the still-pending secret allows.
+//
+// encodedSecret is the secret the caller verified the code against, as
+// HoldFirstTOTP takes it: if a different secret is pending now (the
+// enrolment was started again in between), it refuses with
+// ErrNoPendingTOTP and changes nothing, so an app the person never
+// proved they hold cannot go live (#93).
+func (s *Store) ConfirmLaterTOTP(userID, encodedSecret string, confirmedAt time.Time, matchedCounter uint64) error {
+	return s.confirmTOTP(userID, encodedSecret, confirmedAt, matchedCounter, true)
+}
+
+// confirmTOTP is ConfirmTOTP, and with later set ConfirmLaterTOTP
+// (encodedSecret is checked only then).
+func (s *Store) confirmTOTP(userID, encodedSecret string, confirmedAt time.Time, matchedCounter uint64, later bool) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
 	}
@@ -390,8 +421,11 @@ func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter
 		if u.HeldEnrolment != nil {
 			return ErrEnrolmentHeld
 		}
-		if !u.TOTPPending(confirmedAt) {
+		if !u.TOTPPending(confirmedAt) || (later && u.TOTPSecret != encodedSecret) {
 			return ErrNoPendingTOTP
+		}
+		if later && !u.HasSecondFactor() {
+			return ErrNoOtherSecondFactor
 		}
 		u.TOTPConfirmedAt = confirmedAt
 		u.TOTPLastCounter = matchedCounter
