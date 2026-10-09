@@ -114,6 +114,39 @@ func TestOIDCCallbackFakeProviderHappyPath(t *testing.T) {
 	}
 }
 
+// The code exchange carries the verifier held in the flow cookie. The
+// fake refuses it, as a PKCE-enforcing provider would, if the verifier is
+// missing or not the one this browser's sign-in started with; the other
+// callback tests do not check it.
+func TestOIDCCallbackSendsTheFlowCodeVerifier(t *testing.T) {
+	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	fs, err := oidc.NewFlowState(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.CodeVerifier == "" {
+		t.Fatal("setup: the flow state has no code verifier")
+	}
+	fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+	fp.ExpectCodeVerifier = fs.CodeVerifier
+
+	req := oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code")
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback returned %d, want 302; the provider refused the code exchange unless it carried the flow's verifier", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/" {
+		t.Errorf("redirect location = %q, want %q (a refused exchange redirects to an error page)", loc, "/")
+	}
+	if g.deps.Users.Count() != 2 {
+		t.Errorf("expected the admin plus one provisioned account, got %d", g.deps.Users.Count())
+	}
+}
+
 func TestOIDCCallbackStateMismatchRefused(t *testing.T) {
 	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
 	fs, err := oidc.NewFlowState(time.Now())

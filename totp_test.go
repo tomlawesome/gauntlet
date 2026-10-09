@@ -332,6 +332,46 @@ func TestVerifyTOTPRefusesReplay(t *testing.T) {
 	}
 }
 
+// A code for any step older than the last one spent is refused, not just
+// the code for that step itself: sign in with step N-1, then with step N
+// (the last spent is now N), and someone who saw the first code must not
+// be able to use it again while it is still inside the window.
+func TestVerifyTOTPRefusesEveryStepBelowTheLastUsed(t *testing.T) {
+	secret, err := GenerateTOTPSecret()
+	if err != nil {
+		t.Fatalf("GenerateTOTPSecret: %v", err)
+	}
+	encoded := EncodeTOTPSecret(secret)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	current := totpCounter(now, totpStep)
+
+	tests := []struct {
+		name string
+		last uint64
+		code uint64 // the step the code was made for
+		want bool
+	}{
+		{"the step before, last used is the current step", current, current - 1, false},
+		{"the current step, last used is the current step", current, current, false},
+		{"the next step, last used is the current step", current, current + 1, true},
+		{"the step before, last used is the next step", current + 1, current - 1, false},
+		{"the current step, last used is the next step", current + 1, current, false},
+		{"the step before, last used is two steps back", current - 2, current - 1, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			matched, ok := VerifyTOTP(encoded, GenerateTOTPCode(secret, tc.code), now, tc.last)
+			if ok != tc.want {
+				t.Fatalf("VerifyTOTP(code for step %+d, last used %+d) accepted = %v, want %v",
+					int64(tc.code)-int64(current), int64(tc.last)-int64(current), ok, tc.want)
+			}
+			if ok && matched != tc.code {
+				t.Errorf("matched counter = %d, want %d", matched, tc.code)
+			}
+		})
+	}
+}
+
 func TestVerifyTOTPRefusesMalformedOrEmptySecret(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 

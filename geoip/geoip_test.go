@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/maxminddb-golang/v2"
 	"net/netip"
 )
@@ -131,9 +132,13 @@ func TestOnlyTwoLetterCodes(t *testing.T) {
 	}
 }
 
+// The file answers "IS" for every address, so a non-public address comes
+// back empty only because Country refused it before reading the file.
 func TestLookupOnlyPublicUnicast(t *testing.T) {
 	e := newEnv(t, SourceIPinfo)
-	e.fp.set("/ipinfo", buildDB(t, flat, "IS"))
+	e.fp.set("/ipinfo", buildCoveringDB(t, "gauntlet-test", func() mmdbtype.Map {
+		return mmdbtype.Map{"country_code": mmdbtype.String("IS"), "country": mmdbtype.String("Somewhere")}
+	}))
 	e.m.refresh(context.Background())
 	for _, c := range []struct {
 		addr string
@@ -142,7 +147,7 @@ func TestLookupOnlyPublicUnicast(t *testing.T) {
 		{inV4, "IS"},
 		{"::ffff:" + inV4, "IS"},
 		{inV6, "IS"},
-		{outV4, ""},
+		{outV4, "IS"},
 		{"10.0.0.1", ""},
 		{"172.16.5.4", ""},
 		{"192.168.1.1", ""},

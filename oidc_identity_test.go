@@ -6,6 +6,7 @@
 package gauntlet
 
 import (
+	"errors"
 	"runtime"
 	"testing"
 	"time"
@@ -254,6 +255,8 @@ func TestOIDCOnlyUserPasswordHashIsUnmatchableNotEmpty(t *testing.T) {
 		t.Fatal("OIDC-only user has an empty PasswordHash -- this is the timing side-channel the design review flagged")
 	}
 
+	requireUnmatchableHash(t, stored.PasswordHash)
+
 	// A local-login attempt against this username must go through the
 	// same real Argon2id comparison path as any other account (and
 	// fail, since there's no real password) -- not the fast malformed-
@@ -381,14 +384,20 @@ func TestOIDCIdentityPersistsAndReloadsAcrossStoreOpen(t *testing.T) {
 // an account ID that vanished, and a retried login would silently mint
 // a second account for the same identity.
 func TestFindOrCreateOIDCUserRollsBackOnPersistFailure(t *testing.T) {
-	s, err := OpenStore(failingSaveBackend{}, Options{})
+	// An admin has to exist first, or FindOrCreateOIDCUser refuses with
+	// ErrSetupRequired before it saves anything and the rollback is never
+	// reached. The one save the budget allows is that registration.
+	s, err := OpenStore(&saveBudgetBackend{left: 1}, Options{})
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	if _, err := s.Register("setup-admin", "setup-admin-password", time.Now()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
 
 	u, created, err := s.FindOrCreateOIDCUser("https://idp.example", "sub-1", "alice", time.Now())
-	if err == nil {
-		t.Fatal("FindOrCreateOIDCUser against a backend that cannot save = nil error, want one")
+	if !errors.Is(err, errTestBackendUnavailable) {
+		t.Fatalf("FindOrCreateOIDCUser against a backend that cannot save = %v, want the backend's save error", err)
 	}
 	if created {
 		t.Error("created=true after a failed persist")
@@ -396,8 +405,8 @@ func TestFindOrCreateOIDCUserRollsBackOnPersistFailure(t *testing.T) {
 	if u != nil {
 		t.Errorf("returned user = %+v, want nil after a failed persist", u)
 	}
-	if s.Count() != 0 {
-		t.Errorf("Count() = %d after a failed persist, want 0 -- the account must not exist in memory either", s.Count())
+	if s.Count() != 1 {
+		t.Errorf("Count() = %d after a failed persist, want 1 (the admin) -- the account must not exist in memory either", s.Count())
 	}
 	if _, ok := s.ByOIDCIdentity("https://idp.example", "sub-1"); ok {
 		t.Error("the identity index still resolves an account that was never durably created")

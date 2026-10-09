@@ -110,9 +110,7 @@ func TestLinkingLeavesARealUnmatchableHash(t *testing.T) {
 	if after.PasswordHash == before.PasswordHash {
 		t.Fatal("password hash was left untouched")
 	}
-	if VerifyPassword(after.PasswordHash, "anything-at-all") {
-		t.Error("the replacement hash matched a guess")
-	}
+	requireUnmatchableHash(t, after.PasswordHash)
 }
 
 // Every session issued before the link has to die: the account's
