@@ -61,6 +61,15 @@ func unknownNameKey(username string) string {
 	return "user:" + hex.EncodeToString(sum[:])
 }
 
+// addressKey is the limiter key for a client address (Config.ClientIP):
+// the bucket every sign-in, passkey sign-in, setup-code and unlock-code
+// attempt from that address shares. Written once, so the four places
+// that reserve and release it cannot drift into four buckets, each
+// with its own budget (#90 item 13).
+func addressKey(address string) string {
+	return "ip:" + address
+}
+
 // reserveLogin reserves one attempt on both buckets, or neither, and
 // writes the 429 itself when it is neither. accountID is "" for a name
 // that matches no account.
@@ -89,7 +98,7 @@ func unknownNameKey(username string) string {
 // counted toward the ban in recordSignIn, not here.
 func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, method gauntlet.SignInMethod, now time.Time) (loginReservation, bool) {
 	address := g.cfg.ClientIP(r)
-	res := loginReservation{ipKey: "ip:" + address, address: address, accountID: accountID}
+	res := loginReservation{ipKey: addressKey(address), address: address, accountID: accountID}
 	if accountID == "" {
 		res.nameKey = unknownNameKey(username)
 	}

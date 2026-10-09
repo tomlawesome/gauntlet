@@ -219,7 +219,7 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	// account, then the address's and the account's, as reserveLogin
 	// takes them.
 	address := g.cfg.ClientIP(r)
-	res := loginReservation{ipKey: "ip:" + address, address: address}
+	res := loginReservation{ipKey: addressKey(address), address: address}
 	var (
 		named    *gauntlet.User // the account the handle named, once admitted
 		reserved bool
