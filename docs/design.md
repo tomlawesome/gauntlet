@@ -1011,7 +1011,8 @@ the code or passkey step, the SSO callback -- goes through one helper,
 `recordSignIn` (`gate/signin_record.go`), which writes through `Auditor`:
 `user.login` on a completed sign-in, detail `from="<address>"` (quoted:
 `ClientIP` may read a client-set header), prefixed `via second factor; `
-or `via sso; `; `user.login_failed` for each failed attempt the limiter
+or `via sso; `, or `via admin allowance; ` when an admin's allowance let
+it through (#81); `user.login_failed` for each failed attempt the limiter
 admitted, actor and target the account's username or `unknown`, detail
 `outcome=<outcome> method=<method> from="..."` plus `name="Hu••••"`
 (`MaskUnknownUsername`) when no account matched -- the typed name never

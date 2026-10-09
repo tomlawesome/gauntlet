@@ -261,6 +261,11 @@ All notable changes to this project are documented in this file.
   account gone with 500 `server-error`; they now give the same 401
   `sign-in-required` "sign in first" they give when it is gone at the
   start of the request.
+- **A sign-in an admin allowed is audited as an allowance, not a
+  proof** (#97). Its `user.login` line said "via confirmation code" or
+  "via passkey proof", and an SSO sign-in lost "via sso"; it now says
+  "via admin allowance", even when the session loses its signals to a
+  failed remember write.
 
 Low-severity findings from the v0.3.0 audit (#80):
 

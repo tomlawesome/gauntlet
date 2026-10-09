@@ -426,7 +426,7 @@ store, keep and protect:
 
   | Group | Action | Recorded when |
   |---|---|---|
-  | Sign-in | `user.login` | A sign-in completed (#45, `gate/signin_record.go`) |
+  | Sign-in | `user.login` | A sign-in completed (#45, `gate/signin_record.go`); one an admin's allowance let through says `via admin allowance; ` (#81) |
   | Sign-in | `user.login_failed` | A wrong password, code or passkey the limiter let through; or a wrong password or code at an in-session re-check (`step=recheck`) |
   | Sign-in | `user.login_refused` | The account's sign-in policy refused a sign-in whose credentials were right (#55) |
   | Sign-in | `user.reauthenticated` | A timed-out session was resumed with the password or a passkey (#71, #77) |

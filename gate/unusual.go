@@ -579,6 +579,11 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 			g.recordSignInNote(r, ev, res, escapeUsedNote, now)
 			return nil
 		}
+		// Without the note the record would read as a proof the user gave.
+		if v.allowed {
+			g.recordSignInNote(r, ev, res, allowanceUsedNote, now)
+			return nil
+		}
 		g.recordSignIn(r, ev, res, now)
 		return nil
 	}
