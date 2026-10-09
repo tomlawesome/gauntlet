@@ -40,6 +40,9 @@ func TestNewIsWellFormedAndDistinct(t *testing.T) {
 		if err != nil || len(raw) != browsertoken.Bytes {
 			t.Fatalf("New() = %q decodes to %d bytes (err %v), want %d", tok, len(raw), err, browsertoken.Bytes)
 		}
+		if again := base64.RawURLEncoding.EncodeToString(raw); again != tok {
+			t.Fatalf("New() = %q is not the canonical spelling of its bytes (%q)", tok, again)
+		}
 		if seen[tok] {
 			t.Fatalf("New() repeated %q", tok)
 		}
@@ -54,12 +57,20 @@ func TestWellFormedRefusals(t *testing.T) {
 	if !browsertoken.WellFormed(forty3) {
 		t.Fatalf("control: %q (43 base64url characters) was refused", forty3)
 	}
+	if canonical := strings.Repeat("A", 42) + "Q"; !browsertoken.WellFormed(canonical) {
+		t.Fatalf("control: %q (trailing bits zero) was refused", canonical)
+	}
 
 	for name, s := range map[string]string{
-		"padded":                   good + "=",
-		"padded to a multiple":     good + "===",
-		"42 characters":            good[:42],
-		"44 characters":            good + "A",
+		"padded":               good + "=",
+		"padded to a multiple": good + "===",
+		"42 characters":        good[:42],
+		"44 characters":        good + "A",
+		// 43 characters carry 258 bits for 256 of data: the last
+		// character's low two bits must be zero. A lenient decoder drops
+		// them silently, so two spellings would name one token.
+		"nonzero trailing bits":    strings.Repeat("A", 42) + "B",
+		"all-ones trailing bits":   good[:42] + "_",
 		"empty":                    "",
 		"standard-alphabet plus":   "+" + good[1:],
 		"standard-alphabet slash":  good[:20] + "/" + good[21:],
