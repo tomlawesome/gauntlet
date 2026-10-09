@@ -263,10 +263,14 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeTOTPConfirmError answers a refused confirmation: 409 when there
-// is nothing pending any more or another enrolment is on hold, 500
-// otherwise.
+// writeTOTPConfirmError answers a refused confirmation: 401 for an
+// account deleted mid-request (#95), 409 when there is nothing pending
+// any more or another enrolment is on hold, 500 otherwise.
 func (g *Gate) writeTOTPConfirmError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since the handler read it (#95)
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
 	status, class := http.StatusInternalServerError, classServerError
 	if errors.Is(err, gauntlet.ErrNoPendingTOTP) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
 		status, class = http.StatusConflict, classConflict

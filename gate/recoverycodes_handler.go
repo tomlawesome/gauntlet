@@ -80,6 +80,10 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 		writeProblem(w, http.StatusConflict, classConflict, noSecondFactorForCodesMessage, nil)
 		return
 	}
+	if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since recheckPassword read it (#95)
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
 	if err != nil {
 		// RegenerateRecoveryCodes' own restore-on-failure contract already
 		// left the old set intact and reported nothing as issued -- this

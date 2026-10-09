@@ -199,6 +199,13 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **An account deleted mid-request is told to sign in, not given a
+  500** (#95). Passkey register-finish, authenticator-app confirm and
+  recovery-code regenerate answered a store write that found the
+  account gone with 500 `server-error`; they now give the same 401
+  `sign-in-required` "sign in first" they give when it is gone at the
+  start of the request.
+
 Low-severity findings from the v0.3.0 audit (#80):
 
 - An SSO sign-in that changes the account's role no longer computes a

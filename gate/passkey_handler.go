@@ -412,10 +412,14 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// writePasskeyStoreError answers a refused passkey save: 409 for a
-// duplicate, a full account or an enrolment already on hold, 500
-// otherwise.
+// writePasskeyStoreError answers a refused passkey save: 401 for an
+// account deleted mid-request (#95), 409 for a duplicate, a full account
+// or an enrolment already on hold, 500 otherwise.
 func (g *Gate) writePasskeyStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since the handler read it (#95)
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
 	status, class := http.StatusInternalServerError, classServerError
 	if errors.Is(err, gauntlet.ErrPasskeyDuplicate) || errors.Is(err, gauntlet.ErrPasskeyLimitReached) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
 		status, class = http.StatusConflict, classConflict
