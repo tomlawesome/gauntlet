@@ -82,8 +82,9 @@ type Identity struct {
 
 // claimValues reads one claim as a list of strings, tolerating the three
 // shapes providers actually emit: a list, a single string, or a list
-// containing non-strings. Anything it can't interpret yields no values,
-// which Policy treats as a refusal rather than a pass.
+// containing non-strings. Blank values (empty or whitespace-only) are
+// dropped, so one never counts as a group. Anything it can't interpret
+// yields no values, which Policy treats as a refusal rather than a pass.
 func (i *Identity) claimValues(name string) []string {
 	raw, ok := i.Claims[name]
 	if !ok {
