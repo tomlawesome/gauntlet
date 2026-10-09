@@ -1,8 +1,8 @@
 // Package fetch holds the download rules blocklist and geoip share: the
 // redirect policy their default HTTP clients follow and the spread put
 // on their refresh intervals. Both packages fetch a file on a schedule
-// from a host the operator configured; written out twice, a fix to one
-// copy could miss the other (#90).
+// from a fixed or operator-configured https location; written out
+// twice, a fix to one copy could miss the other (#90).
 package fetch
 
 import (
@@ -18,13 +18,13 @@ import (
 const maxRedirects = 5
 
 // HTTPSRedirectsOnly is an http.Client CheckRedirect policy: follow up
-// to five redirects, each to https. A download configured as https must
-// not be quietly moved onto plain http by whoever answers it, where the
-// file could be read or replaced on the way.
+// to five redirects, each to https. A download that starts on https
+// must not be quietly moved onto plain http by whoever answers it,
+// where the file could be read or replaced on the way.
 //
 // Its errors carry no package prefix: the client returns them inside a
 // *url.Error, and each caller adds its own name, so the message names
-// the package the operator configured.
+// the package that fetched.
 func HTTPSRedirectsOnly(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" {
 		return errors.New("refused a redirect away from https")

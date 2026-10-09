@@ -21,11 +21,12 @@
 //
 // The value is JSON, sealed behind a fresh random nonce and written as
 // unpadded base64url, so it fits a cookie or a JSON field as it is.
-// Open reads that spelling strictly: a lenient decoder ignores the
-// unused bits in the last character, so one sealed value would open
-// under several strings, and gate keys a spent passkey registration on
-// the string itself. The strict reading had to be fixed in three
-// copies before this package existed (#20).
+// Open accepts only the exact string Seal wrote, because gate keys a
+// spent passkey registration on the string itself: a value that opened
+// under two spellings could be spent twice. Go's decoder is not exact
+// on its own. Without Strict it ignores the unused bits in the last
+// character, which had to be fixed in three copies before this package
+// existed (#20), and even with Strict it skips line breaks.
 package seal
 
 import (
@@ -98,6 +99,13 @@ func (c *Codec) Seal(v any) (string, error) {
 func (c *Codec) Open(value string, v any) bool {
 	sealed, err := encoding.DecodeString(value)
 	if err != nil {
+		return false
+	}
+	// Spelling the decoded bytes again and comparing states the rule
+	// itself -- only what Seal would write opens -- rather than listing
+	// the characters the decoder happens to skip ("\r" and "\n" today),
+	// so it stays exact whatever else the decoder learns to tolerate.
+	if encoding.EncodeToString(sealed) != value {
 		return false
 	}
 	ns := c.aead.NonceSize()
