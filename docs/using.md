@@ -163,6 +163,9 @@ With passkey sign-in on, a browser keeps offering a passkey its owner
 has removed, and every try is refused. When the server holds no
 passkey of that ID, the `401` from `POST /api/auth/login/passkey`
 carries `unknownCredential` (#92, [errors.md](api/errors.md#invalid-credentials)).
+So does a refused passkey at `POST /api/auth/reauthenticate`, when it
+names the timed-out session's own account and that account no longer
+holds it, so the resume prompt can drop it too.
 Pass that object unchanged to
 `PublicKeyCredential.signalUnknownCredential()`, and the browser or
 password manager drops the passkey from its list.

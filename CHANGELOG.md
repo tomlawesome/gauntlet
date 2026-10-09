@@ -10,7 +10,10 @@ All notable changes to this project are documented in this file.
   hold** (#92). The `401` `invalid-credentials` from `POST
   /api/auth/login/passkey` carries an `unknownCredential` member,
   `{rpId, credentialId}`, when the user handle names no account or an
-  account with no passkey of that ID in any form. An application passes
+  account with no passkey of that ID in any form; a refused passkey at
+  `POST /api/auth/reauthenticate` carries it too, when the handle is the
+  timed-out session's own account and that account no longer holds the
+  passkey (never for another account's handle). An application passes
   it to the browser's `PublicKeyCredential.signalUnknownCredential()`
   (W3C WebAuthn Level 3), so a removed passkey stops being offered;
   docs/using.md has the feature check and fallback. A passkey the

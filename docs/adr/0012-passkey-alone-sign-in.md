@@ -160,6 +160,9 @@ authenticator, AAL2).
   in any form (live, stale or held) in an `unknownCredential` member,
   the argument of the browser's `signalUnknownCredential()`, so the
   application can tell the browser to stop offering it. No new class,
-  `detail` or Go API; counting is unchanged.
+  `detail` or Go API; counting is unchanged. A refused `{assertion}` at
+  `POST /api/auth/reauthenticate` names it the same way, only when the
+  handle is the timed-out session's own account and that account holds
+  no passkey of that ID (owner decision 7a).
 
 Design ratified on #77, 2026-10-05.

@@ -26,8 +26,8 @@ carries `Content-Type: application/problem+json`,
   two `about:blank` cases below, and a handful of plain 404s).
 - Two classes add an extra field beyond those four:
   `partially-completed` adds `username` (it also sent `totpActive`
-  before #58), and `invalid-credentials` adds `unknownCredential` on one
-  route (#92). Each class's own section says more. No other class has
+  before #58), and `invalid-credentials` adds `unknownCredential` on two
+  routes (#92). Each class's own section says more. No other class has
   any, and none is planned.
 
 **`about:blank`.** A request whose path matches no route, or matches
@@ -98,9 +98,13 @@ exists. Each pair is named under the class it shares, below.
   `rpId` is the relying party's ID, as `login/passkey/begin` gave it;
   `credentialId` is the assertion's credential ID, base64url with no
   padding. Hand it to that call so the browser stops offering a passkey
-  that can never work here. Every other refusal, on this route or any
-  other, has no such field. `detail`, `title` and the status are
-  unchanged.
+  that can never work here. A refused `{assertion}` at `reauthenticate`
+  carries the same field under a narrower rule: only when the user
+  handle is the timed-out session's own account and that account holds
+  no passkey of that ID in any form; another account's handle, or one
+  naming no account, is never named there. Every other refusal, on
+  these routes or any other, has no such field. `detail`, `title` and
+  the status are unchanged.
 - **Security pairs sharing this class and body:**
   - an unknown username and a wrong password at `login`;
   - a wrong authenticator code and a wrong recovery code at
@@ -117,8 +121,10 @@ exists. Each pair is named under the class it shares, below.
     and accepted), or a passkey removed from the account
     since the sign-in started. A use counter that could not be saved is
     the server's failure, not the caller's, and answers `server-error`.
-    The one difference is at `login/passkey`: a passkey the server does not
-    hold carries `unknownCredential` and one it holds does not (#92).
+    The one difference is at `login/passkey` and `reauthenticate`: a
+    passkey the server (at `reauthenticate`, the session's own account)
+    does not hold carries `unknownCredential` and one it holds does not
+    (#92).
     Telling them apart needs the account's user handle and the
     credential ID, which only the passkey's holder has, and tells them
     only that it was removed;

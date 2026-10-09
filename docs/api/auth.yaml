@@ -903,7 +903,12 @@ paths:
         must be the timed-out session's own account: another account's
         passkey resumes nothing. A refused assertion is `401`
         `invalid-credentials`, counted; a dead ceremony is `401`
-        `step-expired`, not counted. Both fields is `400`. An `assertion`
+        `step-expired`, not counted. When the handle is the session's own
+        account and that account holds no passkey with the assertion's ID
+        (live, stale or held), the refusal names it in `unknownCredential`
+        (#92; `UnknownCredentialProblem`), as `POST /api/auth/login/passkey`
+        does; another account's handle, or one naming no account, is never
+        named. Both fields is `400`. An `assertion`
         is `404` unless passkey sign-in is on, and `409` while the relying
         party is not ready. The new session keeps the method of the
         sign-in it continues.
@@ -947,8 +952,10 @@ paths:
         "401":
           description: |
             Nothing can be resumed (class `sign-in-required`); the password
-            or passkey was wrong (class `invalid-credentials`); or the
-            passkey ceremony is dead (class `step-expired`).
+            or passkey was wrong (class `invalid-credentials`;
+            `UnknownCredentialProblem` when it names a passkey the
+            session's own account does not hold, #92); or the passkey
+            ceremony is dead (class `step-expired`).
           headers:
             WWW-Authenticate:
               required: true
@@ -958,14 +965,16 @@ paths:
           content:
             application/problem+json:
               schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties:
-                      type:
-                        enum:
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties:
+                          type:
+                            enum:
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                  - $ref: "#/components/schemas/UnknownCredentialProblem"
         "403":
           $ref: "#/components/responses/CSRFRequired"
         "404":
@@ -3046,8 +3055,9 @@ components:
     UnknownCredentialProblem:
       description: |
         The `invalid-credentials` refusal of `POST /api/auth/login/passkey`
-        when the server holds the assertion's passkey in no form (#92;
-        docs/api/errors.md). Closed, as `PartiallyCompletedProblem` is:
+        when the server holds the assertion's passkey in no form, and of
+        `POST /api/auth/reauthenticate` when the timed-out session's own
+        account does not (#92; docs/api/errors.md). Closed, as `PartiallyCompletedProblem` is:
         its one extension member is part of the contract.
       type: object
       additionalProperties: false
