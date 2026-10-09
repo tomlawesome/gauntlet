@@ -180,11 +180,18 @@ func TestBearerFailuresShareOneBody(t *testing.T) {
 	}
 
 	record(bearerRequest(t, ts.URL, "/api/protected", "not-a-real-token"))
-	status, _, raw := sendAuthorization(t, &http.Client{}, ts.URL, "/api/protected", "Bearer x y")
-	if status != http.StatusUnauthorized {
-		t.Fatalf("malformed Authorization: status %d, want 401", status)
+	// "Bearer x y" has the Bearer prefix, so it is read as a token (with
+	// a space in it) that matches nothing: the same branch as the unknown
+	// token above. The three below do not start "Bearer ", and take
+	// Protect's separate malformed-header branch, whose body is its own
+	// line of code and so has to be compared too.
+	for _, header := range []string{"Bearer x y", "Basic YWRtaW46cGFzc3dvcmQxMjM=", "Bearer", "Bearer\tabc"} {
+		status, _, raw := sendAuthorization(t, &http.Client{}, ts.URL, "/api/protected", header)
+		if status != http.StatusUnauthorized {
+			t.Fatalf("malformed Authorization %q: status %d, want 401", header, status)
+		}
+		bodies = append(bodies, []byte(raw))
 	}
-	bodies = append(bodies, []byte(raw))
 
 	for i := 1; i < len(bodies); i++ {
 		if string(bodies[i]) != string(bodies[0]) {
