@@ -75,25 +75,37 @@
 # #90: internal/groupname is new at 100.0%, the SSO group-name rule
 # oidc and gate now share.
 
+# Re-measured 2026-10-09 under Go 1.27.2 (owner, !51): every floor is
+# the new figure rounded down. Go 1.27.2 fixed cmd/cover over-counting
+# the statements in some covered blocks ("preserve statement counts when
+# splitting coverage blocks", ce0ff94df); 1.27.0 and 1.27.1 counted, for
+# example, 8 statements in a one-line const block. The same tests run
+# the same lines, but five packages measured lower than the older
+# figures: gate 91.4, internal/atomicfile 70.8, internal/passkeytest
+# 83.6, oidc 90.6, persist/persisttest 92.6. Four went up: blocklist
+# 97.3, internal/seal 81.8, passkey 93.9, persist 93.8. The others are
+# unchanged. Figures in the notes above were measured with the older
+# count.
+
 floors:
-  persist: 90
+  persist: 93
   "": 95 # the root `gauntlet` package -- see the note above on the empty key
-  oidc: 91
+  oidc: 90
   internal/testutil: 0
   internal/evict: 100
-  gate: 92
+  gate: 91
   internal/hashcost: 75
-  passkey: 92
-  internal/passkeytest: 91
+  passkey: 93
+  internal/passkeytest: 83
   internal/spent: 100
-  blocklist: 95
+  blocklist: 97
   internal/listsig: 97
   cmd/pwlist: 90
   geoip: 92
-  persist/persisttest: 94
-  internal/atomicfile: 72
+  persist/persisttest: 92
+  internal/atomicfile: 70
   internal/plaintext: 100
-  internal/seal: 78
+  internal/seal: 81
   internal/fetch: 100
   internal/expiry: 100
   internal/browsertoken: 87
