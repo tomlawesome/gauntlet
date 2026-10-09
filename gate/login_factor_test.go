@@ -351,28 +351,40 @@ func TestLoginFactorUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
 
 // TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins reproduces the race
 // checking a TOTP code and recording its counter as two separate calls
-// would leave open: two concurrent submissions of the same code both
-// verifying against the same not-yet-advanced counter and both winning a
+// would leave open: several concurrent submissions of the same code all
+// verifying against the same not-yet-advanced counter and all winning a
 // session. gauntlet.Store.VerifyAndRecordTOTP does both under one lock
 // acquisition, which is what this asserts: exactly one of the concurrent
-// submissions succeeds. Run with -race to be meaningful.
+// submissions succeeds.
+//
+// Each submission carries its own pending login. With one shared pending
+// cookie the pending-login claim (spentPendingLogins) lets only one
+// through whatever the store does, so the store's lock would never be
+// what the test relied on. Run with -race to be meaningful.
 func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
-	_, ts, _ := totpFixture(t)
+	g, ts, _ := totpFixture(t)
+	// Twenty password steps from one address would run into the default
+	// limit; the limit is not what this test is about.
+	g.deps.Limiter = mustNewLoginLimiter(t, 1000, time.Minute)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	secret, _, counter := totpEnrolAndConfirm(t, bob, ts)
 
-	pending := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	const attempts = 20
+	pendings := make([]*http.Client, attempts)
+	for i := range pendings {
+		pendings[i] = startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	}
 	code := gauntlet.GenerateTOTPCode(secret, counter+1)
 	body, err := json.Marshal(loginFactorRequest{Code: code})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	const attempts = 20
 	var wg sync.WaitGroup
 	var successes int32
+	start := make(chan struct{})
 	errs := make(chan error, attempts)
-	for i := 0; i < attempts; i++ {
+	for _, pending := range pendings {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -383,6 +395,7 @@ func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(csrfHeaderName, testCSRFValue)
+			<-start // release every request together, to overlap them
 			resp, err := pending.Do(req)
 			if err != nil {
 				errs <- err
@@ -394,6 +407,7 @@ func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -401,7 +415,7 @@ func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
 	}
 
 	if successes != 1 {
-		t.Errorf("%d of %d concurrent submissions of the same code succeeded, want exactly 1", successes, attempts)
+		t.Errorf("%d of %d concurrent submissions of the same code, each on its own pending login, succeeded, want exactly 1", successes, attempts)
 	}
 }
 
