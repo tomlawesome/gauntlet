@@ -17,15 +17,13 @@ func TestTokensCreateRequiresAdmin(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
-	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
+	// Past the second-factor door, so it is the role check that answers.
+	userClient := userClientPastTheDoor(t, ts, adminClient, "operator", "password456")
 
-	userClient := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, userClient, ts.URL+"/api/auth/login", credentialsRequest{Username: "operator", Password: "password456"}).Body.Close()
-
-	resp := postJSON(t, userClient, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Password: testAdminPassword})
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("expected a non-admin to be forbidden from creating a token, got %d", resp.StatusCode)
+	wantProblem(t, postJSON(t, userClient, ts.URL+"/api/tokens", createTokenRequest{Name: "mine", Password: testAdminPassword}),
+		http.StatusForbidden, classForbidden)
+	if len(g.deps.Tokens.List()) != 0 {
+		t.Error("a refused token was created anyway")
 	}
 }
 
@@ -74,19 +72,14 @@ func TestTokensListAdminOnly(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
-	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
-
-	userClient := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, userClient, ts.URL+"/api/auth/login", credentialsRequest{Username: "operator", Password: "password456"}).Body.Close()
+	// Past the second-factor door, so it is the role check that answers.
+	userClient := userClientPastTheDoor(t, ts, adminClient, "operator", "password456")
 
 	resp, err := userClient.Get(ts.URL + "/api/tokens")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("expected 403 for a non-admin, got %d", resp.StatusCode)
-	}
+	wantProblem(t, resp, http.StatusForbidden, classForbidden)
 }
 
 func TestAdminCanCreateListAndRevokeTokens(t *testing.T) {

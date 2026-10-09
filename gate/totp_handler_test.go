@@ -459,14 +459,13 @@ func TestTOTPAdminClearRefusals(t *testing.T) {
 		totpEnrolAndConfirm(t, bob, ts)
 		id := totpBobID(t, g)
 
-		_ = postJSON(t, adminClient, ts.URL+"/api/auth/users",
-			createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
-		operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
+		// Past the second-factor door, so it is the role check that answers.
+		operator := userClientPastTheDoor(t, ts, adminClient, "operator", "operator-password-placeholder")
 
-		resp := deleteJSON(t, operator, ts.URL+"/api/auth/users/"+id+"/totp", adminStepUpRequest{Password: testAdminPassword})
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusForbidden {
-			t.Errorf("a user-tier caller got %d, want 403", resp.StatusCode)
+		wantProblem(t, deleteJSON(t, operator, ts.URL+"/api/auth/users/"+id+"/totp", adminStepUpRequest{Password: testAdminPassword}),
+			http.StatusForbidden, classForbidden)
+		if u, ok := g.deps.Users.Get(id); !ok || !u.HasActiveTOTP() {
+			t.Error("a refused request cleared the factor anyway")
 		}
 	})
 
