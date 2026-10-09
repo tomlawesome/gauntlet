@@ -1,9 +1,13 @@
 package gate
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
@@ -115,6 +119,42 @@ func passkeyBeginKey(address string) string {
 	return "passkey-begin:" + address
 }
 
+// assertionCredentialID reads the credential ID (rawId) from a WebAuthn
+// assertion's JSON as go-webauthn v0.18.2 decodes it for the ceremony
+// (protocol.URLEncodedBase64.UnmarshalJSON, through encoding/json: the
+// value must be a JSON string, trailing "=" padding is trimmed, the rest
+// is unpadded base64url), so gate compares the bytes the ceremony will
+// without importing it (the leaf rule). read is false when the ID cannot
+// be read or is empty; the caller then treats the credential as possibly
+// held. The ceremony parses the assertion before it calls lookup, so in
+// practice this fails only on a difference between the two parsers.
+func assertionCredentialID(assertion json.RawMessage) (id []byte, read bool) {
+	var body struct {
+		RawID *string `json:"rawId"`
+	}
+	if err := json.Unmarshal(assertion, &body); err != nil || body.RawID == nil {
+		return nil, false
+	}
+	id, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(*body.RawID, "="))
+	if err != nil || len(id) == 0 {
+		return nil, false
+	}
+	return id, true
+}
+
+// accountHoldsCredential reports whether credID is one of u's passkeys
+// the ceremony checks a signature against: those registered under the
+// current relying-party ID, as gauntlet/passkey's RelyingParty.usable
+// selects them. A stale passkey (registered under an earlier public URL)
+// can never complete a ceremony here, so it does not count; a passkey
+// still held for its recovery codes is not in u.Passkeys at all.
+func (g *Gate) accountHoldsCredential(u *gauntlet.User, credID []byte) bool {
+	rpID := g.deps.Passkeys.RPID()
+	return slices.ContainsFunc(u.Passkeys, func(pk gauntlet.Passkey) bool {
+		return pk.RPID == rpID && bytes.Equal(pk.ID, credID)
+	})
+}
+
 // -- the assertion check both finishes share ------------------------------
 
 // signInAssertionOutcome is how checkSignInAssertion ended.
@@ -173,25 +213,38 @@ type loginPasskeyRequest struct {
 // ConfirmationChallenge when the policy asks for a confirmation code.
 //
 // The account is named by the assertion's user handle, read before the
-// signature is checked (the ceremony calls lookup first), and from that
-// moment it is treated as a password attempt on it would be: reserveLogin
-// applies the account's lockout and disable, the address ban and limit
-// and the known-browser allowance (#70, #44) -- a refusal is the 429 and
-// the signature is never checked. Everything after keeps the
-// reservation, which is what counts a failure: a refused or
-// non-user-verified assertion is factor_refused, an unknown handle (or
-// one this account cannot sign in with) no_such_user. Unlike a wrong
-// second factor after a password, none of them counts toward the
-// account's run of second-factor failures: the caller holds no
-// password, and letting anyone holding an account ID force a password
-// change would be a denial of service.
+// signature is checked (the ceremony calls lookup first). The handle is
+// not covered by the signature (WebAuthn Level 3), so whoever holds any
+// passkey can name any account. Lookup therefore checks before it
+// charges: the account must be one this credential can sign in with --
+// it has a local password (an account single sign-on owns cannot be
+// signed into this way, as it cannot resume a session; ruling R4 on
+// #20), and the assertion's credential ID is one of its passkeys under
+// the current relying-party ID (accountHoldsCredential). If not, nothing
+// is reserved or counted on the account -- no lockout, no disable, no
+// notice -- and the refusal is no_such_user naming no account, on the
+// address alone, exactly as for an unknown handle (#80; NIST SP
+// 800-63B-4 3.2.2 counts failures "using a specific authenticator on a
+// single subscriber account"). If the credential ID cannot be read here
+// (assertionCredentialID), the credential is treated as possibly held
+// and the ceremony decides, so a parsing difference never refuses a
+// real user.
+//
+// Once the credential is one the account holds, the attempt is treated
+// as a password attempt on the account would be: reserveLogin applies
+// the account's lockout and disable, the address ban and limit and the
+// known-browser allowance (#70, #44) -- a refusal is the 429 and the
+// signature is never checked. Everything after keeps the reservation,
+// which is what counts a failure: a refused or non-user-verified
+// assertion from a held credential is factor_refused against the
+// account. Unlike a wrong second factor after a password, it does not
+// count toward the account's run of second-factor failures: the caller
+// holds no password, and letting anyone holding an account ID force a
+// password change would be a denial of service.
 //
 // Every refusal answers 401 invalid-credentials, saying nothing of which
 // check failed. A dead ceremony (no cookie, expired, tampered with,
-// already used) answers 401 step-expired and clears the cookie. An
-// account with no local password -- single sign-on owns its identity
-// (ruling R4 on #20) -- cannot be signed into this way, as it cannot
-// resume a session.
+// already used) answers 401 step-expired and clears the cookie.
 func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	ps, ok := g.passkeySignInOrNotFound(w)
 	if !ok {
@@ -230,6 +283,15 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return nil, false
 		}
+		// Check before charging (#80): a credential this account cannot
+		// sign in with is refused before reserveLogin, so the refusal
+		// below is on the address alone, as for an unknown handle.
+		if !u.LocalPassword() {
+			return nil, false
+		}
+		if id, read := assertionCredentialID(req.Assertion); read && !g.accountHoldsCredential(u, id) {
+			return nil, false
+		}
 		admitted := false
 		res, admitted = g.reserveLogin(w, r, u.ID, u.Username, gauntlet.SignInMethodPasskeyAlone, now)
 		if !admitted {
@@ -237,9 +299,6 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 			return nil, false
 		}
 		reserved, named = true, u
-		if !u.LocalPassword() {
-			return nil, false
-		}
 		return u, true
 	}
 	user, outcome := g.checkSignInAssertion(r, ps, cookie.Value, req.Assertion, lookup, now)
