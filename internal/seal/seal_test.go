@@ -204,3 +204,25 @@ func TestOpenRefusesMismatchedType(t *testing.T) {
 		t.Error("Open accepted a struct into an int")
 	}
 }
+
+// Go's base64 decoder skips '\r' and '\n' even when strict, so a sealed
+// value with a line break inserted would open as the same bytes: two
+// strings for one sealed value.
+func TestOpenRefusesLineBreaks(t *testing.T) {
+	c := mustCodec(t)
+	in := payload{Name: "alice", Count: 1}
+	s := mustSeal(t, c, in)
+	var out payload
+	if !c.Open(s, &out) || out != in {
+		t.Fatalf("control: the original should open (got %+v)", out)
+	}
+	for _, br := range []string{"\n", "\r", "\r\n"} {
+		for where, pos := range map[string]int{"start": 0, "middle": len(s) / 2, "end": len(s)} {
+			bad := s[:pos] + br + s[pos:]
+			var got payload
+			if c.Open(bad, &got) {
+				t.Errorf("Open accepted a sealed value with %q inserted at the %s", br, where)
+			}
+		}
+	}
+}
