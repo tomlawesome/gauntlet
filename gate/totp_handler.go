@@ -236,7 +236,7 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	// them), leaving the secret pending, so the app never goes live
 	// without codes (#80): it is held with its own instead, once. A
 	// factor that went live again in between answers 409.
-	err := g.deps.Users.ConfirmLaterTOTP(user.ID, now, matched)
+	err := g.deps.Users.ConfirmLaterTOTP(user.ID, current.TOTPSecret, now, matched)
 	if errors.Is(err, gauntlet.ErrNoOtherSecondFactor) {
 		if !triedFirst && holdFirst() {
 			return

@@ -37,6 +37,13 @@ All notable changes to this project are documented in this file.
   codes, as a first factor. If the factors change again in between it
   answers 409 conflict, "start again". `AddPasskey` and `ConfirmTOTP`
   are unchanged. Additive.
+- **Confirming an authenticator app beside a passkey checks the secret
+  it verified** (#93). The confirm route checked the code against the
+  pending secret, then made whatever secret was pending live; one
+  replaced in between (the enrolment started again in another tab) went
+  live unproven. `Store.ConfirmLaterTOTP` takes the verified secret and
+  refuses with `ErrNoPendingTOTP` if it changed. `ConfirmTOTP` is
+  unchanged and documents that it makes no such check.
 - **A passkey stores at most eight well-formed transports** (#80
   P2-R1). The transports a browser reports at registration were stored
   as they came, so one registration could put an unbounded list of

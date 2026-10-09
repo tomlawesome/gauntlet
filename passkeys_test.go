@@ -1209,7 +1209,7 @@ func TestRemovingTheLastPasskeyThenConfirmingTOTPKeepsRecoveryCodesConsistent(t 
 		t.Fatalf("DeletePasskey: %v", err)
 	}
 	// With no other live factor the add side refuses, under the lock.
-	if err := s.ConfirmLaterTOTP(u.ID, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
+	if err := s.ConfirmLaterTOTP(u.ID, testTOTPSecret, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
 		t.Errorf("ConfirmLaterTOTP after the last factor went = %v, want ErrNoOtherSecondFactor", err)
 	}
 	wantCodesToMatchFactors(t, s, u.ID, "passkey removed, then the app confirmed")
@@ -1256,7 +1256,7 @@ func TestConcurrentFactorChangesKeepRecoveryCodesConsistent(t *testing.T) {
 				}
 			},
 			a: func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
-			b: func(s *Store, id string) error { return s.ConfirmLaterTOTP(id, now, 42) },
+			b: func(s *Store, id string) error { return s.ConfirmLaterTOTP(id, testTOTPSecret, now, 42) },
 		},
 		{
 			name: "clear the only authenticator app while adding a passkey",
@@ -1398,7 +1398,7 @@ func TestConfirmLaterTOTPSucceedsBesideALiveFactor(t *testing.T) {
 	}
 	before, _ := s.Get(u.ID)
 
-	if err := s.ConfirmLaterTOTP(u.ID, now, 42); err != nil {
+	if err := s.ConfirmLaterTOTP(u.ID, testTOTPSecret, now, 42); err != nil {
 		t.Fatalf("ConfirmLaterTOTP beside a live passkey: %v", err)
 	}
 	got, _ := s.Get(u.ID)
@@ -1420,7 +1420,7 @@ func TestConfirmLaterTOTPRefusesWithoutALiveFactorAndLeavesItPending(t *testing.
 	if err := s.SetPendingTOTPSecretAt(u.ID, testTOTPSecret, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ConfirmLaterTOTP(u.ID, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
+	if err := s.ConfirmLaterTOTP(u.ID, testTOTPSecret, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
 		t.Fatalf("ConfirmLaterTOTP on an account with no factor = %v, want ErrNoOtherSecondFactor", err)
 	}
 	got, _ := s.Get(u.ID)
