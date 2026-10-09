@@ -164,5 +164,16 @@ authenticator, AAL2).
   `POST /api/auth/reauthenticate` names it the same way, only when the
   handle is the timed-out session's own account and that account holds
   no passkey of that ID (owner decision 7a).
+- Status (#96): decision 5 was silent on a finish whose handle names no
+  account the credential can sign in to, or that never reaches the
+  lookup. Such a finish reserved nothing and ignored the address ban, so
+  one begin cookie bought unbounded tries for five minutes. Every finish
+  is now one counted attempt on the address (NIST SP 800-63B-4 3.2.2,
+  OWASP ASVS V2.2.1): before its `401` it checks the address ban and
+  reserves on the address bucket a password uses, and is `429`
+  `rate-limited` once that is used or banned, keeping the ceremony
+  cookie. No ruling is reversed: the account path is unchanged, a dead
+  ceremony counts nothing, and a refused finish still leaves the
+  ceremony open (ADR-0004 decision 5).
 
 Design ratified on #77, 2026-10-05.

@@ -801,6 +801,17 @@ paths:
         or unknown credential does not count toward the account's run of
         second-factor failures (no password was presented).
 
+        A finish that names no account this credential can sign in to --
+        an unknown handle, a passkey the account does not hold, an account
+        with no local password -- or that never reaches the account (no
+        user handle, an unreadable assertion) is still one attempt on the
+        address (#96): it is checked against the address ban and takes
+        one attempt from the address's limit, the one a password attempt
+        uses, charging no account. At the limit or banned it is `429`
+        `rate-limited`, with no `unknownCredential` and the ceremony
+        cookie kept; otherwise its `401` counts. A dead ceremony counts
+        nothing.
+
         Every refusal -- an unknown handle, a passkey this account does not
         hold or one that is stale or still held for its recovery codes, a
         wrong signature, an assertion that did not verify the user, a

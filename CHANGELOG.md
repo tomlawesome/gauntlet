@@ -40,6 +40,19 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **Every passkey sign-in finish counts on the address** (#96). A `POST
+  /api/auth/login/passkey` finish whose user handle names no account the
+  credential can sign in to, or that never reaches the account lookup
+  (no handle, an unreadable assertion), reserved nothing and was never
+  checked against the address ban, so one begin cookie bought unbounded
+  tries for five minutes. Such a finish now checks the ban and reserves
+  one attempt on the address bucket a password attempt uses: once that
+  is used or the address is banned it answers `429` `rate-limited`
+  (recorded `rate_limited`, method `passkey_alone`, no account; no
+  `unknownCredential`; the ceremony cookie kept), otherwise the `401`
+  it always did, counted. The account path, dead ceremonies and the Go
+  API are unchanged.
+
 - A passkey-alone sign-in (`POST /api/auth/login/passkey`) whose user
   handle names an account the credential cannot sign in to -- an
   account with no local password, or a credential ID that is not one of

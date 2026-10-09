@@ -94,9 +94,7 @@ func (g *Gate) handleLoginPasskeyBegin(w http.ResponseWriter, r *http.Request) {
 	beginKey := passkeyBeginKey(address)
 	res := loginReservation{address: address}
 	if _, banned := g.deps.Limiter.AddressBanned(address, now); banned || !g.deps.Limiter.Reserve(beginKey, now) {
-		res.refusal = gauntlet.SignInRateLimited
-		g.recordSignIn(r, gauntlet.SignInEvent{Outcome: res.refusal, Method: gauntlet.SignInMethodPasskeyAlone}, res, now)
-		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
+		g.refusePasskeyAloneAtAddress(w, r, res, now)
 		return
 	}
 	options, sealed, err := ps.BeginSignIn()
@@ -109,6 +107,16 @@ func (g *Gate) handleLoginPasskeyBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	g.setPasskeySignInCookie(w, sealed)
 	writeJSON(w, http.StatusOK, options)
+}
+
+// refusePasskeyAloneAtAddress answers a passkey-alone attempt the
+// address's ban or limit refused before any account was named -- at
+// begin, or at a finish the lookup declined (#96): 429 rate-limited,
+// recorded as rate_limited with method passkey_alone and no account.
+func (g *Gate) refusePasskeyAloneAtAddress(w http.ResponseWriter, r *http.Request, res loginReservation, now time.Time) {
+	res.refusal = gauntlet.SignInRateLimited
+	g.recordSignIn(r, gauntlet.SignInEvent{Outcome: res.refusal, Method: gauntlet.SignInMethodPasskeyAlone}, res, now)
+	writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 }
 
 // passkeyBeginKey is the limiter bucket login/passkey/begin reserves on
@@ -284,7 +292,23 @@ type loginPasskeyRequest struct {
 // notice -- and the refusal is no_such_user naming no account, on the
 // address alone, exactly as for an unknown handle (#80; NIST SP
 // 800-63B-4 3.2.2 counts failures "using a specific authenticator on a
-// single subscriber account"). If the credential ID cannot be read here
+// single subscriber account").
+//
+// Such a declined finish -- and one that never reached lookup (no user
+// handle, an assertion the ceremony could not read) -- is still one
+// attempt on the address (#96; NIST SP 800-63B-4 3.2.2 and OWASP ASVS
+// V2.2.1 count the attempt, and the finish is the attempt), so one
+// begin cookie cannot buy unbounded tries. Before its 401 it is checked
+// against the address ban (AddressBanned) and reserves on the address
+// bucket a password attempt uses (addressKey); a refusal there is 429
+// rate-limited, recorded as begin's is, with no unknownCredential and
+// the ceremony cookie kept, as the ceremony expires on its own. An
+// admitted one keeps its reservation, which counts it. Nothing names an
+// account, so there is no known-browser pass on this path; a finish the
+// account path reserved for never reaches it, so none is charged to the
+// address twice. A dead ceremony reserves and records nothing.
+//
+// If the credential ID cannot be read here
 // (assertionCredentialID), the credential is treated as possibly held
 // and the ceremony decides, so a parsing difference never refuses a
 // real user.
@@ -392,6 +416,14 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 		refuse(classStepExpired, passkeyStartAgain, reserved, nil)
 		return
 	case signInAssertionRefused:
+		// A finish no account was reserved for is still one attempt on
+		// the address (#96): the ban, then the address bucket.
+		if !reserved {
+			if _, banned := g.deps.Limiter.AddressBanned(address, now); banned || !g.deps.Limiter.Reserve(res.ipKey, now) {
+				g.refusePasskeyAloneAtAddress(w, r, res, now)
+				return
+			}
+		}
 		refuse(classInvalidCredentials, passkeyNotVerified, true, g.unknownCredentialMember(forget))
 		return
 	case signInAssertionBackendFailed:
