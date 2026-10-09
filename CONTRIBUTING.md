@@ -28,10 +28,10 @@ description or a commit message.
 
 ## Testing expectations
 
-- New behavior needs a test that would fail without it -- prefer testing
-  observable behavior over internal implementation details.
-- A bug fix should include a regression test reproducing the bug where
-  practical.
+- Tests come before the code, for new behavior and bug fixes alike: each
+  is written from the issue, run, and seen to fail before the code that
+  makes it pass is written. Prefer testing observable behavior over
+  internal implementation details.
 - Where gauntlet's code is copied from mikroview (the application
   gauntlet's auth code was factored out of; see [the
   README](README.md)), the port carries mikroview's own tests across
