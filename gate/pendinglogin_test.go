@@ -97,7 +97,7 @@ func TestPendingLoginCodecRefusesAStateWithNoID(t *testing.T) {
 // step and the sign-in that completes it, so the claim is made with now
 // an hour before IssuedAt. The kept cookie must still be refused on
 // replay right up to IssuedAt plus the maximum age on the wall clock --
-// the instant decode stops accepting it -- because the forget time comes
+// the instant decode starts refusing it -- because the forget time comes
 // from IssuedAt, not from the moment of the claim.
 func TestSpentPendingLoginOutlivesABackwardClockStep(t *testing.T) {
 	g, ts, _ := totpFixture(t)
@@ -126,10 +126,12 @@ func TestSpentPendingLoginOutlivesABackwardClockStep(t *testing.T) {
 	}
 }
 
-// TestSpentPendingLoginRefusedAtExactlyItsExpiry: decode still accepts a
-// pending-login cookie at exactly IssuedAt plus its maximum age (it
-// refuses only an older one), so the spent ID must still be held at that
-// instant. A replay then is refused.
+// TestSpentPendingLoginRefusedAtExactlyItsExpiry: decode refuses a
+// pending-login cookie from the instant IssuedAt plus its maximum age
+// (owner decision 18a on #90: a ticket is valid only while now is before
+// its expiry), so a replay at that instant is refused whether or not the
+// spent ID is still held. The held-until-expiry half is pinned one
+// nanosecond earlier, in spent_ticket_test.go.
 func TestSpentPendingLoginRefusedAtExactlyItsExpiry(t *testing.T) {
 	g, ts, _ := totpFixture(t)
 	var mu sync.Mutex
@@ -148,7 +150,7 @@ func TestSpentPendingLoginRefusedAtExactlyItsExpiry(t *testing.T) {
 		t.Fatalf("the sign-in got %d, want 200", first.StatusCode)
 	}
 
-	setClock(issuedAt.Add(pendingLoginCookieMaxAge)) // decode's last accepting instant
+	setClock(issuedAt.Add(pendingLoginCookieMaxAge)) // decode's first refusing instant
 	resp, raw := postRaw(t, ts.URL+"/api/auth/login/factor", loginFactorRequest{Code: codes[1]}, kept)
 	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(raw, "sign in again") {
 		t.Errorf("the kept pending login, replayed at exactly its expiry, got %d %q, want 401 sign in again", resp.StatusCode, raw)
@@ -158,11 +160,12 @@ func TestSpentPendingLoginRefusedAtExactlyItsExpiry(t *testing.T) {
 // TestSpentPendingLoginIsNotReopenedAtTheFiveMinuteMark (ruling S2 on
 // #20, from the review's
 // TestRereviewPruneByALaterRequestReopensASpentPendingLogin): request B
-// read its clock at F, decode's last accepting instant for a spent
-// pending login, but reaches the set after request A, which read F+1ns
-// and pruned. The spent ID must still be there for B. No one request's
-// clock steps back; the test only orders two requests' readings the way
-// two goroutines can.
+// read its clock at F, decode's first refusing instant for a pending
+// login (IssuedAt plus the maximum age; the cookie is refused from F on,
+// so the refusal no longer depends on the spent ID), but reaches the set
+// after request A, which read F+1ns and pruned. B must still be refused.
+// No one request's clock steps back; the test only orders two requests'
+// readings the way two goroutines can.
 func TestSpentPendingLoginIsNotReopenedAtTheFiveMinuteMark(t *testing.T) {
 	g, ts, _ := totpFixture(t)
 	var mu sync.Mutex

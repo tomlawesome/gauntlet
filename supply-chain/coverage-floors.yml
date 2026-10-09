@@ -68,6 +68,7 @@
 # codec's own copies of those failure paths moved there: 91.0%.
 # #90: internal/fetch is new at 100.0%, the redirect rule and refresh
 # jitter blocklist and geoip now share.
+# #90: internal/expiry (the one ticket-expiry rule) is new at 100.0%.
 
 floors:
   persist: 90
@@ -89,3 +90,4 @@ floors:
   internal/plaintext: 100
   internal/seal: 78
   internal/fetch: 100
+  internal/expiry: 100

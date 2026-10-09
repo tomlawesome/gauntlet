@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 )
 
 // The prove step (#65, docs/adr/0009-unusual-sign-ins.md): under the
@@ -199,7 +200,7 @@ func (g *Gate) handleLoginProve(w http.ResponseWriter, r *http.Request) {
 	}
 	// One-shot, as confirm's: of two completions racing on one ticket,
 	// the loser is a replay and is told to sign in again.
-	if !spentConfirmLogins.Claim(st.ID, st.IssuedAt.Add(ConfirmCodeLifetime), now) {
+	if !spentConfirmLogins.Claim(st.ID, expiry.At(st.IssuedAt, ConfirmCodeLifetime), now) {
 		g.clearConfirmLoginCookie(w)
 		writeUnauthorized(w, classStepExpired, "sign in again")
 		return

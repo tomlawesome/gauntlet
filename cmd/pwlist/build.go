@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet/blocklist"
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
 )
 
 const (
@@ -482,7 +483,7 @@ func (b *builder) saveCheckpoint(st *state) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(b.checkpoint, data, 0o600); err != nil {
+	if err := atomicfile.WriteFile(b.checkpoint, data, 0o600); err != nil {
 		return fmt.Errorf("save checkpoint: %w", err)
 	}
 	return nil
@@ -524,10 +525,10 @@ func (b *builder) emit(st *state) error {
 			return fmt.Errorf("self-check: the list written would not parse: %w", err)
 		}
 	}
-	if err := writeFileAtomic(b.out, data, 0o644); err != nil {
+	if err := atomicfile.WriteFile(b.out, data, 0o644); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(b.out+".sha256", []byte(sha256Line(data, filepath.Base(b.out))), 0o644); err != nil {
+	if err := atomicfile.WriteFile(b.out+".sha256", []byte(sha256Line(data, filepath.Base(b.out))), 0o644); err != nil {
 		return err
 	}
 	if b.checkpoint != "" {
@@ -567,31 +568,4 @@ func formatList(hashes []string, built time.Time, minCount, total int64, sample 
 		b.WriteString(h + "\n")
 	}
 	return []byte(b.String())
-}
-
-// writeFileAtomic writes data to a temporary file beside path and
-// renames it into place, so a reader never sees half a file.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err = f.Chmod(mode); err == nil {
-		if _, err = f.Write(data); err == nil {
-			err = f.Sync()
-		}
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }

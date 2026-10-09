@@ -142,6 +142,21 @@ All notable changes to this project are documented in this file.
 - **The `sign-in-refused` detail** now reads "... or ask an
   administrator to allow your next sign-in or reset the account" (#81).
 
+- **Every sign-in ticket is refused from the instant it expires** (#90).
+  The pending-login cookie and the SSO flow state
+  (`oidc.StateCodec.Decode`) used to accept a ticket at exactly its
+  maximum age, while the confirmation and escape tickets refused it
+  then. All four now follow one rule, RFC 7519 §4.1.4's: a ticket is
+  valid only while now is before its expiry. The difference is one
+  instant; no API change.
+
+- **`pwlist` writes its files with the module's shared crash-safe
+  writer** (#90). The list, its checksum, its signature and the build
+  checkpoint now go through `internal/atomicfile`: a missing output
+  directory is created with mode 0700, a replaced file keeps its owner
+  and group (a rebuild run with sudo no longer leaves a list the server
+  cannot read), and the directory is synced after the rename.
+
 - CI: a release is cut on `main` only (#88): release:version and
   release:gitlab run in `main` pipelines and refuse a commit that is not
   `main`'s tip; `preview` and `main` pipelines now run every lint and

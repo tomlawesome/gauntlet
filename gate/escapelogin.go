@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
@@ -106,7 +107,7 @@ func decodeEscapeLogin(value string, now time.Time) (escapeLoginState, bool) {
 	if !escapeLoginCodec.open(value, &st) || st.ID == "" || st.UserID == "" || st.CodeHash == "" {
 		return escapeLoginState{}, false
 	}
-	if !now.Before(st.IssuedAt.Add(EscapeCodeLifetime)) {
+	if expiry.Expired(st.IssuedAt, EscapeCodeLifetime, now) {
 		return escapeLoginState{}, false
 	}
 	return st, true
@@ -256,7 +257,7 @@ func (g *Gate) handleLoginEscape(w http.ResponseWriter, r *http.Request) {
 	}
 	// One-shot: of two completions racing on one ticket, the loser is a
 	// replay and is told to sign in again, as confirm's is.
-	if !spentEscapeLogins.Claim(st.ID, st.IssuedAt.Add(EscapeCodeLifetime), now) {
+	if !spentEscapeLogins.Claim(st.ID, expiry.At(st.IssuedAt, EscapeCodeLifetime), now) {
 		expired()
 		return
 	}

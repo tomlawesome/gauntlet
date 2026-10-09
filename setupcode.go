@@ -74,6 +74,22 @@ func newSetupCode() (display string, hash []byte) {
 	return display, sum[:]
 }
 
+// setupCodeMatches reports whether typed is the code whose hash is want:
+// the SHA-256 of its normalised form, compared in constant time. It is
+// the one check for both codes newSetupCode makes, the setup code and
+// the unlock code, which used to spell it out each (#90). A nil want (no
+// code issued) never matches, but is still compared against a zero hash,
+// so a caller that runs every check whichever fails (CheckUnlockCode)
+// takes the same time either way.
+func setupCodeMatches(typed string, want []byte) bool {
+	sum := sha256.Sum256([]byte(normaliseCode(typed)))
+	issued := want != nil
+	if !issued {
+		want = make([]byte, sha256.Size) // compared anyway; never a match on its own
+	}
+	return subtle.ConstantTimeCompare(sum[:], want) == 1 && issued
+}
+
 // issueSetupCodeLocked makes a new code if the store needs one -- empty,
 // persisted, and not sitting behind a document it refused to apply --
 // and retires the current one otherwise. Returns the display form of a
@@ -131,13 +147,12 @@ func (s *Store) CheckSetupCode(code string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
 	}
-	sum := sha256.Sum256([]byte(NormaliseResetCode(code)))
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(s.byID) > 0 || s.hasRefusedVersion {
 		return ErrRegistrationClosed
 	}
-	if s.setupCodeHash == nil || subtle.ConstantTimeCompare(sum[:], s.setupCodeHash) != 1 {
+	if !setupCodeMatches(code, s.setupCodeHash) {
 		return ErrSetupCodeInvalid
 	}
 	return nil

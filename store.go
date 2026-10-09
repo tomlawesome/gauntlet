@@ -258,7 +258,7 @@ func (f storeFile) checkUsernames() error {
 		if u == nil {
 			continue
 		}
-		key := strings.ToLower(u.Username)
+		key := usernameKey(u.Username)
 		if seen[key] {
 			clashes++
 		}
@@ -423,13 +423,24 @@ type Store struct {
 	breachTimeout time.Duration
 }
 
+// usernameKey is the key a username is indexed and looked up by in
+// byName: lower case, so "Bob" and "bob" are one account. Every lookup,
+// uniqueness check and index write goes through it, so the fold is
+// written once rather than at each of the fourteen places that used to
+// spell out strings.ToLower (#90). gate's limiter key for an unknown
+// name (unknownNameKey) folds the same way with its own call, since
+// gate cannot reach this.
+func usernameKey(username string) string {
+	return strings.ToLower(username)
+}
+
 // storeState is the in-memory index over the accounts document: the
 // accounts and the lookups the store answers from. It is what a write
 // changes, as a whole -- see Store.mutate -- and what OpenStore and
 // reloadIfStale replace on a load.
 type storeState struct {
 	byID      map[string]*User
-	byName    map[string]string  // lowercased username -> ID
+	byName    map[string]string  // usernameKey(username) -> ID
 	oidcIndex map[oidcKey]string // (issuer, subject) -> ID, see ByOIDCIdentity
 	// lastLoginSaved is each account's LastLogin as of the last load or
 	// save, by ID -- what Authenticate measures staleness against (see
@@ -468,7 +479,7 @@ func indexUsers(file storeFile) storeState {
 			continue
 		}
 		st.byID[u.ID] = u
-		st.byName[strings.ToLower(u.Username)] = u.ID
+		st.byName[usernameKey(u.Username)] = u.ID
 		st.lastLoginSaved[u.ID] = u.LastLogin
 		if u.OIDCIssuer != "" || u.OIDCSubject != "" {
 			st.oidcIndex[oidcKey{issuer: u.OIDCIssuer, subject: u.OIDCSubject}] = u.ID
@@ -1061,7 +1072,7 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 			return ErrLastLocalAdmin
 		}
 		delete(st.byID, id)
-		delete(st.byName, strings.ToLower(u.Username))
+		delete(st.byName, usernameKey(u.Username))
 		if u.OIDCIssuer != "" {
 			delete(st.oidcIndex, oidcKey{issuer: u.OIDCIssuer, subject: u.OIDCSubject})
 		}
@@ -1114,7 +1125,7 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 		if current == nil {
 			return ErrNoAdmin
 		}
-		targetID, ok := st.byName[strings.ToLower(toUsername)]
+		targetID, ok := st.byName[usernameKey(toUsername)]
 		if !ok {
 			return ErrUserNotFound
 		}
@@ -1354,7 +1365,7 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 	// document being saved: on a replay that is the one another process
 	// just wrote, which may already hold an admin or this username.
 	id := newID()
-	key := strings.ToLower(username)
+	key := usernameKey(username)
 	var created User
 	err = s.mutate(func(st *storeState) error {
 		if guard != nil {
@@ -1416,7 +1427,7 @@ func (s *Store) ValidateNewAccount(username, password string) error {
 	}
 	s.reloadIfStale()
 	s.mu.RLock()
-	_, taken := s.byName[strings.ToLower(username)]
+	_, taken := s.byName[usernameKey(username)]
 	s.mu.RUnlock()
 	if taken {
 		return ErrUsernameTaken
@@ -1638,7 +1649,7 @@ func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint strin
 			HasLocalPassword: false,
 		}
 		st.byID[u.ID] = u
-		st.byName[strings.ToLower(u.Username)] = u.ID
+		st.byName[usernameKey(u.Username)] = u.ID
 		st.oidcIndex[key] = u.ID
 		result, created, before, ended = *u, true, newRole, false
 		return nil
@@ -1685,7 +1696,7 @@ func (st *storeState) uniqueUsername(hint, issuer, subject string) string {
 	// still gets a stable account under the generated name below.
 	hint = sanitiseUsernameHint(hint)
 	if hint != "" {
-		if _, taken := st.byName[strings.ToLower(hint)]; !taken {
+		if _, taken := st.byName[usernameKey(hint)]; !taken {
 			return hint
 		}
 	}
@@ -1705,7 +1716,7 @@ func (st *storeState) uniqueUsername(hint, issuer, subject string) string {
 	const prefix = "oidc-"
 	for n := 8; n <= len(full) && len(prefix)+n <= maxUsernameLength; n += 8 {
 		candidate := prefix + full[:n]
-		if _, taken := st.byName[strings.ToLower(candidate)]; !taken {
+		if _, taken := st.byName[usernameKey(candidate)]; !taken {
 			return candidate
 		}
 	}
@@ -1910,7 +1921,7 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 	s.reloadIfStale()
 
 	s.mu.RLock()
-	id, known := s.byName[strings.ToLower(username)]
+	id, known := s.byName[usernameKey(username)]
 	hash := dummyHash
 	viaResetCode := false
 	if known {
@@ -2037,7 +2048,7 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u, ok := s.byID[s.byName[strings.ToLower(username)]]
+	u, ok := s.byID[s.byName[usernameKey(username)]]
 	if !ok {
 		return nil, false
 	}
@@ -2067,7 +2078,7 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	s.reloadIfStale()
 	s.mu.RLock()
 	var resetHash, spentHash string
-	if u, ok := s.byID[s.byName[strings.ToLower(username)]]; ok {
+	if u, ok := s.byID[s.byName[usernameKey(username)]]; ok {
 		resetHash, spentHash = u.ResetCodeHash, u.ResetCodeSpentHash
 	}
 	s.mu.RUnlock()
@@ -2091,7 +2102,7 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	// dead, and a restart before the next good write would prove that
 	// wrong. mutate installs it only once it is saved.
 	return s.mutate(func(st *storeState) error {
-		u, ok := st.byID[st.byName[strings.ToLower(username)]]
+		u, ok := st.byID[st.byName[usernameKey(username)]]
 		if !ok {
 			return ErrUserNotFound
 		}

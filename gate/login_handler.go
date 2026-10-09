@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 )
 
 // loginReservation is what one login attempt holds against the
@@ -55,7 +56,10 @@ type loginReservation struct {
 // a body may hold, and the limiter keeps thousands of keys; keyed on the
 // name, a credential-free flood of long made-up names would pin hundreds
 // of megabytes. The digest is the same size for every name, and one
-// name, in any case, is still one bucket.
+// name, in any case, is still one bucket. The fold is the root's
+// usernameKey (store.go), spelled out here because gate cannot call an
+// unexported root function: change one and the other must follow, so a
+// name the store treats as one account is one bucket here too.
 func unknownNameKey(username string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(username)))
 	return "user:" + hex.EncodeToString(sum[:])
@@ -461,7 +465,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // every credential was right, so this request's reservation goes back
 // as for a success.
 func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) {
-	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
+	if !spentPendingLogins.Claim(st.ID, expiry.At(st.IssuedAt, pendingLoginCookieMaxAge), now) {
 		g.clearPendingLoginCookie(w)
 		writeUnauthorized(w, classStepExpired, "sign in again")
 		return

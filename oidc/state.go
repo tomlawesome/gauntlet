@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 	"github.com/tomlawesome/gauntlet/internal/seal"
 )
 
@@ -115,14 +116,15 @@ func (c *StateCodec) Encode(fs FlowState) (string, error) {
 
 // Decode opens a cookie value produced by Encode, rejecting it
 // (ErrFlowStateInvalid) if it's malformed, spelled other than Encode
-// spelled it, fails the AEAD auth check, or is older than maxAge as
-// measured from FlowState.IssuedAt.
+// spelled it, fails the AEAD auth check, or is maxAge old or older as
+// measured from FlowState.IssuedAt: it is refused from the instant it
+// expires (internal/expiry).
 func (c *StateCodec) Decode(cookieValue string, maxAge time.Duration, now time.Time) (FlowState, error) {
 	var fs FlowState
 	if !c.codec.Open(cookieValue, &fs) {
 		return FlowState{}, ErrFlowStateInvalid
 	}
-	if now.Sub(fs.IssuedAt) > maxAge {
+	if expiry.Expired(fs.IssuedAt, maxAge, now) {
 		return FlowState{}, ErrFlowStateInvalid
 	}
 	return fs, nil
