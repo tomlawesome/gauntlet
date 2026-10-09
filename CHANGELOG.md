@@ -25,6 +25,18 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **A blank allow-list entry is refused at startup** (#91). An app that
+  builds `Policy.AllowedGroups`, `AllowedEmails`, `AllowedEmailDomains`
+  or `RoleFromGroups` by splitting a setting on commas gets an empty
+  entry from a trailing comma, which must not quietly change who may
+  sign in. New `Policy.Validate` names the field when an entry (or a
+  `RoleFromGroups` group name) is empty or only whitespace; `gate.New`
+  and `oidc.New` call it and refuse to start. A groups claim value that
+  is only whitespace is now dropped, as an empty one already was, so it
+  never counts as a group. Additive: a policy with a blank entry was
+  accepted before, so a deployment that has one now fails at startup
+  until the entry is removed.
+
 - **Passkey names are refused if they are not plain text, and cleaned
   in notices** (#89). A passkey's name, chosen by whoever registers it,
   was passed into owner notices as it came, so a mail or chat client
