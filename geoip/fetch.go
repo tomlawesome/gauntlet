@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/fetch"
 )
 
 // The download locations. Constants, not configuration: an operator
@@ -73,13 +75,11 @@ func newClient(control func(network, address string, c syscall.RawConn) error) *
 	}
 }
 
-// httpsRedirectsOnly follows up to five redirects, each to https.
+// httpsRedirectsOnly follows up to five redirects, each to https: the
+// rule blocklist's downloads follow too (internal/fetch).
 func httpsRedirectsOnly(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return errors.New("geoip: refused a redirect away from https")
-	}
-	if len(via) >= 5 {
-		return errors.New("geoip: too many redirects")
+	if err := fetch.HTTPSRedirectsOnly(req, via); err != nil {
+		return fmt.Errorf("geoip: %w", err)
 	}
 	return nil
 }

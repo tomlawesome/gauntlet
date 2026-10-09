@@ -61,11 +61,18 @@
 # a chmod, chown, write, sync or close of a just-created temp file
 # failing, which no test here can cause.
 # #89: internal/plaintext is new at 100.0%, the shared plain-text rule.
+# #90: internal/seal is new at 78.1%, the AES-GCM codec oidc, gate and
+# passkey now share. What it leaves uncovered is crypto/rand or the
+# cipher failing, MustNew's panic, and a value JSON cannot encode. oidc
+# re-measured once its
+# codec's own copies of those failure paths moved there: 91.0%.
+# #90: internal/fetch is new at 100.0%, the redirect rule and refresh
+# jitter blocklist and geoip now share.
 
 floors:
   persist: 90
   "": 95 # the root `gauntlet` package -- see the note above on the empty key
-  oidc: 86
+  oidc: 91
   internal/testutil: 0
   internal/evict: 100
   gate: 92
@@ -80,3 +87,5 @@ floors:
   persist/persisttest: 94
   internal/atomicfile: 72
   internal/plaintext: 100
+  internal/seal: 78
+  internal/fetch: 100

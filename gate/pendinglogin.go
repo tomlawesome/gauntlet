@@ -1,17 +1,14 @@
 package gate
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/tomlawesome/gauntlet/internal/seal"
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
@@ -67,77 +64,47 @@ type pendingLoginState struct {
 // (or an attacker probing the endpoint) needs to be able to tell apart.
 var errPendingLoginInvalid = errors.New("gate: pending login expired or was tampered with")
 
-// sealCodec seals and opens a small JSON value for a cookie the same
-// way oidc.StateCodec seals an oidc.FlowState: AES-256-GCM, stdlib only,
-// so a tampered cookie fails the auth-tag check rather than decoding
-// into a different account, with a key generated once via crypto/rand
-// and held only in memory. The pending-login ticket and the
-// confirm-login ticket (#55) each have their own, with their own key.
+// sealCodec seals and opens a small JSON value for a cookie with
+// internal/seal, the same AES-256-GCM mechanism oidc.StateCodec and
+// passkey's ceremony state use: a tampered cookie fails the auth-tag
+// check rather than decoding into a different account, under a key
+// generated once via crypto/rand and held only in memory. The
+// pending-login ticket, the confirm-login ticket (#55) and the
+// escape-login ticket each have their own, with their own key, so a
+// ticket sealed for one step cannot be presented at another.
 //
-// A second implementation rather than reusing oidc.StateCodec directly.
-// That type is hard-coded to oidc.FlowState's fields, and gate has no
-// other reason to depend on the oidc package's cookie-sealing internals
-// -- widening a codec that belongs to one login flow to also carry a
-// second, unrelated flow's payload would leave neither flow's cookie
-// shape visible from its own file.
+// A wrapper of gate's own rather than oidc.StateCodec: that type is
+// hard-coded to oidc.FlowState's fields, and widening one login flow's
+// codec to carry another, unrelated flow's payload would leave neither
+// flow's cookie shape visible from its own file. Only the sealing is
+// shared, so a fix to it lands in all three packages at once (#90).
 type sealCodec struct {
-	aead cipher.AEAD
+	codec *seal.Codec
 }
 
 // mustNewSealCodec builds a codec with a fresh key. what names it in a
-// panic.
+// panic: like gauntlet's own newID (id.go), a CSPRNG that cannot
+// produce bytes is not a condition to degrade from gracefully here --
+// every login on an account with a second factor depends on this codec
+// existing.
 func mustNewSealCodec(what string) *sealCodec {
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		// Same stance gauntlet's own newID takes (id.go): a CSPRNG that
-		// cannot produce bytes is not a condition to degrade from
-		// gracefully here -- every login on an account with a second
-		// factor depends on this codec existing.
-		panic("gate: crypto/rand unavailable: " + err.Error())
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic("gate: constructing " + what + " cipher: " + err.Error())
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		panic("gate: constructing " + what + " AEAD: " + err.Error())
-	}
-	return &sealCodec{aead: aead}
+	return &sealCodec{seal.MustNew("gate: " + what + " codec")}
 }
 
 // seal encodes v as JSON and seals it, base64url without padding.
 func (c *sealCodec) seal(v any) (string, error) {
-	plaintext, err := json.Marshal(v)
+	sealed, err := c.codec.Seal(v)
 	if err != nil {
-		return "", fmt.Errorf("gate: encoding sealed state: %w", err)
+		return "", fmt.Errorf("gate: %w", err)
 	}
-	nonce := make([]byte, c.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("gate: generating seal nonce: %w", err)
-	}
-	sealed := c.aead.Seal(nonce, nonce, plaintext, nil)
-	return base64.RawURLEncoding.EncodeToString(sealed), nil
+	return sealed, nil
 }
 
 // open reverses seal into v, reporting whether value opened. Strict:
 // only the spelling seal wrote opens, so a sealed value has one cookie
-// string, as passkey's seal does (#20).
+// string (#20).
 func (c *sealCodec) open(value string, v any) bool {
-	sealed, err := base64.RawURLEncoding.Strict().DecodeString(value)
-	if err != nil {
-		return false
-	}
-	ns := c.aead.NonceSize()
-	if len(sealed) < ns {
-		return false
-	}
-	nonce, ciphertext := sealed[:ns], sealed[ns:]
-	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return false
-	}
-	return json.Unmarshal(plaintext, v) == nil
+	return c.codec.Open(value, v)
 }
 
 // pendingLoginStateCodec seals/opens a pendingLoginState (sealCodec).
