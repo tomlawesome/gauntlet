@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -196,6 +197,10 @@ func (errBoomType) Error() string { return "boom: backend unavailable" }
 // needs doing by hand.
 func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	g := newTestGate(t)
+	audit := &auditRecorder{}
+	logs := &lockedBuffer{}
+	g.cfg.Audit = audit
+	g.cfg.Log = slog.New(slog.NewTextHandler(logs, nil))
 	ts := newTestServer(t, g)
 	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
 	_ = postJSON(t, client, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
@@ -239,6 +244,19 @@ func TestDeleteUserReportsWhenTokenRevocationFails(t *testing.T) {
 	}
 	if body["username"] != "operator" {
 		t.Errorf("expected the response to still name the deleted account, got %+v", body)
+	}
+	if want := problemTypeBase + classPartiallyCompleted.anchor; body["type"] != want {
+		t.Errorf("problem type = %v, want %q (the account is gone but the tokens are not)", body["type"], want)
+	}
+	// Said out loud server-side, and recorded: the response is not the
+	// only trace of tokens that are still live.
+	if !strings.Contains(logs.String(), "revoking tokens for deleted user "+operator.ID) {
+		t.Errorf("the failed revocation was not logged: %q", logs.String())
+	}
+	entries := auditEntries(audit, "user.delete")
+	if len(entries) != 1 || entries[0].Target != "operator" ||
+		!strings.Contains(entries[0].Detail, "tokenRevokeFailed=true") || !strings.Contains(entries[0].Detail, "tokensRevoked=0") {
+		t.Errorf("user.delete audit entries = %+v, want one for operator with tokenRevokeFailed=true", entries)
 	}
 	// The account deletion itself is not undone by the token-revoke
 	// failure -- it already committed before RevokeAllCreatedBy was
