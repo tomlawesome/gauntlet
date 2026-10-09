@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
 // A used ticket stays refused until the moment it expires (#90 item 1):
@@ -15,7 +17,25 @@ import (
 // IssuedAt+lifetime, where the ticket itself is still young enough to be
 // read, so only the memory of its use can refuse it.
 
+// freshSpentSets gives the test its own replay memories, restored when it
+// ends. The package-level sets are shared by every gate test, and a set
+// forgets keys in the order they were claimed: a key another test left
+// with a later forget time keeps a wrongly early one held, so these
+// guards passed in the full run against code that forgot too early.
+// Gate tests do not run in parallel, so swapping the variables is safe.
+func freshSpentSets(t *testing.T) {
+	t.Helper()
+	pending, confirm, escape := spentPendingLogins, spentConfirmLogins, spentEscapeLogins
+	spentPendingLogins = spent.New(pendingLoginCookieMaxAge)
+	spentConfirmLogins = spent.New(ConfirmCodeLifetime)
+	spentEscapeLogins = spent.New(EscapeCodeLifetime)
+	t.Cleanup(func() {
+		spentPendingLogins, spentConfirmLogins, spentEscapeLogins = pending, confirm, escape
+	})
+}
+
 func TestSpentPendingLoginRefusedUntilItsExpiry(t *testing.T) {
+	freshSpentSets(t)
 	g, ts, _ := totpFixture(t)
 	var mu sync.Mutex
 	clock := time.Now().Round(0)
@@ -41,6 +61,7 @@ func TestSpentPendingLoginRefusedUntilItsExpiry(t *testing.T) {
 }
 
 func TestSpentConfirmTicketRefusedUntilItsExpiry(t *testing.T) {
+	freshSpentSets(t)
 	e, rec, b := confirmEnv(t)
 	if status, _ := e.signIn(t, b, addrParis); status != http.StatusOK {
 		t.Fatal("no challenge")
@@ -61,6 +82,7 @@ func TestSpentConfirmTicketRefusedUntilItsExpiry(t *testing.T) {
 }
 
 func TestSpentProveTicketRefusedUntilItsExpiry(t *testing.T) {
+	freshSpentSets(t)
 	e := newProveEnv(t)
 	c := e.held(t)
 	issuedAt := e.clock.now()
@@ -82,6 +104,7 @@ func TestSpentProveTicketRefusedUntilItsExpiry(t *testing.T) {
 }
 
 func TestSpentEscapeTicketRefusedUntilItsExpiry(t *testing.T) {
+	freshSpentSets(t)
 	e := loneAdminEnv(t)
 	b, resp := e.refusedFrom(t, addrLondon2)
 	issuedAt := e.clock.now()
