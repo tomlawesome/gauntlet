@@ -272,45 +272,85 @@ func TestLoginFactorAccountLostFactorMidFlow(t *testing.T) {
 // bucket -- exhausted by failed attempts arriving from several other
 // source addresses -- does not, and that alone is enough to refuse the
 // request (and release the IP reservation this attempt claimed).
+//
+// Which bucket that is depends on the name. A real account is counted on
+// the account's own bucket (ReserveAccountDecision); a name that matches
+// no account has no such bucket and is counted on a name bucket
+// (loginReservation.nameKey), the Reserve call this test exists for.
+// Each case has its own subtest, so one passing cannot stand in for the
+// other.
 func TestLoginUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
-	g := newTestGate(t)
-	g.deps.Limiter = mustNewLoginLimiter(t, 5, time.Minute)
-	g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
-	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password-placeholder-1")
+	setup := func(t *testing.T) (loginAttempt func(username, ip, password string) *http.Response) {
+		g := newTestGate(t)
+		g.deps.Limiter = mustNewLoginLimiter(t, 5, time.Minute)
+		g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
+		ts := newTestServer(t, g)
+		registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	loginAttempt := func(ip, password string) *http.Response {
-		body := `{"username":"admin","password":"` + password + `"}`
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/login", strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
+		return func(username, ip, password string) *http.Response {
+			body := `{"username":"` + username + `","password":"` + password + `"}`
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/login", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(csrfHeaderName, testCSRFValue)
+			req.Header.Set("X-Test-IP", ip)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return resp
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(csrfHeaderName, testCSRFValue)
-		req.Header.Set("X-Test-IP", ip)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
+	}
+
+	t.Run("a real account", func(t *testing.T) {
+		loginAttempt := setup(t)
+		// Five failures against "admin", each from its own distinct
+		// source IP -- the username bucket reaches its threshold while no
+		// single IP bucket ever holds more than one failure.
+		for i := 0; i < 5; i++ {
+			resp := loginAttempt("admin", "198.51.100."+string(rune('1'+i)), "wrong")
+			_ = resp.Body.Close()
 		}
-		return resp
-	}
 
-	// Five failures against "admin", each from its own distinct source
-	// IP -- the username bucket reaches its threshold while no single IP
-	// bucket ever holds more than one failure.
-	for i := 0; i < 5; i++ {
-		resp := loginAttempt("198.51.100."+string(rune('1'+i)), "wrong")
-		_ = resp.Body.Close()
-	}
+		// A sixth attempt, from yet another fresh IP, with the *correct*
+		// password: the IP bucket has room, but the username bucket is
+		// already at the limit.
+		resp := loginAttempt("admin", "198.51.100.99", "password-placeholder-1")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Errorf("a correct password against an exhausted username bucket got %d, want 429", resp.StatusCode)
+		}
+	})
 
-	// A sixth attempt, from yet another fresh IP, with the *correct*
-	// password: the IP bucket has room, but the username bucket is
-	// already at the limit.
-	resp := loginAttempt("198.51.100.99", "password-placeholder-1")
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("a correct password against an exhausted username bucket got %d, want 429", resp.StatusCode)
-	}
+	t.Run("a name that matches no account", func(t *testing.T) {
+		loginAttempt := setup(t)
+		// Five guesses at one name nobody has, each from its own source IP.
+		for i := 0; i < 5; i++ {
+			resp := loginAttempt("nobody", "198.51.100."+string(rune('1'+i)), "wrong")
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("guess %d at an unknown name got %d, want 401", i+1, resp.StatusCode)
+			}
+			_ = resp.Body.Close()
+		}
+
+		// A different unknown name from a fresh IP is still just wrong: it
+		// shows the refusal below is the name's bucket, not a limit on
+		// the whole server.
+		other := loginAttempt("somebody-else", "198.51.100.98", "wrong")
+		_ = other.Body.Close()
+		if other.StatusCode != http.StatusUnauthorized {
+			t.Errorf("a different unknown name from a fresh address got %d, want 401", other.StatusCode)
+		}
+
+		// The same unknown name once more, from yet another fresh IP.
+		resp := loginAttempt("nobody", "198.51.100.99", "wrong")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Errorf("a sixth guess at one unknown name from a fresh address got %d, want 429", resp.StatusCode)
+		}
+	})
 }
 
 // TestLoginFactorUserKeyRateLimitExhaustsIndependentlyOfIP is
