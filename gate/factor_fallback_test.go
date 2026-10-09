@@ -2,6 +2,7 @@ package gate
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -206,4 +207,49 @@ func TestATOTPEnrolmentWhoseOtherFactorStandsIsAnAdditionalFactor(t *testing.T) 
 		t.Error("the existing recovery codes changed")
 	}
 	wantRecoveryCodesToMatchFactors(t, g, id, "additional app")
+}
+
+// A3b-R1 (#80), the race itself. The handlers re-read the account at
+// finish time, so the hold is only reached for certain when the other
+// factor goes between that read and the write. Each round, an account
+// with a live authenticator app and its codes has begun a passkey
+// registration; the finish is raced against removing the app (through
+// the store: the delete route would end the finishing session). Either
+// order is legal; the codes must match the factors afterwards.
+func TestAdditionalPasskeyRacingTheRemovalOfTheOnlyOtherFactorKeepsRecoveryCodesConsistent(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	id := passkeyBilboID(t, g)
+	for round := range factorRaceRounds {
+		client := raceFixtureReset(t, g, ts, id)
+		factorFallbackSeedTOTP(t, g, id)
+		fake := newFake(g)
+		creation := passkeyRegisterBegin(t, client, ts)
+		cred, err := fake.RegisterResponse(creation)
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		var finishStatus int
+		var finishErr, clearErr error
+		raceTogether(
+			func() {
+				finishStatus, finishErr = factorRaceRequest(client, http.MethodPost,
+					ts.URL+"/api/auth/passkeys/register/finish",
+					passkeyRegisterFinishRequest{Credential: json.RawMessage(cred), Name: "racing key"})
+			},
+			func() { clearErr = g.deps.Users.ClearTOTP(id) },
+		)
+		if finishErr != nil {
+			t.Fatalf("round %d: transport error: %v", round, finishErr)
+		}
+		if clearErr != nil {
+			t.Fatalf("round %d: removing the authenticator app: %v", round, clearErr)
+		}
+		if finishStatus >= 500 {
+			t.Errorf("round %d: register/finish answered %d", round, finishStatus)
+		}
+		wantRecoveryCodesToMatchFactors(t, g, id, fmt.Sprintf("round %d (register/finish %d)", round, finishStatus))
+		if t.Failed() {
+			return
+		}
+	}
 }
