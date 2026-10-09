@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/browsertoken"
 )
 
 // Unusual sign-ins (#55, docs/design.md). A completed sign-in -- every
@@ -228,7 +230,7 @@ func impossibleTravel(prev LastPlace, next Location, now time.Time) bool {
 func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, loc *Location, now time.Time) SignInJudgement {
 	var hashes [][]byte
 	for _, t := range tokens {
-		if wellFormedKnownBrowserToken(t) {
+		if browsertoken.WellFormed(t) {
 			hashes = append(hashes, []byte(knownBrowserHash(t)))
 		}
 	}

@@ -2,7 +2,6 @@ package gate
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -162,13 +161,13 @@ func (g *Gate) startEscape(w http.ResponseWriter, r *http.Request, user *gauntle
 		return false
 	}
 	display, canonical := gauntlet.NewOneTimeCode()
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := newTicketID()
+	if err != nil {
 		g.logError("gate: generating an escape ticket id: " + err.Error())
 		return false
 	}
 	ticket, err := escapeLoginCodec.seal(escapeLoginState{
-		UserID: user.ID, IssuedAt: now, ID: hex.EncodeToString(id),
+		UserID: user.ID, IssuedAt: now, ID: id,
 		CodeHash: escapeCodeHash(canonical), Signals: signals, Method: method,
 	})
 	if err != nil {

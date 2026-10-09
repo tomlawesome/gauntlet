@@ -192,13 +192,13 @@ func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntl
 		g.logError(err.Error())
 		return confirmFailed
 	}
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := newTicketID()
+	if err != nil {
 		g.logError("gate: generating a confirm ticket id: " + err.Error())
 		return confirmFailed
 	}
 	ticket, err := confirmLoginCodec.seal(confirmLoginState{
-		UserID: user.ID, IssuedAt: now, ID: hex.EncodeToString(id),
+		UserID: user.ID, IssuedAt: now, ID: id,
 		CodeHash: confirmCodeHash(digits), Signals: signals, Method: method,
 	})
 	if err != nil {

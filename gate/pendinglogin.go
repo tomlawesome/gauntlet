@@ -185,11 +185,11 @@ func (g *Gate) pendingLogin(w http.ResponseWriter, r *http.Request, now time.Tim
 // against an account holding an active second factor, in place of
 // creating a session.
 func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, now time.Time) error {
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := newTicketID()
+	if err != nil {
 		return fmt.Errorf("gate: generating pending login id: %w", err)
 	}
-	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, ID: hex.EncodeToString(id)})
+	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, ID: id})
 	if err != nil {
 		return err
 	}
@@ -199,4 +199,18 @@ func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, now t
 
 func (g *Gate) clearPendingLoginCookie(w http.ResponseWriter) {
 	g.writeCookie(w, pendingLoginCookieName, "", pendingLoginCookiePath, -1)
+}
+
+// newTicketID returns a fresh ID for a sign-in ticket -- pending login,
+// confirm, prove or escape -- the key each is spent by (internal/spent),
+// so a ticket works once. 16 bytes from crypto/rand, hex: the shape of
+// gauntlet's own newID, which is unexported. One helper for all four, so
+// none can be made with a weaker source or a shorter ID than the others
+// (#90 item 11).
+func newTicketID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

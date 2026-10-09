@@ -549,19 +549,7 @@ func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountI
 	recorded := cur
 	cur = l.liftLapsedLocked(accountID, cur, now)
 	if cur.disabled() || now.Before(cur.until) {
-		// Refused. A decision this limiter has yet to save is tried
-		// again here, once per lockoutRetryInterval; so is a clamped
-		// lockout (readRecord), which while its save fails still reads
-		// as far off and lands here on every guess.
-		base := stored
-		if pending {
-			base = p.state
-		}
-		sync := l.settleLocked(accountID, base, cur, p, pending, now)
-		l.mu.Unlock()
-		if sync {
-			l.syncLockout(rec, accountID, now)
-		}
+		l.refuseAndUnlock(rec, accountID, stored, cur, p, pending, now)
 		d := AccountDecision{Disabled: cur.disabled(), Lockouts: cur.episodes}
 		if !d.Disabled {
 			d.Locked, d.LockedUntil = true, cur.until
@@ -569,11 +557,7 @@ func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountI
 		return d
 	}
 	key := loginBucket + accountID
-	cutoff := now.Add(-l.window)
-	if changed.After(cutoff) {
-		cutoff = changed // guesses at the old password do not count
-	}
-	entries := dropBefore(l.accounts, key, cutoff)
+	entries := l.windowEntriesLocked(key, changed, now)
 	if len(entries) >= l.threshold {
 		// Refused by the in-memory count. A lockout outlasts the window
 		// (lockoutFor), so this is reached only when the record lost a
@@ -894,21 +878,13 @@ func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, acc
 	recorded := cur
 	cur = l.liftLapsedLocked(accountID, cur, now)
 	if cur.disabled() {
-		// Refused, and a disable this limiter has yet to save is tried
-		// again, as ReserveAccount does while refusing.
-		base := stored
-		if pending {
-			base = p.state
-		}
-		sync := l.settleLocked(accountID, base, cur, p, pending, now)
-		l.mu.Unlock()
-		if sync {
-			l.syncLockout(rec, accountID, now)
-		}
+		// Refused only while disabled: a lockout is what this allowance
+		// lets the owner past.
+		l.refuseAndUnlock(rec, accountID, stored, cur, p, pending, now)
 		return AccountDecision{Disabled: true, Lockouts: cur.episodes}
 	}
 	key := knownBrowserBucket + accountID
-	entries := l.knownEntriesLocked(key, changed, now)
+	entries := l.windowEntriesLocked(key, changed, now)
 	if len(entries) >= l.threshold {
 		l.mu.Unlock()
 		return AccountDecision{Lockouts: cur.episodes}
@@ -937,15 +913,44 @@ func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, acc
 	return AccountDecision{Allowed: true, DisabledNow: !cur.disabled() && next.disabled(), Lockouts: next.episodes}
 }
 
-// knownEntriesLocked is a known browser's budget for key: its attempts
-// in the window, less any made before a password change (changed, zero
-// for none).
-func (l *LoginLimiter) knownEntriesLocked(key string, changed, now time.Time) []time.Time {
+// windowEntriesLocked is the attempts key holds that still count at
+// now: those in the window, less any made before a password change
+// (changed, from readRecord, zero for none), since guesses at the old
+// password do not count. An account's login budget and a known
+// browser's allowance are both cut by it, so the two cannot come to
+// disagree about which guesses a password change ended (#90).
+func (l *LoginLimiter) windowEntriesLocked(key string, changed, now time.Time) []time.Time {
 	cutoff := now.Add(-l.window)
 	if changed.After(cutoff) {
 		cutoff = changed
 	}
 	return dropBefore(l.accounts, key, cutoff)
+}
+
+// refuseAndUnlock settles an attempt on accountID that is refused --
+// disabled, or for ReserveAccount locked out -- and releases mu, which
+// the caller holds. Nothing new is decided; cur is the state the
+// refusal was decided on. A decision this limiter has yet to save is
+// tried again here, once per lockoutRetryInterval; so is a clamped
+// lockout (readRecord), which while its save fails still reads as far
+// off and lands here on every guess. It is settled against the pending
+// decision if there is one, else the record as stored -- not the
+// clamped record -- so a clamp is a change to save. ReserveAccount and
+// ReserveKnownBrowser share it, so a fix to how a refusal is saved
+// lands in both (#90).
+//
+// mu is released before syncLockout, which writes through the store
+// and its own lock.
+func (l *LoginLimiter) refuseAndUnlock(rec lockoutRecorder, accountID string, stored, cur lockoutState, p pendingLockout, pending bool, now time.Time) {
+	base := stored
+	if pending {
+		base = p.state
+	}
+	sync := l.settleLocked(accountID, base, cur, p, pending, now)
+	l.mu.Unlock()
+	if sync {
+		l.syncLockout(rec, accountID, now)
+	}
 }
 
 // ReleaseKnownBrowser is ReleaseAccount for ReserveKnownBrowser: the
@@ -967,7 +972,7 @@ func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID s
 
 	l.mu.Lock()
 	key := knownBrowserBucket + accountID
-	full := len(l.knownEntriesLocked(key, changed, now)) >= l.threshold
+	full := len(l.windowEntriesLocked(key, changed, now)) >= l.threshold
 	l.releaseIn(l.accounts, key, now)
 	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
 	next := cur

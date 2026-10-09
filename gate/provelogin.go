@@ -1,8 +1,6 @@
 package gate
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -29,13 +27,13 @@ import (
 // failed) no cookie exists and the caller refuses the attempt
 // (prove-failed).
 func (g *Gate) startProve(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, signals gauntlet.SignInSignals, now time.Time) bool {
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := newTicketID()
+	if err != nil {
 		g.logError("gate: generating a prove ticket id: " + err.Error())
 		return false
 	}
 	ticket, err := confirmLoginCodec.seal(confirmLoginState{
-		UserID: user.ID, IssuedAt: now, ID: hex.EncodeToString(id),
+		UserID: user.ID, IssuedAt: now, ID: id,
 		Signals: signals, Method: method, Prove: true,
 	})
 	if err != nil {

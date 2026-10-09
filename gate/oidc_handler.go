@@ -11,6 +11,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/groupname"
 	"github.com/tomlawesome/gauntlet/oidc"
 )
 
@@ -429,11 +430,12 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 // Policy.RoleWithoutGroup ("viewer" when unset). The second result is
 // false when no map is configured, which leaves every role alone.
 //
-// Groups match like AllowedGroups -- trimmed, case-insensitive -- and
-// the highest wins, so the result does not depend on the order the
-// provider lists groups in. Only user and viewer are ever given: gate.New
-// refuses any other value, and one that got past it here would fall to
-// the lowest role rather than a higher one (ADR-0013).
+// Groups match like AllowedGroups -- trimmed, case-insensitive, by the
+// same groupname.Match -- and the highest wins, so the result does not
+// depend on the order the provider lists groups in. Only user and
+// viewer are ever given: gate.New refuses any other value, and one that
+// got past it here would fall to the lowest role rather than a higher
+// one (ADR-0013).
 func (g *Gate) ssoRoleFor(identity *oidc.Identity) (gauntlet.Role, bool) {
 	p := g.deps.OIDCPolicy
 	if len(p.RoleFromGroups) == 0 {
@@ -442,7 +444,7 @@ func (g *Gate) ssoRoleFor(identity *oidc.Identity) (gauntlet.Role, bool) {
 	var best gauntlet.Role
 	for _, group := range p.Groups(identity) {
 		for name, value := range p.RoleFromGroups {
-			if !strings.EqualFold(strings.TrimSpace(group), strings.TrimSpace(name)) {
+			if !groupname.Match(group, name) {
 				continue
 			}
 			role := gauntlet.Role(value)
