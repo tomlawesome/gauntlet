@@ -68,6 +68,9 @@
 # codec's own copies of those failure paths moved there: 91.0%.
 # #90: internal/fetch is new at 100.0%, the redirect rule and refresh
 # jitter blocklist and geoip now share.
+# #90: internal/browsertoken is new at 87.5%, the known-browser token's
+# shape the root store and gate now share. What it leaves uncovered is
+# New's panic when crypto/rand fails.
 
 floors:
   persist: 90
@@ -89,3 +92,4 @@ floors:
   internal/plaintext: 100
   internal/seal: 78
   internal/fetch: 100
+  internal/browsertoken: 87
