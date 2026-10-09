@@ -25,6 +25,15 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **A passkey stores at most eight well-formed transports** (#80
+  P2-R1). The transports a browser reports at registration were stored
+  as they came, so one registration could put an unbounded list of
+  arbitrary strings in the accounts document. `Store.AddPasskey` and
+  `Store.HoldFirstPasskey` now keep at most eight entries, each 1-32
+  bytes of printable ASCII, dropping any other entry and any repeat and
+  keeping the order sent. WebAuthn Level 3 s5.8.4 makes the list a hint
+  clients ignore unknown values in, so a registration is never refused
+  over it.
 - **Passkey names are refused if they are not plain text, and cleaned
   in notices** (#89). A passkey's name, chosen by whoever registers it,
   was passed into owner notices as it came, so a mail or chat client

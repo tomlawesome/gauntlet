@@ -240,8 +240,7 @@ func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Pass
 		if u.HasSecondFactor() {
 			return ErrSecondFactorExists
 		}
-		p := pk.clone()
-		p.Name = normalisePasskeyName(pk.Name, len(u.Passkeys)+1)
+		p := storedPasskey(pk, len(u.Passkeys)+1)
 		u.HeldEnrolment = &HeldEnrolment{
 			Kind:          HeldFactorPasskey,
 			Passkey:       &p,
