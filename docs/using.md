@@ -187,7 +187,9 @@ Gauntlet names only a passkey presented with one of its own account IDs,
 so a sibling application's passkey is refused but never named. Never
 copy one application's user store into another on the same hostname:
 the IDs would then match, and each would name the other's passkeys. One
-hostname per application is simplest.
+hostname per application is simplest. A deleted account's passkeys are
+never named either, since its ID names no account any more: tell its
+user to remove them from their password manager.
 
 ### Every admin holds a passkey
 

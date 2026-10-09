@@ -133,14 +133,17 @@ exists. Each pair is named under the class it shares, below.
     hold carries `unknownCredential` and one it holds does not (#92).
     Telling them apart needs the account's user handle and the
     credential ID, which only the passkey's holder has, and tells them
-    only that it was removed;
-  - at `login/passkey`, an unknown user handle and a real account that
-    does not hold the passkey, except that only the second carries
-    `unknownCredential` (#92): a passkey is named only for an account
-    here, so a sibling application's is never named.
+    only that it was removed.
 
   None of these is ever split into a more specific class or a more
   specific message.
+
+  Not a pair: at `login/passkey`, an unknown user handle and a real
+  account that does not hold the passkey share the class and message,
+  but only the second carries `unknownCredential` (#92). A passkey is
+  named only for an account here, so a sibling application's on the same
+  hostname is never named; the handle is a random account ID only the
+  passkey's holder has.
 
 ## sign-in-required
 

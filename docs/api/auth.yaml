@@ -867,7 +867,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          description: The assertion was refused (`invalid-credentials`; `UnknownCredentialProblem` when it names a passkey the server does not hold, #92), or the ceremony is dead (`step-expired`) -- begin again.
+          description: The assertion was refused (`invalid-credentials`; `UnknownCredentialProblem` when the handle names an account here that does not hold the passkey, #92), or the ceremony is dead (`step-expired`) -- begin again.
           headers:
             WWW-Authenticate:
               required: true
