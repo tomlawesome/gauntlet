@@ -86,7 +86,7 @@ func TestValidWithinAcceptsEachPrintableClass(t *testing.T) {
 // An unprintable or broken character is refused however short the text:
 // the limit is an extra rule, not a replacement for the character rules.
 func TestValidWithinKeepsTheCharacterRulesUnderTheLimit(t *testing.T) {
-	for _, in := range []string{"a\nb", "a\uFFFDb", "a\xffb", "a‮b"} {
+	for _, in := range []string{"a\nb", "a\uFFFDb", "a\xffb", "a\u202eb"} {
 		if ValidWithin(in, 1000) {
 			t.Errorf("ValidWithin(%q, 1000) = true, want false", in)
 		}
