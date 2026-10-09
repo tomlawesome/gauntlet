@@ -592,32 +592,50 @@ func TestPasskeySignInWithACredentialTheAccountDoesNotHoldChargesNothingToIt(t *
 	e.mustSignIn(t, newBrowserJar(t))
 }
 
-// #80: the three refusals -- an unknown handle, a stranger's credential
-// on a real account, and an SSO-owned account -- cannot be told apart by
-// the response body.
+// #80, amended for #92: the three refusals -- an unknown handle, a
+// stranger's credential on a real account, and an SSO-owned account -- have
+// the same problem fields. The first two name the credential (#92), and
+// byte for byte alike when it is the same credential; the SSO-owned account
+// still holds its passkey, so it is not named and answers exactly as a
+// held credential refused for a wrong assertion does.
 func TestPasskeySignInUnheldCredentialAnswersLikeAnUnknownHandle(t *testing.T) {
 	e := newAloneEnv(t)
 	e.withFreshAddresses()
-	answer := func(fake *passkeytest.FakeAuthenticator) problemBody {
+	answer := func(fake *passkeytest.FakeAuthenticator) (problemBody, string) {
 		t.Helper()
 		resp, body := e.signIn(t, newBrowserJar(t), fake)
 		wantStatusClass(t, resp, body, http.StatusUnauthorized, classInvalidCredentials)
-		return decodeProblem(t, []byte(body))
+		return decodeProblem(t, []byte(body)), body
 	}
 
 	unknown := newFake(e.g)
 	unknown.UserHandle = []byte("no-such-account")
-	wantBody := answer(unknown)
+	wantBody, unknownRaw := answer(unknown)
+	wantUnknownCredential(t, unknownRaw, e.g.deps.Passkeys.RPID(), unknown)
 
-	stranger := newFake(e.g)
+	stranger := *unknown // the same credential, now presented with bilbo's handle
 	stranger.UserHandle = []byte(e.id)
-	if got := answer(stranger); got != wantBody {
+	got, strangerRaw := answer(&stranger)
+	if got != wantBody {
 		t.Errorf("a credential the account does not hold got %+v, want the unknown handle's %+v", got, wantBody)
 	}
+	if strangerRaw != unknownRaw {
+		t.Errorf("a credential the account does not hold got %s, want the unknown handle's %s byte for byte", strangerRaw, unknownRaw)
+	}
+
+	e.fake.NoUserVerification = true
+	_, heldRaw := answer(e.fake) // bilbo holds this passkey; the assertion is wrong
+	e.fake.NoUserVerification = false
+	wantNoUnknownCredential(t, heldRaw)
 
 	makeBilboSSOOwned(t, e)
-	if got := answer(e.fake); got != wantBody {
+	got, ssoRaw := answer(e.fake)
+	if got != wantBody {
 		t.Errorf("an SSO-owned account got %+v, want the unknown handle's %+v", got, wantBody)
+	}
+	wantNoUnknownCredential(t, ssoRaw)
+	if ssoRaw != heldRaw {
+		t.Errorf("an SSO-owned account got %s, want the held credential's %s byte for byte", ssoRaw, heldRaw)
 	}
 }
 
