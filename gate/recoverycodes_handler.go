@@ -28,7 +28,7 @@ type recoveryCodesRegenerateResponse struct {
 // outright when the account has no second factor at all: recovery codes
 // stand in for one, not for a password alone.
 //
-// The old set stops working at once, when GenerateRecoveryCodes saves the
+// The old set stops working at once, when RegenerateRecoveryCodes saves the
 // new one, just before the reply is written (owner decision, 2026-10-08,
 // #80 P1-S2: as GitHub, Google, Microsoft, 1Password and Dropbox do; NIST
 // SP 800-63B-4 4.2.1.1 lets a replacement be requested at any time). The
@@ -81,7 +81,7 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err != nil {
-		// GenerateRecoveryCodes' own restore-on-failure contract already
+		// RegenerateRecoveryCodes' own restore-on-failure contract already
 		// left the old set intact and reported nothing as issued -- this
 		// is a clean refusal, not a half-done one.
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)

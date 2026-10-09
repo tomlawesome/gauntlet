@@ -50,7 +50,7 @@ All notable changes to this project are documented in this file.
   account with no factor. New `Store.RegenerateRecoveryCodes` refuses
   with `ErrNoSecondFactors` under the store lock, storing nothing, and
   the route answers its existing 409. `GenerateRecoveryCodes` is
-  unchanged.
+  unchanged. Additive.
 - **A passkey stores at most eight well-formed transports** (#80
   P2-R1). The transports a browser reports at registration were stored
   as they came, so one registration could put an unbounded list of

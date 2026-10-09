@@ -69,7 +69,8 @@ var (
 	ErrNoPasskeys = errors.New("gauntlet: this account has no passkeys")
 	// ErrNoSecondFactors is returned by ClearAllSecondFactors when the
 	// account has nothing to clear: no authenticator app (live or
-	// pending), no passkey, no recovery codes and nothing on hold.
+	// pending), no passkey, no recovery codes and nothing on hold; and
+	// by RegenerateRecoveryCodes when it has no live second factor (#94).
 	// Nothing is written.
 	ErrNoSecondFactors = errors.New("gauntlet: this account has no second factor to clear")
 	// ErrPasskeyLimitReached is returned by AddPasskey once an account
