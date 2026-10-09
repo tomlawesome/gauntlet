@@ -25,6 +25,25 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **Passkey names are refused if they are not plain text, and cleaned
+  in notices** (#89). A passkey's name, chosen by whoever registers it,
+  was passed into owner notices as it came, so a mail or chat client
+  could show a made-up line or hidden text. `Store.AddPasskey`,
+  `Store.RenamePasskey` and `Store.HoldFirstPasskey` now refuse a name
+  holding a control or format character, a line or paragraph separator
+  or invalid UTF-8 with the new `ErrPasskeyNameInvalid`, and store
+  nothing. `POST /api/auth/passkeys/register/finish` answers `400
+  invalid-request` before the ceremony is used, so the same credential
+  can be finished again with a good name, and `PATCH
+  /api/auth/passkeys/{id}` answers `400`. A blank name still becomes
+  `Passkey n`, a long one is still cut, and letters of any script,
+  accents and emoji are still accepted. Notices built from a passkey
+  name stored before this release have those characters removed. One
+  shared rule now decides what is plain text for usernames, token names,
+  device IDs, sign-out reasons and passkey names; none of their
+  behaviour changes. Additive: a name refused here was accepted before,
+  so a caller that sent one now gets an error.
+
 - **Confirmation codes and escape codes wait between sends, and five an
   hour at most** (#83). The per-window send limit (#84) let someone
   holding the password ask for a code every minute, window after window.
