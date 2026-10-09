@@ -85,7 +85,27 @@ func NormaliseRecoveryCode(typed string) string {
 //
 // now is unused: a recovery code records no issue time. It stays so the
 // signature matches mikroview's and gauntlet v0.1.0's.
+//
+// It writes whether or not the account has a second factor; gate uses
+// RegenerateRecoveryCodes, which refuses that case (#94).
 func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, error) {
+	return s.generateRecoveryCodes(userID, false)
+}
+
+// RegenerateRecoveryCodes is GenerateRecoveryCodes for an account's
+// later sets: it refuses with ErrNoSecondFactors, storing nothing, when
+// the account has no live second factor (an app or passkey only pending
+// or held does not count). That is decided in the same locked write that
+// replaces the set (check-and-set, as AddLaterPasskey is), so a last
+// factor removed after the caller looked -- which cleared the codes --
+// cannot leave a new set on an account with no factor (#94).
+func (s *Store) RegenerateRecoveryCodes(userID string, now time.Time) ([]string, error) {
+	return s.generateRecoveryCodes(userID, true)
+}
+
+// generateRecoveryCodes is GenerateRecoveryCodes, and with needFactor
+// set RegenerateRecoveryCodes.
+func (s *Store) generateRecoveryCodes(userID string, needFactor bool) ([]string, error) {
 	if !s.Persisted() {
 		return nil, ErrNotPersisted
 	}
@@ -111,6 +131,9 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 		u, ok := st.byID[userID]
 		if !ok {
 			return ErrUserNotFound
+		}
+		if needFactor && !u.HasSecondFactor() {
+			return ErrNoSecondFactors
 		}
 		u.RecoveryCodes = hashed
 		return nil

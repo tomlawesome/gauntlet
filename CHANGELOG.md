@@ -44,6 +44,13 @@ All notable changes to this project are documented in this file.
   live unproven. `Store.ConfirmLaterTOTP` takes the verified secret and
   refuses with `ErrNoPendingTOTP` if it changed. `ConfirmTOTP` is
   unchanged and documents that it makes no such check.
+- **Regenerating recovery codes needs a live second factor at the
+  write** (#94). The route checked for a factor, then wrote the new set
+  unconditionally; a last factor removed in between left codes on an
+  account with no factor. New `Store.RegenerateRecoveryCodes` refuses
+  with `ErrNoSecondFactors` under the store lock, storing nothing, and
+  the route answers its existing 409. `GenerateRecoveryCodes` is
+  unchanged.
 - **A passkey stores at most eight well-formed transports** (#80
   P2-R1). The transports a browser reports at registration were stored
   as they came, so one registration could put an unbounded list of
