@@ -163,7 +163,11 @@ authenticator, AAL2).
   `detail` or Go API; counting is unchanged. A refused `{assertion}` at
   `POST /api/auth/reauthenticate` names it the same way, only when the
   handle is the timed-out session's own account and that account holds
-  no passkey of that ID (owner decision 7a).
+  no passkey of that ID (owner decision 7a). Amended (owner decision
+  8a): `login/passkey` names a passkey only when the handle names one of
+  this application's accounts, because another application on the same
+  hostname shares the browser's passkeys and must never have its own
+  deleted; a handle naming no account here gets no member.
 - Status (#96): decision 5 was silent on a finish whose handle names no
   account the credential can sign in to, or that never reaches the
   lookup. Such a finish reserved nothing and ignored the address ban, so

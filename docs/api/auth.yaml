@@ -822,13 +822,20 @@ paths:
         refused credential leaves the ceremony open for a corrected
         assertion.
 
-        A refusal whose passkey the server does not hold in any form --
-        the handle names no account, or an account with no passkey of that
-        ID, live, stale or held -- names it in `unknownCredential` (#92;
-        `UnknownCredentialProblem`), the argument of the browser's
+        A refusal whose handle names one of this application's accounts
+        that holds no passkey of that ID -- live, stale or held -- names it
+        in `unknownCredential` (#92; `UnknownCredentialProblem`), the
+        argument of the browser's
         `PublicKeyCredential.signalUnknownCredential()`, so the frontend
-        can tell the browser to stop offering it. The two cases answer
-        byte for byte alike; every other refusal has no member.
+        can tell the browser to stop offering it. A handle naming no
+        account here gets a plain `Problem` with no member, answering as a
+        wrong signature does: an RP ID is a hostname with no port or path
+        (W3C WebAuthn Level 3), so another application on the same
+        hostname shares the browser's passkeys, and naming one of its
+        passkeys would make the browser hide or delete one that still
+        works there. The member shows that the handle named an account
+        here; the handle is a random 128-bit ID only the passkey's holder
+        has. Every other refusal has no member.
 
         A completed sign-in is first judged for unusual-sign-in signals
         (#55, method `passkey_alone`): it may be refused (`403`
@@ -3066,7 +3073,8 @@ components:
     UnknownCredentialProblem:
       description: |
         The `invalid-credentials` refusal of `POST /api/auth/login/passkey`
-        when the server holds the assertion's passkey in no form, and of
+        when the handle names one of this application's accounts and that
+        account holds the assertion's passkey in no form, and of
         `POST /api/auth/reauthenticate` when the timed-out session's own
         account does not (#92; docs/api/errors.md). Closed, as `PartiallyCompletedProblem` is:
         its one extension member is part of the contract.

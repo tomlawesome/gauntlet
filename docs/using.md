@@ -160,8 +160,8 @@ Both are optional, and both answer 404 on their routes until wired:
 ### Tell the browser to forget a removed passkey
 
 With passkey sign-in on, a browser keeps offering a passkey its owner
-has removed, and every try is refused. When the server holds no
-passkey of that ID, the `401` from `POST /api/auth/login/passkey`
+has removed, and every try is refused. When the passkey's account is
+one of this application's and holds no passkey of that ID, the `401` from `POST /api/auth/login/passkey`
 carries `unknownCredential` (#92, [errors.md](api/errors.md#invalid-credentials)).
 So does a refused passkey at `POST /api/auth/reauthenticate`, when it
 names the timed-out session's own account and that account no longer
@@ -179,6 +179,15 @@ password manager drops the passkey from its list.
   then signing in another way.
 - The browser's deletion cannot be undone, so gauntlet never names a
   passkey it still holds, even one that cannot sign in here today.
+
+Passkeys are scoped to the hostname, not the port or path. Two
+applications on one hostname, on two ports or two paths, or anything on
+`localhost`, each see the other's passkeys in the browser's chooser.
+Gauntlet names only a passkey presented with one of its own account IDs,
+so a sibling application's passkey is refused but never named. Never
+copy one application's user store into another on the same hostname:
+the IDs would then match, and each would name the other's passkeys. One
+hostname per application is simplest.
 
 ### Every admin holds a passkey
 
