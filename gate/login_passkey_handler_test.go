@@ -50,9 +50,14 @@ type aloneEnv struct {
 	country string
 }
 
-func newAloneEnv(t *testing.T) *aloneEnv {
+func newAloneEnv(t *testing.T) *aloneEnv { return newAloneEnvAt(t, passkeyTestPublicURL) }
+
+// newAloneEnvAt is newAloneEnv for a gate whose public URL (and so relying
+// party) is publicURL, so two gates can share a hostname on different ports.
+func newAloneEnvAt(t *testing.T, publicURL string) *aloneEnv {
 	t.Helper()
 	g, ts, admin := passkeyFixture(t)
+	g.deps.Passkeys = mustRelyingParty(t, publicURL)
 	g.cfg.PasskeySignIn = true
 	e := &aloneEnv{g: g, ts: ts, admin: admin, clock: &escalationClock{t: time.Now()}, country: "GB", notices: &noticeRecorder{}}
 	g.cfg.Now = e.clock.now
@@ -592,32 +597,56 @@ func TestPasskeySignInWithACredentialTheAccountDoesNotHoldChargesNothingToIt(t *
 	e.mustSignIn(t, newBrowserJar(t))
 }
 
-// #80: the three refusals -- an unknown handle, a stranger's credential
-// on a real account, and an SSO-owned account -- cannot be told apart by
-// the response body.
-func TestPasskeySignInUnheldCredentialAnswersLikeAnUnknownHandle(t *testing.T) {
+// #80, amended for #92 and its 2026-10-09 amendment: a passkey is named
+// only when the handle names one of this application's own accounts. An
+// unknown handle and an SSO-owned account that still holds its passkey are
+// both unnamed and byte for byte the held-credential wrong-assertion body;
+// a stranger's credential presented with bilbo's handle is named.
+func TestPasskeySignInNamesAPasskeyOnlyForAnAccountOfItsOwn(t *testing.T) {
 	e := newAloneEnv(t)
 	e.withFreshAddresses()
-	answer := func(fake *passkeytest.FakeAuthenticator) problemBody {
+	answer := func(fake *passkeytest.FakeAuthenticator) (problemBody, string) {
 		t.Helper()
 		resp, body := e.signIn(t, newBrowserJar(t), fake)
 		wantStatusClass(t, resp, body, http.StatusUnauthorized, classInvalidCredentials)
-		return decodeProblem(t, []byte(body))
+		return decodeProblem(t, []byte(body)), body
 	}
+
+	e.fake.NoUserVerification = true
+	wantBody, heldRaw := answer(e.fake) // bilbo holds this passkey; the assertion is wrong
+	e.fake.NoUserVerification = false
+	wantNoUnknownCredential(t, heldRaw)
 
 	unknown := newFake(e.g)
 	unknown.UserHandle = []byte("no-such-account")
-	wantBody := answer(unknown)
+	got, unknownRaw := answer(unknown)
+	if got != wantBody {
+		t.Errorf("an unknown handle got %+v, want the held credential's %+v", got, wantBody)
+	}
+	wantNoUnknownCredential(t, unknownRaw)
+	if unknownRaw != heldRaw {
+		t.Errorf("an unknown handle got %s, want the held credential's %s byte for byte", unknownRaw, heldRaw)
+	}
 
-	stranger := newFake(e.g)
+	stranger := *unknown // the same credential, now presented with bilbo's handle
 	stranger.UserHandle = []byte(e.id)
-	if got := answer(stranger); got != wantBody {
-		t.Errorf("a credential the account does not hold got %+v, want the unknown handle's %+v", got, wantBody)
+	got, strangerRaw := answer(&stranger)
+	if got != wantBody {
+		t.Errorf("a credential the account does not hold got problem fields %+v, want %+v", got, wantBody)
+	}
+	wantUnknownCredential(t, strangerRaw, e.g.deps.Passkeys.RPID(), &stranger)
+	if strangerRaw == unknownRaw {
+		t.Errorf("a credential the account does not hold got the unknown handle's body %s, want it named", strangerRaw)
 	}
 
 	makeBilboSSOOwned(t, e)
-	if got := answer(e.fake); got != wantBody {
-		t.Errorf("an SSO-owned account got %+v, want the unknown handle's %+v", got, wantBody)
+	got, ssoRaw := answer(e.fake)
+	if got != wantBody {
+		t.Errorf("an SSO-owned account got %+v, want the held credential's %+v", got, wantBody)
+	}
+	wantNoUnknownCredential(t, ssoRaw)
+	if ssoRaw != heldRaw {
+		t.Errorf("an SSO-owned account got %s, want the held credential's %s byte for byte", ssoRaw, heldRaw)
 	}
 }
 

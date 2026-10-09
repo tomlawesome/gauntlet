@@ -1378,7 +1378,11 @@ it. The data for all of this lives on `User`.
   counted for the account's lockout and the address limit and ban before
   the signature is checked, and meets the must-change-password door after
   it. The same passkey resumes a timed-out session (§1.5, #71). Mikroview
-  opts in when its login screen has the button.
+  opts in when its login screen has the button. A refusal for a passkey
+  that one of this application's own accounts does not hold names it
+  (`unknownCredential`, #92), so the application can tell the browser to
+  stop offering it; a handle naming no account here is never named, as a
+  sibling application on the same hostname may still use that passkey.
 - **The door is always shut: `RequireSecondFactor` is deprecated and
   ignored (#49).** `gate` no longer offers a way to turn the
   forced-enrolment door off -- every local-password account, mikroview's

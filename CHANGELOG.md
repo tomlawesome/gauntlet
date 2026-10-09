@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **A refused passkey sign-in names a passkey its account does not
+  hold** (#92). The `401` `invalid-credentials` from `POST
+  /api/auth/login/passkey` carries an `unknownCredential` member,
+  `{rpId, credentialId}`, when the user handle names one of this
+  application's accounts that holds no passkey of that ID in any form;
+  a handle naming no account here gets no member, since another
+  application on the same hostname shares the browser's passkeys. A
+  refused passkey at `POST /api/auth/reauthenticate` carries it too,
+  when the handle is the timed-out session's own account and that
+  account no longer holds the passkey (never for another account's
+  handle). An application passes
+  it to the browser's `PublicKeyCredential.signalUnknownCredential()`
+  (W3C WebAuthn Level 3), so a removed passkey stops being offered;
+  docs/using.md has the feature check and fallback. A passkey the
+  server still holds, live, stale or held for its codes, is never
+  named. `detail`, status and counting are unchanged; no Go API
+  changes. Additive.
+
 - **An admin can allow an account's next sign-in for ten minutes**
   (#81, ADR-0009 decision 11). `POST /api/auth/users/{id}/allow-sign-in`
   lets a person the unusual-sign-in policy holds or refuses at a new
@@ -24,6 +42,19 @@ All notable changes to this project are documented in this file.
   `User.SignInAllowed` and `SignInAllowanceLifetime`. Additive.
 
 ### Security
+
+- **Every passkey sign-in finish counts on the address** (#96). A `POST
+  /api/auth/login/passkey` finish whose user handle names no account the
+  credential can sign in to, or that never reaches the account lookup
+  (no handle, an unreadable assertion), reserved nothing and was never
+  checked against the address ban, so one begin cookie bought unbounded
+  tries for five minutes. Such a finish now checks the ban and reserves
+  one attempt on the address bucket a password attempt uses: once that
+  is used or the address is banned it answers `429` `rate-limited`
+  (recorded `rate_limited`, method `passkey_alone`, no account; no
+  `unknownCredential`; the ceremony cookie kept), otherwise the `401`
+  it always did, counted. The account path, dead ceremonies and the Go
+  API are unchanged.
 
 - A passkey-alone sign-in (`POST /api/auth/login/passkey`) whose user
   handle names an account the credential cannot sign in to -- an

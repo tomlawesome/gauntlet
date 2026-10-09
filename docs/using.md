@@ -157,6 +157,40 @@ Both are optional, and both answer 404 on their routes until wired:
   ([ADR-0012](adr/0012-passkey-alone-sign-in.md)). An application that
   never imports `gauntlet/passkey` never links the WebAuthn library.
 
+### Tell the browser to forget a removed passkey
+
+With passkey sign-in on, a browser keeps offering a passkey its owner
+has removed, and every try is refused. When the passkey's account is
+one of this application's and holds no passkey of that ID, the `401` from `POST /api/auth/login/passkey`
+carries `unknownCredential` (#92, [errors.md](api/errors.md#invalid-credentials)).
+So does a refused passkey at `POST /api/auth/reauthenticate`, when it
+names the timed-out session's own account and that account no longer
+holds it, so the resume prompt can drop it too.
+Pass that object unchanged to
+`PublicKeyCredential.signalUnknownCredential()`, and the browser or
+password manager drops the passkey from its list.
+
+- Check the call exists first, with
+  `if (PublicKeyCredential.signalUnknownCredential)`: as of 2026-10,
+  Chrome and Edge 132 and later have it, Safari has announced it, and
+  Firefox does not.
+- Where it is missing, show the refusal as usual and suggest removing
+  the passkey by hand in the browser's or password manager's settings,
+  then signing in another way.
+- The browser's deletion cannot be undone, so gauntlet never names a
+  passkey it still holds, even one that cannot sign in here today.
+
+Passkeys are scoped to the hostname, not the port or path. Two
+applications on one hostname, on two ports or two paths, or anything on
+`localhost`, each see the other's passkeys in the browser's chooser.
+Gauntlet names only a passkey presented with one of its own account IDs,
+so a sibling application's passkey is refused but never named. Never
+copy one application's user store into another on the same hostname:
+the IDs would then match, and each would name the other's passkeys. One
+hostname per application is simplest. A deleted account's passkeys are
+never named either, since its ID names no account any more: tell its
+user to remove them from their password manager.
+
 ### Every admin holds a passkey
 
 `Config.AdminPasskey` says whether every admin account must hold a
