@@ -30,8 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -139,17 +139,17 @@ var (
 	// caller believing in a scope that nothing enforces.
 	ErrTokenDeviceNotAllowed = errors.New("gauntlet: only an ingest token may name a device")
 	// ErrTokenDeviceInvalid is returned by Create for a device id that
-	// cannot be one: too long, or carrying control/formatting
-	// characters. The id is a display value (it appears in the token
+	// cannot be one: longer than MaxDeviceIDLen characters, or not plain
+	// text (plaintext.ValidWithin). The id is a display value (it appears in the token
 	// list, an audit trail and log lines) as well as a scope key, and
 	// an unbounded or control-bearing one is a typo that becomes a
 	// permanently, invisibly dead token at best.
-	ErrTokenDeviceInvalid = errors.New("gauntlet: device id must be printable text of at most 64 bytes (fewer characters for non-Latin letters)")
-	// ErrTokenNameInvalid is returned by Create for a name that is too
-	// long or carries control/formatting characters. The name is a
+	ErrTokenDeviceInvalid = errors.New("gauntlet: device id must be at most 64 characters of plain text")
+	// ErrTokenNameInvalid is returned by Create for a name longer than
+	// MaxTokenNameLen characters or that is not plain text. The name is a
 	// display value in the same places the device id is, and bounded
 	// for the same reasons (see ErrTokenDeviceInvalid).
-	ErrTokenNameInvalid = errors.New("gauntlet: token name must be printable text of at most 64 bytes (fewer characters for non-Latin letters)")
+	ErrTokenNameInvalid = errors.New("gauntlet: token name must be at most 64 characters of plain text")
 	// ErrTokenExpiryInvalid is returned by CreateWithExpiry for an expiry
 	// that is not after the time of creation: a token born expired
 	// would be a dead credential the caller believes works.
@@ -640,46 +640,34 @@ func hashTokenValue(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// MaxDeviceIDLen bounds a token's device scope. Nothing legitimate comes
-// close: a configured id is operator-chosen and a discovered one is an
-// IP literal (at most 45 characters for IPv6 with a zone).
+// MaxDeviceIDLen bounds a token's device scope, in characters (code
+// points), not bytes (#90). Nothing legitimate comes close: a configured
+// id is operator-chosen and a discovered one is an IP literal (at most
+// 45 characters for IPv6 with a zone).
 const MaxDeviceIDLen = 64
 
 // validDeviceID rejects a device scope that could not have come from a
-// real device. Control and Unicode formatting characters, and the line
-// and paragraph separators (unprintable), are refused because this string reaches an operator's terminal and browser, and
-// the length cap keeps an oversized value out of the token store.
+// real device. Text that is not plain (plaintext.ValidWithin: control
+// and format characters, the line and paragraph separators, U+FFFD,
+// invalid UTF-8) is refused because this string reaches an operator's
+// terminal and browser, and the length cap keeps an oversized value out
+// of the token store.
 func validDeviceID(device string) bool {
 	if device == "" {
 		return true // the required/not-allowed rules in Create already ruled on this
 	}
-	return printableWithin(device, MaxDeviceIDLen)
+	return plaintext.ValidWithin(device, MaxDeviceIDLen)
 }
 
-// MaxTokenNameLen bounds a token's display name, the same cap
-// MaxDeviceIDLen puts on its device scope.
+// MaxTokenNameLen bounds a token's display name in characters, the same
+// cap MaxDeviceIDLen puts on its device scope.
 const MaxTokenNameLen = 64
 
 // validTokenName applies validDeviceID's rules to a token's name, which
 // reaches the same terminals and browsers. Empty stays allowed, as it
 // always has been: a name is a label, not a scope.
 func validTokenName(name string) bool {
-	return printableWithin(name, MaxTokenNameLen)
-}
-
-// printableWithin is the check validDeviceID and validTokenName share:
-// at most maxBytes of valid UTF-8, with no character unprintable
-// refuses.
-func printableWithin(s string, maxBytes int) bool {
-	if len(s) > maxBytes {
-		return false
-	}
-	for _, r := range s {
-		if unprintable(r) || r == utf8.RuneError {
-			return false
-		}
-	}
-	return utf8.ValidString(s)
+	return plaintext.ValidWithin(name, MaxTokenNameLen)
 }
 
 // Create generates a new token named name, of kind kind, and persists

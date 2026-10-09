@@ -78,7 +78,8 @@ var (
 	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
 	// ErrPasskeyNameInvalid is returned by AddPasskey, RenamePasskey and
 	// HoldFirstPasskey for a name holding a control or format character,
-	// a line or paragraph separator, or invalid UTF-8 (#89): a name is
+	// a line or paragraph separator, invalid UTF-8 (#89) or U+FFFD
+	// (#90): a name is
 	// plain text, shown in lists and in notices to the account's owner.
 	// Nothing is stored or changed. A blank name is not an error; it
 	// becomes "Passkey <n>".
@@ -289,14 +290,17 @@ type PasskeyFlags struct {
 	BackupState    bool `json:"backupState"`
 }
 
-// checkPasskeyName refuses a name that is not plain text, before
-// normalisePasskeyName trims, cuts or defaults it: an unprintable
-// character past the 64th would otherwise be cut off unseen, and one
-// among spaces trimmed away, so the answer would depend on where it
-// sat. Shared by AddPasskey, RenamePasskey and HoldFirstPasskey so the
-// three can't drift apart.
+// checkPasskeyName refuses a name that is not plain text, U+FFFD
+// included (plaintext.ValidWithin, #90), before normalisePasskeyName
+// trims, cuts or defaults it: an unprintable character past the 64th
+// would otherwise be cut off unseen, and one among spaces trimmed away,
+// so the answer would depend on where it sat. Shared by AddPasskey,
+// RenamePasskey and HoldFirstPasskey so the three can't drift apart.
+//
+// The limit given is len(name), which no name's character count can
+// pass: a long name is cut to maxPasskeyNameLength, not refused.
 func checkPasskeyName(name string) error {
-	if !plaintext.Valid(name) {
+	if !plaintext.ValidWithin(name, len(name)) {
 		return ErrPasskeyNameInvalid
 	}
 	return nil

@@ -20,7 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 // MaxSessionIdle is the longest a session may go unused before gate.New
@@ -286,28 +287,24 @@ func (s *SessionStore) CreateContinuing(from Session, client SessionClient, now 
 	return sess
 }
 
-// cleanClientText is Clean's rule for one SessionClient field: the
-// characters printableWithin (token.go) refuses in a token name are
-// dropped rather than refused -- a session is never refused for what a
-// browser sent -- and what is left is cut to at most maxBytes on a
-// character boundary.
+// cleanClientText is Clean's rule for one SessionClient field:
+// plaintext.Clean drops what is not plain text rather than refusing it
+// -- a session is never refused for what a browser sent -- and what is
+// left is cut to at most maxBytes on a character boundary. Client text
+// keeps a byte cap (#90): it is not a name a person chose.
 func cleanClientText(s string, maxBytes int) string {
-	var b strings.Builder
-	for len(s) > 0 {
-		r, size := utf8.DecodeRuneInString(s)
-		s = s[size:]
-		if r == utf8.RuneError && size == 1 {
-			continue // invalid UTF-8
-		}
-		if unprintable(r) {
-			continue
-		}
-		if b.Len()+size > maxBytes {
+	s = plaintext.Clean(s)
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := 0
+	for i := range s {
+		if i > maxBytes {
 			break
 		}
-		b.WriteRune(r)
+		cut = i
 	}
-	return b.String()
+	return s[:cut]
 }
 
 // sweepLocked checks the next sweepBatch entries of order: an ID no
