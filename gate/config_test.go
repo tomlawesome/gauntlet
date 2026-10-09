@@ -303,3 +303,34 @@ func TestNewRequiresTheAdminPasskeyRule(t *testing.T) {
 		})
 	}
 }
+
+// TestNewRefusesABlankAllowListEntry pins #91: a blank entry in an
+// allow-list (a trailing comma when an app splits a setting) is refused
+// at startup, naming the field, rather than silently widening access.
+func TestNewRefusesABlankAllowListEntry(t *testing.T) {
+	cases := map[string]oidc.Policy{
+		"AllowedGroups":       {AllowedGroups: []string{"family", ""}},
+		"AllowedEmails":       {AllowedEmails: []string{"a@example.com", " "}},
+		"AllowedEmailDomains": {AllowedEmailDomains: []string{"example.com", "\t"}},
+		"RoleFromGroups":      {RoleFromGroups: map[string]string{"staff": "user", "": "user"}},
+	}
+	for field, policy := range cases {
+		t.Run(field, func(t *testing.T) {
+			deps := validDeps(t)
+			deps.OIDCPolicy = policy
+			_, err := New(validConfig(), deps)
+			if err == nil {
+				t.Fatal("expected New to refuse the policy")
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("error %q does not name %s", err, field)
+			}
+		})
+	}
+
+	deps := validDeps(t)
+	deps.OIDCPolicy = oidc.Policy{AllowedGroups: []string{"family"}}
+	if _, err := New(validConfig(), deps); err != nil {
+		t.Errorf("a policy with no blank entries was refused: %v", err)
+	}
+}

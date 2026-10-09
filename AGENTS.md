@@ -90,6 +90,10 @@ licence need an owner-recorded `go-bundled-assets:` review (#64).
 
 ## Checks
 
+Run them under CI's Go: `export GOTOOLCHAIN=go1.27.2`. Go 1.27.0 and
+1.27.1 over-count coverage statements, so their figures miss the floors
+(re-measured under 1.27.2, !51).
+
 ```
 gofmt -l .                     # must print nothing
 go build ./... && go vet ./... && go test ./... -race -coverprofile=coverage.out

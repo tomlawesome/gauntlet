@@ -137,8 +137,9 @@ type SecondFactorDetail struct {
 // LockoutDetail is NoticeAccountLocked and NoticeSignInDisabled's
 // detail: the attempt's own address, and, for a lockout, when it ends
 // and how many the account has had since its last completed sign-in.
-// Until and Lockouts are both zero for NoticeSignInDisabled unless the
-// same attempt also started a lockout.
+// For NoticeSignInDisabled, Lockouts is the account's running lockout
+// count all the same, and Until is zero unless the same attempt also
+// started a lockout.
 type LockoutDetail struct {
 	Until    time.Time
 	Lockouts int

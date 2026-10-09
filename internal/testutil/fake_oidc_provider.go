@@ -70,6 +70,13 @@ type FakeProvider struct {
 	// secret, an expired code).
 	TokenErrorStatus int
 	TokenErrorBody   string
+
+	// ExpectCodeVerifier, when non-empty, makes the token endpoint behave
+	// like a PKCE-enforcing provider (Authentik, Keycloak): a code
+	// exchange whose code_verifier is missing or different is refused
+	// with invalid_grant, as RFC 7636 §4.6 says. Set it to the verifier
+	// the flow state carries to prove the caller sends that one.
+	ExpectCodeVerifier string
 }
 
 // NewFakeProvider starts an httptest server serving discovery, JWKS and
@@ -147,6 +154,14 @@ func (fp *FakeProvider) serveToken(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(fp.TokenErrorStatus)
 		_, _ = w.Write([]byte(fp.TokenErrorBody))
 		return
+	}
+	if fp.ExpectCodeVerifier != "" {
+		if err := r.ParseForm(); err != nil || r.PostForm.Get("code_verifier") != fp.ExpectCodeVerifier {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"code_verifier missing or does not match"}`))
+			return
+		}
 	}
 	idToken := fp.NextIDToken
 	if idToken == "" {

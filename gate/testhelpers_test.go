@@ -304,6 +304,24 @@ func enrolTOTPFactor(t *testing.T, client *http.Client, ts *httptest.Server, pas
 	confirmEnrolmentOK(t, client, ts)
 }
 
+// userClientPastTheDoor creates a plain "user"-role account through
+// admin, signs it in and enrols it a second factor, and returns its
+// client. A password-only user is stopped at the forced-enrolment door
+// before any role check runs (#49), so a test that means to prove an
+// admin-only route refuses the ROLE has to start from an account that is
+// past that door; pair this with wantProblem(..., classForbidden), whose
+// problem type differs from the door's (classMustEnrolFactor).
+func userClientPastTheDoor(t *testing.T, ts *httptest.Server, admin *http.Client, username, password string) *http.Client {
+	t.Helper()
+	resp := postJSON(t, admin, ts.URL+"/api/auth/users", createUserRequest{Username: username, Password: password, Role: "user"})
+	if status, body := readAll(t, resp); status != http.StatusCreated {
+		t.Fatalf("creating %q = %d %s", username, status, body)
+	}
+	client := loggedInClient(t, ts, username, password)
+	enrolTOTPFactor(t, client, ts, password)
+	return client
+}
+
 // testAdminPassword is the password the fixtures register "admin" with;
 // the admin routes that re-check the caller's password (#72) take it.
 const testAdminPassword = "password-placeholder-1"

@@ -36,18 +36,20 @@ const defaultGroupsClaim = "groups"
 // is set adds a condition, and all set conditions must hold.
 type Policy struct {
 	// AllowedGroups permits an identity carrying at least one of these in
-	// its groups claim (GroupsClaim). Permit checks it on its own, with
+	// its groups claim (GroupsClaim). An entry must not be empty or only
+	// whitespace (Validate refuses it). Permit checks it on its own, with
 	// its own refusal messages; it is not folded into RequiredClaims, so
 	// setting both on the same claim means both must hold.
 	AllowedGroups []string
 	// GroupsClaim is where to read groups from; defaults to "groups".
 	GroupsClaim string
 	// AllowedEmails is an exact-address allowlist, compared
-	// case-insensitively.
+	// case-insensitively. An entry must not be empty or only whitespace.
 	AllowedEmails []string
 	// AllowedEmailDomains permits an identity whose email is at one of
 	// these domains -- the usual way to scope a Google Workspace or
-	// Microsoft 365 tenant down to one organisation.
+	// Microsoft 365 tenant down to one organisation. An entry must not be
+	// empty or only whitespace.
 	AllowedEmailDomains []string
 	// RequiredClaims is the general mechanism for any other claim: claim
 	// name -> permitted values, where the identity must carry at least
@@ -60,7 +62,8 @@ type Policy struct {
 	RequiredClaims map[string][]string
 	// RoleFromGroups gives an SSO account a role from the groups claim
 	// (GroupsClaim): group name -> "user" or "viewer", matched like
-	// AllowedGroups (trimmed, case-insensitive). An identity in several
+	// AllowedGroups (trimmed, case-insensitive). A group name must not be
+	// empty or only whitespace (Validate refuses it). An identity in several
 	// mapped groups gets the highest role. It is applied when the account
 	// is provisioned and at every SSO sign-in, so the identity provider
 	// stays the source of truth (ADR-0013).
@@ -146,7 +149,7 @@ func (p Policy) Permit(id *Identity) error {
 // Groups returns the values id carries in the groups claim (GroupsClaim,
 // default "groups") -- the same ones Permit reads for AllowedGroups --
 // whether the provider sent a single string or a list. Empty when the
-// claim is absent.
+// claim is absent. Blank (empty or whitespace-only) values are dropped.
 func (p Policy) Groups(id *Identity) []string {
 	if id == nil {
 		return nil
@@ -184,11 +187,60 @@ func (p Policy) ValidateRoles(valid func(role string) bool) error {
 	return nil
 }
 
+// Validate refuses a Policy with a blank allow-list entry: any
+// AllowedGroups, AllowedEmails or AllowedEmailDomains entry, or any
+// RoleFromGroups key, that is empty or only whitespace. A domain entry
+// is also blank when nothing is left after its leading "@" is removed,
+// as permitEmail reads it. It names the
+// first offending field, in a fixed order so the message is stable.
+//
+// An app that builds these lists by splitting a setting on commas gets a
+// blank entry from a trailing comma or a stray space, and a blank entry
+// is never what the operator meant. It must not quietly widen access, so
+// it is refused at startup rather than ignored or left to match
+// something. A zero Policy is valid. gate.New and New call it.
+func (p Policy) Validate() error {
+	for _, f := range []struct {
+		name    string
+		entries []string
+	}{
+		{"AllowedGroups", p.AllowedGroups},
+		{"AllowedEmails", p.AllowedEmails},
+		{"AllowedEmailDomains", p.AllowedEmailDomains},
+	} {
+		for i, e := range f.entries {
+			if blankEntry(f.name, e) {
+				return fmt.Errorf("oidc: Policy.%s entry %d is empty or only whitespace (a trailing comma in a setting?)", f.name, i+1)
+			}
+		}
+	}
+	for g := range p.RoleFromGroups {
+		if strings.TrimSpace(g) == "" {
+			return fmt.Errorf("oidc: Policy.RoleFromGroups has a group name that is empty or only whitespace (a trailing comma in a setting?)")
+		}
+	}
+	return nil
+}
+
+// blankEntry reports whether an allow-list entry is blank as Permit
+// reads it: for a domain, after removing whitespace and a leading "@".
+func blankEntry(field, e string) bool {
+	if field == "AllowedEmailDomains" {
+		return normalDomain(e) == ""
+	}
+	return strings.TrimSpace(e) == ""
+}
+
+// normalDomain is how permitEmail reads an AllowedEmailDomains entry.
+func normalDomain(e string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(e), "@")))
+}
+
 func (p Policy) permitEmail(id *Identity) error {
 	// Without email_verified, an address restriction is decorative: any
 	// provider that lets a user type their own unverified email lets them
 	// type one inside the allowlist.
-	if id.Email == "" {
+	if strings.TrimSpace(id.Email) == "" {
 		return &ErrNotPermitted{Reason: "no email claim in the id_token, but this deployment restricts by email"}
 	}
 	if !id.EmailVerified {
@@ -196,8 +248,11 @@ func (p Policy) permitEmail(id *Identity) error {
 	}
 
 	email := strings.ToLower(strings.TrimSpace(id.Email))
+	// A blank entry never matches, even on a Policy nobody validated, so
+	// it cannot widen access (#91).
 	for _, allowed := range p.AllowedEmails {
-		if email == strings.ToLower(strings.TrimSpace(allowed)) {
+		a := strings.ToLower(strings.TrimSpace(allowed))
+		if a != "" && email == a {
 			return nil
 		}
 	}
@@ -210,7 +265,7 @@ func (p Policy) permitEmail(id *Identity) error {
 	if at >= 0 {
 		domain := email[at+1:]
 		for _, allowed := range p.AllowedEmailDomains {
-			if domain == strings.ToLower(strings.TrimSpace(strings.TrimPrefix(allowed, "@"))) {
+			if d := normalDomain(allowed); d != "" && domain == d {
 				return nil
 			}
 		}

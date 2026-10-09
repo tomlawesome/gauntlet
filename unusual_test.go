@@ -220,6 +220,39 @@ func TestJudgeSignInNewBrowser(t *testing.T) {
 	}
 }
 
+// A remembered browser past its lifetime is stored until the next
+// RememberSignIn prunes it, and the cookie it matches must not count as
+// known meanwhile. TestJudgeSignInNewBrowser cannot show that: its
+// expired entry is pruned before the cases run, so the token is simply
+// unknown. Here the stale entry is still in the account beside a live
+// one when the sign-in is judged.
+func TestJudgeSignInRefusesAStaleRememberedBrowser(t *testing.T) {
+	s, id, _ := openJudgeStore(t)
+	at := escalationStart
+	stale := mustRememberSignIn(t, s, id, "", "", nil, at)
+	// Still inside stale's lifetime, so remembering it prunes nothing.
+	liveAt := at.Add(KnownBrowserLifetime - time.Minute)
+	live := mustRememberSignIn(t, s, id, "", "", nil, liveAt)
+	now := at.Add(KnownBrowserLifetime + time.Hour)
+
+	s.mu.RLock()
+	stored := len(s.byID[id].KnownBrowsers)
+	s.mu.RUnlock()
+	if stored != 2 {
+		t.Fatalf("setup: %d remembered browsers, want the stale one kept beside the live one", stored)
+	}
+
+	if j := s.JudgeSignIn(id, []string{live}, "", nil, now); j.Signals != 0 {
+		t.Errorf("the live token = %v, want nothing raised", j.Signals)
+	}
+	if j := s.JudgeSignIn(id, []string{stale}, "", nil, now); !j.Signals.Has(SignalNewBrowser) {
+		t.Errorf("the stale token = %v, want new-browser: a cookie past its lifetime is not a known browser", j.Signals)
+	}
+	if j := s.JudgeSignIn(id, []string{stale, live}, "", nil, now); j.Signals != 0 {
+		t.Errorf("the stale and the live token together = %v, want nothing raised", j.Signals)
+	}
+}
+
 func TestJudgeSignInNewCountry(t *testing.T) {
 	s, id, _ := openJudgeStore(t)
 	at := escalationStart

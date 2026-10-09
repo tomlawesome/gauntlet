@@ -266,32 +266,53 @@ func TestEncryptedFileBackendVersionPropagatesLoadError(t *testing.T) {
 	}
 }
 
-// The three malformed-envelope shapes openSealed distinguishes
-// internally, each forced directly by writing the raw bytes rather than
-// through Save, so each branch is proven independently instead of only
-// ever being reached via a full valid-then-tampered document.
+// The malformed-envelope shapes openSealed distinguishes internally,
+// each forced directly by writing the raw bytes rather than through
+// Save, so each branch is proven independently instead of only ever
+// being reached via a full valid-then-tampered document. Each is held
+// to its own message: all of them failing to open at all would be true
+// of any of them without its guard, because the key schedule and the
+// cipher refuse a zeroed header too.
 func TestEncryptedFileBackendMalformedEnvelopesFailToOpen(t *testing.T) {
-	cases := map[string][]byte{
-		"too short":   []byte("MVS1"),
-		"wrong magic": bytes.Repeat([]byte{0xAA}, sealHeaderBytes+20),
-		"unsupported version": append(
-			append([]byte(sealMagic), 0x09),
-			bytes.Repeat([]byte{0}, saltBytes+20)...,
-		),
-		"truncated after header": append([]byte(sealMagic), append([]byte{sealVersion}, bytes.Repeat([]byte{0}, saltBytes+2)...)...),
+	cases := map[string]struct {
+		raw  []byte
+		want string // in the error
+	}{
+		"too short": {[]byte("MVS1"), "truncated (too short)"},
+		// Not the magic, so not an envelope at all: a plaintext document
+		// as far as openSealed can tell, never "damaged ciphertext".
+		"wrong magic": {bytes.Repeat([]byte{0xAA}, sealHeaderBytes+20), "not a sealed document"},
+		"unsupported version": {
+			append(append([]byte(sealMagic), 0x09), bytes.Repeat([]byte{0}, saltBytes+20)...),
+			"unsupported sealed-document version 9",
+		},
+		"truncated after header": {
+			append([]byte(sealMagic), append([]byte{sealVersion}, bytes.Repeat([]byte{0}, saltBytes+2)...)...),
+			"not a sealed document (truncated)",
+		},
 	}
-	for name, raw := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "store.json")
-			if err := os.WriteFile(path, raw, 0o600); err != nil {
+			if err := os.WriteFile(path, c.raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			b, err := NewEncryptedFileBackend(path, testKey(0x01))
 			if err != nil {
 				t.Fatalf("NewEncryptedFileBackend: %v", err)
 			}
-			if _, err := b.Load(context.Background()); err == nil {
+			_, err = b.Load(context.Background())
+			if err == nil {
 				t.Fatalf("Load of a %s envelope succeeded, want a clean failure", name)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("Load of a %s envelope = %q, want it to say %q", name, err, c.want)
+			}
+			if got, want := errors.Is(err, errNotSealed), name == "wrong magic"; got != want {
+				t.Errorf("Load of a %s envelope: errors.Is(err, errNotSealed) = %v, want %v", name, got, want)
+			}
+			if strings.Contains(err.Error(), "did not decrypt") {
+				t.Errorf("Load of a %s envelope = %q, reached the cipher; want it refused before", name, err)
 			}
 		})
 	}

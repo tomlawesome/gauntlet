@@ -28,7 +28,7 @@ type recoveryCodesRegenerateResponse struct {
 // outright when the account has no second factor at all: recovery codes
 // stand in for one, not for a password alone.
 //
-// The old set stops working at once, when GenerateRecoveryCodes saves the
+// The old set stops working at once, when RegenerateRecoveryCodes saves the
 // new one, just before the reply is written (owner decision, 2026-10-08,
 // #80 P1-S2: as GitHub, Google, Microsoft, 1Password and Dropbox do; NIST
 // SP 800-63B-4 4.2.1.1 lets a replacement be requested at any time). The
@@ -69,13 +69,23 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 	// snapshot -- same reasoning handleTOTPConfirm's header comment gives
 	// for re-reading rather than trusting UserFromContext.
 	if !current.HasSecondFactor() {
-		writeProblem(w, http.StatusConflict, classConflict, "this account has no second factor yet -- recovery codes stand in for one, not for a password alone", nil)
+		writeProblem(w, http.StatusConflict, classConflict, noSecondFactorForCodesMessage, nil)
 		return
 	}
 
-	codes, err := g.deps.Users.GenerateRecoveryCodes(user.ID, now)
+	// The store checks again under its lock: a last factor removed since
+	// the check above is refused the same way, never given codes (#94).
+	codes, err := g.deps.Users.RegenerateRecoveryCodes(user.ID, now)
+	if errors.Is(err, gauntlet.ErrNoSecondFactors) {
+		writeProblem(w, http.StatusConflict, classConflict, noSecondFactorForCodesMessage, nil)
+		return
+	}
+	if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since recheckPassword read it (#95)
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
 	if err != nil {
-		// GenerateRecoveryCodes' own restore-on-failure contract already
+		// RegenerateRecoveryCodes' own restore-on-failure contract already
 		// left the old set intact and reported nothing as issued -- this
 		// is a clean refusal, not a half-done one.
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
@@ -89,6 +99,10 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 		Kind: NoticeRecoveryCodesRegenerated, UserID: user.ID, Username: user.Username, Role: current.Role, At: now,
 	})
 }
+
+// noSecondFactorForCodesMessage is the 409 for regenerating recovery
+// codes on an account with no live second factor.
+const noSecondFactorForCodesMessage = "this account has no second factor yet -- recovery codes stand in for one, not for a password alone"
 
 // -- POST /api/auth/recovery-codes/confirm (#58) -------------------------
 

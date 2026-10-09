@@ -124,15 +124,13 @@ func TestNonAdminCannotCreateUsers(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
-	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
+	// Past the second-factor door, so it is the role check that answers.
+	userClient := userClientPastTheDoor(t, ts, adminClient, "operator", "password456")
 
-	userClient := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, userClient, ts.URL+"/api/auth/login", credentialsRequest{Username: "operator", Password: "password456"}).Body.Close()
-
-	resp := postJSON(t, userClient, ts.URL+"/api/auth/users", createUserRequest{Username: "another", Password: "password789", Role: "user"})
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("expected a non-admin to be forbidden from creating users, got %d", resp.StatusCode)
+	wantProblem(t, postJSON(t, userClient, ts.URL+"/api/auth/users", createUserRequest{Username: "another", Password: "password789", Role: "user"}),
+		http.StatusForbidden, classForbidden)
+	if _, ok := g.deps.Users.ByUsername("another"); ok {
+		t.Error("a refused request created the account anyway")
 	}
 }
 
@@ -140,19 +138,14 @@ func TestUserListIsAdminOnly(t *testing.T) {
 	g := newTestGate(t)
 	ts := newTestServer(t, g)
 	adminClient := registerAdmin(t, ts, "admin", "password-placeholder-1")
-	_ = postJSON(t, adminClient, ts.URL+"/api/auth/users", createUserRequest{Username: "operator", Password: "password456", Role: "user"}).Body.Close()
-
-	userClient := &http.Client{Jar: mustCookieJar(t)}
-	_ = postJSON(t, userClient, ts.URL+"/api/auth/login", credentialsRequest{Username: "operator", Password: "password456"}).Body.Close()
+	// Past the second-factor door, so it is the role check that answers.
+	userClient := userClientPastTheDoor(t, ts, adminClient, "operator", "password456")
 
 	resp, err := userClient.Get(ts.URL + "/api/auth/users")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 for a non-admin, got %d", resp.StatusCode)
-	}
+	wantProblem(t, resp, http.StatusForbidden, classForbidden)
 
 	adminResp, err := adminClient.Get(ts.URL + "/api/auth/users")
 	if err != nil {

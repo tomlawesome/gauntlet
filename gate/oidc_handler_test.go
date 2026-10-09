@@ -114,6 +114,39 @@ func TestOIDCCallbackFakeProviderHappyPath(t *testing.T) {
 	}
 }
 
+// The code exchange carries the verifier held in the flow cookie. The
+// fake refuses it, as a PKCE-enforcing provider would, if the verifier is
+// missing or not the one this browser's sign-in started with; the other
+// callback tests do not check it.
+func TestOIDCCallbackSendsTheFlowCodeVerifier(t *testing.T) {
+	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	fs, err := oidc.NewFlowState(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.CodeVerifier == "" {
+		t.Fatal("setup: the flow state has no code verifier")
+	}
+	fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+	fp.ExpectCodeVerifier = fs.CodeVerifier
+
+	req := oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code")
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback returned %d, want 302; the provider refused the code exchange unless it carried the flow's verifier", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/" {
+		t.Errorf("redirect location = %q, want %q (a refused exchange redirects to an error page)", loc, "/")
+	}
+	if g.deps.Users.Count() != 2 {
+		t.Errorf("expected the admin plus one provisioned account, got %d", g.deps.Users.Count())
+	}
+}
+
 func TestOIDCCallbackStateMismatchRefused(t *testing.T) {
 	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
 	fs, err := oidc.NewFlowState(time.Now())
@@ -612,46 +645,76 @@ func TestOIDCLinkCallbackRefusesIdentityAlreadyLinkedElsewhere(t *testing.T) {
 
 // TestOIDCLinkCallbackSessionChangedRefused covers completeOIDCLink's
 // "the browser is signed in as someone else by the time the provider
-// comes back" branch.
+// comes back" branch. It has two halves, each a way the check can fail
+// open on its own: the callback carrying no session at all, and carrying
+// the session of a different account (the case the check is named for --
+// with it gone, the identity would be linked to the account that started
+// the flow, or to nobody, by a browser that is no longer that account's).
 func TestOIDCLinkCallbackSessionChangedRefused(t *testing.T) {
-	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
+	// callbackWith starts a link as admin, then runs the provider's
+	// callback with whatever session cookies cookiesFor returns.
+	callbackWith := func(t *testing.T, cookiesFor func(operator *http.Client, req *http.Request) []*http.Cookie) {
+		t.Helper()
+		g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
+		admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
+		_ = postJSON(t, admin, ts.URL+"/api/auth/users",
+			createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
+		operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
 
-	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
-	defer func() { _ = startResp.Body.Close() }()
-	var flowCookie *http.Cookie
-	for _, c := range startResp.Cookies() {
-		if c.Name == oidcFlowCookieName {
-			flowCookie = c
+		startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
+		defer func() { _ = startResp.Body.Close() }()
+		var flowCookie *http.Cookie
+		for _, c := range startResp.Cookies() {
+			if c.Name == oidcFlowCookieName {
+				flowCookie = c
+			}
+		}
+		if flowCookie == nil {
+			t.Fatal("expected the OIDC flow cookie to be set by link start")
+		}
+		fs, err := g.deps.OIDCState.Decode(flowCookie.Value, oidcFlowCookieMaxAge, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/oidc/callback?state="+fs.State+"&code=test-code", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(flowCookie)
+		for _, c := range cookiesFor(operator, req) {
+			req.AddCookie(c)
+		}
+		resp, err := noRedirectClient().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=link_session_changed" {
+			t.Errorf("redirect location = %q, want the link_session_changed ssoError", loc)
+		}
+		for _, name := range []string{"admin", "operator"} {
+			if u, ok := g.deps.Users.ByUsername(name); !ok || u.OIDCSubject != "" {
+				t.Errorf("%s was linked to an identity (%q) by a refused callback", name, u.OIDCSubject)
+			}
 		}
 	}
-	if flowCookie == nil {
-		t.Fatal("expected the OIDC flow cookie to be set by link start")
-	}
-	fs, err := g.deps.OIDCState.Decode(flowCookie.Value, oidcFlowCookieMaxAge, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
 
-	// No session cookie at all on the callback request -- as if the
-	// browser had signed out (or a different browser altogether)
-	// between starting the link and the provider redirect back.
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/oidc/callback?state="+fs.State+"&code=test-code", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.AddCookie(flowCookie)
-	resp, err := noRedirectClient().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=link_session_changed" {
-		t.Errorf("redirect location = %q, want the link_session_changed ssoError", loc)
-	}
+	t.Run("no session cookie at all", func(t *testing.T) {
+		// As if the browser had signed out (or a different browser
+		// altogether) between starting the link and the provider redirect
+		// back.
+		callbackWith(t, func(*http.Client, *http.Request) []*http.Cookie { return nil })
+	})
 
-	g.deps.Users.List() // silence unused warnings if any
+	t.Run("another account's session", func(t *testing.T) {
+		// The browser signed out of admin and in as operator while the
+		// provider round trip was in flight.
+		callbackWith(t, func(operator *http.Client, req *http.Request) []*http.Cookie {
+			return operator.Jar.Cookies(req.URL)
+		})
+	})
 }
 
 // TestOIDCLinkNonAdminLosesLocalPassword covers completeOIDCLink's
