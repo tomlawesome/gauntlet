@@ -37,19 +37,9 @@ var (
 	ErrUsernameIsEmail = errors.New("gauntlet: a local account's username may not be an email address")
 )
 
-// unprintable is the rule for characters this package refuses or drops
-// in text a person or a client chose, which usernames and the client
-// details a session, a sign-in record and a notice carry follow as it
-// stands. Token names and device IDs start from it too, and also refuse
-// a genuine U+FFFD (printableWithin). The reasoning is in
-// internal/plaintext.
-func unprintable(r rune) bool {
-	return plaintext.Unprintable(r)
-}
-
 // ValidateUsername rejects a username that would be unsafe downstream.
 //
-// Three things are refused, each for a specific reason:
+// Four things are refused, each for a specific reason:
 //
 //   - Control characters (C0, C1, DEL). An ANSI escape in a username is
 //     executed by an operator's terminal when they list users, and a
@@ -65,9 +55,17 @@ func unprintable(r rune) bool {
 //     access, an account that displays as another account's name is a
 //     real problem.
 //
+//   - U+FFFD, the replacement character (#90). A browser only sends it
+//     when the text it was given was broken, so a username holding it
+//     is not what the person typed.
+//
 //   - Leading or trailing whitespace. " admin" and "admin" look
 //     identical in a list, and the store's uniqueness check is on the
 //     lowercased string, so both can exist at once.
+//
+// The character rules and the length count are plaintext.ValidWithin's,
+// the rule every name a person chooses follows; the length is checked
+// first so it keeps its own error (ErrUsernameLength).
 //
 // Deliberately not an allowlist of ASCII. Plenty of legitimate people
 // have non-ASCII names, and refusing them to save a validation function
@@ -89,10 +87,8 @@ func ValidateUsername(username string) error {
 	if n < minUsernameLength || n > maxUsernameLength {
 		return ErrUsernameLength
 	}
-	for _, r := range username {
-		if unprintable(r) {
-			return ErrUsernameInvalid
-		}
+	if !plaintext.ValidWithin(username, maxUsernameLength) {
+		return ErrUsernameInvalid
 	}
 	return nil
 }

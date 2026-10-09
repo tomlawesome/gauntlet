@@ -1,8 +1,7 @@
 // Package plaintext decides what counts as plain text in a string a
 // person or a client chose -- a username, a passkey name, a sign-out
 // reason, the client details a session or sign-in record carries -- and
-// cleans what does not. (Token names and device IDs apply the same rule
-// and refuse more besides; see printableWithin in the root package.)
+// cleans what does not.
 //
 // A control (Cc) or format (Cf) character, or the Unicode line or
 // paragraph separator (Zl, Zp), is not text a person reads but an
@@ -19,6 +18,8 @@
 // when it is given (Valid), and take it out when it is shown (Clean),
 // for text stored before the rule or edited into a file by hand. Input
 // validation does not replace output encoding, or the other way round.
+// A name a person chooses is held to a stricter rule (ValidWithin): it
+// also refuses U+FFFD and counts its length in characters (#90).
 //
 // This is not the full RFC 8266 profile: its extra steps (space folding,
 // NFKC) tidy a name but add no security, and would need a new
@@ -77,4 +78,30 @@ func Clean(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// ValidWithin is the rule for a name a person chooses -- a username, a
+// token name, a device ID, a passkey name, a sign-out reason (#90): s
+// is Valid, holds no U+FFFD, and is at most maxChars characters long,
+// each code point counting as one whatever its width in bytes. The
+// empty string passes.
+//
+// U+FFFD is refused because a browser only sends it when the text it
+// was given was broken (and JSON decoding turns invalid UTF-8 into it),
+// so a name holding one is not what the person typed. Characters, not
+// bytes, because a documented maxLength counts characters (JSON Schema
+// validation section 6.3.1, NIST SP 800-63B-4 section 3.1.1.2), and a
+// byte limit would give non-Latin names fewer letters.
+func ValidWithin(s string, maxChars int) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	n := 0
+	for _, r := range s {
+		n++
+		if n > maxChars || r == utf8.RuneError || Unprintable(r) {
+			return false
+		}
+	}
+	return true
 }

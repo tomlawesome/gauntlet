@@ -301,7 +301,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	// mistake whatever the cookie holds, and refusing it here leaves the
 	// ceremony live (nothing is claimed), so the same credential can be
 	// finished again with a good name (#89).
-	if !plaintext.Valid(req.Name) {
+	if !validPasskeyName(req.Name) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, passkeyNameInvalidMessage, nil)
 		return
 	}
@@ -407,9 +407,18 @@ func (g *Gate) writePasskeyStoreError(w http.ResponseWriter, r *http.Request, er
 	g.writeAuthError(w, r, err, status, class)
 }
 
+// validPasskeyName is the root store's checkPasskeyName rule, applied
+// before the ceremony is claimed or the passkey looked up: plain text
+// with no U+FFFD (plaintext.ValidWithin, #89, #90). The limit given is
+// len(name), which no name's character count can pass: a long name is
+// cut by the store, not refused.
+func validPasskeyName(name string) bool {
+	return plaintext.ValidWithin(name, len(name))
+}
+
 // passkeyNameInvalidMessage is the plain-English 400 for a passkey name
-// holding a control or format character or a line or paragraph
-// separator (#89).
+// holding a control or format character, a line or paragraph separator
+// (#89) or U+FFFD (#90).
 const passkeyNameInvalidMessage = "that passkey name has characters that can't be shown as text -- use letters, numbers, spaces and punctuation"
 
 // -- PATCH /api/auth/passkeys/{id} ----------------------------------------
@@ -435,7 +444,7 @@ func (g *Gate) handlePasskeyRename(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
-	if !plaintext.Valid(req.Name) {
+	if !validPasskeyName(req.Name) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, passkeyNameInvalidMessage, nil)
 		return
 	}
