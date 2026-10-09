@@ -173,7 +173,7 @@ authenticator, AAL2).
   reserves on the address bucket a password uses, and is `429`
   `rate-limited` once that is used or banned, keeping the ceremony
   cookie. No ruling is reversed: the account path is unchanged, a dead
-  ceremony counts nothing, and a refused finish still leaves the
+  ceremony on this path counts nothing, and a refused finish still leaves the
   ceremony open (ADR-0004 decision 5).
 
 Design ratified on #77, 2026-10-05.
