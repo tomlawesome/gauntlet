@@ -345,8 +345,10 @@ func findPasskeyIndex(u *User, credID []byte) int {
 // account before the account's capacity is: ErrPasskeyDuplicate takes
 // priority over ErrPasskeyLimitReached, so an authenticator presented
 // twice against a full account is told it's already registered rather
-// than that the account is full. Name is normalised (see
-// normalisePasskeyName) before it's stored. Returns the stored Passkey,
+// than that the account is full. Before either, a name that is not
+// plain text is refused with ErrPasskeyNameInvalid and nothing is
+// stored. Name is normalised (see normalisePasskeyName) before it's
+// stored. Returns the stored Passkey,
 // with its normalised name, so the caller's response doesn't have to
 // re-derive it.
 func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
@@ -396,7 +398,8 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 // cosmetic and reversible, unlike DeletePasskey below. Runs the same
 // normalisation AddPasskey does, so a rename to blank or to something
 // absurdly long behaves the same way giving that name at registration
-// would have.
+// would have. A name that is not plain text is refused with
+// ErrPasskeyNameInvalid and the stored name is left as it was.
 func (s *Store) RenamePasskey(userID string, credID []byte, name string) (Passkey, error) {
 	if err := checkPasskeyName(name); err != nil {
 		return Passkey{}, err

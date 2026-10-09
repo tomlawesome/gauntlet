@@ -126,6 +126,7 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrTokenDeviceInvalid:    gauntlet.ErrTokenDeviceInvalid.Error(),
 	gauntlet.ErrTokenNameInvalid:      gauntlet.ErrTokenNameInvalid.Error(),
 	gauntlet.ErrTokenExpiryInvalid:    gauntlet.ErrTokenExpiryInvalid.Error(),
+	gauntlet.ErrPasskeyNameInvalid:    passkeyNameInvalidMessage,
 	gauntlet.ErrUserNotFound:          "no such user",
 	gauntlet.ErrCannotDeleteAdmin:     "the last admin account cannot be deleted -- make another account an admin first",
 	gauntlet.ErrTOTPAlreadyActive:     gauntlet.ErrTOTPAlreadyActive.Error(), // already phrased for an end user

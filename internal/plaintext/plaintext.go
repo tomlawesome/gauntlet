@@ -1,6 +1,8 @@
 // Package plaintext decides what counts as plain text in a string a
-// person or a client chose -- a username, a token or passkey name, a
-// device ID, a sign-out reason -- and cleans what does not.
+// person or a client chose -- a username, a passkey name, a sign-out
+// reason, the client details a session or sign-in record carries -- and
+// cleans what does not. (Token names and device IDs apply the same rule
+// and refuse more besides; see printableWithin in the root package.)
 //
 // A control (Cc) or format (Cf) character, or the Unicode line or
 // paragraph separator (Zl, Zp), is not text a person reads but an

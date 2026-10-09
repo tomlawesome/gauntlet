@@ -38,9 +38,11 @@ var (
 )
 
 // unprintable is the rule for characters this package refuses or drops
-// in text a person or a client chose, which usernames, token names,
-// device IDs and the client details a session, a sign-in record and a
-// notice carry all follow. The reasoning is in internal/plaintext.
+// in text a person or a client chose, which usernames and the client
+// details a session, a sign-in record and a notice carry follow as it
+// stands. Token names and device IDs start from it too, and also refuse
+// a genuine U+FFFD (printableWithin). The reasoning is in
+// internal/plaintext.
 func unprintable(r rune) bool {
 	return plaintext.Unprintable(r)
 }

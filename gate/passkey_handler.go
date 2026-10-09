@@ -267,11 +267,15 @@ type passkeyRegisterFinishResponse struct {
 // origin, bad signature, malformed) answers 400 and keeps the cookie, so
 // a corrected response can finish inside the same five minutes.
 //
-// A malformed body, or a name that is not plain text, is refused (400)
-// before the ceremony cookie is examined, since only the ceremony can judge the cookie and it needs
+// A malformed body is refused (400) before the ceremony cookie is
+// examined, since only the ceremony can judge the cookie and it needs
 // the body to do so; a dead cookie sent with a malformed body is left
 // for the next request to clear (ruling R5 on #20, accepted: no
 // frontend sends such a body).
+//
+// A name that is not plain text (#89) is refused (400) before the
+// cookie too, so the ceremony stays live and the same credential can be
+// finished again with a good name.
 func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
