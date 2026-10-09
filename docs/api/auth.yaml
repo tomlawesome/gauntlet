@@ -1570,7 +1570,11 @@ paths:
         a second factor the passkey is live at once, with no codes. A
         refused credential keeps the ceremony cookie, so it can be
         corrected within the five minutes; every other answer clears it.
-        Reachable at the must-enrol-factor door.
+        A name holding a control or format character, a line or paragraph
+        separator, invalid UTF-8 or U+FFFD is refused with `400` before the
+        ceremony cookie is examined, so the ceremony stays live and the
+        same credential can be finished again with a good name; nothing
+        is stored. Reachable at the must-enrol-factor door.
       security:
         - sessionCookie: []
           passkeyRegisterCookie: []
@@ -1590,7 +1594,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PasskeyRegisterFinishResponse"
         "400":
-          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or the credential was refused (wrong origin, bad signature, malformed; `invalid-request` either way). The ceremony cookie is kept, so a corrected credential can finish it.
+          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or `name` holds a character that is not plain text (a control or format character, a line or paragraph separator, or U+FFFD), or the credential was refused (wrong origin, bad signature, malformed; `invalid-request` in every case). The ceremony cookie is kept, so a corrected credential can finish it.
           content:
             application/problem+json:
               schema:
@@ -1632,7 +1636,7 @@ paths:
     patch:
       operationId: renamePasskey
       summary: Rename one of the caller's passkeys
-      description: Cosmetic, so no password. A blank name becomes `Passkey n`; a long one is cut at 64 characters.
+      description: Cosmetic, so no password. A blank name becomes `Passkey n`; a long one is cut at 64 characters. A name holding a control or format character, a line or paragraph separator, invalid UTF-8 or U+FFFD is refused with `400` (`invalid-request`), and the stored name is unchanged.
       parameters:
         - $ref: "#/components/parameters/PasskeyID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2255,7 +2259,8 @@ paths:
         session, or to list another account's sessions (#53).
 
         The body is optional. `reason` is at most 200 characters of plain text
-        (no control or format characters, no line or paragraph separators);
+        (no control or format characters, no line or paragraph separators,
+        no U+FFFD);
         it goes into the audit record
         and to the application's `Config.Notices` (or the deprecated
         `Config.Notify`), which may mail the account's owner. `notified`
@@ -2517,13 +2522,13 @@ paths:
                   description: The calling admin's own password.
                 name:
                   type: string
-                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters, and no line or paragraph separators); otherwise a 400.
+                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 characters of plain text (no control or format characters, no line or paragraph separators, no U+FFFD; letters of any script count one each); otherwise a 400.
                 kind:
                   type: string
                   description: "One of the kinds the application registered (TokenOptions.Kinds): `api` and `ingest` by default. Empty or absent means `api` (read-only), which is a 400 if the application did not register `api`."
                 device:
                   type: string
-                  description: Required for, and allowed only on, an `ingest` token.
+                  description: Required for, and allowed only on, an `ingest` token. Surrounding whitespace is trimmed; what is left is at most 64 characters of plain text (no control or format characters, no line or paragraph separators, no U+FFFD); otherwise a 400.
                 expiresAt:
                   type: string
                   description: |
@@ -3301,7 +3306,7 @@ components:
           description: The W3C `PublicKeyCredential` JSON `navigator.credentials.create()` produced. An open object -- see "Compatibility" above.
         name:
           type: string
-          description: A label for the list; blank becomes `Passkey n`, and it is cut at 64 characters.
+          description: A label for the list; blank becomes `Passkey n`, and it is cut at 64 characters. Plain text only -- a control or format character, a line or paragraph separator, or U+FFFD, is refused with `400` (letters of any script, accents and emoji are fine).
     PasskeyRegisterFinishResponse:
       type: object
       additionalProperties: false
@@ -3650,7 +3655,7 @@ components:
         reason:
           type: string
           maxLength: 200
-          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters and the line and paragraph separators (U+2028, U+2029) are refused with `400`.
+          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters, the line and paragraph separators (U+2028, U+2029) and U+FFFD are refused with `400`.
     AdminLogoutAllResponse:
       type: object
       additionalProperties: false

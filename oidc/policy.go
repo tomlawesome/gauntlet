@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/tomlawesome/gauntlet/internal/groupname"
 )
 
 // defaultGroupsClaim is what most providers name the claim, but it is
@@ -217,10 +219,13 @@ func (p Policy) permitEmail(id *Identity) error {
 	return &ErrNotPermitted{Reason: "email address is not on the permitted list"}
 }
 
+// intersects reports whether any group in got is one in allowed, by
+// groupname.Match: the rule gate's role map uses too, so a group that is
+// let in is the group that gets its role.
 func intersects(got, allowed []string) bool {
 	for _, g := range got {
 		for _, a := range allowed {
-			if strings.EqualFold(strings.TrimSpace(g), strings.TrimSpace(a)) {
+			if groupname.Match(g, a) {
 				return true
 			}
 		}

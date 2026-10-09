@@ -7,8 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode"
 	"unicode/utf8"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 // A username is not just a label. It is written into the audit trail,
@@ -36,19 +37,9 @@ var (
 	ErrUsernameIsEmail = errors.New("gauntlet: a local account's username may not be an email address")
 )
 
-// unprintable reports whether r is a character this package refuses or
-// drops in text a person or a client chose: a control (Cc) or format
-// (Cf) character, or the Unicode line or paragraph separator (Zl, Zp),
-// which some mail and chat clients start a new line at, as at a newline
-// (#80). Usernames, token names, device IDs and the client details a
-// session, a sign-in record and a notice carry all use it.
-func unprintable(r rune) bool {
-	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
-}
-
 // ValidateUsername rejects a username that would be unsafe downstream.
 //
-// Three things are refused, each for a specific reason:
+// Four things are refused, each for a specific reason:
 //
 //   - Control characters (C0, C1, DEL). An ANSI escape in a username is
 //     executed by an operator's terminal when they list users, and a
@@ -64,9 +55,17 @@ func unprintable(r rune) bool {
 //     access, an account that displays as another account's name is a
 //     real problem.
 //
+//   - U+FFFD, the replacement character (#90). A browser only sends it
+//     when the text it was given was broken, so a username holding it
+//     is not what the person typed.
+//
 //   - Leading or trailing whitespace. " admin" and "admin" look
 //     identical in a list, and the store's uniqueness check is on the
 //     lowercased string, so both can exist at once.
+//
+// The character rules and the length count are plaintext.ValidWithin's,
+// the rule every name a person chooses follows; the length is checked
+// first so it keeps its own error (ErrUsernameLength).
 //
 // Deliberately not an allowlist of ASCII. Plenty of legitimate people
 // have non-ASCII names, and refusing them to save a validation function
@@ -88,10 +87,8 @@ func ValidateUsername(username string) error {
 	if n < minUsernameLength || n > maxUsernameLength {
 		return ErrUsernameLength
 	}
-	for _, r := range username {
-		if unprintable(r) {
-			return ErrUsernameInvalid
-		}
+	if !plaintext.ValidWithin(username, maxUsernameLength) {
+		return ErrUsernameInvalid
 	}
 	return nil
 }

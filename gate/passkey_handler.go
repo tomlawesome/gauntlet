@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 // -- Passkeys (G8, docs/adr/0004-passkey-ceremony.md) --------------------
@@ -271,6 +272,10 @@ type passkeyRegisterFinishResponse struct {
 // the body to do so; a dead cookie sent with a malformed body is left
 // for the next request to clear (ruling R5 on #20, accepted: no
 // frontend sends such a body).
+//
+// A name that is not plain text (#89) is refused (400) before the
+// cookie too, so the ceremony stays live and the same credential can be
+// finished again with a good name.
 func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	if g.passkeysOff(w, r) {
 		return
@@ -290,6 +295,14 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	var req passkeyRegisterFinishRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
+	// The name next, for the same reason: a bad name is the caller's
+	// mistake whatever the cookie holds, and refusing it here leaves the
+	// ceremony live (nothing is claimed), so the same credential can be
+	// finished again with a good name (#89).
+	if !validPasskeyName(req.Name) {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, passkeyNameInvalidMessage, nil)
 		return
 	}
 
@@ -376,7 +389,7 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	})
 	g.notify(r.Context(), &AccountNotice{
 		Kind: NoticeSecondFactorAdded, UserID: current.ID, Username: current.Username, Role: current.Role, At: now,
-		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: stored.Name},
+		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: plaintext.Clean(stored.Name)},
 	})
 }
 
@@ -388,8 +401,25 @@ func (g *Gate) writePasskeyStoreError(w http.ResponseWriter, r *http.Request, er
 	if errors.Is(err, gauntlet.ErrPasskeyDuplicate) || errors.Is(err, gauntlet.ErrPasskeyLimitReached) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
 		status, class = http.StatusConflict, classConflict
 	}
+	if errors.Is(err, gauntlet.ErrPasskeyNameInvalid) { // a backstop: the handler checked first
+		status, class = http.StatusBadRequest, classInvalidRequest
+	}
 	g.writeAuthError(w, r, err, status, class)
 }
+
+// validPasskeyName is the root store's checkPasskeyName rule, applied
+// before the ceremony is claimed or the passkey looked up: plain text
+// with no U+FFFD (plaintext.ValidWithin, #89, #90). The limit given is
+// len(name), which no name's character count can pass: a long name is
+// cut by the store, not refused.
+func validPasskeyName(name string) bool {
+	return plaintext.ValidWithin(name, len(name))
+}
+
+// passkeyNameInvalidMessage is the plain-English 400 for a passkey name
+// holding a control or format character, a line or paragraph separator
+// (#89) or U+FFFD (#90).
+const passkeyNameInvalidMessage = "that passkey name has characters that can't be shown as text -- use letters, numbers, spaces and punctuation"
 
 // -- PATCH /api/auth/passkeys/{id} ----------------------------------------
 
@@ -414,6 +444,10 @@ func (g *Gate) handlePasskeyRename(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
+	if !validPasskeyName(req.Name) {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, passkeyNameInvalidMessage, nil)
+		return
+	}
 	credID, err := base64.RawURLEncoding.DecodeString(r.PathValue("id"))
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid passkey id", nil)
@@ -424,6 +458,11 @@ func (g *Gate) handlePasskeyRename(w http.ResponseWriter, r *http.Request) {
 		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrPasskeyNotFound) {
 			status, class = http.StatusNotFound, classNotFound
+		}
+		// The check above is the one that answers; the store's own is a
+		// backstop, so a name it refuses is still the caller's mistake.
+		if errors.Is(err, gauntlet.ErrPasskeyNameInvalid) {
+			status, class = http.StatusBadRequest, classInvalidRequest
 		}
 		g.writeAuthError(w, r, err, status, class)
 		return
@@ -503,7 +542,7 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "signedOut": signedOut})
 	g.notify(r.Context(), &AccountNotice{
 		Kind: NoticeSecondFactorRemoved, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
-		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: removed.Name},
+		SecondFactor: &SecondFactorDetail{Method: "passkey", Name: plaintext.Clean(removed.Name)},
 	})
 }
 

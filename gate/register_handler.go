@@ -42,7 +42,7 @@ func (g *Gate) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := g.now()
-	ipKey := "ip:" + g.cfg.ClientIP(r)
+	ipKey := addressKey(g.cfg.ClientIP(r))
 	if !g.deps.Limiter.Reserve(ipKey, now) {
 		writeProblem(w, http.StatusTooManyRequests, classRateLimited, "too many attempts, try again later", nil)
 		return

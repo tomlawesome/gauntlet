@@ -953,3 +953,162 @@ func TestClearAllSecondFactorsWithNothingToClear(t *testing.T) {
 		t.Error("the pending app secret survived")
 	}
 }
+
+// unprintablePasskeyNames are names a passkey must never carry (#89): each
+// holds a control (Cc) or format (Cf) character, the line or paragraph
+// separator (Zl, Zp), or is not valid UTF-8. The refusal comes before the
+// name is trimmed, cut or defaulted, so a name that would have been
+// trimmed or defaulted to "Passkey <n>" is refused too.
+var unprintablePasskeyNames = []struct{ label, name string }{
+	{"NUL", "Yubi\x00Key"},
+	{"BEL", "Yubi\x07Key"},
+	{"ESC", "Yubi\x1bKey"},
+	{"DEL", "Yubi\x7fKey"},
+	{"C1 NEL", "Yubi\u0085Key"},
+	{"zero-width space", "Yubi\u200bKey"},
+	{"left-to-right mark", "Yubi\u200eKey"},
+	{"right-to-left override", "Yubi\u202eKey"},
+	{"left-to-right isolate", "Yubi\u2066Key"},
+	{"byte order mark", "Yubi\ufeffKey"},
+	{"soft hyphen", "Yubi\u00adKey"},
+	{"line separator", "Yubi\u2028Key"},
+	{"paragraph separator", "Yubi\u2029Key"},
+	{"trailing newline", "YubiKey\n"},
+	{"tab", "Yubi\tKey"},
+	{"only a newline, which would default", "\n"},
+	{"spaces around a control, which would trim", "  \x07  "},
+	{"invalid byte", "Yubi\xffKey"},
+	{"truncated multi-byte sequence", "Yubi\xe2\x82Key"},
+	{"past the length cut", strings.Repeat("x", 70) + "\x07"},
+}
+
+// acceptedPasskeyNames stay accepted, unchanged by trimming: letters of
+// every script, accents, emoji and ordinary spaces are not unprintable.
+var acceptedPasskeyNames = []string{"Clé de Zoë 🔑", "鍵", "مفتاح", "My  work key"}
+
+func TestAddPasskeyRefusesAnUnprintableName(t *testing.T) {
+	for _, tc := range unprintablePasskeyNames {
+		t.Run(tc.label, func(t *testing.T) {
+			s, b, id := openHoldStore(t)
+			saves := b.saves.Load()
+
+			_, err := s.AddPasskey(id, testPasskey(1, tc.name))
+			if !errors.Is(err, ErrPasskeyNameInvalid) {
+				t.Fatalf("AddPasskey(%q) = %v, want ErrPasskeyNameInvalid", tc.name, err)
+			}
+			u, _ := s.Get(id)
+			if len(u.Passkeys) != 0 {
+				t.Errorf("a refused name still stored %d passkeys: %+v", len(u.Passkeys), u.Passkeys)
+			}
+			if got := b.saves.Load(); got != saves {
+				t.Errorf("a refused name wrote to the backend (%d saves, was %d)", got, saves)
+			}
+		})
+	}
+}
+
+func TestAddPasskeyKeepsLettersAccentsAndEmojiInAName(t *testing.T) {
+	for i, name := range acceptedPasskeyNames {
+		s := openTestStore(t)
+		u, err := s.Register("admin", "password-placeholder-1", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.AddPasskey(u.ID, testPasskey(byte(i+1), name))
+		if err != nil {
+			t.Fatalf("AddPasskey(%q): %v", name, err)
+		}
+		if got.Name != name {
+			t.Errorf("AddPasskey(%q) stored the name %q", name, got.Name)
+		}
+		stored, _ := s.Get(u.ID)
+		if len(stored.Passkeys) != 1 || stored.Passkeys[0].Name != name {
+			t.Errorf("stored passkeys after AddPasskey(%q) = %+v", name, stored.Passkeys)
+		}
+	}
+}
+
+// A blank name still becomes "Passkey <n>" and a long one is still cut
+// to 64 characters (runes, not bytes), on every path that names a
+// passkey (#89 leaves both as they were).
+func TestAddPasskeyStillDefaultsABlankNameAndCutsALongOneToSixtyFourRunes(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.AddPasskey(u.ID, testPasskey(1, "   "))
+	if err != nil {
+		t.Fatalf("AddPasskey(blank): %v", err)
+	}
+	if got.Name != "Passkey 1" {
+		t.Errorf("a blank name became %q, want %q", got.Name, "Passkey 1")
+	}
+
+	long := strings.Repeat("鍵", 70)
+	got, err = s.AddPasskey(u.ID, testPasskey(2, long))
+	if err != nil {
+		t.Fatalf("AddPasskey(70 runes): %v", err)
+	}
+	if want := strings.Repeat("鍵", 64); got.Name != want {
+		t.Errorf("a 70-rune name became %d runes (%q), want the first 64", len([]rune(got.Name)), got.Name)
+	}
+}
+
+func TestRenamePasskeyRefusesAnUnprintableName(t *testing.T) {
+	for _, tc := range unprintablePasskeyNames {
+		t.Run(tc.label, func(t *testing.T) {
+			s, b, id := openHoldStore(t)
+			if _, err := s.AddPasskey(id, testPasskey(1, "original")); err != nil {
+				t.Fatal(err)
+			}
+			saves := b.saves.Load()
+
+			_, err := s.RenamePasskey(id, []byte{1}, tc.name)
+			if !errors.Is(err, ErrPasskeyNameInvalid) {
+				t.Fatalf("RenamePasskey(%q) = %v, want ErrPasskeyNameInvalid", tc.name, err)
+			}
+			u, _ := s.Get(id)
+			if len(u.Passkeys) != 1 || u.Passkeys[0].Name != "original" {
+				t.Errorf("a refused rename changed the passkeys to %+v", u.Passkeys)
+			}
+			if got := b.saves.Load(); got != saves {
+				t.Errorf("a refused rename wrote to the backend (%d saves, was %d)", got, saves)
+			}
+		})
+	}
+}
+
+func TestRenamePasskeyKeepsLettersAccentsAndEmojiAndStillDefaultsAndCuts(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(u.ID, testPasskey(1, "original")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range acceptedPasskeyNames {
+		got, err := s.RenamePasskey(u.ID, []byte{1}, name)
+		if err != nil {
+			t.Fatalf("RenamePasskey(%q): %v", name, err)
+		}
+		if got.Name != name {
+			t.Errorf("RenamePasskey(%q) stored the name %q", name, got.Name)
+		}
+	}
+	got, err := s.RenamePasskey(u.ID, []byte{1}, "  ")
+	if err != nil {
+		t.Fatalf("RenamePasskey(blank): %v", err)
+	}
+	if got.Name != "Passkey 1" {
+		t.Errorf("a blank rename became %q, want %q", got.Name, "Passkey 1")
+	}
+	got, err = s.RenamePasskey(u.ID, []byte{1}, strings.Repeat("鍵", 70))
+	if err != nil {
+		t.Fatalf("RenamePasskey(70 runes): %v", err)
+	}
+	if want := strings.Repeat("鍵", 64); got.Name != want {
+		t.Errorf("a 70-rune rename became %d runes, want 64", len([]rune(got.Name)))
+	}
+}

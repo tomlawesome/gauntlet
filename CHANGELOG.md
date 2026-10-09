@@ -25,6 +25,42 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **Passkey names are refused if they are not plain text, and cleaned
+  in notices** (#89). A passkey's name, chosen by whoever registers it,
+  was passed into owner notices as it came, so a mail or chat client
+  could show a made-up line or hidden text. `Store.AddPasskey`,
+  `Store.RenamePasskey` and `Store.HoldFirstPasskey` now refuse a name
+  holding a control or format character, a line or paragraph separator
+  or invalid UTF-8 with the new `ErrPasskeyNameInvalid`, and store
+  nothing. `POST /api/auth/passkeys/register/finish` answers `400
+  invalid-request` before the ceremony is used, so the same credential
+  can be finished again with a good name, and `PATCH
+  /api/auth/passkeys/{id}` answers `400`. A blank name still becomes
+  `Passkey n`, a long one is still cut, and letters of any script,
+  accents and emoji are still accepted. Notices built from a passkey
+  name stored before this release have those characters removed. One
+  shared rule now decides what is plain text for usernames, token names,
+  device IDs, sign-out reasons and passkey names; none of their
+  behaviour changes. Additive: a name refused here was accepted before,
+  so a caller that sent one now gets an error.
+
+- **U+FFFD is refused in usernames, passkey names and the sign-out
+  reason** (#90), as it already was in token names and device IDs. A
+  browser only sends the replacement character when the text it was
+  given was broken (and a JSON body turns invalid UTF-8 into it), so a
+  name holding it is not what the person typed. `ValidateUsername` (and
+  so `Store.Register` and local account creation) answers
+  `ErrUsernameInvalid`; an identity provider's username holding it is
+  not used, and a new account gets its `oidc-<hash>` name instead.
+  `Store.AddPasskey`, `Store.RenamePasskey` and `Store.HoldFirstPasskey`
+  answer `ErrPasskeyNameInvalid`, and `POST
+  /api/auth/passkeys/register/finish` and `PATCH
+  /api/auth/passkeys/{id}` answer `400 invalid-request` as for any other
+  name that is not plain text, the ceremony left live. `POST
+  /api/auth/users/{id}/logout-all` answers `400` for such a reason.
+  Client text in sessions and sign-in records is still only cleaned.
+  Additive in the same way: a name refused here was accepted before.
+
 - **Confirmation codes and escape codes wait between sends, and five an
   hour at most** (#83). The per-window send limit (#84) let someone
   holding the password ask for a code every minute, window after window.
@@ -82,6 +118,15 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Token names and device IDs count characters, not bytes** (#90).
+  `MaxTokenNameLen` and `MaxDeviceIDLen` (64) now count characters, as
+  usernames, passkey names and the sign-out reason already did, and as
+  a documented `maxLength` does: a name of non-Latin letters may be
+  longer than before (22 CJK characters were already too many). The
+  errors now say "at most 64 characters of plain text";
+  `docs/api/auth.yaml` says the same and describes `device` for the
+  first time. A name that fitted before still fits.
+
 - **The accounts document is version 10** (#81), for
   `User.SignInAllowedUntil`. **One-way:** a v0.3.0 build refuses a
   version-10 document at start-up (ADR-0002), so rolling back means
@@ -96,6 +141,21 @@ All notable changes to this project are documented in this file.
 
 - **The `sign-in-refused` detail** now reads "... or ask an
   administrator to allow your next sign-in or reset the account" (#81).
+
+- **Every sign-in ticket is refused from the instant it expires** (#90).
+  The pending-login cookie and the SSO flow state
+  (`oidc.StateCodec.Decode`) used to accept a ticket at exactly its
+  maximum age, while the confirmation and escape tickets refused it
+  then. All four now follow one rule, RFC 7519 §4.1.4's: a ticket is
+  valid only while now is before its expiry. The difference is one
+  instant; no API change.
+
+- **`pwlist` writes its files with the module's shared crash-safe
+  writer** (#90). The list, its checksum, its signature and the build
+  checkpoint now go through `internal/atomicfile`: a missing output
+  directory is created with mode 0700, a replaced file keeps its owner
+  and group (a rebuild run with sudo no longer leaves a list the server
+  cannot read), and the directory is synced after the rename.
 
 - CI: a release is cut on `main` only (#88): release:version and
   release:gitlab run in `main` pipelines and refuse a commit that is not

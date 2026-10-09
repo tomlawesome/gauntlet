@@ -1,14 +1,13 @@
 package gate
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 )
 
 // The prove step (#65, docs/adr/0009-unusual-sign-ins.md): under the
@@ -28,13 +27,13 @@ import (
 // failed) no cookie exists and the caller refuses the attempt
 // (prove-failed).
 func (g *Gate) startProve(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, signals gauntlet.SignInSignals, now time.Time) bool {
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := newTicketID()
+	if err != nil {
 		g.logError("gate: generating a prove ticket id: " + err.Error())
 		return false
 	}
 	ticket, err := confirmLoginCodec.seal(confirmLoginState{
-		UserID: user.ID, IssuedAt: now, ID: hex.EncodeToString(id),
+		UserID: user.ID, IssuedAt: now, ID: id,
 		Signals: signals, Method: method, Prove: true,
 	})
 	if err != nil {
@@ -199,7 +198,7 @@ func (g *Gate) handleLoginProve(w http.ResponseWriter, r *http.Request) {
 	}
 	// One-shot, as confirm's: of two completions racing on one ticket,
 	// the loser is a replay and is told to sign in again.
-	if !spentConfirmLogins.Claim(st.ID, st.IssuedAt.Add(ConfirmCodeLifetime), now) {
+	if !spentConfirmLogins.Claim(st.ID, expiry.At(st.IssuedAt, ConfirmCodeLifetime), now) {
 		g.clearConfirmLoginCookie(w)
 		writeUnauthorized(w, classStepExpired, "sign in again")
 		return

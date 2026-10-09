@@ -142,11 +142,18 @@ every line ran, not that every condition was tried both ways.
 
 ## What a test has to prove
 
-- New behaviour needs a test that would fail without it; prefer what a
-  caller sees over internal detail.
-- A bug fix carries a regression test that reproduces the bug first. A
-  test that has never failed proves nothing; if shipping without one, say
-  so on the issue.
+- The test comes before the code, for new behaviour and fixes alike. It
+  is written from the issue (and ADR) alone, run, and seen to fail; the
+  commit message records that failure
+  (`Failed first: TestName -- <the line it failed with>`). A test that has
+  never failed proves nothing.
+- A test that fails only because the code it calls does not exist yet is
+  checked again once the code exists, by breaking the code briefly and
+  watching the test fail. A test that expects a refusal sits beside the
+  case it guards, since it can pass with no code at all.
+- Prefer what a caller sees over internal detail.
+- Shipping a change without a test needs the reason put to the owner, and
+  their approval, first.
 - Where a type or function is copied from mikroview's implementation
   (`persist`, and later the accounts, session and token stores), its
   ported tests come with it. See each file's doc comment for where it

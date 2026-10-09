@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 // MaxSessionEndReason bounds the reason an admin may give for ending
@@ -14,8 +14,8 @@ import (
 // document's maxLength counts, so a reason it accepts is never refused
 // for being written in accented or non-Latin letters. It reaches the
 // audit log and, through Config.Notify, the account owner's mail, so it
-// is short and plain: control and format characters and the line and
-// paragraph separators are refused, not stripped.
+// is short and plain: control and format characters, the line and
+// paragraph separators and U+FFFD are refused, not stripped.
 const MaxSessionEndReason = 200
 
 // adminLogoutAllRequest is POST /api/auth/users/{id}/logout-all's
@@ -34,22 +34,12 @@ type adminLogoutAllResponse struct {
 	Notified bool `json:"notified"`
 }
 
-// validSessionEndReason reports whether reason is short enough and
-// carries no control or format character and no line or paragraph
-// separator. (JSON decoding has already
-// replaced any invalid UTF-8 with U+FFFD.)
+// validSessionEndReason reports whether reason is at most
+// MaxSessionEndReason characters of plain text (plaintext.ValidWithin):
+// no control or format character, no line or paragraph separator and no
+// U+FFFD (#90), which is what JSON decoding turns invalid UTF-8 into.
 func validSessionEndReason(reason string) bool {
-	if utf8.RuneCountInString(reason) > MaxSessionEndReason {
-		return false
-	}
-	for _, r := range reason {
-		// The line and paragraph separators too: some mail and chat
-		// clients start a new line at them in the owner's notice (#80).
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return false
-		}
-	}
-	return true
+	return plaintext.ValidWithin(reason, MaxSessionEndReason)
 }
 
 // handleAdminLogoutAll is an admin ending every session another account
@@ -64,7 +54,7 @@ func validSessionEndReason(reason string) bool {
 // /api/auth/logout-all, which keeps the browser they are using signed
 // in. 404 for no such account; 400 for a reason over
 // MaxSessionEndReason characters, or holding a control or format
-// character or a line or paragraph separator.
+// character, a line or paragraph separator or U+FFFD.
 // The body is optional.
 //
 // Once the response is written, Config.Notices, or the deprecated

@@ -1,12 +1,12 @@
 package gauntlet
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/browsertoken"
 )
 
 // The known-browser allowance (#44). Escalating lockouts and the
@@ -54,10 +54,6 @@ const MaxKnownBrowsers = 3
 // to forget it.
 const KnownBrowserLifetime = 45 * 24 * time.Hour
 
-// knownBrowserTokenBytes is the token's size before encoding: 256 bits,
-// twice the 128 a session ID has (newID), so it cannot be guessed.
-const knownBrowserTokenBytes = 32
-
 // KnownBrowser is one browser an account remembers (User.KnownBrowsers).
 type KnownBrowser struct {
 	// Hash is the hex SHA-256 of the token the browser carries, never
@@ -95,26 +91,10 @@ func knownBrowserHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// wellFormedKnownBrowserToken reports whether token has the shape
-// RememberBrowser issues, so anything else -- a forged or truncated
-// cookie -- is refused before it is hashed or compared.
-func wellFormedKnownBrowserToken(token string) bool {
-	if len(token) != base64.RawURLEncoding.EncodedLen(knownBrowserTokenBytes) {
-		return false
-	}
-	b, err := base64.RawURLEncoding.DecodeString(token)
-	return err == nil && len(b) == knownBrowserTokenBytes
-}
-
-// newKnownBrowserToken returns a fresh token, base64url without padding.
-func newKnownBrowserToken() string {
-	b := make([]byte, knownBrowserTokenBytes)
-	if _, err := rand.Read(b); err != nil {
-		// As newID: no CSPRNG, nothing in this package can be made safely.
-		panic("gauntlet: crypto/rand unavailable: " + err.Error())
-	}
-	return base64.RawURLEncoding.EncodeToString(b)
-}
+// newKnownBrowserToken returns a fresh token. The token's size, how it
+// is made and which strings count as one live in internal/browsertoken
+// (#90), so gate's cookie reading applies the same rule the store does.
+func newKnownBrowserToken() string { return browsertoken.New() }
 
 // RememberBrowser remembers a browser that has just completed a sign-in
 // on accountID, and returns the token to hand it: a new one every call.
@@ -173,7 +153,7 @@ func (s *Store) ClearKnownBrowsers(accountID string) error {
 // Compared in constant time against every entry, as the setup and
 // unlock codes are, so how far a forged token matched is not timed.
 func (s *Store) KnowsBrowser(accountID, token string, now time.Time) bool {
-	if !wellFormedKnownBrowserToken(token) {
+	if !browsertoken.WellFormed(token) {
 		return false
 	}
 	want := []byte(knownBrowserHash(token))

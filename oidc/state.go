@@ -1,16 +1,16 @@
 package oidc
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"golang.org/x/oauth2"
+
+	"github.com/tomlawesome/gauntlet/internal/expiry"
+	"github.com/tomlawesome/gauntlet/internal/seal"
 )
 
 // FlowState is everything a caller needs to remember between redirecting
@@ -81,76 +81,50 @@ func randomToken() (string, error) {
 // callback endpoint) needs to be able to distinguish.
 var ErrFlowStateInvalid = errors.New("oidc: login flow expired or was tampered with")
 
-// StateCodec seals/opens a FlowState into an opaque cookie value using
-// AES-256-GCM (stdlib crypto/aes + crypto/cipher -- no new dependency
-// needed for this). GCM is an authenticated-encryption (AEAD)
-// construction, so the cookie is both confidential (the PKCE verifier is
-// never observable or guessable from the cookie itself) and
-// tamper-evident (any modification fails the auth tag check in Decode) --
-// a plain HMAC-signed-but-plaintext cookie would give tamper evidence but
-// not confidentiality for the verifier. The key is generated once via
-// crypto/rand at construction and held only in memory, the same
-// process-lifetime contract gauntlet's SessionStore already has.
+// StateCodec seals/opens a FlowState into an opaque cookie value, so
+// the cookie is both confidential (the PKCE verifier is never observable
+// or guessable from the cookie itself) and tamper-evident. The sealing
+// is internal/seal's AES-256-GCM under a key made once from crypto/rand
+// and held only in memory, the same process-lifetime contract gauntlet's
+// SessionStore already has. That package's doc says why.
+//
+// gate's tickets and passkey's ceremony state share that mechanism but
+// not this type or its key: each wrapper names the one payload it
+// carries, and a value sealed for one flow cannot be opened as another.
 type StateCodec struct {
-	aead cipher.AEAD
+	codec *seal.Codec
 }
 
 // NewStateCodec generates a fresh in-memory AES-256-GCM key and returns a
 // StateCodec ready to seal and open FlowState values.
 func NewStateCodec() (*StateCodec, error) {
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("oidc: generating state codec key: %w", err)
-	}
-	block, err := aes.NewCipher(key)
+	c, err := seal.New()
 	if err != nil {
-		return nil, fmt.Errorf("oidc: constructing cipher: %w", err)
+		return nil, fmt.Errorf("oidc: building the state codec: %w", err)
 	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("oidc: constructing AEAD: %w", err)
-	}
-	return &StateCodec{aead: aead}, nil
+	return &StateCodec{codec: c}, nil
 }
 
 // Encode seals fs into a cookie-safe (base64 URL, no padding) string.
 func (c *StateCodec) Encode(fs FlowState) (string, error) {
-	plaintext, err := json.Marshal(fs)
+	sealed, err := c.codec.Seal(fs)
 	if err != nil {
-		return "", fmt.Errorf("oidc: encoding flow state: %w", err)
+		return "", fmt.Errorf("oidc: sealing flow state: %w", err)
 	}
-	nonce := make([]byte, c.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("oidc: generating seal nonce: %w", err)
-	}
-	sealed := c.aead.Seal(nonce, nonce, plaintext, nil)
-	return base64.RawURLEncoding.EncodeToString(sealed), nil
+	return sealed, nil
 }
 
 // Decode opens a cookie value produced by Encode, rejecting it
-// (ErrFlowStateInvalid) if it's malformed, fails the AEAD auth check, or
-// is older than maxAge as measured from FlowState.IssuedAt.
+// (ErrFlowStateInvalid) if it's malformed, spelled other than Encode
+// spelled it, fails the AEAD auth check, or is maxAge old or older as
+// measured from FlowState.IssuedAt: it is refused from the instant it
+// expires (internal/expiry).
 func (c *StateCodec) Decode(cookieValue string, maxAge time.Duration, now time.Time) (FlowState, error) {
-	// Strict: only the spelling Encode wrote opens, so a sealed value has
-	// one cookie string.
-	sealed, err := base64.RawURLEncoding.Strict().DecodeString(cookieValue)
-	if err != nil {
-		return FlowState{}, ErrFlowStateInvalid
-	}
-	ns := c.aead.NonceSize()
-	if len(sealed) < ns {
-		return FlowState{}, ErrFlowStateInvalid
-	}
-	nonce, ciphertext := sealed[:ns], sealed[ns:]
-	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return FlowState{}, ErrFlowStateInvalid
-	}
 	var fs FlowState
-	if err := json.Unmarshal(plaintext, &fs); err != nil {
+	if !c.codec.Open(cookieValue, &fs) {
 		return FlowState{}, ErrFlowStateInvalid
 	}
-	if now.Sub(fs.IssuedAt) > maxAge {
+	if expiry.Expired(fs.IssuedAt, maxAge, now) {
 		return FlowState{}, ErrFlowStateInvalid
 	}
 	return fs, nil

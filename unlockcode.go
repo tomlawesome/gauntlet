@@ -1,11 +1,8 @@
 package gauntlet
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -199,18 +196,13 @@ func (s *Store) announceUnlockCode(username, code string) {
 func (s *Store) CheckUnlockCode(username, code string) (*User, error) {
 	// An unlock in another process retires the code here too.
 	s.reloadIfStale()
-	sum := sha256.Sum256([]byte(NormaliseResetCode(code)))
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	admin := s.lockedOutAdmin(unlockCodeNow())
-	want := s.unlockCodeHash
-	if want == nil {
-		want = make([]byte, sha256.Size) // compared anyway; never a match on its own
-	}
-	codeOK := subtle.ConstantTimeCompare(sum[:], want) == 1 && s.unlockCodeHash != nil
+	codeOK := setupCodeMatches(code, s.unlockCodeHash)
 	adminOK := admin != nil && admin.ID == s.unlockCodeFor && !s.hasRefusedVersion
-	nameOK := admin != nil && s.byName[strings.ToLower(username)] == admin.ID
+	nameOK := admin != nil && s.byName[usernameKey(username)] == admin.ID
 	if !codeOK || !adminOK || !nameOK {
 		return nil, ErrUnlockCodeInvalid
 	}

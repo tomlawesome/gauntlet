@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
@@ -76,7 +77,7 @@ func decodeConfirmLogin(value string, now time.Time) (confirmLoginState, bool) {
 	if !confirmLoginCodec.open(value, &st) || st.ID == "" || st.UserID == "" || (st.CodeHash == "") != st.Prove {
 		return confirmLoginState{}, false
 	}
-	if !now.Before(st.IssuedAt.Add(ConfirmCodeLifetime)) {
+	if expiry.Expired(st.IssuedAt, ConfirmCodeLifetime, now) {
 		return confirmLoginState{}, false
 	}
 	return st, true
@@ -191,13 +192,13 @@ func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntl
 		g.logError(err.Error())
 		return confirmFailed
 	}
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := newTicketID()
+	if err != nil {
 		g.logError("gate: generating a confirm ticket id: " + err.Error())
 		return confirmFailed
 	}
 	ticket, err := confirmLoginCodec.seal(confirmLoginState{
-		UserID: user.ID, IssuedAt: now, ID: hex.EncodeToString(id),
+		UserID: user.ID, IssuedAt: now, ID: id,
 		CodeHash: confirmCodeHash(digits), Signals: signals, Method: method,
 	})
 	if err != nil {
@@ -281,7 +282,7 @@ func (g *Gate) handleLoginConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	// One-shot: of two completions racing on one ticket, the loser is a
 	// replay and is told to sign in again, as completeLoginFactor's is.
-	if !spentConfirmLogins.Claim(st.ID, st.IssuedAt.Add(ConfirmCodeLifetime), now) {
+	if !spentConfirmLogins.Claim(st.ID, expiry.At(st.IssuedAt, ConfirmCodeLifetime), now) {
 		expired()
 		return
 	}

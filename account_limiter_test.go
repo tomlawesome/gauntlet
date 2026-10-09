@@ -701,3 +701,53 @@ func TestAllowAfterResetGivesNoPass(t *testing.T) {
 		t.Error("the reset did not clear the account's own count (#24)")
 	}
 }
+
+// failAccount makes n password guesses against the account, each of which
+// must be let through to be checked.
+func failAccount(t *testing.T, l *LoginLimiter, s *Store, id string, n int, at time.Time) {
+	t.Helper()
+	for i := range n {
+		if !l.ReserveAccount(s, id, at) {
+			t.Fatalf("account attempt %d at %v was refused", i+1, at)
+		}
+	}
+}
+
+// A password change ends the count of guesses before it for the account's
+// own budget too, as it does for the known-browser allowance
+// (TestKnownBrowserGuessesBeforeAPasswordChangeStopCounting): the
+// guesses were at the old password. With a threshold of 5, even one
+// guess from before the change, counted, would make the fifth after it
+// the sixth and start the lockout early, so the boundary is one guess.
+func TestAccountGuessesBeforeAPasswordChangeStopCounting(t *testing.T) {
+	const threshold = 5
+	for _, before := range []int{1, threshold - 1} {
+		t.Run(fmt.Sprintf("%d before the change", before), func(t *testing.T) {
+			s, id := openLockoutStore(t, persist.NewMemory())
+			l := mustNewLoginLimiter(t, threshold, 5*time.Minute)
+			failAccount(t, l, s, id, before, escalationStart)
+			if got := s.LoginLockedUntil(id); !got.IsZero() {
+				t.Fatalf("test setup: %d guesses locked the account until %v", before, got)
+			}
+
+			if err := s.SetPassword("alice", "a-new-password", escalationStart.Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			after := escalationStart.Add(2 * time.Second)
+
+			// A full budget of new guesses is let through, and the lockout
+			// starts with the last of them, not before.
+			failAccount(t, l, s, id, threshold-1, after)
+			if got := s.LoginLockedUntil(id); !got.IsZero() {
+				t.Fatalf("%d guesses after the change, %d before it, locked the account until %v", threshold-1, before, got)
+			}
+			failAccount(t, l, s, id, 1, after)
+			if got := s.LoginLockedUntil(id); got.IsZero() {
+				t.Fatalf("the %dth guess after the change did not start the lockout", threshold)
+			}
+			if l.ReserveAccount(s, id, after) {
+				t.Fatal("a guess past the threshold was let through")
+			}
+		})
+	}
+}
