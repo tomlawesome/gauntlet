@@ -6,6 +6,18 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **A refused passkey sign-in names a passkey the server does not
+  hold** (#92). The `401` `invalid-credentials` from `POST
+  /api/auth/login/passkey` carries an `unknownCredential` member,
+  `{rpId, credentialId}`, when the user handle names no account or an
+  account with no passkey of that ID in any form. An application passes
+  it to the browser's `PublicKeyCredential.signalUnknownCredential()`
+  (W3C WebAuthn Level 3), so a removed passkey stops being offered;
+  docs/using.md has the feature check and fallback. A passkey the
+  server still holds, live, stale or held for its codes, is never
+  named. `detail`, status and counting are unchanged; no Go API
+  changes. Additive.
+
 - **An admin can allow an account's next sign-in for ten minutes**
   (#81, ADR-0009 decision 11). `POST /api/auth/users/{id}/allow-sign-in`
   lets a person the unusual-sign-in policy holds or refuses at a new

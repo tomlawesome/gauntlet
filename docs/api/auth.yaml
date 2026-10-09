@@ -80,10 +80,10 @@ info:
     (`application/problem+json`, gauntlet #23): `type`, a permanent link
     into [`docs/api/errors.md`](../errors.md) naming a fixed `title` and
     `status`; `detail`, free text that may change wording and is never
-    parsed; and, on the one response marked below, an extension member
-    (`username`) that is part of the contract and does not change.
-    (`totpActive`, the other extension member, was last sent by 0.2.0's
-    `totp/confirm`; see `PartiallyCompletedProblem`.) A frontend branches on `type` (or the status code and
+    parsed; and, on the two responses marked below, an extension member
+    (`username`, `unknownCredential`) that is part of the contract and
+    does not change. (`totpActive`, the other extension member, was last
+    sent by 0.2.0's `totp/confirm`; see `PartiallyCompletedProblem`.) A frontend branches on `type` (or the status code and
     the `X-Auth-Gate` header, for the three forced-auth-gate classes),
     never on `detail`'s text. An unmatched path or method (a typo, or a
     method the route does not take) answers the same shape with `type:
@@ -811,6 +811,14 @@ paths:
         refused credential leaves the ceremony open for a corrected
         assertion.
 
+        A refusal whose passkey the server does not hold in any form --
+        the handle names no account, or an account with no passkey of that
+        ID, live, stale or held -- names it in `unknownCredential` (#92;
+        `UnknownCredentialProblem`), the argument of the browser's
+        `PublicKeyCredential.signalUnknownCredential()`, so the frontend
+        can tell the browser to stop offering it. The two cases answer
+        byte for byte alike; every other refusal has no member.
+
         A completed sign-in is first judged for unusual-sign-in signals
         (#55, method `passkey_alone`): it may be refused (`403`
         `sign-in-refused`) or held for a confirmation code (`200`
@@ -841,7 +849,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          description: The assertion was refused (`invalid-credentials`), or the ceremony is dead (`step-expired`) -- begin again.
+          description: The assertion was refused (`invalid-credentials`; `UnknownCredentialProblem` when it names a passkey the server does not hold, #92), or the ceremony is dead (`step-expired`) -- begin again.
           headers:
             WWW-Authenticate:
               required: true
@@ -851,13 +859,15 @@ paths:
           content:
             application/problem+json:
               schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties:
-                      type:
-                        enum:
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties:
+                          type:
+                            enum:
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                  - $ref: "#/components/schemas/UnknownCredentialProblem"
         "403":
           $ref: "#/components/responses/CSRFRequiredOrSignInRefused"
         "404":
@@ -3033,6 +3043,38 @@ components:
         username:
           type: string
           description: Present only from `DELETE /api/auth/users/{id}` -- the account named was deleted, but its API tokens could not be revoked.
+    UnknownCredentialProblem:
+      description: |
+        The `invalid-credentials` refusal of `POST /api/auth/login/passkey`
+        when the server holds the assertion's passkey in no form (#92;
+        docs/api/errors.md). Closed, as `PartiallyCompletedProblem` is:
+        its one extension member is part of the contract.
+      type: object
+      additionalProperties: false
+      required: [type, title, status, unknownCredential]
+      properties:
+        type:
+          const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+        title:
+          const: Invalid credentials
+        status:
+          const: 401
+        detail:
+          type: string
+        unknownCredential:
+          type: object
+          additionalProperties: false
+          required: [rpId, credentialId]
+          description: The argument of `PublicKeyCredential.signalUnknownCredential()` (W3C WebAuthn Level 3 section 5.1.10.2), unchanged.
+          properties:
+            rpId:
+              type: string
+              minLength: 1
+              description: The relying party's ID, the one `login/passkey/begin` gave.
+            credentialId:
+              type: string
+              pattern: "^[A-Za-z0-9_-]+$"
+              description: The assertion's credential ID, base64url with no padding.
     Role:
       type: string
       description: "`admin`, `user` or `viewer`. Any other value is an account gauntlet refuses on every session-gated route."

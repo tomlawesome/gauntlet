@@ -155,6 +155,65 @@ func (g *Gate) accountHoldsCredential(u *gauntlet.User, credID []byte) bool {
 	})
 }
 
+// -- naming a passkey the server does not hold (#92) ------------------------
+//
+// A browser keeps offering a passkey the server has forgotten (removed by
+// its owner, or never held) until it is told not to. W3C WebAuthn Level 3
+// section 5.1.10.2 gives the call for that, signalUnknownCredential, and
+// section 14.6.3 names it as the one to use for a caller who is not signed
+// in. Making it is the application's; gate's part is the refusal naming
+// the credential in an RFC 9457 extension member shaped as that call's
+// argument, so the application can pass it on unchanged.
+
+// unknownCredential is the unknownCredential member: the W3C
+// UnknownCredentialOptions for the credential a refusal names.
+type unknownCredential struct {
+	RPID         string `json:"rpId"`
+	CredentialID string `json:"credentialId"` // base64url, no padding
+}
+
+// accountKnowsCredential reports whether credID is one of u's passkeys in
+// any form: live, registered under another relying-party ID (stale), or
+// held for its recovery codes (#58), expired or not. It is wider than
+// accountHoldsCredential on purpose: a passkey the server still holds is
+// never named, since the browser's deletion cannot be undone and a stale
+// or held passkey can work again (the old public URL comes back, the
+// codes are confirmed).
+func accountKnowsCredential(u *gauntlet.User, credID []byte) bool {
+	if slices.ContainsFunc(u.Passkeys, func(pk gauntlet.Passkey) bool { return bytes.Equal(pk.ID, credID) }) {
+		return true
+	}
+	held := u.HeldEnrolment
+	return held != nil && held.Passkey != nil && bytes.Equal(held.Passkey.ID, credID)
+}
+
+// credentialToForget is the credential ID a refused assertion may name:
+// the one assertionCredentialID reads, when u -- the account the user
+// handle names, nil when it names none -- does not know it. nil when
+// there is nothing to name. A handle naming no account and one naming an
+// account without the credential give the same answer, so the member
+// says nothing of whether an account exists.
+func credentialToForget(u *gauntlet.User, assertion json.RawMessage) []byte {
+	id, read := assertionCredentialID(assertion)
+	if !read || (u != nil && accountKnowsCredential(u, id)) {
+		return nil
+	}
+	return id
+}
+
+// unknownCredentialMember is writeProblem's extra for a refusal naming
+// credID, or nil when credID is nil. The ID is the bytes gate decoded,
+// encoded again, never the caller's own text.
+func (g *Gate) unknownCredentialMember(credID []byte) map[string]any {
+	if credID == nil {
+		return nil
+	}
+	return map[string]any{"unknownCredential": unknownCredential{
+		RPID:         g.deps.Passkeys.RPID(),
+		CredentialID: base64.RawURLEncoding.EncodeToString(credID),
+	}}
+}
+
 // -- the assertion check both finishes share ------------------------------
 
 // signInAssertionOutcome is how checkSignInAssertion ended.
@@ -243,8 +302,12 @@ type loginPasskeyRequest struct {
 // password change would be a denial of service.
 //
 // Every refusal answers 401 invalid-credentials, saying nothing of which
-// check failed. A dead ceremony (no cookie, expired, tampered with,
-// already used) answers 401 step-expired and clears the cookie.
+// check failed -- except that one naming a passkey the handle's account
+// does not know at all, or a handle naming no account, carries the
+// credential in unknownCredential (#92, credentialToForget), so the
+// browser can be told to stop offering it. A dead ceremony (no cookie,
+// expired, tampered with, already used) answers 401 step-expired and
+// clears the cookie.
 func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	ps, ok := g.passkeySignInOrNotFound(w)
 	if !ok {
@@ -277,12 +340,15 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 		named    *gauntlet.User // the account the handle named, once admitted
 		reserved bool
 		limited  bool
+		forget   []byte // the credential a refusal names (#92), nil for none
 	)
 	lookup := func(handle []byte) (*gauntlet.User, bool) {
 		u, ok := g.deps.Users.Get(string(handle))
 		if !ok {
+			forget = credentialToForget(nil, req.Assertion)
 			return nil, false
 		}
+		forget = credentialToForget(u, req.Assertion)
 		// Check before charging (#80): a credential this account cannot
 		// sign in with is refused before reserveLogin, so the refusal
 		// below is on the address alone, as for an unknown handle.
@@ -311,22 +377,22 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	// every other refusal is on the address alone and recorded as
 	// no_such_user. A dead ceremony with no account named checked no
 	// credential, so records nothing.
-	refuse := func(class problemClass, msg string, record bool) {
+	refuse := func(class problemClass, msg string, record bool, extra map[string]any) {
 		switch {
 		case reserved && record:
 			g.recordSignIn(r, loginEvent(named, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodPasskeyAlone), res, now)
 		case record:
 			g.recordSignIn(r, loginEvent(nil, "", gauntlet.SignInNoSuchUser, gauntlet.SignInMethodPasskeyAlone), res, now)
 		}
-		writeUnauthorized(w, class, msg)
+		writeUnauthorizedWith(w, class, msg, extra)
 	}
 	switch outcome {
 	case signInAssertionDead:
 		g.clearPasskeySignInCookie(w)
-		refuse(classStepExpired, passkeyStartAgain, reserved)
+		refuse(classStepExpired, passkeyStartAgain, reserved, nil)
 		return
 	case signInAssertionRefused:
-		refuse(classInvalidCredentials, passkeyNotVerified, true)
+		refuse(classInvalidCredentials, passkeyNotVerified, true, g.unknownCredentialMember(forget))
 		return
 	case signInAssertionBackendFailed:
 		// The credential was right but could not be recorded: this

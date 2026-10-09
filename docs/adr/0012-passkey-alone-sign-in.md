@@ -155,5 +155,11 @@ authenticator, AAL2).
   completes. Page loads and cancelled prompts call begin, and were
   spending the budget a wrong guess is limited by; the finish still
   reserves on the address and the account as decision 5 says.
+- Status (#92): decision 6's `401` `invalid-credentials` from `POST
+  /api/auth/login/passkey` now names a passkey the server does not hold
+  in any form (live, stale or held) in an `unknownCredential` member,
+  the argument of the browser's `signalUnknownCredential()`, so the
+  application can tell the browser to stop offering it. No new class,
+  `detail` or Go API; counting is unchanged.
 
 Design ratified on #77, 2026-10-05.

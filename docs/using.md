@@ -157,6 +157,26 @@ Both are optional, and both answer 404 on their routes until wired:
   ([ADR-0012](adr/0012-passkey-alone-sign-in.md)). An application that
   never imports `gauntlet/passkey` never links the WebAuthn library.
 
+### Tell the browser to forget a removed passkey
+
+With passkey sign-in on, a browser keeps offering a passkey its owner
+has removed, and every try is refused. When the server holds no
+passkey of that ID, the `401` from `POST /api/auth/login/passkey`
+carries `unknownCredential` (#92, [errors.md](api/errors.md#invalid-credentials)).
+Pass that object unchanged to
+`PublicKeyCredential.signalUnknownCredential()`, and the browser or
+password manager drops the passkey from its list.
+
+- Check the call exists first, with
+  `if (PublicKeyCredential.signalUnknownCredential)`: as of 2026-10,
+  Chrome and Edge 132 and later have it, Safari has announced it, and
+  Firefox does not.
+- Where it is missing, show the refusal as usual and suggest removing
+  the passkey by hand in the browser's or password manager's settings,
+  then signing in another way.
+- The browser's deletion cannot be undone, so gauntlet never names a
+  passkey it still holds, even one that cannot sign in here today.
+
 ### Every admin holds a passkey
 
 `Config.AdminPasskey` says whether every admin account must hold a

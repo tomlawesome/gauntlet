@@ -172,11 +172,12 @@ func (g *Gate) writeAuthError(w http.ResponseWriter, r *http.Request, err error,
 // problemClass is one of the fixed error classes every error Routes or
 // Protect answers with belongs to (gauntlet #23, RFC 9457 Problem
 // Details): type and title never vary by call site, only detail (and,
-// for partially-completed, extra) do. status is not part of the type --
-// it is passed separately at each writeProblem/writeAuthError call --
-// but every class here in fact has exactly one fixed status, held to by
-// convention at the call site and pinned by the tests in
-// problem_test.go, not enforced by the type itself.
+// for partially-completed and invalid-credentials, extra) do. status
+// is not part of the type -- it is passed separately at each
+// writeProblem/writeAuthError call -- but every class here in fact has
+// exactly one fixed status, held to by convention at the call site and
+// pinned by the tests in problem_test.go, not enforced by the type
+// itself.
 //
 // docs/api/errors.md has one permanent section per anchor: the anchor
 // is part of a public URL once released, so it is never renamed, and a
@@ -230,8 +231,9 @@ var (
 // (problemTypeBase+class.anchor), title (class.title) and status always;
 // detail (the call site's own message text, unchanged -- gauntlet #23)
 // only when it is not empty. extra adds further top-level members --
-// only partially-completed's username does (its totpActive is no longer
-// sent, #58); every other call site passes nil.
+// only partially-completed's username (its totpActive is no longer
+// sent, #58) and a refused passkey's unknownCredential (#92) do; every
+// other call site passes nil.
 //
 // Its headers are setBodyHeaders', as writeJSON's are, with
 // Content-Type: application/problem+json and no charset parameter --
