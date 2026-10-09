@@ -60,11 +60,16 @@
 # moved out so blocklist and geoip share it. What it leaves uncovered is
 # a chmod, chown, write, sync or close of a just-created temp file
 # failing, which no test here can cause.
+# #90: internal/seal is new at 78.1%, the AES-GCM codec oidc, gate and
+# passkey now share. What it leaves uncovered is crypto/rand or the
+# cipher failing, MustNew's panic, a value JSON cannot encode, and the
+# AEAD accessor only passkey's tests use. oidc re-measured once its
+# codec's own copies of those failure paths moved there: 91.0%.
 
 floors:
   persist: 90
   "": 95 # the root `gauntlet` package -- see the note above on the empty key
-  oidc: 86
+  oidc: 91
   internal/testutil: 0
   internal/evict: 100
   gate: 92
@@ -78,3 +83,4 @@ floors:
   geoip: 92
   persist/persisttest: 94
   internal/atomicfile: 72
+  internal/seal: 78
