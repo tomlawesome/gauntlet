@@ -98,7 +98,7 @@ python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
 scripts/licence-check.sh
 scripts/apidiff.sh             # exported API vs the last v* tag
-GOTOOLCHAIN=go1.27.0 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # CI's version, this module's Go
+GOTOOLCHAIN=go1.27.2 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # the Go in CI's image
 gitleaks detect --no-banner
 python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"
 ```
