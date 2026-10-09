@@ -36,18 +36,20 @@ const defaultGroupsClaim = "groups"
 // is set adds a condition, and all set conditions must hold.
 type Policy struct {
 	// AllowedGroups permits an identity carrying at least one of these in
-	// its groups claim (GroupsClaim). Permit checks it on its own, with
+	// its groups claim (GroupsClaim). An entry must not be empty or only
+	// whitespace (Validate refuses it). Permit checks it on its own, with
 	// its own refusal messages; it is not folded into RequiredClaims, so
 	// setting both on the same claim means both must hold.
 	AllowedGroups []string
 	// GroupsClaim is where to read groups from; defaults to "groups".
 	GroupsClaim string
 	// AllowedEmails is an exact-address allowlist, compared
-	// case-insensitively.
+	// case-insensitively. An entry must not be empty or only whitespace.
 	AllowedEmails []string
 	// AllowedEmailDomains permits an identity whose email is at one of
 	// these domains -- the usual way to scope a Google Workspace or
-	// Microsoft 365 tenant down to one organisation.
+	// Microsoft 365 tenant down to one organisation. An entry must not be
+	// empty or only whitespace.
 	AllowedEmailDomains []string
 	// RequiredClaims is the general mechanism for any other claim: claim
 	// name -> permitted values, where the identity must carry at least
@@ -60,7 +62,8 @@ type Policy struct {
 	RequiredClaims map[string][]string
 	// RoleFromGroups gives an SSO account a role from the groups claim
 	// (GroupsClaim): group name -> "user" or "viewer", matched like
-	// AllowedGroups (trimmed, case-insensitive). An identity in several
+	// AllowedGroups (trimmed, case-insensitive). A group name must not be
+	// empty or only whitespace (Validate refuses it). An identity in several
 	// mapped groups gets the highest role. It is applied when the account
 	// is provisioned and at every SSO sign-in, so the identity provider
 	// stays the source of truth (ADR-0013).
@@ -180,6 +183,39 @@ func (p Policy) ValidateRoles(valid func(role string) bool) error {
 	}
 	if p.RoleWithoutGroup != "" && !valid(p.RoleWithoutGroup) {
 		return fmt.Errorf("oidc: RoleWithoutGroup %q is not a role a group may give", p.RoleWithoutGroup)
+	}
+	return nil
+}
+
+// Validate refuses a Policy with a blank allow-list entry: any
+// AllowedGroups, AllowedEmails or AllowedEmailDomains entry, or any
+// RoleFromGroups key, that is empty or only whitespace. It names the
+// first offending field, in a fixed order so the message is stable.
+//
+// An app that builds these lists by splitting a setting on commas gets a
+// blank entry from a trailing comma or a stray space, and a blank entry
+// is never what the operator meant. It must not quietly widen access, so
+// it is refused at startup rather than ignored or left to match
+// something. A zero Policy is valid. gate.New and New call it.
+func (p Policy) Validate() error {
+	for _, f := range []struct {
+		name    string
+		entries []string
+	}{
+		{"AllowedGroups", p.AllowedGroups},
+		{"AllowedEmails", p.AllowedEmails},
+		{"AllowedEmailDomains", p.AllowedEmailDomains},
+	} {
+		for i, e := range f.entries {
+			if strings.TrimSpace(e) == "" {
+				return fmt.Errorf("oidc: Policy.%s entry %d is empty or only whitespace (a trailing comma in a setting?)", f.name, i+1)
+			}
+		}
+	}
+	for g := range p.RoleFromGroups {
+		if strings.TrimSpace(g) == "" {
+			return fmt.Errorf("oidc: Policy.RoleFromGroups has a group name that is empty or only whitespace (a trailing comma in a setting?)")
+		}
 	}
 	return nil
 }

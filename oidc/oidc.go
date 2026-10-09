@@ -19,6 +19,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -90,7 +91,7 @@ func (i *Identity) claimValues(name string) []string {
 	}
 	switch v := raw.(type) {
 	case string:
-		if v == "" {
+		if strings.TrimSpace(v) == "" {
 			return nil
 		}
 		return []string{v}
@@ -101,7 +102,7 @@ func (i *Identity) claimValues(name string) []string {
 	case []any:
 		var out []string
 		for _, item := range v {
-			if s, ok := item.(string); ok && s != "" {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
 				out = append(out, s)
 			}
 		}
@@ -135,6 +136,11 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	// a public provider sign itself in.
 	if err := AllowIssuerWithPolicy(cfg.IssuerURL, cfg.Policy); err != nil {
 		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	// A blank allow-list entry (a trailing comma in an app's setting) is
+	// refused at startup, not left to widen access (#91).
+	if err := cfg.Policy.Validate(); err != nil {
+		return nil, err
 	}
 
 	timeout := cfg.HTTPTimeout
