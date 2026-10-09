@@ -49,8 +49,15 @@ var (
 	// ErrSecondFactorExists is returned by HoldFirstPasskey and
 	// HoldFirstTOTP when the account already has a live second factor:
 	// only the first is held with recovery codes, and a later one is
-	// added live (AddPasskey, ConfirmTOTP) without codes.
+	// added live (AddLaterPasskey, ConfirmLaterTOTP) without codes.
 	ErrSecondFactorExists = errors.New("gauntlet: this account already has a second factor")
+	// ErrNoOtherSecondFactor is returned by AddLaterPasskey and
+	// ConfirmLaterTOTP when the account has no live second factor: the
+	// mirror of ErrSecondFactorExists. Going live without codes is only
+	// for a factor beside one whose codes stand; an account's first
+	// factor is held with its own (HoldFirstPasskey, HoldFirstTOTP), so
+	// the person has saved them before it goes live (#30, #80).
+	ErrNoOtherSecondFactor = errors.New("gauntlet: this would be the account's first second factor -- hold it with its recovery codes instead")
 	// ErrNoHeldEnrolment is returned by ConfirmHeldEnrolment when
 	// nothing is on hold.
 	ErrNoHeldEnrolment = errors.New("gauntlet: no second factor is waiting to be confirmed")
@@ -201,7 +208,7 @@ func (s *Store) holdRefusal(userID, totpSecret string, now time.Time) error {
 // The codes are minted by this call, for this credential, so they can
 // belong to no other registration. Refused with ErrSecondFactorExists
 // when the account already has a live second factor (add the passkey
-// live with AddPasskey instead), and with ErrEnrolmentHeld while
+// live with AddLaterPasskey instead), and with ErrEnrolmentHeld while
 // another enrolment is on hold. Before either, a name that is not plain
 // text is refused with ErrPasskeyNameInvalid. The write deletes an
 // expired hold first.
@@ -268,7 +275,8 @@ func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Pass
 // it.
 //
 // Refused with ErrSecondFactorExists when the account already has a
-// live second factor (confirm the app live with ConfirmTOTP instead),
+// live second factor (confirm the app live with ConfirmLaterTOTP
+// instead),
 // and with ErrEnrolmentHeld while another enrolment is on hold.
 func (s *Store) HoldFirstTOTP(userID, encodedSecret string, matchedCounter uint64, now time.Time) ([]string, error) {
 	if !s.Persisted() {

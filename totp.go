@@ -364,13 +364,32 @@ func (s *Store) SetPendingTOTPSecretAt(userID, encodedSecret string, now time.Ti
 // a state where accepting a code should change anything -- and
 // ErrEnrolmentHeld while an enrolment is on hold.
 //
-// This makes the app live at once, with no recovery codes: what gate
-// does for an account that already has a second factor (a passkey),
-// whose codes stand. An account's first factor is held instead, with
+// This makes the app live at once, with no recovery codes,
+// unconditionally: on an account with no other second factor that
+// leaves a live app with no codes, so gate uses ConfirmLaterTOTP, which
+// refuses that case. An account's first factor is held instead, with
 // its codes, until confirmed (HoldFirstTOTP, ConfirmHeldEnrolment;
 // #58). Verifying the code is the caller's job (VerifyTOTP above); this
 // only records the outcome.
 func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter uint64) error {
+	return s.confirmTOTP(userID, confirmedAt, matchedCounter, false)
+}
+
+// ConfirmLaterTOTP is ConfirmTOTP for an app confirmed beside a live
+// second factor (a passkey), whose recovery codes stand: it refuses
+// with ErrNoOtherSecondFactor, leaving the secret pending, when the
+// account has none. That is decided in the same locked write that
+// makes the app live (check-and-set, as HoldFirstTOTP's
+// ErrSecondFactorExists is), so a passkey removed after the caller
+// looked -- which took the codes with it -- cannot leave this app live
+// with no codes (#80). The caller holds it instead, HoldFirstTOTP,
+// which the still-pending secret allows.
+func (s *Store) ConfirmLaterTOTP(userID string, confirmedAt time.Time, matchedCounter uint64) error {
+	return s.confirmTOTP(userID, confirmedAt, matchedCounter, true)
+}
+
+// confirmTOTP is ConfirmTOTP, and with later set ConfirmLaterTOTP.
+func (s *Store) confirmTOTP(userID string, confirmedAt time.Time, matchedCounter uint64, later bool) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
 	}
@@ -392,6 +411,9 @@ func (s *Store) ConfirmTOTP(userID string, confirmedAt time.Time, matchedCounter
 		}
 		if !u.TOTPPending(confirmedAt) {
 			return ErrNoPendingTOTP
+		}
+		if later && !u.HasSecondFactor() {
+			return ErrNoOtherSecondFactor
 		}
 		u.TOTPConfirmedAt = confirmedAt
 		u.TOTPLastCounter = matchedCounter

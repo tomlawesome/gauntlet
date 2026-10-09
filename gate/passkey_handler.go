@@ -247,7 +247,9 @@ type passkeyRegisterFinishResponse struct {
 // nothing goes live, no session is rotated and nothing is audited until
 // the caller confirms the codes were saved (handleEnrolmentConfirm).
 // On an account that already has a second factor the passkey is added
-// live at once (AddPasskey), with no codes, and audited here.
+// live at once (AddLaterPasskey), with no codes, and audited here; if
+// that factor has gone by the time of the write, the passkey is held
+// with codes instead, as a first factor (#80).
 //
 // The ceremony ends at the first finish the library accepts (ruling S1
 // on #20): one password-proved begin stores at most one passkey. Its
@@ -353,11 +355,11 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 	pk.CreatedAt = now
 	rpID := g.deps.Passkeys.RPID()
 
-	if !current.HasSecondFactor() {
-		// The first factor: held with its codes, in one write. The store
-		// decides again under its lock, so of two first factors racing
-		// only one is held, and one that lost to a factor going live in
-		// between is added live below instead.
+	// The first factor: held with its codes, in one write. The store
+	// decides again under its lock, so of two first factors racing only
+	// one is held, and one that lost to a factor going live in between
+	// is added live below instead.
+	holdFirst := func() (done bool) {
 		held, codes, err := g.deps.Users.HoldFirstPasskey(current.ID, pk, now)
 		if err == nil {
 			writeJSON(w, http.StatusOK, passkeyRegisterFinishResponse{
@@ -365,15 +367,32 @@ func (g *Gate) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Reques
 				RecoveryCodes:       codes,
 				PendingConfirmation: true,
 			})
-			return
+			return true
 		}
 		if !errors.Is(err, gauntlet.ErrSecondFactorExists) {
 			g.writePasskeyStoreError(w, r, err)
-			return
+			return true
 		}
+		return false
+	}
+	triedFirst := !current.HasSecondFactor()
+	if triedFirst && holdFirst() {
+		return
 	}
 
-	stored, err := g.deps.Users.AddPasskey(current.ID, pk)
+	// Beside a live factor, whose codes stand. The store refuses under
+	// its lock if that factor has gone since (taking the codes with it),
+	// so this passkey never goes live without codes (#80): it is held
+	// with its own instead, once. A factor that went live again in
+	// between ends the ceremony with a 409.
+	stored, err := g.deps.Users.AddLaterPasskey(current.ID, pk)
+	if errors.Is(err, gauntlet.ErrNoOtherSecondFactor) {
+		if !triedFirst && holdFirst() {
+			return
+		}
+		g.writeAuthError(w, r, gauntlet.ErrSecondFactorExists, http.StatusConflict, classConflict)
+		return
+	}
 	if err != nil {
 		g.writePasskeyStoreError(w, r, err)
 		return

@@ -25,6 +25,18 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **A second factor added beside another never goes live without
+  recovery codes** (#80 A3b-R1). An enrolment begun while the account
+  had a second factor took the additional-factor path; if that factor
+  was removed before the new one was confirmed (which clears the
+  recovery codes), the new factor went live with none. The passkey
+  register-finish and authenticator-app confirm routes now use the new
+  `Store.AddLaterPasskey` and `Store.ConfirmLaterTOTP`, which refuse
+  with the new `ErrNoOtherSecondFactor` under the store lock when no
+  other factor is live; the route then holds the factor with its own
+  codes, as a first factor. If the factors change again in between it
+  answers 409 conflict, "start again". `AddPasskey` and `ConfirmTOTP`
+  are unchanged. Additive.
 - **A passkey stores at most eight well-formed transports** (#80
   P2-R1). The transports a browser reports at registration were stored
   as they came, so one registration could put an unbounded list of

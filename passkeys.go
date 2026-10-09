@@ -392,9 +392,11 @@ func findPasskeyIndex(u *User, credID []byte) int {
 // the store-layer half of the registration ceremony gauntlet/passkey
 // runs (PasskeyCeremony.FinishRegistration). pk arrives fully populated
 // by the caller. The passkey is live at once and no recovery codes are
-// minted: what gate does for an account that already has a second
-// factor. An account's first factor is held with its codes instead,
-// until confirmed (HoldFirstPasskey, ConfirmHeldEnrolment; #58).
+// minted, unconditionally: on an account with no other second factor
+// that leaves a live passkey with no recovery codes, so gate uses
+// AddLaterPasskey, which refuses that case. An account's first factor
+// is held with its codes instead, until confirmed (HoldFirstPasskey,
+// ConfirmHeldEnrolment; #58).
 //
 // The credential ID is checked against every passkey already on the
 // account before the account's capacity is: ErrPasskeyDuplicate takes
@@ -407,6 +409,23 @@ func findPasskeyIndex(u *User, credID []byte) int {
 // the stored Passkey, with its normalised name, so the caller's
 // response doesn't have to re-derive it.
 func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
+	return s.addPasskey(userID, pk, false)
+}
+
+// AddLaterPasskey is AddPasskey for a passkey added beside a live
+// second factor, whose recovery codes stand: it refuses with
+// ErrNoOtherSecondFactor, storing nothing, when the account has none.
+// That is decided in the same locked write that adds the passkey
+// (check-and-set, as HoldFirstPasskey's ErrSecondFactorExists is), so a
+// factor removed after the caller looked -- which took the codes with
+// it -- cannot leave this passkey live with no codes (#80). The caller
+// starts again on the first-factor path, HoldFirstPasskey.
+func (s *Store) AddLaterPasskey(userID string, pk Passkey) (Passkey, error) {
+	return s.addPasskey(userID, pk, true)
+}
+
+// addPasskey is AddPasskey, and with later set AddLaterPasskey.
+func (s *Store) addPasskey(userID string, pk Passkey, later bool) (Passkey, error) {
 	if err := checkPasskeyName(pk.Name); err != nil {
 		return Passkey{}, err
 	}
@@ -432,6 +451,9 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 		}
 		if len(u.Passkeys) >= maxPasskeysPerAccount {
 			return ErrPasskeyLimitReached
+		}
+		if later && !u.HasSecondFactor() {
+			return ErrNoOtherSecondFactor
 		}
 		// Copied in and out, as the other passkey methods do: the
 		// stored credential must not share its ID, PublicKey or
