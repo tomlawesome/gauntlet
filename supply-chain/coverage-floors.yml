@@ -65,6 +65,8 @@
 # cipher failing, MustNew's panic, a value JSON cannot encode, and the
 # AEAD accessor only passkey's tests use. oidc re-measured once its
 # codec's own copies of those failure paths moved there: 91.0%.
+# #90: internal/fetch is new at 100.0%, the redirect rule and refresh
+# jitter blocklist and geoip now share.
 
 floors:
   persist: 90
@@ -84,3 +86,4 @@ floors:
   persist/persisttest: 94
   internal/atomicfile: 72
   internal/seal: 78
+  internal/fetch: 100

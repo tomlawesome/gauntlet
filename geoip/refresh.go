@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"math/rand/v2"
 	"net/netip"
 	"net/url"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"github.com/oschwald/maxminddb-golang/v2"
 
 	"github.com/tomlawesome/gauntlet/internal/atomicfile"
+	"github.com/tomlawesome/gauntlet/internal/fetch"
 )
 
 const (
@@ -69,10 +69,10 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 // nextDelay is the interval moved by up to a tenth either way, so many
-// processes started together do not all download together.
+// processes started together do not all download together
+// (internal/fetch, shared with blocklist).
 func (m *Manager) nextDelay() time.Duration {
-	tenth := int64(m.interval / 10)
-	return m.interval + time.Duration(rand.Int64N(2*tenth+1)-tenth) //nolint:gosec // spreading load, not a secret
+	return fetch.Jitter(m.interval)
 }
 
 // refresh runs one check and returns how long until the next. A check
