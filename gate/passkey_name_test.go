@@ -2,8 +2,11 @@ package gate
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/tomlawesome/gauntlet/persist"
@@ -228,5 +231,32 @@ func TestNoticeCleansAnOldUnprintableNameWhenAPasskeyIsRemoved(t *testing.T) {
 	}
 	if n.SecondFactor.Method != "passkey" || n.SecondFactor.Name != cleanedStoredName {
 		t.Errorf("notice detail = %+v, want method passkey and the name %q", *n.SecondFactor, cleanedStoredName)
+	}
+}
+
+// A first passkey held before the rule may carry a newline, an escape,
+// a line separator or bidi controls in its name. When its recovery codes
+// are confirmed the account.passkey_added audit entry quotes the name
+// (strconv.Quote), so the entry stays one line and the characters show
+// as escapes (guards behaviour that already exists).
+func TestAuditLogQuotesAnOldHeldPasskeysNameAtConfirm(t *testing.T) {
+	g, ts, mem, _ := passkeyNameFixture(t)
+	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+	registerPasskeyHeld(t, bilbo, ts, g, plantedMarker)
+	plantPasskeyName(t, mem)
+	var planted string
+	if err := json.Unmarshal([]byte(`"`+storedUnprintableName+`"`), &planted); err != nil {
+		t.Fatal(err)
+	}
+
+	confirmEnrolmentOK(t, bilbo, ts)
+
+	entry := findAuditEntry(t, g, "account.passkey_added")
+	want := "name=" + strconv.Quote(planted) + fixtureFromSuffix
+	if entry.Detail != want {
+		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, want)
+	}
+	if strings.ContainsAny(entry.Detail, "\n\x1b\u2028\u2029\u202e") {
+		t.Errorf("account.passkey_added detail = %q holds a raw newline, escape, separator or bidi character", entry.Detail)
 	}
 }
