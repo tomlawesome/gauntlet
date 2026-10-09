@@ -100,6 +100,24 @@ func reachesHashing(encoded string) bool {
 	return reached
 }
 
+// requireUnmatchableHash fails unless hash is one a login attempt must do
+// the full Argon2id work against, and still nothing can match it. A
+// hash VerifyPassword refuses at once ("", "!id", anything it cannot
+// parse) answers faster than a real one, which tells an attacker which
+// accounts are SSO-only, so "non-empty" is not enough and neither is a
+// false from VerifyPassword.
+func requireUnmatchableHash(t *testing.T, hash string) {
+	t.Helper()
+	if !reachesHashing(hash) {
+		t.Errorf("VerifyPassword refuses %q before hashing; want a real Argon2id hash, so a login against this account costs what any other does", hash)
+	}
+	for _, guess := range []string{"anything-at-all", "", hash} {
+		if VerifyPassword(guess, hash) {
+			t.Errorf("the hash matched the guess %q", guess)
+		}
+	}
+}
+
 // Not from mikroview (issue #12): a stored hash is data this module did
 // not necessarily write, so VerifyPassword must refuse -- without
 // hashing, panicking or keeping a hash slot -- any cost setting or

@@ -255,6 +255,8 @@ func TestOIDCOnlyUserPasswordHashIsUnmatchableNotEmpty(t *testing.T) {
 		t.Fatal("OIDC-only user has an empty PasswordHash -- this is the timing side-channel the design review flagged")
 	}
 
+	requireUnmatchableHash(t, stored.PasswordHash)
+
 	// A local-login attempt against this username must go through the
 	// same real Argon2id comparison path as any other account (and
 	// fail, since there's no real password) -- not the fast malformed-
