@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 )
 
 // FlowState is everything a caller needs to remember between redirecting
@@ -129,7 +131,8 @@ func (c *StateCodec) Encode(fs FlowState) (string, error) {
 
 // Decode opens a cookie value produced by Encode, rejecting it
 // (ErrFlowStateInvalid) if it's malformed, fails the AEAD auth check, or
-// is older than maxAge as measured from FlowState.IssuedAt.
+// is maxAge old or older as measured from FlowState.IssuedAt: it is
+// refused from the instant it expires (internal/expiry).
 func (c *StateCodec) Decode(cookieValue string, maxAge time.Duration, now time.Time) (FlowState, error) {
 	// Strict: only the spelling Encode wrote opens, so a sealed value has
 	// one cookie string.
@@ -150,7 +153,7 @@ func (c *StateCodec) Decode(cookieValue string, maxAge time.Duration, now time.T
 	if err := json.Unmarshal(plaintext, &fs); err != nil {
 		return FlowState{}, ErrFlowStateInvalid
 	}
-	if now.Sub(fs.IssuedAt) > maxAge {
+	if expiry.Expired(fs.IssuedAt, maxAge, now) {
 		return FlowState{}, ErrFlowStateInvalid
 	}
 	return fs, nil

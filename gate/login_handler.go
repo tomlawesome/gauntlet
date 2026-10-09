@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 )
 
 // loginReservation is what one login attempt holds against the
@@ -461,7 +462,7 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // every credential was right, so this request's reservation goes back
 // as for a success.
 func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) {
-	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
+	if !spentPendingLogins.Claim(st.ID, expiry.At(st.IssuedAt, pendingLoginCookieMaxAge), now) {
 		g.clearPendingLoginCookie(w)
 		writeUnauthorized(w, classStepExpired, "sign in again")
 		return

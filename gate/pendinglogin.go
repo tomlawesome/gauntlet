@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
@@ -163,14 +164,15 @@ func (c *pendingLoginStateCodec) encode(st pendingLoginState) (string, error) {
 }
 
 // decode reverses encode, refusing (errPendingLoginInvalid) anything
-// malformed, tampered, or older than pendingLoginCookieMaxAge as measured
-// from the sealed IssuedAt against now.
+// malformed, tampered, or pendingLoginCookieMaxAge old or older as
+// measured from the sealed IssuedAt against now (internal/expiry: refused
+// from the instant it expires).
 func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pendingLoginState, error) {
 	var st pendingLoginState
 	if !c.open(cookieValue, &st) {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}
-	if now.Sub(st.IssuedAt) > pendingLoginCookieMaxAge {
+	if expiry.Expired(st.IssuedAt, pendingLoginCookieMaxAge, now) {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}
 	if st.ID == "" {
