@@ -12,12 +12,14 @@
 // cleared only when the account's last second factor of either kind
 // goes -- see ClearTOTP (totp.go) and DeletePasskey/ClearPasskeys
 // (passkeys.go), which own that clearing rule from each side.
+// Unlike mikroview's copy, the generator, formatter and normaliser call
+// the helpers resetcode.go shares with the reset code (newCode,
+// formatCode, normaliseCode; #90), so the two kinds of code have one
+// rule each.
 
 package gauntlet
 
 import (
-	"crypto/rand"
-	"strings"
 	"time"
 )
 
@@ -25,17 +27,15 @@ const (
 	// recoveryCodeCount is how many codes GenerateRecoveryCodes mints,
 	// and how many User.RecoveryCodes holds afterward.
 	recoveryCodeCount = 10
-	// recoveryCodeAlphabet reuses the reset code's alphabet: no 0/O, no
-	// 1/I/l, so a code copied off a screen (or read aloud) has no
-	// ambiguous character.
-	recoveryCodeAlphabet = resetCodeAlphabet
 	// recoveryCodeLength is characters per code, excluding the grouping
-	// dash. Ten characters over the 32-character alphabet above is 50
-	// bits -- ample for a hashed, single-use, backup-only credential a
-	// person copies out of a list once and keeps offline; the reset
-	// code is longer only because it stands in for a whole password
-	// indefinitely, while a recovery code is checked once and then
-	// dead.
+	// dash, over the reset code's alphabet (resetCodeAlphabet, through
+	// newCode): no 0/O, no 1/I/l, so a code copied off a screen (or read
+	// aloud) has no ambiguous character. Ten characters over that
+	// 32-character alphabet is 50 bits -- ample for a hashed,
+	// single-use, backup-only credential a person copies out of a list
+	// once and keeps offline; the reset code is longer only because it
+	// stands in for a whole password indefinitely, while a recovery code
+	// is checked once and then dead.
 	recoveryCodeLength = 10
 	// recoveryCodeGroup is how many characters sit between dashes in the
 	// form shown to a person: xxxxx-xxxxx.
@@ -56,49 +56,22 @@ type RecoveryCode struct {
 // newRecoveryCode returns a fresh code in its canonical (dashless) form
 // -- the form that gets hashed, mirroring newResetCode.
 func newRecoveryCode() string {
-	b := make([]byte, recoveryCodeLength)
-	if _, err := rand.Read(b); err != nil {
-		// Same stance as newID/newResetCode: a CSPRNG that cannot
-		// produce bytes is not a condition to degrade from gracefully
-		// when the output is about to stand in for a login credential.
-		panic("gauntlet: crypto/rand unavailable: " + err.Error())
-	}
-	out := make([]byte, recoveryCodeLength)
-	for i, v := range b {
-		out[i] = recoveryCodeAlphabet[v&31]
-	}
-	return string(out)
+	return newCode(recoveryCodeLength)
 }
 
 // FormatRecoveryCode groups a canonical code for display: xxxxx-xxxxx.
 // The dash is presentation only -- NormaliseRecoveryCode strips it again
 // on the way back in.
 func FormatRecoveryCode(code string) string {
-	var b strings.Builder
-	for i, r := range code {
-		if i > 0 && i%recoveryCodeGroup == 0 {
-			b.WriteByte('-')
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
+	return formatCode(code, recoveryCodeGroup)
 }
 
 // NormaliseRecoveryCode turns whatever a person typed into the canonical
 // form a stored hash was computed over: upper case, with dashes, spaces
-// and tabs they may have copied (or added themselves) removed. Mirrors
-// NormaliseResetCode exactly, for the same reasons.
+// and tabs they may have copied (or added themselves) removed. It is
+// normaliseCode, the same rule as NormaliseResetCode, not a copy of it.
 func NormaliseRecoveryCode(typed string) string {
-	var b strings.Builder
-	b.Grow(len(typed))
-	for _, r := range typed {
-		switch r {
-		case '-', ' ', '\t':
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.ToUpper(b.String())
+	return normaliseCode(typed)
 }
 
 // GenerateRecoveryCodes mints a fresh set of ten single-use codes for

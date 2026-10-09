@@ -56,7 +56,10 @@ type loginReservation struct {
 // a body may hold, and the limiter keeps thousands of keys; keyed on the
 // name, a credential-free flood of long made-up names would pin hundreds
 // of megabytes. The digest is the same size for every name, and one
-// name, in any case, is still one bucket.
+// name, in any case, is still one bucket. The fold is the root's
+// usernameKey (store.go), spelled out here because gate cannot call an
+// unexported root function: change one and the other must follow, so a
+// name the store treats as one account is one bucket here too.
 func unknownNameKey(username string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(username)))
 	return "user:" + hex.EncodeToString(sum[:])

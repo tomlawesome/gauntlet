@@ -65,14 +65,24 @@ var ErrNoLocalPassword = errors.New("gauntlet: this account signs in through its
 var ErrResetDuringChange = errors.New("gauntlet: an administrator reset this account's password while it was being changed, so the change was not saved -- sign in with the code they give you")
 
 // NormaliseResetCode turns whatever a person typed into the canonical
-// form a stored hash was computed over: upper case, with the dashes and
-// spaces they may have copied (or added themselves) removed.
+// form a stored hash was computed over: upper case, with the dashes,
+// spaces and tabs they may have copied (or added themselves) removed.
+// It is normaliseCode, the one rule every code over resetCodeAlphabet is
+// typed back through.
+func NormaliseResetCode(typed string) string {
+	return normaliseCode(typed)
+}
+
+// normaliseCode is the one normaliser for every code over
+// resetCodeAlphabet: reset, recovery, setup, unlock and escape codes.
+// They used to carry two identical copies (NormaliseResetCode and
+// NormaliseRecoveryCode), so a fix to one could miss the other (#90).
 //
 // Only separators are dropped. A character that is not in the alphabet
 // is left exactly where it is rather than deleted, so a mistyped code
 // stays a mistyped code -- silently discarding unknown characters would
 // make "abcd!efgh" and "abcdefgh" the same secret.
-func NormaliseResetCode(typed string) string {
+func normaliseCode(typed string) string {
 	var b strings.Builder
 	b.Grow(len(typed))
 	for _, r := range typed {
@@ -98,14 +108,21 @@ func (u *User) resetCodeLive(now time.Time) bool {
 // hashed; FormatResetCode below is only ever applied on the way to a
 // human.
 func newResetCode() string {
-	b := make([]byte, resetCodeLength)
+	return newCode(resetCodeLength)
+}
+
+// newCode returns length characters drawn uniformly from
+// resetCodeAlphabet: the canonical form of a reset or recovery code,
+// which differ only in length (#90).
+func newCode(length int) string {
+	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
 		// Same stance as newID: a CSPRNG that cannot produce bytes is
 		// not a condition to degrade gracefully from when the output is
 		// about to stand in for someone's password.
 		panic("gauntlet: crypto/rand unavailable: " + err.Error())
 	}
-	out := make([]byte, resetCodeLength)
+	out := make([]byte, length)
 	for i, v := range b {
 		out[i] = resetCodeAlphabet[v&31]
 	}
@@ -118,9 +135,16 @@ func newResetCode() string {
 // who types the code with them, without them, or in lower case is
 // accepted either way.
 func FormatResetCode(code string) string {
+	return formatCode(code, resetCodeGroup)
+}
+
+// formatCode puts a dash between every group characters of a canonical
+// code, for display. Reset and recovery codes differ only in the group
+// size (#90).
+func formatCode(code string, group int) string {
 	var b strings.Builder
 	for i, r := range code {
-		if i > 0 && i%resetCodeGroup == 0 {
+		if i > 0 && i%group == 0 {
 			b.WriteByte('-')
 		}
 		b.WriteRune(r)
