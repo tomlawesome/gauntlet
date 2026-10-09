@@ -76,10 +76,6 @@ func MustNew(what string) *Codec {
 	return c
 }
 
-// AEAD returns the codec's cipher, for a test that must seal bytes Seal
-// would never write (an authentic value that is not JSON, say).
-func (c *Codec) AEAD() cipher.AEAD { return c.aead }
-
 // Seal encodes v as JSON and seals it behind a fresh random nonce,
 // written as unpadded base64url.
 func (c *Codec) Seal(v any) (string, error) {

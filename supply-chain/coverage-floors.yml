@@ -62,8 +62,8 @@
 # failing, which no test here can cause.
 # #90: internal/seal is new at 78.1%, the AES-GCM codec oidc, gate and
 # passkey now share. What it leaves uncovered is crypto/rand or the
-# cipher failing, MustNew's panic, a value JSON cannot encode, and the
-# AEAD accessor only passkey's tests use. oidc re-measured once its
+# cipher failing, MustNew's panic, and a value JSON cannot encode. oidc
+# re-measured once its
 # codec's own copies of those failure paths moved there: 91.0%.
 # #90: internal/fetch is new at 100.0%, the redirect rule and refresh
 # jitter blocklist and geoip now share.

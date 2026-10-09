@@ -1,7 +1,6 @@
 package passkey
 
 import (
-	"crypto/cipher"
 	"fmt"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -30,16 +29,12 @@ import (
 // library).
 type sessionCodec struct {
 	codec *sealing.Codec
-	// aead is codec's own cipher, kept so this package's tests can seal
-	// an authentic value that is not session JSON.
-	aead cipher.AEAD
 }
 
 func newSessionCodec() *sessionCodec {
 	// A CSPRNG that cannot produce bytes is not something either
 	// ceremony can degrade from: every one depends on a codec.
-	c := sealing.MustNew("passkey: ceremony codec")
-	return &sessionCodec{codec: c, aead: c.AEAD()}
+	return &sessionCodec{codec: sealing.MustNew("passkey: ceremony codec")}
 }
 
 // registerCodec, assertCodec and signInCodec each seal one ceremony's
