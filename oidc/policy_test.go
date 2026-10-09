@@ -517,3 +517,60 @@ func TestPolicyWhitespaceGroupNeverCountsAsAGroup(t *testing.T) {
 		t.Errorf("Groups = %q, want [family] with blank values dropped", got)
 	}
 }
+
+// TestPolicyValidateRefusesBlankEmailDomainAfterTrim pins #91: a domain
+// entry that is blank once a leading "@" and whitespace are removed is
+// refused, naming the field; ordinary entries are accepted.
+func TestPolicyValidateRefusesBlankEmailDomainAfterTrim(t *testing.T) {
+	for _, entry := range []string{"@", "@ ", " @"} {
+		t.Run(fmt.Sprintf("refuses/%q", entry), func(t *testing.T) {
+			err := Policy{AllowedEmailDomains: []string{"example.com", entry}}.Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted domain entry %q", entry)
+			}
+			if !strings.Contains(err.Error(), "AllowedEmailDomains") {
+				t.Errorf("error %q does not name AllowedEmailDomains", err)
+			}
+		})
+	}
+	for _, entry := range []string{"@example.com", "example.com"} {
+		t.Run(fmt.Sprintf("accepts/%q", entry), func(t *testing.T) {
+			if err := (Policy{AllowedEmailDomains: []string{entry}}).Validate(); err != nil {
+				t.Errorf("Validate refused domain entry %q: %v", entry, err)
+			}
+		})
+	}
+}
+
+// TestPolicyPermitBlankEmailEntryNeverMatches pins #91 defence in depth:
+// on a policy that was never validated, a blank allow-list entry must not
+// widen access.
+func TestPolicyPermitBlankEmailEntryNeverMatches(t *testing.T) {
+	verified := func(email string) *Identity {
+		return identity(map[string]any{"email": email, "email_verified": true})
+	}
+
+	t.Run("AllowedEmails", func(t *testing.T) {
+		p := Policy{AllowedEmails: []string{"alice@example.com", ""}}
+		for _, email := range []string{"", "   "} {
+			if err := p.Permit(verified(email)); err == nil {
+				t.Errorf("permitted verified email %q via a blank AllowedEmails entry", email)
+			}
+		}
+		if err := p.Permit(verified("alice@example.com")); err != nil {
+			t.Errorf("refused the listed address: %v", err)
+		}
+	})
+
+	for _, blank := range []string{"", "@"} {
+		t.Run(fmt.Sprintf("AllowedEmailDomains/%q", blank), func(t *testing.T) {
+			p := Policy{AllowedEmailDomains: []string{"example.com", blank}}
+			if err := p.Permit(verified("x@")); err == nil {
+				t.Errorf("permitted verified email %q via blank domain entry %q", "x@", blank)
+			}
+			if err := p.Permit(verified("bob@example.com")); err != nil {
+				t.Errorf("refused bob@example.com: %v", err)
+			}
+		})
+	}
+}
