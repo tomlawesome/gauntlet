@@ -197,13 +197,20 @@ func accountKnowsCredential(u *gauntlet.User, credID []byte) bool {
 
 // credentialToForget is the credential ID a refused assertion may name:
 // the one assertionCredentialID reads, when u -- the account the user
-// handle names, nil when it names none -- does not know it. nil when
-// there is nothing to name. A handle naming no account and one naming an
-// account without the credential give the same answer, so the member
-// says nothing of whether an account exists.
+// handle names -- does not know it. nil when there is nothing to name,
+// and always nil when the handle names no account here (u nil): an RP ID
+// is a hostname with no port or path, so another application on the same
+// hostname shares the browser's passkeys, and naming one of its passkeys
+// would have the browser hide or delete a passkey that still works there
+// (#92 amendment, owner 8a). A handle is a random 128-bit account ID only
+// the passkey's holder has, so the difference tells no one else whether
+// an account exists.
 func credentialToForget(u *gauntlet.User, assertion json.RawMessage) []byte {
+	if u == nil {
+		return nil
+	}
 	id, read := assertionCredentialID(assertion)
-	if !read || (u != nil && accountKnowsCredential(u, id)) {
+	if !read || accountKnowsCredential(u, id) {
 		return nil
 	}
 	return id
@@ -326,10 +333,11 @@ type loginPasskeyRequest struct {
 // password change would be a denial of service.
 //
 // Every refusal answers 401 invalid-credentials, saying nothing of which
-// check failed -- except that one naming a passkey the handle's account
-// does not know at all, or a handle naming no account, carries the
-// credential in unknownCredential (#92, credentialToForget), so the
-// browser can be told to stop offering it. A dead ceremony (no cookie,
+// check failed -- except that one whose handle names an account here
+// that does not know the passkey at all carries the credential in
+// unknownCredential (#92, credentialToForget), so the browser can be
+// told to stop offering it. A handle naming no account here names
+// nothing: it may be another application's on the same hostname. A dead ceremony (no cookie,
 // expired, tampered with, already used) answers 401 step-expired and
 // clears the cookie.
 func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
@@ -369,8 +377,7 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	lookup := func(handle []byte) (*gauntlet.User, bool) {
 		u, ok := g.deps.Users.Get(string(handle))
 		if !ok {
-			forget = credentialToForget(nil, req.Assertion)
-			return nil, false
+			return nil, false // a handle naming no account here names nothing (#92)
 		}
 		forget = credentialToForget(u, req.Assertion)
 		// Check before charging (#80): a credential this account cannot
