@@ -202,9 +202,13 @@ func (s *Store) holdRefusal(userID, totpSecret string, now time.Time) error {
 // belong to no other registration. Refused with ErrSecondFactorExists
 // when the account already has a live second factor (add the passkey
 // live with AddPasskey instead), and with ErrEnrolmentHeld while
-// another enrolment is on hold. The write deletes an expired hold
-// first.
+// another enrolment is on hold. Before either, a name that is not plain
+// text is refused with ErrPasskeyNameInvalid. The write deletes an
+// expired hold first.
 func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Passkey, []string, error) {
+	if err := checkPasskeyName(pk.Name); err != nil {
+		return Passkey{}, nil, err
+	}
 	if !s.Persisted() {
 		return Passkey{}, nil, ErrNotPersisted
 	}

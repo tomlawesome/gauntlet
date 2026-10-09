@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"unicode"
 	"unicode/utf8"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 // MaxSessionEndReason bounds the reason an admin may give for ending
@@ -43,9 +44,7 @@ func validSessionEndReason(reason string) bool {
 		return false
 	}
 	for _, r := range reason {
-		// The line and paragraph separators too: some mail and chat
-		// clients start a new line at them in the owner's notice (#80).
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+		if plaintext.Unprintable(r) {
 			return false
 		}
 	}

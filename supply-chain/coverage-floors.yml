@@ -60,6 +60,7 @@
 # moved out so blocklist and geoip share it. What it leaves uncovered is
 # a chmod, chown, write, sync or close of a just-created temp file
 # failing, which no test here can cause.
+# #89: internal/plaintext is new at 100.0%, the shared plain-text rule.
 
 floors:
   persist: 90
@@ -78,3 +79,4 @@ floors:
   geoip: 92
   persist/persisttest: 94
   internal/atomicfile: 72
+  internal/plaintext: 100
