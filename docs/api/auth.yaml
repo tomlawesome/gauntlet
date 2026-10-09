@@ -1570,7 +1570,11 @@ paths:
         a second factor the passkey is live at once, with no codes. A
         refused credential keeps the ceremony cookie, so it can be
         corrected within the five minutes; every other answer clears it.
-        Reachable at the must-enrol-factor door.
+        A name holding a control or format character, a line or paragraph
+        separator or invalid UTF-8 is refused with `400` before the
+        ceremony cookie is examined, so the ceremony stays live and the
+        same credential can be finished again with a good name; nothing
+        is stored. Reachable at the must-enrol-factor door.
       security:
         - sessionCookie: []
           passkeyRegisterCookie: []
@@ -1590,7 +1594,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PasskeyRegisterFinishResponse"
         "400":
-          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or the credential was refused (wrong origin, bad signature, malformed; `invalid-request` either way). The ceremony cookie is kept, so a corrected credential can finish it.
+          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or `name` holds a character that is not plain text (a control or format character, or a line or paragraph separator), or the credential was refused (wrong origin, bad signature, malformed; `invalid-request` in every case). The ceremony cookie is kept, so a corrected credential can finish it.
           content:
             application/problem+json:
               schema:
@@ -1632,7 +1636,7 @@ paths:
     patch:
       operationId: renamePasskey
       summary: Rename one of the caller's passkeys
-      description: Cosmetic, so no password. A blank name becomes `Passkey n`; a long one is cut at 64 characters.
+      description: Cosmetic, so no password. A blank name becomes `Passkey n`; a long one is cut at 64 characters. A name holding a control or format character, a line or paragraph separator or invalid UTF-8 is refused with `400` (`invalid-request`), and the stored name is unchanged.
       parameters:
         - $ref: "#/components/parameters/PasskeyID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -3301,7 +3305,7 @@ components:
           description: The W3C `PublicKeyCredential` JSON `navigator.credentials.create()` produced. An open object -- see "Compatibility" above.
         name:
           type: string
-          description: A label for the list; blank becomes `Passkey n`, and it is cut at 64 characters.
+          description: A label for the list; blank becomes `Passkey n`, and it is cut at 64 characters. Plain text only -- a control or format character, or a line or paragraph separator, is refused with `400` (letters of any script, accents and emoji are fine).
     PasskeyRegisterFinishResponse:
       type: object
       additionalProperties: false

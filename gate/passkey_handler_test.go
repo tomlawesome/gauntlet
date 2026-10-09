@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -728,27 +729,38 @@ func TestPasskeyDeleteWrongPassword(t *testing.T) {
 }
 
 // TestPasskeyNameIsQuotedInTheAuditLog: a passkey's name is the user's
-// own text, so a newline or terminal escape in it reaches the audit
-// detail quoted, on adding and removing alike, never raw. The stored
-// name is left as the user gave it.
+// own text, so it reaches the audit detail quoted, on adding and
+// removing alike, never raw. A name with a newline or terminal escape
+// can no longer be given (#89), but one stored before that rule still
+// can be held, so the removal is checked against a planted one. The
+// stored name is left as it was.
 func TestPasskeyNameIsQuotedInTheAuditLog(t *testing.T) {
-	g, ts, _ := passkeyFixture(t)
+	g, ts, mem, _ := passkeyNameFixture(t)
 	bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
-	name := "key\nforged=1 \x1b[31mred"
+	name := `key forged=1 "red"`
 	_, out := registerPasskey(t, bilbo, ts, g, name)
 	if out.Passkey.Name != name {
 		t.Errorf("stored passkey name = %q, want %q unchanged", out.Passkey.Name, name)
 	}
-	want := `name="key\nforged=1 \x1b[31mred"` + fixtureFromSuffix
-	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != want || strings.ContainsAny(entry.Detail, "\n\x1b") {
+	want := `name="key forged=1 \"red\""` + fixtureFromSuffix
+	if entry := findAuditEntry(t, g, "account.passkey_added"); entry.Detail != want {
 		t.Errorf("account.passkey_added detail = %q, want %q", entry.Detail, want)
 	}
 
-	resp := deleteJSON(t, bilbo, ts.URL+"/api/auth/passkeys/"+out.Passkey.ID, passkeyDeleteRequest{Password: passkeyBilboPassword})
+	resp := doJSON(t, bilbo, http.MethodPatch, ts.URL+"/api/auth/passkeys/"+out.Passkey.ID, passkeyRenameRequest{Name: plantedMarker})
+	_ = resp.Body.Close()
+	plantPasskeyName(t, mem)
+	var planted string
+	if err := json.Unmarshal([]byte(`"`+storedUnprintableName+`"`), &planted); err != nil {
+		t.Fatal(err)
+	}
+
+	resp = deleteJSON(t, bilbo, ts.URL+"/api/auth/passkeys/"+out.Passkey.ID, passkeyDeleteRequest{Password: passkeyBilboPassword})
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("delete returned %d", resp.StatusCode)
 	}
+	want = "name=" + strconv.Quote(planted) + fixtureFromSuffix
 	if entry := findAuditEntry(t, g, "account.passkey_removed"); entry.Detail != want || strings.ContainsAny(entry.Detail, "\n\x1b") {
 		t.Errorf("account.passkey_removed detail = %q, want %q", entry.Detail, want)
 	}

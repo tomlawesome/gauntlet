@@ -3,6 +3,7 @@ package gauntlet
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -481,5 +482,62 @@ func TestARefusedHoldMintsNoCodes(t *testing.T) {
 	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > ceiling {
 		t.Errorf("four refused holds allocated %.1f MiB; want well under %d MiB -- a refused hold minted its codes",
 			float64(allocated)/(1<<20), ceiling>>20)
+	}
+}
+
+func TestHoldFirstPasskeyRefusesAnUnprintableName(t *testing.T) {
+	for _, tc := range unprintablePasskeyNames {
+		t.Run(tc.label, func(t *testing.T) {
+			s, b, id := openHoldStore(t)
+			saves := b.saves.Load()
+
+			_, codes, err := s.HoldFirstPasskey(id, testPasskey(7, tc.name), time.Now())
+			if !errors.Is(err, ErrPasskeyNameInvalid) {
+				t.Fatalf("HoldFirstPasskey(%q) = %v, want ErrPasskeyNameInvalid", tc.name, err)
+			}
+			if len(codes) != 0 {
+				t.Errorf("a refused name still minted %d recovery codes", len(codes))
+			}
+			u, _ := s.Get(id)
+			if u.HeldEnrolment != nil {
+				t.Errorf("a refused name still left a hold: %+v", u.HeldEnrolment)
+			}
+			if got := b.saves.Load(); got != saves {
+				t.Errorf("a refused name wrote to the backend (%d saves, was %d)", got, saves)
+			}
+		})
+	}
+}
+
+// Names that were fine stay fine: held under their own text, a blank
+// one defaulted and a long one cut to 64 runes.
+func TestHoldFirstPasskeyStillKeepsDefaultsAndCutsTheName(t *testing.T) {
+	for _, name := range acceptedPasskeyNames {
+		s, _, id := openHoldStore(t)
+		held, _, err := s.HoldFirstPasskey(id, testPasskey(7, name), time.Now())
+		if err != nil {
+			t.Fatalf("HoldFirstPasskey(%q): %v", name, err)
+		}
+		if held.Name != name {
+			t.Errorf("HoldFirstPasskey(%q) held the name %q", name, held.Name)
+		}
+	}
+
+	s, _, id := openHoldStore(t)
+	held, _, err := s.HoldFirstPasskey(id, testPasskey(7, "  "), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.Name != "Passkey 1" {
+		t.Errorf("a blank held name became %q, want %q", held.Name, "Passkey 1")
+	}
+
+	s, _, id = openHoldStore(t)
+	held, _, err = s.HoldFirstPasskey(id, testPasskey(7, strings.Repeat("鍵", 70)), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Repeat("鍵", 64); held.Name != want {
+		t.Errorf("a 70-rune held name became %d runes, want 64", len([]rune(held.Name)))
 	}
 }

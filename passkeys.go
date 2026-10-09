@@ -33,6 +33,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 const (
@@ -74,6 +76,13 @@ var (
 	// credential is never reported as "limit reached" merely because
 	// the account happens to be full.
 	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
+	// ErrPasskeyNameInvalid is returned by AddPasskey, RenamePasskey and
+	// HoldFirstPasskey for a name holding a control or format character,
+	// a line or paragraph separator, or invalid UTF-8 (#89): a name is
+	// plain text, shown in lists and in notices to the account's owner.
+	// Nothing is stored or changed. A blank name is not an error; it
+	// becomes "Passkey <n>".
+	ErrPasskeyNameInvalid = errors.New("gauntlet: passkey name contains characters that are not allowed")
 	// ErrPasskeyCeremonyInvalid is wrapped by gauntlet/passkey's
 	// FinishRegistration and FinishLogin (PasskeyCeremony), and FinishSignIn (PasskeySignIn), whenever the
 	// sealed ceremony state is unusable: it fails the authentication
@@ -280,6 +289,19 @@ type PasskeyFlags struct {
 	BackupState    bool `json:"backupState"`
 }
 
+// checkPasskeyName refuses a name that is not plain text, before
+// normalisePasskeyName trims, cuts or defaults it: an unprintable
+// character past the 64th would otherwise be cut off unseen, and one
+// among spaces trimmed away, so the answer would depend on where it
+// sat. Shared by AddPasskey, RenamePasskey and HoldFirstPasskey so the
+// three can't drift apart.
+func checkPasskeyName(name string) error {
+	if !plaintext.Valid(name) {
+		return ErrPasskeyNameInvalid
+	}
+	return nil
+}
+
 // normalisePasskeyName trims name, bounds it to maxPasskeyNameLength
 // runes, and falls back to a numbered default ("Passkey <n>") if what's
 // left is empty. Shared by AddPasskey and RenamePasskey so a stored
@@ -323,11 +345,16 @@ func findPasskeyIndex(u *User, credID []byte) int {
 // account before the account's capacity is: ErrPasskeyDuplicate takes
 // priority over ErrPasskeyLimitReached, so an authenticator presented
 // twice against a full account is told it's already registered rather
-// than that the account is full. Name is normalised (see
-// normalisePasskeyName) before it's stored. Returns the stored Passkey,
+// than that the account is full. Before either, a name that is not
+// plain text is refused with ErrPasskeyNameInvalid and nothing is
+// stored. Name is normalised (see normalisePasskeyName) before it's
+// stored. Returns the stored Passkey,
 // with its normalised name, so the caller's response doesn't have to
 // re-derive it.
 func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
+	if err := checkPasskeyName(pk.Name); err != nil {
+		return Passkey{}, err
+	}
 	if !s.Persisted() {
 		return Passkey{}, ErrNotPersisted
 	}
@@ -371,8 +398,12 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 // cosmetic and reversible, unlike DeletePasskey below. Runs the same
 // normalisation AddPasskey does, so a rename to blank or to something
 // absurdly long behaves the same way giving that name at registration
-// would have.
+// would have. A name that is not plain text is refused with
+// ErrPasskeyNameInvalid and the stored name is left as it was.
 func (s *Store) RenamePasskey(userID string, credID []byte, name string) (Passkey, error) {
+	if err := checkPasskeyName(name); err != nil {
+		return Passkey{}, err
+	}
 	if !s.Persisted() {
 		return Passkey{}, ErrNotPersisted
 	}

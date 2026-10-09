@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 type recoveryCodesRegenerateRequest struct {
@@ -141,10 +142,11 @@ func (g *Gate) handleEnrolmentConfirm(w http.ResponseWriter, r *http.Request) {
 
 	detail := &SecondFactorDetail{Method: "totp"}
 	if held.Kind == gauntlet.HeldFactorPasskey && held.Passkey != nil {
-		// Quoted, as in handlePasskeyRegisterFinish: the name is the
-		// user's own text.
+		// Quoted in the audit entry, as in handlePasskeyRegisterFinish:
+		// the name is the user's own text. Cleaned in the notice, for a
+		// name held before names were checked (#89).
 		g.audit(r, user.Username, "account.passkey_added", user.Username, fmt.Sprintf("name=%q", held.Passkey.Name))
-		detail = &SecondFactorDetail{Method: "passkey", Name: held.Passkey.Name}
+		detail = &SecondFactorDetail{Method: "passkey", Name: plaintext.Clean(held.Passkey.Name)}
 	} else {
 		g.audit(r, user.Username, "account.totp_enabled", user.Username, "authenticator app confirmed; recovery codes issued")
 	}
