@@ -21,8 +21,10 @@ package gauntlet
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1110,5 +1112,225 @@ func TestRenamePasskeyKeepsLettersAccentsAndEmojiAndStillDefaultsAndCuts(t *test
 	}
 	if want := strings.Repeat("鍵", 64); got.Name != want {
 		t.Errorf("a 70-rune rename became %d runes, want 64", len([]rune(got.Name)))
+	}
+}
+
+// A3b-R1 (#80). The invariant: an account with at least one live second
+// factor (authenticator app or passkey) holds recovery codes, and one
+// with none holds none. Standard pattern: check-and-set -- the decision
+// ("was that the last factor?") and the write happen in one store
+// operation under the store's lock, so no interleaving of a removal with
+// another factor change can break it.
+
+// wantCodesToMatchFactors fails unless id holds recovery codes exactly
+// when it has a live second factor.
+func wantCodesToMatchFactors(t *testing.T, s *Store, id, when string) {
+	t.Helper()
+	u, ok := s.Get(id)
+	if !ok {
+		t.Fatalf("%s: the account vanished", when)
+	}
+	if factor, codes := u.HasSecondFactor(), len(u.RecoveryCodes) > 0; factor != codes {
+		t.Errorf("%s: live second factor = %v but recovery codes held = %v (totp=%v passkeys=%d codes=%d)",
+			when, factor, codes, u.HasActiveTOTP(), len(u.Passkeys), len(u.RecoveryCodes))
+	}
+}
+
+// raceStart runs a and b on goroutines released at the same moment.
+func raceStart(a, b func()) {
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, f := range []func(){a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			f()
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+const factorRaceRounds = 200
+
+// seedPasskeyWithCodes gives id one live passkey and the recovery codes
+// that back it.
+func seedPasskeyWithCodes(t *testing.T, s *Store, id string, now time.Time) {
+	t.Helper()
+	if _, err := s.AddPasskey(id, testPasskey(1, "only")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GenerateRecoveryCodes(id, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedTOTPWithCodes gives id a live authenticator app and its codes.
+func seedTOTPWithCodes(t *testing.T, s *Store, id string, now time.Time) {
+	t.Helper()
+	if err := s.SetPendingTOTPSecretAt(id, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConfirmTOTP(id, now, 42); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GenerateRecoveryCodes(id, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// resetFactors takes id back to no second factor at all.
+func resetFactors(t *testing.T, s *Store, id string) {
+	t.Helper()
+	if err := s.ClearAllSecondFactors(id); err != nil && !errors.Is(err, ErrNoSecondFactors) {
+		t.Fatalf("resetting factors: %v", err)
+	}
+}
+
+// Both orders of "remove the last passkey" and "confirm a pending
+// authenticator app" are legal; the second one to run must see what the
+// first did. Run in order, as a lock would let them, the codes must
+// still match the factors after the removal-first order too.
+func TestRemovingTheLastPasskeyThenConfirmingTOTPKeepsRecoveryCodesConsistent(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPasskeyWithCodes(t, s, u.ID, now)
+	if err := s.SetPendingTOTPSecretAt(u.ID, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.DeletePasskey(u.ID, []byte{1}); err != nil {
+		t.Fatalf("DeletePasskey: %v", err)
+	}
+	// The confirmation may be refused or may mint codes of its own; it
+	// may not leave a live app with no codes.
+	_ = s.ConfirmTOTP(u.ID, now, 42)
+	wantCodesToMatchFactors(t, s, u.ID, "passkey removed, then the app confirmed")
+}
+
+// The same hole from the other side: clearing the only authenticator app
+// strips the codes, and a passkey added after that must not go live
+// without any.
+func TestClearingTheLastTOTPThenAddingAPasskeyKeepsRecoveryCodesConsistent(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTOTPWithCodes(t, s, u.ID, now)
+
+	if err := s.ClearTOTP(u.ID); err != nil {
+		t.Fatalf("ClearTOTP: %v", err)
+	}
+	_, _ = s.AddPasskey(u.ID, testPasskey(2, "late"))
+	wantCodesToMatchFactors(t, s, u.ID, "app cleared, then a passkey added")
+}
+
+func TestConcurrentFactorChangesKeepRecoveryCodesConsistent(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	cases := []struct {
+		name string
+		// seed puts the account in its starting state; a and b are the
+		// two changes released together. mustSucceed is whether both
+		// have to return nil (two removals of factors that stand).
+		seed        func(t *testing.T, s *Store, id string)
+		a, b        func(s *Store, id string) error
+		mustSucceed bool
+	}{
+		{
+			name: "remove the last passkey while confirming an authenticator app",
+			seed: func(t *testing.T, s *Store, id string) {
+				seedPasskeyWithCodes(t, s, id, now)
+				if err := s.SetPendingTOTPSecretAt(id, testTOTPSecret, now); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a: func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
+			b: func(s *Store, id string) error { return s.ConfirmTOTP(id, now, 42) },
+		},
+		{
+			name: "clear the only authenticator app while adding a passkey",
+			seed: func(t *testing.T, s *Store, id string) { seedTOTPWithCodes(t, s, id, now) },
+			a:    func(s *Store, id string) error { return s.ClearTOTP(id) },
+			b: func(s *Store, id string) error {
+				_, err := s.AddPasskey(id, testPasskey(2, "late"))
+				return err
+			},
+		},
+		{
+			name: "remove the app and the passkey, each the other's backup",
+			seed: func(t *testing.T, s *Store, id string) {
+				seedTOTPWithCodes(t, s, id, now)
+				if _, err := s.AddPasskey(id, testPasskey(1, "only")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a:           func(s *Store, id string) error { return s.ClearTOTP(id) },
+			b:           func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
+			mustSucceed: true,
+		},
+		{
+			name: "clear the app and clear all passkeys",
+			seed: func(t *testing.T, s *Store, id string) {
+				seedTOTPWithCodes(t, s, id, now)
+				if _, err := s.AddPasskey(id, testPasskey(1, "one")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.AddPasskey(id, testPasskey(2, "two")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a:           func(s *Store, id string) error { return s.ClearTOTP(id) },
+			b:           func(s *Store, id string) error { return s.ClearPasskeys(id) },
+			mustSucceed: true,
+		},
+		{
+			name: "remove two passkeys of a passkey-only account",
+			seed: func(t *testing.T, s *Store, id string) {
+				if _, err := s.AddPasskey(id, testPasskey(1, "one")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.AddPasskey(id, testPasskey(2, "two")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.GenerateRecoveryCodes(id, now); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a:           func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
+			b:           func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{2}); return err },
+			mustSucceed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			u, err := s.Register("admin", "password-placeholder-1", now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for round := range factorRaceRounds {
+				resetFactors(t, s, u.ID)
+				tc.seed(t, s, u.ID)
+				var errA, errB error
+				raceStart(
+					func() { errA = tc.a(s, u.ID) },
+					func() { errB = tc.b(s, u.ID) },
+				)
+				if tc.mustSucceed && (errA != nil || errB != nil) {
+					t.Fatalf("round %d: both removals stand to succeed, got %v and %v", round, errA, errB)
+				}
+				wantCodesToMatchFactors(t, s, u.ID, fmt.Sprintf("round %d (a: %v, b: %v)", round, errA, errB))
+				if t.Failed() {
+					return
+				}
+			}
+		})
 	}
 }

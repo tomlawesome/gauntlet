@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2516,4 +2517,322 @@ func TestAdminClearingAnotherAdminsPasskeysHoldsThem(t *testing.T) {
 		t.Errorf("audit detail = %q, want it to say the admin is now held", e.Detail)
 	}
 	wantDoor(t, secondClient, ts, "/api/protected", authGateMustEnrolPasskey, "no passkey")
+}
+
+// registerFinishWithTransports finishes a registration whose response
+// carries transports -- what the browser's getTransports() reported.
+// The fake authenticator reports none, so the list is spliced into the
+// response it builds; nothing the attestation signs covers it.
+func registerFinishWithTransports(t *testing.T, client *http.Client, ts *httptest.Server, fake *passkeytest.FakeAuthenticator, creation *protocol.CredentialCreation, name string, transports []string) *http.Response {
+	t.Helper()
+	body, err := fake.RegisterResponse(creation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatal(err)
+	}
+	inner, ok := doc["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("the fake registration response has no response object: %s", body)
+	}
+	inner["transports"] = transports
+	spliced, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return postJSON(t, client, ts.URL+"/api/auth/passkeys/register/finish",
+		passkeyRegisterFinishRequest{Credential: json.RawMessage(spliced), Name: name})
+}
+
+// storedTransports is the Transports of the stored passkey with this
+// credential ID -- live, or held for its codes to be confirmed.
+func storedTransports(t *testing.T, g *Gate, userID string, credID []byte) []string {
+	t.Helper()
+	u, ok := g.deps.Users.Get(userID)
+	if !ok {
+		t.Fatal("the account vanished")
+	}
+	for _, pk := range u.Passkeys {
+		if bytes.Equal(pk.ID, credID) {
+			return pk.Transports
+		}
+	}
+	if h := u.HeldEnrolment; h != nil && h.Passkey != nil && bytes.Equal(h.Passkey.ID, credID) {
+		return h.Passkey.Transports
+	}
+	t.Fatal("the registered passkey is not stored, live or held")
+	return nil
+}
+
+// P2-R1 (#80). A passkey's transports are a hint the relying party
+// stores from getTransports() and sends back in allowCredentials;
+// WebAuthn L3 s5.8.4 defines six values (usb, nfc, ble, smart-card,
+// hybrid, internal) and says clients ignore unknown ones, so a transport
+// list must never break a registration. Gauntlet stores at most 8
+// entries, each 1-32 bytes of printable ASCII (0x21-0x7e); an entry
+// outside that is dropped, so is a repeat, and the kept ones stay in the
+// order sent. Registration still succeeds.
+func TestPasskeyRegistrationBoundsTheTransportsItStores(t *testing.T) {
+	numbered := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("t%03d", i)
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		sent []string
+		want []string
+	}{
+		{"the six standard values are kept as sent",
+			[]string{"usb", "nfc", "ble", "smart-card", "hybrid", "internal"},
+			[]string{"usb", "nfc", "ble", "smart-card", "hybrid", "internal"}},
+		{"an unknown but well-formed value is kept",
+			[]string{"usb", "future-transport"},
+			[]string{"usb", "future-transport"}},
+		{"a hundred transports keep the first eight",
+			numbered(100), numbered(8)},
+		{"exactly eight are all kept",
+			numbered(8), numbered(8)},
+		{"entries that are dropped do not count against the eight",
+			append([]string{"", "a b", "x\x07y", strings.Repeat("z", 33), "café", "\x7f"}, numbered(10)...),
+			numbered(8)},
+		{"a ten kilobyte transport is dropped and the rest kept",
+			[]string{"usb", strings.Repeat("a", 10*1024), "nfc"},
+			[]string{"usb", "nfc"}},
+		{"thirty-two bytes are kept and thirty-three dropped",
+			[]string{strings.Repeat("b", 32), strings.Repeat("c", 33)},
+			[]string{strings.Repeat("b", 32)}},
+		{"one byte is kept and an empty entry dropped",
+			[]string{"", "u"},
+			[]string{"u"}},
+		{"control characters, DEL, spaces and non-ASCII are dropped",
+			[]string{"us\x00b", "\n", "usb\x7f", "a b", " nfc", "hýbrid", "бle", "\x1b[31m", "internal", "hybrid"},
+			[]string{"internal", "hybrid"}},
+		{"duplicates are dropped and first-seen order kept",
+			[]string{"usb", "nfc", "usb", "internal", "nfc", "ble"},
+			[]string{"usb", "nfc", "internal", "ble"}},
+		{"a duplicate does not take a place in the eight",
+			append([]string{"usb", "usb", "usb"}, numbered(8)...),
+			append([]string{"usb"}, numbered(7)...)},
+		{"nothing well-formed leaves none, and registration still works",
+			[]string{"", "\x00", strings.Repeat("q", 40), "two words"},
+			nil},
+		{"an empty list stays empty",
+			[]string{}, nil},
+	}
+	for _, path := range []struct {
+		name  string
+		prior bool // a live passkey already stands, so this one is stored live
+	}{
+		{"first factor, held for its codes", false},
+		{"added to an account that has a factor", true},
+	} {
+		for _, tc := range cases {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				g, ts, _ := passkeyFixture(t)
+				bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+				if path.prior {
+					registerPasskey(t, bilbo, ts, g, "already here")
+				}
+				fake := newFake(g)
+				creation := passkeyRegisterBegin(t, bilbo, ts)
+				resp := registerFinishWithTransports(t, bilbo, ts, fake, creation, "with transports", tc.sent)
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("register/finish with %d transports returned %d, want 200 (a transport hint never breaks registration): %.200s",
+						len(tc.sent), resp.StatusCode, body)
+				}
+
+				got := storedTransports(t, g, passkeyBilboID(t, g), fake.CredentialID())
+				if len(got) != len(tc.want) {
+					t.Fatalf("stored %d transports (%.80q), want %d (%.80q)", len(got), got, len(tc.want), tc.want)
+				}
+				for i := range tc.want {
+					if got[i] != tc.want[i] {
+						t.Errorf("stored transport %d = %.40q, want %.40q", i, got[i], tc.want[i])
+					}
+				}
+			})
+		}
+	}
+}
+
+// factorRaceRounds is how many times each concurrent factor-change test
+// repeats its race.
+const factorRaceRounds = 200
+
+// factorRaceRequest sends one JSON request and returns the status. It
+// never calls t.Fatal, so a goroutine can use it.
+func factorRaceRequest(client *http.Client, method, url string, body any) (int, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequest(method, url, bytes.NewReader(b))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(csrfHeaderName, testCSRFValue)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// raceTogether runs a and b on goroutines released at the same moment
+// and waits for both.
+func raceTogether(a, b func()) {
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, f := range []func(){a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			f()
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+// wantRecoveryCodesToMatchFactors fails unless the account holds
+// recovery codes exactly when it has a live second factor.
+func wantRecoveryCodesToMatchFactors(t *testing.T, g *Gate, userID, when string) {
+	t.Helper()
+	u, ok := g.deps.Users.Get(userID)
+	if !ok {
+		t.Fatal("the account vanished")
+	}
+	if factor, codes := u.HasSecondFactor(), len(u.RecoveryCodes) > 0; factor != codes {
+		t.Errorf("%s: live second factor = %v but recovery codes held = %v (totp=%v passkeys=%d codes=%d)",
+			when, factor, codes, u.HasActiveTOTP(), len(u.Passkeys), len(u.RecoveryCodes))
+	}
+}
+
+// raceFixtureReset takes bilbo back to no factor and signs in, so every
+// round starts from the same state on a session the round's removal can
+// end without ending the next round's.
+func raceFixtureReset(t *testing.T, g *Gate, ts *httptest.Server, id string) *http.Client {
+	t.Helper()
+	if err := g.deps.Users.ClearAllSecondFactors(id); err != nil && !errors.Is(err, gauntlet.ErrNoSecondFactors) {
+		t.Fatalf("resetting the account's factors: %v", err)
+	}
+	return loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
+}
+
+// raceSeedPasskey gives the account one live passkey (credential ID
+// {1}) with its recovery codes.
+func raceSeedPasskey(t *testing.T, g *Gate, id string, now time.Time) {
+	t.Helper()
+	if _, err := g.deps.Users.AddPasskey(id, gauntlet.Passkey{
+		ID: []byte{1}, PublicKey: []byte{1, 1, 1}, RPID: g.deps.Passkeys.RPID(), Name: "race key",
+		Flags: gauntlet.PasskeyFlags{UserPresent: true, UserVerified: true},
+	}); err != nil {
+		t.Fatalf("seeding a passkey: %v", err)
+	}
+	if _, err := g.deps.Users.GenerateRecoveryCodes(id, now); err != nil {
+		t.Fatalf("seeding recovery codes: %v", err)
+	}
+}
+
+const raceTOTPSecret = "JBSWY3DPEHPK3PXP"
+
+// A3b-R1 (#80). The invariant: an account with a live second factor
+// (authenticator app or passkey) holds recovery codes, and one with none
+// holds none. Deciding "this was the last factor" and writing the codes
+// away must be one check-and-set under the store's lock; done as two
+// steps, a removal and a concurrent addition can interleave and leave a
+// live factor with no codes. Removes the last passkey while a pending
+// authenticator app is confirmed, over and over, through the routes.
+func TestRemovingTheLastPasskeyWhileConfirmingTOTPKeepsRecoveryCodesConsistent(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	id := passkeyBilboID(t, g)
+	secret, err := gauntlet.DecodeTOTPSecret(raceTOTPSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round := range factorRaceRounds {
+		client := raceFixtureReset(t, g, ts, id)
+		now := time.Now()
+		raceSeedPasskey(t, g, id, now)
+		if err := g.deps.Users.SetPendingTOTPSecretAt(id, raceTOTPSecret, now); err != nil {
+			t.Fatalf("round %d: seeding a pending authenticator app: %v", round, err)
+		}
+		code := gauntlet.GenerateTOTPCode(secret, totpCounterNow(now))
+		var delStatus, confirmStatus int
+		var delErr, confirmErr error
+		raceTogether(
+			func() {
+				delStatus, delErr = factorRaceRequest(client, http.MethodDelete,
+					ts.URL+"/api/auth/passkeys/"+base64.RawURLEncoding.EncodeToString([]byte{1}),
+					passkeyDeleteRequest{Password: passkeyBilboPassword})
+			},
+			func() {
+				confirmStatus, confirmErr = factorRaceRequest(client, http.MethodPost,
+					ts.URL+totpConfirmPath, totpConfirmRequest{Code: code})
+			},
+		)
+		if delErr != nil || confirmErr != nil {
+			t.Fatalf("round %d: transport errors: %v / %v", round, delErr, confirmErr)
+		}
+		if delStatus >= 500 || confirmStatus >= 500 {
+			t.Errorf("round %d: a server error: delete passkey %d, confirm TOTP %d", round, delStatus, confirmStatus)
+		}
+		wantRecoveryCodesToMatchFactors(t, g, id, fmt.Sprintf("round %d (delete %d, confirm %d)", round, delStatus, confirmStatus))
+		if t.Failed() {
+			return
+		}
+	}
+}
+
+// Same invariant, two removals: with an authenticator app and a passkey
+// both live, removing each at once must leave no factor and no codes,
+// never a factor-less account still holding codes that sign in.
+func TestRemovingTwoLastFactorsAtOnceKeepsRecoveryCodesConsistent(t *testing.T) {
+	g, ts, _ := passkeyFixture(t)
+	id := passkeyBilboID(t, g)
+	for round := range factorRaceRounds {
+		client := raceFixtureReset(t, g, ts, id)
+		now := time.Now()
+		if err := g.deps.Users.SetPendingTOTPSecretAt(id, raceTOTPSecret, now); err != nil {
+			t.Fatalf("round %d: seeding a pending authenticator app: %v", round, err)
+		}
+		if err := g.deps.Users.ConfirmTOTP(id, now, 42); err != nil {
+			t.Fatalf("round %d: confirming the authenticator app: %v", round, err)
+		}
+		raceSeedPasskey(t, g, id, now)
+		var totpStatus, passkeyStatus int
+		var totpErr, passkeyErr error
+		raceTogether(
+			func() {
+				totpStatus, totpErr = factorRaceRequest(client, http.MethodDelete,
+					ts.URL+"/api/auth/totp", totpDeleteRequest{Password: passkeyBilboPassword})
+			},
+			func() {
+				passkeyStatus, passkeyErr = factorRaceRequest(client, http.MethodDelete,
+					ts.URL+"/api/auth/passkeys/"+base64.RawURLEncoding.EncodeToString([]byte{1}),
+					passkeyDeleteRequest{Password: passkeyBilboPassword})
+			},
+		)
+		if totpErr != nil || passkeyErr != nil {
+			t.Fatalf("round %d: transport errors: %v / %v", round, totpErr, passkeyErr)
+		}
+		if totpStatus >= 500 || passkeyStatus >= 500 {
+			t.Errorf("round %d: a server error: delete TOTP %d, delete passkey %d", round, totpStatus, passkeyStatus)
+		}
+		wantRecoveryCodesToMatchFactors(t, g, id, fmt.Sprintf("round %d (delete TOTP %d, delete passkey %d)", round, totpStatus, passkeyStatus))
+		if t.Failed() {
+			return
+		}
+	}
 }
