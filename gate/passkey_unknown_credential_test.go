@@ -1,4 +1,5 @@
-// A passkey the server does not hold is named in the refusal (#92). The
+// A passkey the server does not hold is named in the refusal (#92, as
+// amended: only for one of its own accounts). The
 // 401 invalid-credentials answer of POST /api/auth/login/passkey carries
 // one extra RFC 9457 member, "unknownCredential", shaped as the argument
 // of the browser's PublicKeyCredential.signalUnknownCredential() (W3C
@@ -6,12 +7,16 @@
 //
 //	"unknownCredential": {"rpId": "<the relying party's ID>", "credentialId": "<base64url, no padding>"}
 //
-// It is present only when the assertion's rawId decoded to a non-empty ID
-// and the account the user handle names either does not exist or holds no
-// passkey with that ID in any form (live, registered under another RP ID,
-// or held for its recovery codes). Everywhere else the body is today's.
-// Written from the design on the issue; the cases are T1-T12 and T14, with
-// T13 (reauthenticate) left out until the owner decides it.
+// It is present only when the assertion's rawId decoded to a non-empty ID,
+// the user handle names one of THIS application's accounts, and that
+// account holds no passkey with that ID in any form (live, registered
+// under another RP ID, or held for its recovery codes). A handle naming no
+// account gets no member: an RP ID is a hostname only, so a sibling
+// application on the same hostname (another port or path) shares the
+// browser's passkeys, and naming its credential would remove its user's
+// working passkey. Everywhere else the body is today's.
+// Written from the design on the issue and its 2026-10-09 amendment; the
+// cases are T1-T12, T14 and T17-T19, with T13 (reauthenticate) elsewhere.
 package gate
 
 import (
@@ -202,36 +207,38 @@ func TestUnknownCredentialRemovedPasskeyIsNamed(t *testing.T) {
 
 // -- T2, T3 ------------------------------------------------------------------
 
-// T2: a user handle that names no account still gets the member, with the
-// credential the browser presented.
-func TestUnknownCredentialUnknownHandleIsNamed(t *testing.T) {
+// T2: a user handle that names no account gets no member: the body is
+// byte for byte the held credential's wrong-assertion refusal (T6).
+func TestUnknownCredentialUnknownHandleIsNotNamed(t *testing.T) {
 	e := newAloneEnv(t)
 	e.withFreshAddresses()
+	e.fake.NoUserVerification = true
+	_, _, heldBody := e.refusedWith(t, e.fake)
+	e.fake.NoUserVerification = false
+
 	unknown := newFake(e.g)
 	unknown.UserHandle = []byte(unknownAccountHandle)
-
-	rpID, _, body := e.refusedWith(t, unknown)
-	wantUnknownCredential(t, body, rpID, unknown)
+	_, _, body := e.refusedWith(t, unknown)
+	wantNoUnknownCredential(t, body)
+	if body != heldBody {
+		t.Errorf("an unknown handle got %s, want the held-credential refusal's %s byte for byte", body, heldBody)
+	}
 }
 
 // T3: a credential bilbo's account does not hold, presented with his
-// handle, answers byte for byte like the same credential with an unknown
-// handle: the member says nothing of whether the account exists.
-func TestUnknownCredentialForeignCredentialAnswersLikeAnUnknownHandle(t *testing.T) {
+// handle, is named: the handle names one of this application's accounts,
+// so the passkey is signalled with begin's own rpId and today's detail.
+func TestUnknownCredentialStrangersCredentialOnARealAccountIsNamed(t *testing.T) {
 	e := newAloneEnv(t)
 	e.withFreshAddresses()
-	fake := newFake(e.g)
+	stranger := newFake(e.g)
+	stranger.UserHandle = []byte(e.id)
 
-	fake.UserHandle = []byte(unknownAccountHandle)
-	rpID, _, unknownBody := e.refusedWith(t, fake)
-	wantUnknownCredential(t, unknownBody, rpID, fake)
-
-	fake.UserHandle = []byte(e.id)
-	_, _, foreignBody := e.refusedWith(t, fake)
-	wantUnknownCredential(t, foreignBody, rpID, fake)
-	if foreignBody != unknownBody {
-		t.Errorf("a credential the account does not hold got %s, want the unknown handle's %s", foreignBody, unknownBody)
+	rpID, _, body := e.refusedWith(t, stranger)
+	if rpID == "" || rpID != e.g.deps.Passkeys.RPID() {
+		t.Fatalf("begin offered rpId %q, want the relying party's %q", rpID, e.g.deps.Passkeys.RPID())
 	}
+	wantUnknownCredential(t, body, rpID, stranger)
 }
 
 // -- T4, T6 ------------------------------------------------------------------
@@ -425,9 +432,10 @@ func TestUnknownCredentialPaddedRawIDIsNamedUnpadded(t *testing.T) {
 
 // -- T12 ---------------------------------------------------------------------
 
-// T12: counting is unchanged. The removed passkey, the unknown handle and
-// the foreign credential are each recorded no_such_user, and past the
-// lockout and disable thresholds nothing is charged to bilbo's account.
+// T12: counting is unchanged by whether the member is present. The removed
+// passkey, the unknown handle and the foreign credential are each recorded
+// no_such_user, and past the lockout and disable thresholds nothing is
+// charged to bilbo's account.
 func TestUnknownCredentialRefusalsStillChargeNothing(t *testing.T) {
 	const threshold = 3
 	attempts := gauntlet.MaxConsecutiveLoginFailures + 1
@@ -457,6 +465,91 @@ func TestUnknownCredentialRefusalsStillChargeNothing(t *testing.T) {
 		failedUncharged(t, e, stranger, attempts)
 		wantNothingChargedTo(t, e, e.id, threshold)
 	})
+}
+
+// -- T17 to T19 --------------------------------------------------------------
+
+// T17: a sibling application. An RP ID is a hostname only, so two gates at
+// https://host:8443 and https://host:9443 share one scope and the browser
+// offers either one's passkeys to the other. The second gate must refuse
+// the first's passkey without naming it (the browser would act on the
+// signal and remove the first's working passkey), and the first still
+// signs in.
+func TestUnknownCredentialSiblingApplicationsPasskeyIsNotNamed(t *testing.T) {
+	first := newAloneEnvAt(t, "https://passkeys.example.org:8443")
+	second := newAloneEnvAt(t, "https://passkeys.example.org:9443")
+	first.withFreshAddresses()
+	second.withFreshAddresses()
+	if a, b := first.g.deps.Passkeys.RPID(), second.g.deps.Passkeys.RPID(); a == "" || a != b {
+		t.Fatalf("relying party IDs = %q and %q, want one shared hostname", a, b)
+	}
+	if first.g.deps.Passkeys.Origin() == second.g.deps.Passkeys.Origin() {
+		t.Fatal("the two gates share an origin, want different ports")
+	}
+	if first.id == second.id {
+		t.Fatal("the two gates minted the same account ID")
+	}
+
+	// What the browser sends the second gate: the first's key, credential ID
+	// and user handle, with the second gate's origin (its page is open).
+	carried := *first.fake
+	carried.RPID, carried.Origin = second.g.deps.Passkeys.RPID(), second.g.deps.Passkeys.Origin()
+	if string(carried.UserHandle) != first.id {
+		t.Fatalf("carried user handle = %q, want the first gate's account ID %q", carried.UserHandle, first.id)
+	}
+
+	second.fake.NoUserVerification = true
+	_, _, heldBody := second.refusedWith(t, second.fake)
+	second.fake.NoUserVerification = false
+
+	_, _, body := second.refusedWith(t, &carried)
+	wantNoUnknownCredential(t, body)
+	if body != heldBody {
+		t.Errorf("a sibling application's passkey got %s, want the second gate's held-credential refusal %s byte for byte", body, heldBody)
+	}
+
+	first.mustSignIn(t, newBrowserJar(t))
+}
+
+// T18: an SSO-owned account (no local password) presenting a passkey it
+// does not hold: its handle names an account here, so the passkey is
+// named, and nothing is charged to the account.
+func TestUnknownCredentialSSOOwnedAccountWithAStrangersPasskeyIsNamed(t *testing.T) {
+	const threshold = 3
+	e := newAloneEnv(t)
+	e.withFreshAddresses()
+	makeBilboSSOOwned(t, e)
+	stranger := newFake(e.g)
+	stranger.UserHandle = []byte(e.id)
+
+	rpID, _, body := e.refusedWith(t, stranger)
+	wantUnknownCredential(t, body, rpID, stranger)
+
+	e.g.deps.Limiter = mustNewLoginLimiter(t, threshold, time.Minute)
+	failedUncharged(t, e, stranger, gauntlet.MaxConsecutiveLoginFailures+1)
+	wantNothingChargedTo(t, e, e.id, threshold)
+}
+
+// T19: a handle of the right shape -- 32 hex characters, the form of an
+// account ID -- that names no account gets no member.
+func TestUnknownCredentialWellFormedHandleNamingNoAccountIsNotNamed(t *testing.T) {
+	const handle = "0123456789abcdef0123456789abcdef"
+	e := newAloneEnv(t)
+	e.withFreshAddresses()
+	if e.id == handle {
+		t.Fatal("bilbo's account ID is the handle the test needs to be unused")
+	}
+	e.fake.NoUserVerification = true
+	_, _, heldBody := e.refusedWith(t, e.fake)
+	e.fake.NoUserVerification = false
+
+	stranger := newFake(e.g)
+	stranger.UserHandle = []byte(handle)
+	_, _, body := e.refusedWith(t, stranger)
+	wantNoUnknownCredential(t, body)
+	if body != heldBody {
+		t.Errorf("a well-formed handle naming no account got %s, want the held-credential refusal's %s byte for byte", body, heldBody)
+	}
 }
 
 // -- T14 ---------------------------------------------------------------------

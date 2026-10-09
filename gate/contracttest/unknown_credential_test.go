@@ -16,8 +16,9 @@ import (
 
 // TestContractUnknownCredentialMember (#92): the 401 invalid-credentials
 // answer of POST /api/auth/login/passkey names a passkey the server does
-// not hold in a closed UnknownCredentialProblem; the refusal of a passkey
-// it does hold stays a plain Problem. Any member beyond the documented
+// not hold in a closed UnknownCredentialProblem, only when the user handle
+// names one of its own accounts (T3); a handle naming no account (T2) and
+// the refusal of a passkey it does hold (T6) stay a plain Problem. Any member beyond the documented
 // ones fails the closed schema.
 func TestContractUnknownCredentialMember(t *testing.T) {
 	const adminPass = "contract-admin-password"
@@ -77,6 +78,15 @@ func TestContractUnknownCredentialMember(t *testing.T) {
 	noUV.NoUserVerification = true
 	t6 := finish(&noUV) // T6: a passkey it holds, refused for a wrong assertion
 
+	// T2: a handle naming no account. T3: a credential nobody holds,
+	// presented with the admin's own handle.
+	unknownHandle := passkeytest.New("passkeys.example.org", publicURL)
+	unknownHandle.UserHandle = []byte("no-such-account")
+	t2 := finish(unknownHandle)
+	strangerOnAccount := *unknownHandle
+	strangerOnAccount.UserHandle = []byte(adminUser.ID)
+	t3 := finish(&strangerOnAccount)
+
 	doc := c.doc
 	named := doc.Components.Schemas["UnknownCredentialProblem"]
 	if named == nil || named.Value == nil {
@@ -103,6 +113,17 @@ func TestContractUnknownCredentialMember(t *testing.T) {
 	validate("T1 body against UnknownCredentialProblem", named, t1, true)
 	validate("T1 body against Problem (the member must not slip into the open class)", plain, t1, false)
 	validate("T6 body against Problem", plain, t6, true)
+
+	// T20: T2's body is a plain Problem and not the closed
+	// UnknownCredentialProblem, and is T6's body byte for byte; T3's body is
+	// the closed UnknownCredentialProblem.
+	validate("T2 body against Problem", plain, t2, true)
+	validate("T2 body against UnknownCredentialProblem (an unknown handle must not be named)", named, t2, false)
+	if string(t2) != string(t6) {
+		t.Errorf("T2 body = %s, want T6's %s byte for byte", t2, t6)
+	}
+	validate("T3 body against UnknownCredentialProblem", named, t3, true)
+	validate("T3 body against Problem (the member must not slip into the open class)", plain, t3, false)
 
 	// Any other extra member fails the closed schema.
 	var withExtra map[string]any
@@ -135,4 +156,6 @@ func TestContractUnknownCredentialMember(t *testing.T) {
 	}
 	validate("T1 body against login/passkey's 401", media.Schema, t1, true)
 	validate("T6 body against login/passkey's 401", media.Schema, t6, true)
+	validate("T2 body against login/passkey's 401", media.Schema, t2, true)
+	validate("T3 body against login/passkey's 401", media.Schema, t3, true)
 }
