@@ -30,8 +30,8 @@ func via(t *testing.T, n int) []*http.Request {
 }
 
 func TestHTTPSRedirectsOnlyAllowsHTTPSUpToFiveRedirects(t *testing.T) {
-	// via holds the earlier requests, so len(via) 0..4 means the first to
-	// fifth redirect.
+	// via holds the requests already made; up to four may precede an
+	// allowed redirect.
 	for n := 0; n <= 4; n++ {
 		if err := HTTPSRedirectsOnly(request(t, "https://example.test/next"), via(t, n)); err != nil {
 			t.Errorf("len(via)=%d: https redirect refused: %v", n, err)
@@ -109,7 +109,7 @@ func TestRedirectToHTTPIsRefusedEndToEnd(t *testing.T) {
 	client.CheckRedirect = HTTPSRedirectsOnly
 	resp, err := client.Get(srv.URL)
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	if err == nil {
 		t.Fatal("redirect to an http:// URL was followed")
@@ -125,7 +125,7 @@ func TestRedirectToHTTPIsRefusedEndToEnd(t *testing.T) {
 
 func TestHTTPSRedirectsFollowedEndToEnd(t *testing.T) {
 	dst := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer dst.Close()
 	src := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +140,7 @@ func TestHTTPSRedirectsFollowedEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("https to https redirect failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status %d, want 200", resp.StatusCode)
 	}
@@ -156,7 +156,7 @@ func TestRedirectLoopStopsEndToEnd(t *testing.T) {
 	client.CheckRedirect = HTTPSRedirectsOnly
 	resp, err := client.Get(srv.URL + "/")
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	var ue *url.Error
 	if !errors.As(err, &ue) {

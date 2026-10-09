@@ -69,7 +69,8 @@ func TestSessionCodecRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decoding test fixture: %v", err)
 	}
-	ns := codec.aead.NonceSize()
+	// The nonce is the first 12 bytes: AES-GCM's standard nonce size.
+	const ns = 12
 	if len(sealed) <= ns {
 		t.Fatalf("sealed value too short to tamper with: %d bytes", len(sealed))
 	}
@@ -117,13 +118,24 @@ func TestSessionCodecRejectsMalformedInput(t *testing.T) {
 
 // TestSessionCodecRejectsAnAuthenticNonSessionPayload covers decode's
 // last refusal: a value that opens under the right key but does not
-// hold session JSON.
+// hold session JSON. A JSON string is sealed through the codec's own
+// Seal, so it is authentic, correctly spelled and valid JSON -- only the
+// wrong shape for webauthn.SessionData.
 func TestSessionCodecRejectsAnAuthenticNonSessionPayload(t *testing.T) {
 	codec := registerCodec
-	nonce := make([]byte, codec.aead.NonceSize())
-	sealed := codec.aead.Seal(nonce, nonce, []byte("not json"), nil)
-	if _, err := codec.decode(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
-		t.Fatalf("decode(non-JSON payload) error = %v, want ErrPasskeyCeremonyInvalid", err)
+	for name, payload := range map[string]any{
+		"a JSON string": "not a session",
+		"a JSON number": 42,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sealed, err := codec.codec.Seal(payload)
+			if err != nil {
+				t.Fatalf("seal: %v", err)
+			}
+			if _, err := codec.decode(sealed); !errors.Is(err, gauntlet.ErrPasskeyCeremonyInvalid) {
+				t.Fatalf("decode(%s) error = %v, want ErrPasskeyCeremonyInvalid", name, err)
+			}
+		})
 	}
 }
 
