@@ -272,45 +272,85 @@ func TestLoginFactorAccountLostFactorMidFlow(t *testing.T) {
 // bucket -- exhausted by failed attempts arriving from several other
 // source addresses -- does not, and that alone is enough to refuse the
 // request (and release the IP reservation this attempt claimed).
+//
+// Which bucket that is depends on the name. A real account is counted on
+// the account's own bucket (ReserveAccountDecision); a name that matches
+// no account has no such bucket and is counted on a name bucket
+// (loginReservation.nameKey), the Reserve call this test exists for.
+// Each case has its own subtest, so one passing cannot stand in for the
+// other.
 func TestLoginUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
-	g := newTestGate(t)
-	g.deps.Limiter = mustNewLoginLimiter(t, 5, time.Minute)
-	g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
-	ts := newTestServer(t, g)
-	registerAdmin(t, ts, "admin", "password-placeholder-1")
+	setup := func(t *testing.T) (loginAttempt func(username, ip, password string) *http.Response) {
+		g := newTestGate(t)
+		g.deps.Limiter = mustNewLoginLimiter(t, 5, time.Minute)
+		g.cfg.ClientIP = func(r *http.Request) string { return r.Header.Get("X-Test-IP") }
+		ts := newTestServer(t, g)
+		registerAdmin(t, ts, "admin", "password-placeholder-1")
 
-	loginAttempt := func(ip, password string) *http.Response {
-		body := `{"username":"admin","password":"` + password + `"}`
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/login", strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
+		return func(username, ip, password string) *http.Response {
+			body := `{"username":"` + username + `","password":"` + password + `"}`
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/auth/login", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(csrfHeaderName, testCSRFValue)
+			req.Header.Set("X-Test-IP", ip)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return resp
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(csrfHeaderName, testCSRFValue)
-		req.Header.Set("X-Test-IP", ip)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
+	}
+
+	t.Run("a real account", func(t *testing.T) {
+		loginAttempt := setup(t)
+		// Five failures against "admin", each from its own distinct
+		// source IP -- the username bucket reaches its threshold while no
+		// single IP bucket ever holds more than one failure.
+		for i := 0; i < 5; i++ {
+			resp := loginAttempt("admin", "198.51.100."+string(rune('1'+i)), "wrong")
+			_ = resp.Body.Close()
 		}
-		return resp
-	}
 
-	// Five failures against "admin", each from its own distinct source
-	// IP -- the username bucket reaches its threshold while no single IP
-	// bucket ever holds more than one failure.
-	for i := 0; i < 5; i++ {
-		resp := loginAttempt("198.51.100."+string(rune('1'+i)), "wrong")
-		_ = resp.Body.Close()
-	}
+		// A sixth attempt, from yet another fresh IP, with the *correct*
+		// password: the IP bucket has room, but the username bucket is
+		// already at the limit.
+		resp := loginAttempt("admin", "198.51.100.99", "password-placeholder-1")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Errorf("a correct password against an exhausted username bucket got %d, want 429", resp.StatusCode)
+		}
+	})
 
-	// A sixth attempt, from yet another fresh IP, with the *correct*
-	// password: the IP bucket has room, but the username bucket is
-	// already at the limit.
-	resp := loginAttempt("198.51.100.99", "password-placeholder-1")
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("a correct password against an exhausted username bucket got %d, want 429", resp.StatusCode)
-	}
+	t.Run("a name that matches no account", func(t *testing.T) {
+		loginAttempt := setup(t)
+		// Five guesses at one name nobody has, each from its own source IP.
+		for i := 0; i < 5; i++ {
+			resp := loginAttempt("nobody", "198.51.100."+string(rune('1'+i)), "wrong")
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("guess %d at an unknown name got %d, want 401", i+1, resp.StatusCode)
+			}
+			_ = resp.Body.Close()
+		}
+
+		// A different unknown name from a fresh IP is still just wrong: it
+		// shows the refusal below is the name's bucket, not a limit on
+		// the whole server.
+		other := loginAttempt("somebody-else", "198.51.100.98", "wrong")
+		_ = other.Body.Close()
+		if other.StatusCode != http.StatusUnauthorized {
+			t.Errorf("a different unknown name from a fresh address got %d, want 401", other.StatusCode)
+		}
+
+		// The same unknown name once more, from yet another fresh IP.
+		resp := loginAttempt("nobody", "198.51.100.99", "wrong")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Errorf("a sixth guess at one unknown name from a fresh address got %d, want 429", resp.StatusCode)
+		}
+	})
 }
 
 // TestLoginFactorUserKeyRateLimitExhaustsIndependentlyOfIP is
@@ -351,28 +391,40 @@ func TestLoginFactorUserKeyRateLimitExhaustsIndependentlyOfIP(t *testing.T) {
 
 // TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins reproduces the race
 // checking a TOTP code and recording its counter as two separate calls
-// would leave open: two concurrent submissions of the same code both
-// verifying against the same not-yet-advanced counter and both winning a
+// would leave open: several concurrent submissions of the same code all
+// verifying against the same not-yet-advanced counter and all winning a
 // session. gauntlet.Store.VerifyAndRecordTOTP does both under one lock
 // acquisition, which is what this asserts: exactly one of the concurrent
-// submissions succeeds. Run with -race to be meaningful.
+// submissions succeeds.
+//
+// Each submission carries its own pending login. With one shared pending
+// cookie the pending-login claim (spentPendingLogins) lets only one
+// through whatever the store does, so the store's lock would never be
+// what the test relied on. Run with -race to be meaningful.
 func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
-	_, ts, _ := totpFixture(t)
+	g, ts, _ := totpFixture(t)
+	// Twenty password steps from one address would run into the default
+	// limit; the limit is not what this test is about.
+	g.deps.Limiter = mustNewLoginLimiter(t, 1000, time.Minute)
 	bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
 	secret, _, counter := totpEnrolAndConfirm(t, bob, ts)
 
-	pending := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	const attempts = 20
+	pendings := make([]*http.Client, attempts)
+	for i := range pendings {
+		pendings[i] = startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	}
 	code := gauntlet.GenerateTOTPCode(secret, counter+1)
 	body, err := json.Marshal(loginFactorRequest{Code: code})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	const attempts = 20
 	var wg sync.WaitGroup
 	var successes int32
+	start := make(chan struct{})
 	errs := make(chan error, attempts)
-	for i := 0; i < attempts; i++ {
+	for _, pending := range pendings {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -383,6 +435,7 @@ func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(csrfHeaderName, testCSRFValue)
+			<-start // release every request together, to overlap them
 			resp, err := pending.Do(req)
 			if err != nil {
 				errs <- err
@@ -394,6 +447,7 @@ func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -401,7 +455,7 @@ func TestConcurrentTOTPLoginFactorSubmissionsOnlyOneWins(t *testing.T) {
 	}
 
 	if successes != 1 {
-		t.Errorf("%d of %d concurrent submissions of the same code succeeded, want exactly 1", successes, attempts)
+		t.Errorf("%d of %d concurrent submissions of the same code, each on its own pending login, succeeded, want exactly 1", successes, attempts)
 	}
 }
 

@@ -3,6 +3,7 @@ package gate
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/tomlawesome/gauntlet"
 )
@@ -25,6 +26,17 @@ func lastNotice(t *testing.T, g *Gate, rec *noticeRecorder, kind NoticeKind) Acc
 	}
 	t.Fatalf("no %s notice among %+v", kind, all)
 	return AccountNotice{}
+}
+
+// wantNoticeCount fails unless exactly want notices of kind about
+// username's account have been raised so far (noticesOfKind waits for
+// the background ones first) -- for a test about how many were raised,
+// which lastNotice cannot see.
+func wantNoticeCount(t *testing.T, g *Gate, rec *noticeRecorder, kind NoticeKind, username string, want int, when string) {
+	t.Helper()
+	if got := noticesOfKind(g, rec, kind, username); got != want {
+		t.Errorf("%s: %d %s notices, want %d", when, got, kind, want)
+	}
 }
 
 func TestNoticePasswordReset(t *testing.T) {
@@ -53,7 +65,20 @@ func TestNoticeSecondFactorAddedAtFirstFactorConfirm(t *testing.T) {
 		rec := &noticeRecorder{}
 		g.cfg.Notices = rec
 		bob := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
-		totpEnrolAndConfirm(t, bob, ts)
+		// Enrol and post a good code by hand, not totpEnrolAndConfirm, so
+		// the account can be looked at while the factor is only held.
+		enrolled := totpEnrol(t, bob, ts)
+		secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := postJSON(t, bob, ts.URL+"/api/auth/totp/confirm", totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, totpCounterNow(time.Now()))})
+		if status, body := readAll(t, resp); status != http.StatusOK {
+			t.Fatalf("confirm = %d %s", status, body)
+		}
+		wantNoticeCount(t, g, rec, NoticeSecondFactorAdded, totpBobUsername, 0, "while the app is held")
+		confirmEnrolmentOK(t, bob, ts)
+		wantNoticeCount(t, g, rec, NoticeSecondFactorAdded, totpBobUsername, 1, "once the app is confirmed")
 		n := lastNotice(t, g, rec, NoticeSecondFactorAdded)
 		bobID := totpBobID(t, g)
 		if n.UserID != bobID || n.Username != totpBobUsername || n.Role != gauntlet.RoleUser || n.By != "" ||
@@ -67,7 +92,9 @@ func TestNoticeSecondFactorAddedAtFirstFactorConfirm(t *testing.T) {
 		g.cfg.Notices = rec
 		bilbo := loggedInClient(t, ts, passkeyBilboUsername, passkeyBilboPassword)
 		registerPasskeyHeld(t, bilbo, ts, g, "first")
+		wantNoticeCount(t, g, rec, NoticeSecondFactorAdded, passkeyBilboUsername, 0, "while the passkey is held")
 		confirmEnrolmentOK(t, bilbo, ts)
+		wantNoticeCount(t, g, rec, NoticeSecondFactorAdded, passkeyBilboUsername, 1, "once the passkey is confirmed")
 		n := lastNotice(t, g, rec, NoticeSecondFactorAdded)
 		bilboID := passkeyBilboID(t, g)
 		if n.UserID != bilboID || n.Username != passkeyBilboUsername || n.By != "" ||
@@ -88,6 +115,7 @@ func TestNoticeSecondFactorAddedDirect(t *testing.T) {
 		rec := &noticeRecorder{}
 		g.cfg.Notices = rec
 		totpEnrolAndConfirmLive(t, bilbo, ts, g.now())
+		wantNoticeCount(t, g, rec, NoticeSecondFactorAdded, passkeyBilboUsername, 1, "after a later app goes live")
 		n := lastNotice(t, g, rec, NoticeSecondFactorAdded)
 		if n.SecondFactor == nil || n.SecondFactor.Method != "totp" || n.SecondFactor.Name != "" {
 			t.Errorf("notice = %+v", n)
@@ -101,6 +129,7 @@ func TestNoticeSecondFactorAddedDirect(t *testing.T) {
 		rec := &noticeRecorder{}
 		g.cfg.Notices = rec
 		registerPasskeyHeld(t, bilbo, ts, g, "second")
+		wantNoticeCount(t, g, rec, NoticeSecondFactorAdded, passkeyBilboUsername, 1, "after a later passkey goes live")
 		n := lastNotice(t, g, rec, NoticeSecondFactorAdded)
 		if n.SecondFactor == nil || n.SecondFactor.Method != "passkey" || n.SecondFactor.Name != "second" {
 			t.Errorf("notice = %+v", n)
