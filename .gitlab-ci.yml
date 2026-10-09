@@ -134,7 +134,7 @@ lint:go:
     # Built from source with the image's Go, matching birdcage's own
     # lint:go: a prebuilt binary built with an older Go refuses go.mod's
     # `go 1.27.0` directive.
-    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
     - golangci-lint run ./...
 
 # Two checks in one script: go-licenses holds every linked package's
@@ -267,7 +267,7 @@ test:contract:
   script:
     - cd gate/contracttest
     - go vet ./...
-    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
     - golangci-lint run ./...
     - go test ./... -race
 
