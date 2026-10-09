@@ -508,11 +508,20 @@ func wantNothingChargedTo(t *testing.T, e *aloneEnv, id string, threshold int) {
 			t.Errorf("a %s notice was sent for an account nothing was charged to: %+v", n.Kind, n)
 		}
 	}
+	// Probe the allowance without spending it: one earlier charge would
+	// make the threshold-th reservation start a lockout, so take one fewer,
+	// confirm the record still shows no lockout, and give them all back.
 	now := e.clock.now()
-	for i := range threshold {
+	for i := range threshold - 1 {
 		if !e.g.deps.Limiter.ReserveAccount(e.g.deps.Users, id, now) {
 			t.Errorf("account attempt %d of %d was refused, want the account's allowance untouched", i+1, threshold)
 		}
+	}
+	if u, _ := e.g.deps.Users.Get(id); !u.LoginLockedUntil.IsZero() || u.LoginLockoutCount != 0 {
+		t.Errorf("after %d probes the record holds lockout count %d until %v, want none: an earlier attempt was charged", threshold-1, u.LoginLockoutCount, u.LoginLockedUntil)
+	}
+	for range threshold - 1 {
+		e.g.deps.Limiter.ReleaseAccount(e.g.deps.Users, id, now)
 	}
 }
 
