@@ -95,12 +95,15 @@ func auditCount(g *Gate, action string) int {
 	return n
 }
 
-// noticesOfKind waits for the background notices, then counts those of kind.
-func noticesOfKind(g *Gate, rec *noticeRecorder, kind NoticeKind) int {
+// noticesOfKind waits for the background notices, then counts those of
+// kind about username's account. The fixture's own setup sends notices
+// for the admin (registerAdmin enrols it a factor), so the count is
+// per account.
+func noticesOfKind(g *Gate, rec *noticeRecorder, kind NoticeKind, username string) int {
 	g.notifying.Wait()
 	n := 0
 	for _, notice := range rec.all() {
-		if notice.Kind == kind {
+		if notice.Kind == kind && notice.Username == username {
 			n++
 		}
 	}
@@ -124,7 +127,7 @@ func TestPasskeyRegisterFinishRefusesAnUnprintableNameAndLeavesTheCeremonyLive(t
 			if got := auditCount(g, "account.passkey_added"); got != 0 {
 				t.Errorf("a refused name wrote %d account.passkey_added audit entries", got)
 			}
-			if got := noticesOfKind(g, rec, NoticeSecondFactorAdded); got != 0 {
+			if got := noticesOfKind(g, rec, NoticeSecondFactorAdded, passkeyBilboUsername); got != 0 {
 				t.Errorf("a refused name sent %d second-factor-added notices", got)
 			}
 
