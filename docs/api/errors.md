@@ -117,7 +117,7 @@ exists. Each pair is named under the class it shares, below.
     and accepted), or a passkey removed from the account
     since the sign-in started. A use counter that could not be saved is
     the server's failure, not the caller's, and answers `server-error`.
-    The one split is at `login/passkey`: a passkey the server does not
+    The one difference is at `login/passkey`: a passkey the server does not
     hold carries `unknownCredential` and one it holds does not (#92).
     Telling them apart needs the account's user handle and the
     credential ID, which only the passkey's holder has, and tells them
