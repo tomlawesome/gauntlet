@@ -433,8 +433,9 @@ func TestPasskeySignInRefusesAHandleWhosePasskeyIsNotLive(t *testing.T) {
 		e.fake.UserHandle = []byte(frodoID)
 		resp, body := e.signIn(t, newBrowserJar(t), e.fake)
 		wantStatusClass(t, resp, body, http.StatusUnauthorized, classInvalidCredentials)
-		if ev := lastEvent(t, e); ev.Outcome != gauntlet.SignInFactorRefused || ev.UserID != frodoID {
-			t.Errorf("event = %+v, want factor_refused on the account the handle named", ev)
+		// #80: the credential is not one frodo holds, so it is not charged to him.
+		if ev := lastEvent(t, e); ev.Outcome != gauntlet.SignInNoSuchUser || ev.UserID != "" {
+			t.Errorf("event = %+v, want no_such_user naming no account", ev)
 		}
 	})
 	t.Run("a held passkey", func(t *testing.T) {
@@ -468,10 +469,11 @@ func TestPasskeySignInRefusesAHandleWhosePasskeyIsNotLive(t *testing.T) {
 	})
 }
 
-// An account with no local password signs in through its identity
-// provider; a passkey carried over on it signs in nothing here.
-func TestPasskeySignInRefusesAnAccountWithNoLocalPassword(t *testing.T) {
-	e := newAloneEnv(t)
+// makeBilboSSOOwned swaps the store for one where bilbo's account has no
+// local password (single sign-on owns it) but still holds the passkey it
+// had before it was linked.
+func makeBilboSSOOwned(t *testing.T, e *aloneEnv) {
+	t.Helper()
 	bilbo, _ := e.g.deps.Users.Get(e.id)
 	hash, err := gauntlet.HashPassword("password-placeholder-1")
 	if err != nil {
@@ -487,10 +489,126 @@ func TestPasskeySignInRefusesAnAccountWithNoLocalPassword(t *testing.T) {
 		OIDCIssuer: "https://idp.example.org", OIDCSubject: "sam-subject",
 		Passkeys: bilbo.Passkeys,
 	})
+}
+
+// wantNothingChargedTo fails unless account id carries no lockout, no
+// disable, no held attempt and no lockout notice (#80).
+func wantNothingChargedTo(t *testing.T, e *aloneEnv, id string, threshold int) {
+	t.Helper()
+	u, ok := e.g.deps.Users.Get(id)
+	if !ok {
+		t.Fatalf("account %s is gone", id)
+	}
+	if u.LoginLockoutCount != 0 || !u.LoginLockedUntil.IsZero() || !u.LoginDisabledAt.IsZero() {
+		t.Errorf("record holds lockout count %d until %v, disabled at %v, want none of them", u.LoginLockoutCount, u.LoginLockedUntil, u.LoginDisabledAt)
+	}
+	e.g.notifying.Wait()
+	for _, n := range e.notices.all() {
+		if n.Kind == NoticeAccountLocked || n.Kind == NoticeSignInDisabled {
+			t.Errorf("a %s notice was sent for an account nothing was charged to: %+v", n.Kind, n)
+		}
+	}
+	now := e.clock.now()
+	for i := range threshold {
+		if !e.g.deps.Limiter.ReserveAccount(e.g.deps.Users, id, now) {
+			t.Errorf("account attempt %d of %d was refused, want the account's allowance untouched", i+1, threshold)
+		}
+	}
+}
+
+// failedUncharged signs in n times with fake from a fresh address each
+// time, requiring a 401 invalid-credentials and a no_such_user event
+// naming no account every time.
+func failedUncharged(t *testing.T, e *aloneEnv, fake *passkeytest.FakeAuthenticator, n int) {
+	t.Helper()
+	e.events.events = nil
+	for i := range n {
+		resp, body := e.signIn(t, newBrowserJar(t), fake)
+		wantStatusClass(t, resp, body, http.StatusUnauthorized, classInvalidCredentials)
+		if ev := lastEvent(t, e); ev.Outcome != gauntlet.SignInNoSuchUser || ev.Method != gauntlet.SignInMethodPasskeyAlone || ev.UserID != "" {
+			t.Fatalf("attempt %d: event = %+v, want no_such_user/passkey_alone naming no account", i+1, ev)
+		}
+	}
+}
+
+// An account with no local password signs in through its identity
+// provider; a passkey carried over on it signs in nothing here. #80: the
+// refusal is an unknown-user answer with no account named, because the
+// user handle is not covered by the assertion's signature (WebAuthn), so
+// whoever holds any passkey can name this account; NIST SP 800-63B-4
+// 3.2.2 counts failures "using a specific authenticator on a single
+// subscriber account", and this authenticator is not one of the account's.
+func TestPasskeySignInRefusesAnAccountWithNoLocalPassword(t *testing.T) {
+	e := newAloneEnv(t)
+	makeBilboSSOOwned(t, e)
 	resp, body := e.signIn(t, newBrowserJar(t), e.fake)
 	wantStatusClass(t, resp, body, http.StatusUnauthorized, classInvalidCredentials)
-	if got := lastEvent(t, e); got.Outcome != gauntlet.SignInFactorRefused {
-		t.Errorf("event = %+v, want factor_refused", got)
+	wantEvents(t, e.events.all(), "no_such_user/passkey_alone")
+	if ev := lastEvent(t, e); ev.UserID != "" {
+		t.Errorf("event names account %q, want none", ev.UserID)
+	}
+}
+
+// #80, case a: repeating the refusal past the lockout and disable
+// thresholds, with the account's own passkey and with a stranger's, locks
+// and disables nothing and sends no notice.
+func TestPasskeySignInNamingAnSSOAccountChargesNothingToIt(t *testing.T) {
+	e := newAloneEnv(t)
+	e.withFreshAddresses()
+	e.g.deps.Limiter = mustNewLoginLimiter(t, 3, time.Minute)
+	makeBilboSSOOwned(t, e)
+	stranger := newFake(e.g)
+	stranger.UserHandle = []byte(e.id)
+
+	failedUncharged(t, e, e.fake, gauntlet.MaxConsecutiveLoginFailures+1)
+	failedUncharged(t, e, stranger, gauntlet.MaxConsecutiveLoginFailures+1)
+	wantNothingChargedTo(t, e, e.id, 3)
+}
+
+// #80, case b: an account with a local password, named by a handle
+// presented with a credential it never registered. Not charged to it:
+// no lockout, no disable, no notice, no held attempt, and its real
+// passkey still signs in afterwards.
+func TestPasskeySignInWithACredentialTheAccountDoesNotHoldChargesNothingToIt(t *testing.T) {
+	e := newAloneEnv(t)
+	e.withFreshAddresses()
+	e.g.deps.Limiter = mustNewLoginLimiter(t, 3, time.Minute)
+	stranger := newFake(e.g)
+	stranger.UserHandle = []byte(e.id)
+
+	failedUncharged(t, e, stranger, gauntlet.MaxConsecutiveLoginFailures+1)
+	wantNothingChargedTo(t, e, e.id, 3)
+
+	e.g.deps.Limiter = mustNewLoginLimiter(t, 3, time.Minute)
+	e.mustSignIn(t, newBrowserJar(t))
+}
+
+// #80: the three refusals -- an unknown handle, a stranger's credential
+// on a real account, and an SSO-owned account -- cannot be told apart by
+// the response body.
+func TestPasskeySignInUnheldCredentialAnswersLikeAnUnknownHandle(t *testing.T) {
+	e := newAloneEnv(t)
+	e.withFreshAddresses()
+	answer := func(fake *passkeytest.FakeAuthenticator) problemBody {
+		t.Helper()
+		resp, body := e.signIn(t, newBrowserJar(t), fake)
+		wantStatusClass(t, resp, body, http.StatusUnauthorized, classInvalidCredentials)
+		return decodeProblem(t, []byte(body))
+	}
+
+	unknown := newFake(e.g)
+	unknown.UserHandle = []byte("no-such-account")
+	wantBody := answer(unknown)
+
+	stranger := newFake(e.g)
+	stranger.UserHandle = []byte(e.id)
+	if got := answer(stranger); got != wantBody {
+		t.Errorf("a credential the account does not hold got %+v, want the unknown handle's %+v", got, wantBody)
+	}
+
+	makeBilboSSOOwned(t, e)
+	if got := answer(e.fake); got != wantBody {
+		t.Errorf("an SSO-owned account got %+v, want the unknown handle's %+v", got, wantBody)
 	}
 }
 
