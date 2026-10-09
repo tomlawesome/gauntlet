@@ -105,6 +105,13 @@ All notable changes to this project are documented in this file.
   valid only while now is before its expiry. The difference is one
   instant; no API change.
 
+- **`pwlist` writes its files with the module's shared crash-safe
+  writer** (#90). The list, its checksum, its signature and the build
+  checkpoint now go through `internal/atomicfile`: a missing output
+  directory is created with mode 0700, a replaced file keeps its owner
+  and group (a rebuild run with sudo no longer leaves a list the server
+  cannot read), and the directory is synced after the rename.
+
 - CI: a release is cut on `main` only (#88): release:version and
   release:gitlab run in `main` pipelines and refuse a commit that is not
   `main`'s tip; `preview` and `main` pipelines now run every lint and

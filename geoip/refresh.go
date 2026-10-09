@@ -141,6 +141,13 @@ func (m *Manager) fetch(ctx context.Context) error {
 	if err := os.MkdirAll(m.dir, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", m.dir, err)
 	}
+	// Not atomicfile.WriteFile, on purpose (#90 item 15): that takes the
+	// whole file as bytes and renames it into place at once, while a
+	// downloaded database runs to many megabytes and streams straight to
+	// disk, and adopt must open and check it before anything replaces
+	// the file in use. So this keeps its own temp file beside the kept
+	// one and takes the part that must match the other writers, keeping
+	// the replaced file's owner, from atomicfile.KeepOwner below.
 	tmp, err := os.CreateTemp(m.dir, "."+string(m.source)+".mmdb.*")
 	if err != nil {
 		return err

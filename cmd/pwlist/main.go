@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet/blocklist"
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
 	"github.com/tomlawesome/gauntlet/internal/listsig"
 )
 
@@ -204,7 +205,7 @@ func cmdSign(_ context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(*in+".sig", sig, 0o644); err != nil {
+	if err := atomicfile.WriteFile(*in+".sig", sig, 0o644); err != nil {
 		return err
 	}
 	for _, k := range keys {
