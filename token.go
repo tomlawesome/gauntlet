@@ -834,7 +834,8 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 //
 // Reloading a stale document is a read of the backend, not a write,
 // and is what lets a revoke made through the CLI end a stream in the
-// running server (#104).
+// running server (#104). Like Authenticate's, it logs once if it meets
+// a document it refuses.
 func (s *TokenStore) Peek(raw string, want TokenKind, now time.Time) (*Token, bool) {
 	if raw == "" {
 		return nil, false

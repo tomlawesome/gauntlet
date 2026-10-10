@@ -30,7 +30,9 @@ func (e *Refusal) Error() string {
 // the account, its role, and the three doors, each against the
 // request's own path -- and differs in one way: it touches nothing.
 // The session's expiry does not slide, no LastUsedAt moves, no
-// document is written, nothing is revoked and no log line is left.
+// document is written, nothing is revoked, and none of Protect's
+// refusal lines is logged. (A store that refuses a document another
+// process wrote still logs that once, as it would on any request.)
 // A stream that calls it on a timer therefore idles out when the
 // person does, not while the tab is open (#104).
 //

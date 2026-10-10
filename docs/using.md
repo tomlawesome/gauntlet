@@ -179,8 +179,10 @@ func events(w http.ResponseWriter, r *http.Request) {
   doors it matches.
 - The check never keeps a session awake. It does not slide the
   session's expiry or move a token's last-used time, revokes nothing
-  and logs nothing, so a tab left open on a stream signs out after the
-  idle limit (an hour by default) like any other, not at the one-day ceiling.
+  and logs none of `Protect`'s refusals, so a tab left open on a stream
+  signs out at the idle limit you gave `NewSessionStore` (at most an
+  hour), like any other, not at its maximum lifetime (the second
+  argument, at most a day).
 - `gate` runs no timer: the call is the application's to make, from
   the tick it already has.
 - An `Exempt` path is admitted whatever its cookie says, as `Protect`

@@ -452,8 +452,8 @@ func (g *Gate) bearerFor(raw string, kind gauntlet.TokenKind, now time.Time, tou
 // Peeked, not Authenticated; a session issued before the cutoff is
 // refused without being revoked -- and nothing else differs.
 //
-// It logs nothing: the refusal carries the Warn line, and Protect is
-// what writes it.
+// It writes no log line of its own: the refusal carries the Warn line,
+// and Protect is what writes it.
 func (g *Gate) decideAccess(r *http.Request, now time.Time, touch bool) (verdict, *refusal) {
 	// The ESCAPED path, not the decoded one: http.ServeMux's own
 	// pattern matching works on r.URL.EscapedPath() (a request for
