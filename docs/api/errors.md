@@ -371,6 +371,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
   shape, role name, a token's name, kind or device). `detail` names the
   rule, except in a few places where `detail` is just "invalid request
   body" because the request was not valid JSON of the right form.
+- `POST /api/auth/login/factor` also answers it when the body holds both
+  `code` and `assertion`, or neither (#99). A `null` assertion counts as
+  none. Nothing is counted, and the pending login still holds.
 - Returned across nearly every route that takes a body or a path
   parameter; see the OpenAPI document for which status a given field
   rule answers with on which route.
@@ -383,6 +386,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
     session, the `ref`);
   - the caller asked to remove an authenticator app their account does
     not have;
+  - an admin clearing another account's authenticator app or passkeys
+    (`DELETE /api/auth/users/{id}/totp` or `.../passkeys`) found that
+    the account was deleted while the request was in flight (#99);
   - the application does not offer this feature at all
     (`Deps.Passkeys`, `Deps.OIDC` or `Deps.SignIns` is nil, or, for
     signing in or resuming with a passkey alone,
@@ -390,7 +396,8 @@ Short route names such as `login/factor` are under `/api/auth/`.
 - `detail` is absent when the feature is switched off, and gives the
   reason for the others ("no such user", "no such session", "no such
   token", "no such passkey on this account", "this account has no
-  authenticator app", "sign-in history is not configured").
+  authenticator app", "this account was deleted before the request
+  finished", "sign-in history is not configured").
 - Not the same as `about:blank`: this class is for a *route that exists*
   answering "nothing here has that id"; `about:blank` is for a path or
   method the route table never registered at all.
@@ -407,6 +414,11 @@ Short route names such as `login/factor` are under `/api/auth/`.
     waiting to confirm;
   - the route refuses to act on this account: the caller's own, or one
     that already holds the role asked for;
+  - the caller has no local password, so there is no password to
+    re-check, at `DELETE /api/auth/totp`,
+    `DELETE /api/auth/passkeys/{id}` and
+    `POST /api/auth/recovery-codes` (#99). The refusal comes before
+    any password is checked, and nothing is counted;
   - an admin removing their own last passkey that works at this
     address, while the application requires admin passkeys (#82):
     "register another passkey first";
@@ -466,7 +478,15 @@ Short route names such as `login/factor` are under `/api/auth/`.
   - the address is banned for 24 hours after 100 failed sign-ins
     (#70);
   - for a sign-in that would be held for a confirmation code, too many
-    codes were already sent to the account in the window (#84).
+    codes were already sent to the account in the window (#84). A
+    resend inside the cooldown (30 seconds after the first code, twice
+    as long after each further one in the hour), or past 5 an hour, is
+    `429` with nothing sent (#83);
+  - at `login/factor/begin` and `login/prove/begin`, the account is
+    locked out after repeated failures (unless the browser is one the
+    account remembers) or disabled (always). The server refuses
+    early, so nobody is asked to touch a passkey for a sign-in that
+    could not complete.
 - `detail` is always "too many attempts, try again later". A banned
   address gets the same answer as one that hit the normal limit, so a
   client cannot tell the difference.
