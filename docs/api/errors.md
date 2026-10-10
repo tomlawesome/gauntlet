@@ -201,6 +201,11 @@ Short route names such as `login/factor` are under `/api/auth/`.
   change, a reset, or linking the account to SSO. Each handler also
   checks for a session itself and gives the same class. You only see
   that if you use a handler without `gate.Protect` in front of it.
+- `DELETE /api/auth/totp`, `DELETE /api/auth/passkeys/{id}` and
+  `POST /api/auth/recovery-codes` also answer it, with `detail` "sign in
+  first", when the caller's account is deleted after its password was
+  re-checked but before the change was saved (#95, #100). Nothing is
+  changed.
 - `POST /api/auth/reauthenticate` (#71) answers it, with `detail` "sign
   in again", when there is no session it can resume, whatever the
   reason:
@@ -540,6 +545,12 @@ Short route names such as `login/factor` are under `/api/auth/`.
   complete the request" or "unable to create token".
 - Returned wherever a store, session or token operation fails for a
   reason none of the other classes name.
+- A sign-in let through by an admin's allowance of the next sign-in
+  (#81) whose allowance cannot be saved as spent answers it at `POST
+  /api/auth/login`, `POST /api/auth/login/factor` and `POST
+  /api/auth/login/passkey`, with "unable to complete sign-in" (#101). No
+  session is issued and the allowance stays live. The SSO callback
+  redirects with `ssoError=login_failed` instead.
 
 ## partially-completed
 

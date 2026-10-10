@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-10
+
+### Fixed
+
+- **Turning off an authenticator app or removing a passkey for an
+  account deleted mid-request answers 401, not 500** (#100). `DELETE
+  /api/auth/totp` and `DELETE /api/auth/passkeys/{id}` answered `500`
+  `server-error` with detail "no such user" when an admin deleted the
+  account between the password re-check and the save. They now answer
+  `401` `sign-in-required` "sign in first", as `POST
+  /api/auth/recovery-codes` already did (#95).
+- **`ErrNoSecondFactors` no longer says "to clear"** (#101). Its text is
+  now "gauntlet: this account has no second factor", which fits both
+  `Store.ClearAllSecondFactors` and `Store.RegenerateRecoveryCodes`.
+  Code that matches it with `errors.Is` is unaffected.
+- **The "username not allowed" message names invisible characters**
+  (#101). A username refused for a zero-width space, a line separator or
+  another invisible formatting character now gets a `detail` that says
+  so, instead of naming only control characters and edge spaces.
+- **A sign-in let through by an admin's allowance fails closed when the
+  allowance cannot be saved as spent** (#101). It used to complete,
+  leaving the allowance live for another sign-in. It now answers `500`
+  `server-error` "unable to complete sign-in" at `POST
+  /api/auth/login`, `POST /api/auth/login/factor` and `POST
+  /api/auth/login/passkey`, and the SSO callback redirects with
+  `ssoError=login_failed`. No session is issued, the attempt is not
+  counted as a failure, and the allowance stays live, so a new sign-in
+  once the store recovers completes. At `login/factor` the second-factor
+  code given in the failed attempt stays used, so that sign-in needs
+  another code. Ordinary sign-ins are unchanged.
+
 ## [0.4.0] - 2026-10-10
 
 ### Added

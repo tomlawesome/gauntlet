@@ -458,6 +458,13 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 		g.answerStopped(w, r, verdict, out, notice)
 		return
 	}
+	if !g.spendAllowance(w, r, user, place, &verdict, now) {
+		// The allowance could not be saved as spent: no session, as
+		// login's (#101).
+		g.releaseLogin(res, now)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
+		return
+	}
 	g.completeLogin(res, now)
 	// The session this browser already held for the account ends here,
 	// as for every sign-in (ASVS 7.2.4; see revokeReplacedSession).

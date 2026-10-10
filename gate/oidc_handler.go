@@ -420,6 +420,12 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		g.notify(r.Context(), notice)
 		return
 	}
+	if !g.spendAllowance(w, r, user, place, &verdict, now) {
+		// The allowance could not be saved as spent: no session, as
+		// login's (#101). rememberSignIn has logged why.
+		g.redirectWithSSOError(w, r, "login_failed")
+		return
+	}
 	notice := g.completeSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
 	http.Redirect(w, r, "/", http.StatusFound)
 	g.notify(r.Context(), notice)

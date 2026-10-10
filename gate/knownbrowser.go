@@ -113,7 +113,9 @@ func (g *Gate) isKnownBrowser(r *http.Request, accountID string, now time.Time) 
 // A write that fails is logged and the sign-in goes on: the session is
 // what the caller asked for, and the browser keeps whatever token it
 // had. No cookie is set then, since its hash is on no record, and it
-// reports false, so the sign-in is flagged as nothing (#55).
+// reports false, so the sign-in is flagged as nothing (#55). A sign-in
+// let through by an admin's allowance is the exception: this write
+// spends the allowance, so spendAllowance refuses it instead (#101).
 func (g *Gate) rememberSignIn(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, now time.Time) bool {
 	carried := knownBrowserTokens(r)
 	replacing := ""

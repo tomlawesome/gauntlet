@@ -278,3 +278,11 @@ remembers, and let the application decide what happens next.
 - Status note (v0.4.0 audit, 2026-10-10): "§17a of the design note" is now
   `docs/design.md` §2.4 (Configuration) and the §4 "Unusual sign-ins"
   pitfalls table.
+- Status note (#101, 2026-10-10): decision 11's allowance fails closed.
+  The write that remembers the browser, and so spends the allowance,
+  now comes before anything else of an allowed sign-in. When it fails
+  the sign-in is refused -- `500` `server-error` "unable to complete
+  sign-in", or `ssoError=login_failed` at the SSO callback -- with no
+  session, no record and no failure counted, and the allowance stays
+  live. An ordinary sign-in whose remembering write fails still
+  completes, its signals dropped, as before.
