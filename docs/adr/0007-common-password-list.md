@@ -155,5 +155,12 @@ is about 410 KB.
   published files; it is two of the three. `update-blocklist.sh`
   copies `top10k.txt` and `top10k.txt.sig`, and the `.sha256` file is
   published but not embedded.
+- Status note (v0.4.0 audit, 2026-10-10): the **Status** line's "still to
+  come" is out of date: the owner's signing and publishing infrastructure
+  was set up and the first signed list embedded on 2026-10-03.
+- Status note (v0.4.0 audit, 2026-10-10): decision 2's "talks to nobody"
+  for `blocklist:sign` is loose: it builds `pwlist`, so it reaches its Go
+  module proxy and container registry; it never talks to HIBP or GitHub
+  (`.gitlab-ci.yml`).
 
 Written from the design on #52, 2026-10-02.

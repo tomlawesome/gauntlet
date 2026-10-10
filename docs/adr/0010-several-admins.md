@@ -130,8 +130,10 @@ the step-up).
   neither demoted nor deleted (`ErrLastLocalAdmin`, 409 `last-admin`).
 - Status note (v0.3.0 audit, 2026-10-08): decision 2's step-up is no longer named
   `recheckUnlockSelf`: it is the shared `recheckStepUp` in `gate`, used
-  by user creation, the role route and the admin unlock route, on the
-  same re-check budget.
+  by user creation, the role route, the admin unlock route and the
+  caller's own allow-sign-in (#81), on the same re-check budget.
+  ("No longer named" is loose: `recheckUnlockSelf` still exists, as a
+  wrapper around `recheckStepUp` for the unlock route.)
 - Status note (v0.3.0 audit, 2026-10-08): decision 3 has one more refusal:
   [ADR-0013](0013-sso-group-roles.md) (#76) answers 409
   `role-managed-by-sso` to a change to `user` or `viewer` on a non-admin
@@ -149,3 +151,11 @@ the step-up).
   passkeys (ADR-0015 decision 5): an SSO-only admin is held at the
   `must-change-password` door until it sets one, then at the passkey
   door.
+- Status note (v0.4.0 audit, 2026-10-10): the accounts document is version
+  10 since #81; version 9 is what #67 introduced (decision 7, and the
+  consequence "The accounts document is version 9").
+- Status note (v0.4.0 audit, 2026-10-10): the consequence that only role
+  grants are re-checked is superseded: since #72 reset-password, delete
+  user, clearing a user's factors and token creation re-check the
+  caller's password (`recheckAdminPassword`); role grants and admin
+  creation take password plus second factor.

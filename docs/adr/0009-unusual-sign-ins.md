@@ -267,11 +267,15 @@ remembers, and let the application decide what happens next.
 - `geoip` gains a dependency on the City file's larger download (tens
   of megabytes rather than a few) wherever `EditionCity` is chosen; the
   128 MiB cap and the existing refresh schedule are unchanged.
-- Status note (v0.3.0 audit, 2026-10-08): the accounts document is version 9, not 8
-  (decision 3 and the consequence above): ADR-0010 (#67) raised it. The
+- Status note (v0.3.0 audit, 2026-10-08): the accounts document was version 9 at
+  v0.3.0, not 8 (decision 3 and the consequence above): ADR-0010 (#67)
+  raised it; it has been version 10 since #81 (last note). The
   version-8 fields (`SeenCountries`, `LastPlace`) are unchanged.
 - Status note (v0.3.0 audit, 2026-10-08): decision 2 lists three places that judge; there
   is a fourth, passkey-alone sign-in (`SignInMethodPasskeyAlone`,
   [ADR-0012](0012-passkey-alone-sign-in.md)). The other session issues
   still never judge.
 - Status note: the accounts document is version 10 (#81).
+- Status note (v0.4.0 audit, 2026-10-10): "§17a of the design note" is now
+  `docs/design.md` §2.4 (Configuration) and the §4 "Unusual sign-ins"
+  pitfalls table.
