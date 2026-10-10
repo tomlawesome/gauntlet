@@ -169,9 +169,12 @@ Settled without a question:
   change; `apidiff` passes, the OpenAPI document and errors.md are
   unchanged. `Validate` and `Authenticate` keep their meaning: real
   requests still slide the session, as they should.
-- **No logging from `StillSignedIn`.** A sign-out would otherwise leave
-  one rated Warn line per open tab; the next ordinary request from that
-  tab logs through `Protect` as before.
+- **No logging from `StillSignedIn`.** It runs on a timer for every
+  open stream, so the refusals `Protect` logs (the CSRF header, a
+  malformed `Authorization` header, an unknown role, the doors) would
+  repeat at every tick; the next ordinary request logs them through
+  `Protect` as before. A plain sign-in-required 401 is not logged by
+  either.
 - **The call is the application's to make.** `gate` runs no timer and
   knows nothing about the stream; the application calls `StillSignedIn`
   from its own keepalive tick (mikroview's ping, birdcage's 30-second

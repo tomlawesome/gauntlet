@@ -739,8 +739,8 @@ func TestStillSignedInConcurrentWithProtect(t *testing.T) {
 }
 
 // A refusal from StillSignedIn leaves nothing in Config.Log. The same
-// signed-out request through Protect does log, so the recorder can see a
-// line when there is one.
+// request without the CSRF header through Protect does log, so the
+// recorder can see a line when there is one.
 func TestStillSignedInRefusalLeavesNoLogLine(t *testing.T) {
 	f := newStillAdminFixture(t)
 	raw, _, err := f.g.deps.Tokens.Create("integration", gauntlet.TokenKindAPI, "", nil, f.clock.now())
@@ -768,10 +768,11 @@ func TestStillSignedInRefusalLeavesNoLogLine(t *testing.T) {
 		t.Errorf("StillSignedIn's refusals left %d log lines, want none: %v", n, logs.msgs)
 	}
 
-	if status, _ := throughProtect(t, f.g, f.stream()); status != http.StatusUnauthorized {
-		t.Fatalf("Protect with the signed-out cookie = %d, want 401", status)
+	noCSRF := stillReq{method: http.MethodPost, path: "/api/protected", cookie: f.cookie}
+	if status, _ := throughProtect(t, f.g, noCSRF); status != http.StatusForbidden {
+		t.Fatalf("Protect without the CSRF header = %d, want 403", status)
 	}
 	if count() == 0 {
-		t.Error("Protect's refusal of the signed-out cookie logged nothing; the absence above proves nothing")
+		t.Error("Protect's refusal without the CSRF header logged nothing; the absence above proves nothing")
 	}
 }
