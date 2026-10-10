@@ -13,7 +13,7 @@ const v041UsernameDetail = "that username contains characters that aren't allowe
 
 func TestV041AdminCreateRefusesInvisibleCharactersInUsername(t *testing.T) {
 	cases := []struct{ name, username string }{
-		{"zero-width space", "ali​ce"},
+		{"zero-width space", "ali\u200bce"},
 		{"line separator", "ali ce"},
 	}
 	for _, tc := range cases {
@@ -59,7 +59,7 @@ func TestV041AdminCreateAcceptsPlainUsernameOfTheSameLength(t *testing.T) {
 
 func TestV041FirstRunRegisterRefusesInvisibleCharactersInUsername(t *testing.T) {
 	cases := []struct{ name, username string }{
-		{"zero-width space", "ali​ce"},
+		{"zero-width space", "ali\u200bce"},
 		{"line separator", "ali ce"},
 	}
 	for _, tc := range cases {
