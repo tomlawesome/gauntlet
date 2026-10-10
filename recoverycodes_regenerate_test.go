@@ -49,7 +49,7 @@ func TestRegenerateRecoveryCodesRefusedWithNoFactor(t *testing.T) {
 	}
 	before := storedCodeHashes(t, s, id)
 
-	codes, err := s.RegenerateRecoveryCodes(id, time.Now())
+	codes, err := s.RegenerateRecoveryCodes(id)
 	if !errors.Is(err, ErrNoSecondFactors) {
 		t.Fatalf("RegenerateRecoveryCodes with no second factor = %v, want ErrNoSecondFactors", err)
 	}
@@ -72,7 +72,7 @@ func TestRegenerateRecoveryCodesRefusedWithOnlyAPendingTOTP(t *testing.T) {
 		t.Fatalf("SetPendingTOTPSecret: %v", err)
 	}
 
-	if _, err := s.RegenerateRecoveryCodes(id, time.Now()); !errors.Is(err, ErrNoSecondFactors) {
+	if _, err := s.RegenerateRecoveryCodes(id); !errors.Is(err, ErrNoSecondFactors) {
 		t.Fatalf("RegenerateRecoveryCodes with only a pending authenticator app = %v, want ErrNoSecondFactors", err)
 	}
 	wantSameHashes(t, storedCodeHashes(t, s, id), before)
@@ -87,7 +87,7 @@ func TestRegenerateRecoveryCodesRefusedWithOnlyAHeldEnrolment(t *testing.T) {
 		}
 		before := storedCodeHashes(t, s, id)
 
-		if _, err := s.RegenerateRecoveryCodes(id, now.Add(time.Minute)); !errors.Is(err, ErrNoSecondFactors) {
+		if _, err := s.RegenerateRecoveryCodes(id); !errors.Is(err, ErrNoSecondFactors) {
 			t.Fatalf("RegenerateRecoveryCodes with only a held passkey = %v, want ErrNoSecondFactors", err)
 		}
 		wantSameHashes(t, storedCodeHashes(t, s, id), before)
@@ -105,7 +105,7 @@ func TestRegenerateRecoveryCodesRefusedWithOnlyAHeldEnrolment(t *testing.T) {
 		}
 		before := storedCodeHashes(t, s, id)
 
-		if _, err := s.RegenerateRecoveryCodes(id, now.Add(time.Minute)); !errors.Is(err, ErrNoSecondFactors) {
+		if _, err := s.RegenerateRecoveryCodes(id); !errors.Is(err, ErrNoSecondFactors) {
 			t.Fatalf("RegenerateRecoveryCodes with only a held authenticator app = %v, want ErrNoSecondFactors", err)
 		}
 		wantSameHashes(t, storedCodeHashes(t, s, id), before)
@@ -121,7 +121,7 @@ func TestRegenerateRecoveryCodesRefusedWithOnlyAHeldEnrolment(t *testing.T) {
 func wantRegenerationReplacesTheSet(t *testing.T, s *Store, id string, old []string) {
 	t.Helper()
 	before := storedCodeHashes(t, s, id)
-	codes, err := s.RegenerateRecoveryCodes(id, time.Now())
+	codes, err := s.RegenerateRecoveryCodes(id)
 	if err != nil {
 		t.Fatalf("RegenerateRecoveryCodes: %v", err)
 	}
