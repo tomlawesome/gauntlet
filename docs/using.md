@@ -174,10 +174,13 @@ func events(w http.ResponseWriter, r *http.Request) {
 - `StillSignedIn` is `Protect`'s own decision -- the same cookie or
   bearer token, the same rules, the same doors, against the request's
   own path -- so it refuses exactly what `Protect` would refuse now.
+  Pass it the request as `Protect` saw it: middleware that rewrites the
+  path in between (`http.StripPrefix`) changes which `Exempt` paths and
+  doors it matches.
 - The check never keeps a session awake. It does not slide the
   session's expiry or move a token's last-used time, revokes nothing
   and logs nothing, so a tab left open on a stream signs out after the
-  idle limit (an hour) like any other, not at the one-day ceiling.
+  idle limit (an hour by default) like any other, not at the one-day ceiling.
 - `gate` runs no timer: the call is the application's to make, from
   the tick it already has.
 - An `Exempt` path is admitted whatever its cookie says, as `Protect`
