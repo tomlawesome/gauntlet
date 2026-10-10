@@ -209,6 +209,20 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **`docs/api/auth.yaml` re-checked line by line against the code**
+  (#97). About a hundred statements that were wrong, missing or
+  misleading are corrected: which routes set, read or clear each
+  cookie, when attempts are counted and given back, what each status
+  answers, and what the session, passkey and sign-in-history fields
+  hold. **Removed** from the document, as responses the code can never
+  send (a one-off before any application uses gauntlet; ADR-0002 is
+  otherwise additive): `500` on `POST /api/auth/login/confirm` and
+  `POST /api/auth/login/escape`, and `503` `not-persisted` on `PUT
+  /api/auth/users/{id}/role`, `POST /api/auth/users/{id}/reset-password`
+  and `POST /api/auth/users/{id}/allow-sign-in` (now `503`
+  `setup-required` only). Added: `404` on `POST /api/auth/users`, `409`
+  on `DELETE /api/auth/totp`.
+
 - **Token names and device IDs count characters, not bytes** (#90).
   `MaxTokenNameLen` and `MaxDeviceIDLen` (64) now count characters, as
   usernames, passkey names and the sign-out reason already did, and as
@@ -255,6 +269,21 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Ten `auth.yaml` descriptions were cut short** (#98). An unquoted
+  value holding a space then `#` (as in "`Config.AdminPasskey`, #82")
+  ends at the `#`, which YAML reads as a comment, so OpenAPI readers saw
+  half a sentence; v0.3.0 shipped nine. They are quoted, and a contract
+  test now fails on any new one.
+- **Four places where the code broke its own contract** (#99). An
+  account with no local password gets `409` "set a local password
+  first" at `DELETE /api/auth/totp`, `DELETE /api/auth/passkeys/{id}`
+  and `POST /api/auth/recovery-codes`, as at every other re-check route,
+  instead of a counted `401`. A country from `Config.Country` is kept
+  only as two letters, upper-cased, else dropped, matching the
+  documented pattern. `POST /api/auth/login/factor` answers `400` to
+  both `code` and `assertion` or neither, before counting anything.
+  An admin clearing the authenticator app or passkeys of an account
+  deleted mid-request gets `404`, not a `500` naming the internal error.
 - **An account deleted mid-request is told to sign in, not given a
   500** (#95). Passkey register-finish, authenticator-app confirm and
   recovery-code regenerate answered a store write that found the
