@@ -1352,8 +1352,10 @@ strictest of the kept signals wins.
   "unable to complete sign-in" at `login`, `login/factor` and
   `login/passkey`, and a redirect with `ssoError=login_failed` at the
   SSO callback. No session is issued, nothing is recorded, the attempt
-  is not counted as a failure, and the allowance stays live for the
-  same sign-in tried again.
+  is not counted as a failure, and the allowance stays live for a new
+  sign-in once the store recovers. At `login/factor` the second-factor
+  code given in the failed attempt stays used (a recovery code is spent
+  before the allowance is), so the new sign-in needs another code.
   It lifts no lockout or disable and changes no credential; an SSO-only
   account's callback completes too. Audited as `user.sign_in_allowed`;
   the account holder gets `NoticeSignInAllowed`

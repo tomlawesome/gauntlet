@@ -28,9 +28,10 @@ All notable changes to this project are documented in this file.
   /api/auth/login`, `POST /api/auth/login/factor` and `POST
   /api/auth/login/passkey`, and the SSO callback redirects with
   `ssoError=login_failed`. No session is issued, the attempt is not
-  counted as a failure, and the allowance stays live, so the same
-  sign-in tried again once the store recovers completes. Ordinary
-  sign-ins are unchanged.
+  counted as a failure, and the allowance stays live, so a new sign-in
+  once the store recovers completes. At `login/factor` the second-factor
+  code given in the failed attempt stays used, so that sign-in needs
+  another code. Ordinary sign-ins are unchanged.
 
 ## [0.4.0] - 2026-10-10
 
