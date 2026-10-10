@@ -113,7 +113,10 @@ says `TEXT` too.
 - Status note (v0.3.0 audit, 2026-10-08): this change shipped in v0.2.0, so "CHANGELOG,
   Unreleased" above means the `[0.2.0]` section.
 - Status note (v0.3.0 audit, 2026-10-08): the accounts document is no longer version 3
-  (decision 1): later changes raised it, and it is version 10 now (#81).
-  The sealing is unchanged.
-- Status note (v0.4.0 audit, 2026-10-10): line 108: only `SaveWithRetry`
-  is deprecated; `LoadDocument` is a plain helper (`persist/document.go`).
+  (decision 1): later changes raised it, and it is version 9 now. The
+  sealing is unchanged.
+- Status note (v0.4.0 audit, 2026-10-10): the accounts document is version
+  10 since #81.
+- Status note (v0.4.0 audit, 2026-10-10): the consequence "The deprecated
+  `SaveWithRetry` and `LoadDocument`" is loose: only `SaveWithRetry` is
+  deprecated; `LoadDocument` is a plain helper (`persist/document.go`).

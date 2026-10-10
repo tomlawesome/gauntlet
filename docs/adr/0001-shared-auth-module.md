@@ -83,13 +83,15 @@ not any one issue:
   mikroview #1202, opened only when the owner says so.
 - Status note (v0.3.0 audit, 2026-10-08): decision 2's "one caller" for
   `evict.DownTo` is out of date: the address-ban counts and bans map
-  (`addressban.go`) and the sign-in history's fold index (`signins.go`)
-  also call it.
+  (`addressban.go`) also call it.
 - Status note (v0.3.0 audit, 2026-10-08): the dependency and passkey lines
   above are superseded: `github.com/go-webauthn/webauthn` was approved
   on 2026-09-30 and the `passkey` package shipped in v0.2.0
   ([ADR-0004](0004-passkey-ceremony.md)).
+- Status note (v0.4.0 audit, 2026-10-10): the sign-in history's fold index
+  (`signins.go`, #90) also calls `evict.DownTo`.
 - Status note (v0.4.0 audit, 2026-10-10): decision 1's self-hosted-only
-  issuer policy is amended by [ADR-0014](0014-shared-issuers.md): a shared
-  issuer is accepted when the policy pins the tenant (Google `hd`; a
-  single Entra tenant).
+  issuer policy is amended by [ADR-0014](0014-shared-issuers.md):
+  `accounts.google.com` is accepted when the policy requires an `hd` value;
+  Entra's shared endpoints, Apple and Microsoft personal accounts stay
+  refused.

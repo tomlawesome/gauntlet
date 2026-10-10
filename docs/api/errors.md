@@ -415,10 +415,11 @@ Short route names such as `login/factor` are under `/api/auth/`.
   - the route refuses to act on this account: the caller's own, or one
     that already holds the role asked for;
   - the caller has no local password, so there is no password to
-    re-check, at `DELETE /api/auth/totp`,
+    re-check: at every route that re-checks the caller's password or
+    takes a step-up (since #99 also `DELETE /api/auth/totp`,
     `DELETE /api/auth/passkeys/{id}` and
-    `POST /api/auth/recovery-codes` (#99). The refusal comes before
-    any password is checked, and nothing is counted;
+    `POST /api/auth/recovery-codes`). The refusal comes before any
+    password is checked, and nothing is counted;
   - an admin removing their own last passkey that works at this
     address, while the application requires admin passkeys (#82):
     "register another passkey first";
@@ -479,9 +480,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
     (#70);
   - for a sign-in that would be held for a confirmation code, too many
     codes were already sent to the account in the window (#84). A
-    resend inside the cooldown (30 seconds after the first code, twice
-    as long after each further one in the hour), or past 5 an hour, is
-    `429` with nothing sent (#83);
+    second code waits 30 seconds after the first, each further one in
+    the hour twice as long, and a sixth in an hour is refused; a
+    sign-in inside those limits is `429` with no code sent (#83);
   - at `login/factor/begin` and `login/prove/begin`, the account is
     locked out after repeated failures (unless the browser is one the
     account remembers) or disabled (always). The server refuses
