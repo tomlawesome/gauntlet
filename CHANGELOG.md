@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-10
+
 ### Added
 
 - **`Gate.StillSignedIn`, `gate.Refusal`, `SessionStore.Peek` and
