@@ -104,14 +104,36 @@ type SessionClient struct {
 // mid-character. Both are the client's own word, so neither may carry a
 // terminal escape, a bidirectional override, a line break or a megabyte
 // of padding into a page, a log or a message that later shows them.
-// Country, Unusual and Method are gate's own and pass through unchanged.
-// It is one rule: CreateFrom, CreateContinuing and Resume clean through
-// it, and gate cleans through it the client it hands to a notice or a
-// confirmation code.
+// Country is kept only as exactly two ASCII letters, upper-cased (an
+// ISO 3166-1 alpha-2 code); anything else a lookup returned becomes "",
+// no country. Unusual and Method are gate's own and pass through
+// unchanged. It is one rule: CreateFrom, CreateContinuing and Resume
+// clean through it, and gate cleans through it the client it hands to a
+// notice or a confirmation code.
 func (c SessionClient) Clean() SessionClient {
 	c.Address = cleanClientText(c.Address, MaxSessionAddress)
 	c.UserAgent = cleanClientText(c.UserAgent, MaxSessionUserAgent)
+	c.Country = cleanCountry(c.Country)
 	return c
+}
+
+// cleanCountry returns s upper-cased when it is exactly two ASCII
+// letters, else "".
+func cleanCountry(s string) string {
+	if len(s) != 2 {
+		return ""
+	}
+	b := []byte(s)
+	for i, ch := range b {
+		switch {
+		case 'a' <= ch && ch <= 'z':
+			b[i] = ch - 'a' + 'A'
+		case 'A' <= ch && ch <= 'Z':
+		default:
+			return ""
+		}
+	}
+	return string(b)
 }
 
 // Session is deliberately an opaque random ID (see newID), not a JWT --

@@ -52,6 +52,9 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if refuseWithoutLocalPassword(w, user) {
+		return
+	}
 	var req recoveryCodesRegenerateRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)

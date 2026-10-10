@@ -363,6 +363,13 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
 		return
 	}
+	// Exactly one of a code and an assertion, refused before anything
+	// is reserved or looked up: a malformed request is no guess, so it
+	// spends no attempts and leaves the pending login as it was.
+	if (req.Code == "") == (len(req.Assertion) == 0) {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "send a code or an assertion, not both and not neither", nil)
+		return
+	}
 	// An assertion where the application has no passkeys is a request
 	// for a route that does not exist here, as every passkey route is.
 	if len(req.Assertion) > 0 && g.passkeysOff(w, r) {
