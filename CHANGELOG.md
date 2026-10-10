@@ -4,6 +4,365 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-10
+
+### Added
+
+- **A refused passkey sign-in names a passkey its account does not
+  hold** (#92). The `401` `invalid-credentials` from `POST
+  /api/auth/login/passkey` carries an `unknownCredential` member,
+  `{rpId, credentialId}`, when the user handle names one of this
+  application's accounts that holds no passkey of that ID in any form;
+  a handle naming no account here gets no member, since another
+  application on the same hostname shares the browser's passkeys. A
+  refused passkey at `POST /api/auth/reauthenticate` carries it too,
+  when the handle is the timed-out session's own account and that
+  account no longer holds the passkey (never for another account's
+  handle). An application passes
+  it to the browser's `PublicKeyCredential.signalUnknownCredential()`
+  (W3C WebAuthn Level 3), so a removed passkey stops being offered;
+  docs/using.md has the feature check and fallback. A passkey the
+  server still holds, live, stale or held for its codes, is never
+  named. `detail`, status and counting are unchanged; no Go API
+  changes. Additive.
+
+- **An admin can allow an account's next sign-in for ten minutes**
+  (#81, ADR-0009 decision 11). `POST /api/auth/users/{id}/allow-sign-in`
+  lets a person the unusual-sign-in policy holds or refuses at a new
+  browser or place sign in once, normally, and have that browser and
+  place remembered -- without a reset code destroying their password,
+  and as the first administrator remedy at all for an account that
+  signs in only through single sign-on. For another account it takes
+  the caller's password, for the caller's own the password and a
+  current second factor, as own unlock does. It changes no password,
+  second factor, session, lockout or disable. The first completed
+  sign-in from any browser spends it; a reset code or sign out
+  everywhere clears it. Audited as `user.sign_in_allowed`; the account
+  holder is told through the new `NoticeSignInAllowed`
+  (`AccountNotice.SignInAllowed`, `SignInAllowedDetail{Until}`). New
+  `Store.AllowNextSignIn`, `User.SignInAllowedUntil`,
+  `User.SignInAllowanceLive` and `SignInAllowanceLifetime`. Additive.
+
+### Security
+
+- **Every passkey sign-in finish counts on the address** (#96). A `POST
+  /api/auth/login/passkey` finish whose user handle names no account the
+  credential can sign in to, or that never reaches the account lookup
+  (no handle, an unreadable assertion), reserved nothing and was never
+  checked against the address ban, so one begin cookie bought unbounded
+  tries for five minutes. Such a finish now checks the ban and reserves
+  one attempt on the address bucket a password attempt uses: once that
+  is used or the address is banned it answers `429` `rate-limited`
+  (recorded `rate_limited`, method `passkey_alone`, no account; no
+  `unknownCredential`; the ceremony cookie kept), otherwise the `401`
+  it always did, counted. The account path, dead ceremonies and the Go
+  API are unchanged.
+
+- A passkey-alone sign-in (`POST /api/auth/login/passkey`) whose user
+  handle names an account the credential cannot sign in to -- an
+  account with no local password, or a credential ID that is not one of
+  the account's passkeys under the current relying-party ID -- is no
+  longer charged to that account. The user handle is not covered by the
+  passkey's signature, so anyone holding any passkey could name any
+  account and lock or disable it. Such an attempt now answers `401
+  invalid-credentials` as before, is recorded as `no_such_user` with no
+  account, and reserves and counts nothing on the account (no lockout,
+  no disable, no notice); the address limits still apply, as for an
+  unknown handle. A passkey the account does hold whose assertion fails
+  is still `factor_refused` against the account.
+
+- **A blank allow-list entry is refused at startup** (#91). An app that
+  builds `Policy.AllowedGroups`, `AllowedEmails`, `AllowedEmailDomains`
+  or `RoleFromGroups` by splitting a setting on commas gets an empty
+  entry from a trailing comma, which must not quietly change who may
+  sign in. New `Policy.Validate` names the field when an entry (or a
+  `RoleFromGroups` group name) is empty or only whitespace; `gate.New`
+  and `oidc.New` call it and refuse to start. A groups claim value that
+  is only whitespace is now dropped, as an empty one already was, so it
+  never counts as a group. Additive: a policy with a blank entry was
+  accepted before, so a deployment that has one now fails at startup
+  until the entry is removed.
+
+- **A second factor added beside another never goes live without
+  recovery codes** (#80 A3b-R1). An enrolment begun while the account
+  had a second factor took the additional-factor path; if that factor
+  was removed before the new one was confirmed (which clears the
+  recovery codes), the new factor went live with none. The passkey
+  register-finish and authenticator-app confirm routes now use the new
+  `Store.AddLaterPasskey` and `Store.ConfirmLaterTOTP`, which refuse
+  with the new `ErrNoOtherSecondFactor` under the store lock when no
+  other factor is live; the route then holds the factor with its own
+  codes, as a first factor. If the factors change again in between it
+  answers 409 conflict, "start again". `AddPasskey` and `ConfirmTOTP`
+  are unchanged. Additive.
+- **Confirming an authenticator app beside a passkey checks the secret
+  it verified** (#93). The confirm route checked the code against the
+  pending secret, then made whatever secret was pending live; one
+  replaced in between (the enrolment started again in another tab) went
+  live unproven. `Store.ConfirmLaterTOTP` takes the verified secret and
+  refuses with `ErrNoPendingTOTP` if it changed. `ConfirmTOTP` is
+  unchanged and documents that it makes no such check.
+- **Regenerating recovery codes needs a live second factor at the
+  write** (#94). The route checked for a factor, then wrote the new set
+  unconditionally; a last factor removed in between left codes on an
+  account with no factor. New `Store.RegenerateRecoveryCodes` refuses
+  with `ErrNoSecondFactors` under the store lock, storing nothing, and
+  the route answers its existing 409. `GenerateRecoveryCodes` is
+  unchanged. Additive.
+- **A passkey stores at most eight well-formed transports** (#80
+  P2-R1). The transports a browser reports at registration were stored
+  as they came, so one registration could put an unbounded list of
+  arbitrary strings in the accounts document. `Store.AddPasskey` and
+  `Store.HoldFirstPasskey` now keep at most eight entries, each 1-32
+  bytes of printable ASCII, dropping any other entry and any repeat and
+  keeping the order sent. WebAuthn Level 3 s5.8.4 makes the list a hint
+  clients ignore unknown values in, so a registration is never refused
+  over it.
+- **Passkey names are refused if they are not plain text, and cleaned
+  in notices** (#89). A passkey's name, chosen by whoever registers it,
+  was passed into owner notices as it came, so a mail or chat client
+  could show a made-up line or hidden text. `Store.AddPasskey`,
+  `Store.RenamePasskey` and `Store.HoldFirstPasskey` now refuse a name
+  holding a control or format character, a line or paragraph separator
+  or invalid UTF-8 with the new `ErrPasskeyNameInvalid`, and store
+  nothing. `POST /api/auth/passkeys/register/finish` answers `400
+  invalid-request` before the ceremony is used, so the same credential
+  can be finished again with a good name, and `PATCH
+  /api/auth/passkeys/{id}` answers `400`. A blank name still becomes
+  `Passkey n`, a long one is still cut, and letters of any script,
+  accents and emoji are still accepted. Notices built from a passkey
+  name stored before this release have those characters removed. One
+  shared rule now decides what is plain text for usernames, token names,
+  device IDs, sign-out reasons and passkey names; none of their
+  behaviour changes. Additive: a name refused here was accepted before,
+  so a caller that sent one now gets an error.
+
+- **U+FFFD is refused in usernames, passkey names and the sign-out
+  reason** (#90), as it already was in token names and device IDs. A
+  browser only sends the replacement character when the text it was
+  given was broken (and a JSON body turns invalid UTF-8 into it), so a
+  name holding it is not what the person typed. `ValidateUsername` (and
+  so `Store.Register` and local account creation) answers
+  `ErrUsernameInvalid`; an identity provider's username holding it is
+  not used, and a new account gets its `oidc-<hash>` name instead.
+  `Store.AddPasskey`, `Store.RenamePasskey` and `Store.HoldFirstPasskey`
+  answer `ErrPasskeyNameInvalid`, and `POST
+  /api/auth/passkeys/register/finish` and `PATCH
+  /api/auth/passkeys/{id}` answer `400 invalid-request` as for any other
+  name that is not plain text, the ceremony left live. `POST
+  /api/auth/users/{id}/logout-all` answers `400` for such a reason.
+  Client text in sessions and sign-in records is still only cleaned.
+  Additive in the same way: a name refused here was accepted before.
+
+- **Confirmation codes and escape codes wait between sends, and five an
+  hour at most** (#83). The per-window send limit (#84) let someone
+  holding the password ask for a code every minute, window after window.
+  Each account and kind of code now also has a resend cooldown, 30
+  seconds after the first code and doubling with each further one in
+  the last hour (at most 15 minutes), and a cap of five codes in any
+  hour, both fixed. Inside the cooldown or past the cap a held sign-in
+  is answered `429 rate-limited` with no code, as at the window's limit;
+  a refused request is not counted. An admin's unlock
+  (`LoginLimiter.UnlockLogin`) or a restart clears both. No API change.
+
+- **Starting a passkey second step spends no sign-in attempts** (#85).
+  `login/factor/begin` used to take an attempt on the address's and
+  the account's sign-in limits and `login/factor` handed it back in a
+  later request, so an abandoned prompt could start a lockout, and a
+  completed step whose begin had aged out of the window handed back a
+  real wrong guess from that address. Each begin is now counted on a
+  limit of the account's own, the limiter's threshold per window (5
+  per 5 minutes at the usual settings), never handed back; past it,
+  begin is `429 rate-limited`, recorded as `rate_limited`, while codes
+  and recovery codes still work. `login/factor` hands back only the
+  attempt it took itself. The limit is not the per-address one the login
+  page's passkey sign-in spends, so that one filling does not refuse an
+  account's second step, and a browser the account remembers has a
+  limit of its own beside it, so a stranger holding the password cannot
+  keep the owner from their passkey. A banned address is still refused
+  at begin unless the browser is known, and so is a locked account
+  (recorded as `locked`) or a disabled one (to any browser): begin reads
+  the lockout without reserving anything, so no prompt is shown for a
+  sign-in that cannot complete. An admin's unlock
+  (`LoginLimiter.UnlockLogin`) or a restart clears the count. New
+  `LoginLimiter.ReserveFactorBegin` and `ReleaseFactorBegin`. Additive.
+
+- **Only public keys are compiled into an application** (#87). The
+  blocklist package embedded the whole `blocklist/keys` folder, so any
+  other file left there, such as a private key, would have been built
+  into every app. It now embeds `keys/*.pub` only, and the folder has a
+  `.gitignore` that lets Git track just `*.pub`, `README.md` and itself.
+
+- **A password reset no longer lets the account past its address's
+  limit** (#86, retiring #32's pass). The pass was the last thing on the
+  sign-in limits that carried across requests: the pending-login cookie
+  let the code step skip the address limit. A reset still ends the
+  account's lockout and stops its earlier wrong guesses counting (#24),
+  and a browser the account remembers still signs in past a full
+  address on its own allowance (#44). What changes: someone reset within
+  five minutes of the wrong guesses, signing in from the same address on
+  a browser the account does not remember, gets `429 rate-limited` ("too
+  many attempts, try again later") until five minutes have passed since
+  those guesses, then signs in as normal. A pending-login cookie issued
+  before the upgrade that still carries the old flag is accepted, and
+  the flag is ignored. `LoginLimiter.AllowAfterReset` now always reports
+  false, and `ReleaseAfterReset` and `EndAfterReset` do nothing; all
+  three are deprecated and kept until a major version (ADR-0002).
+
+### Changed
+
+- **`docs/api/auth.yaml` re-checked line by line against the code**
+  (#97). About a hundred statements that were wrong, missing or
+  misleading are corrected: which routes set, read or clear each
+  cookie, when attempts are counted and given back, what each status
+  answers, and what the session, passkey and sign-in-history fields
+  hold. **Removed** from the document, as responses the code can never
+  send (a one-off before any application uses gauntlet; ADR-0002 is
+  otherwise additive): `500` on `POST /api/auth/login/confirm` and
+  `POST /api/auth/login/escape`, and `503` `not-persisted` on `PUT
+  /api/auth/users/{id}/role`, `POST /api/auth/users/{id}/reset-password`
+  and `POST /api/auth/users/{id}/allow-sign-in` (now `503`
+  `setup-required` only). Added: `404` on `POST /api/auth/users`, `409`
+  on `DELETE /api/auth/totp`.
+
+- **Token names and device IDs count characters, not bytes** (#90).
+  `MaxTokenNameLen` and `MaxDeviceIDLen` (64) now count characters, as
+  usernames, passkey names and the sign-out reason already did, and as
+  a documented `maxLength` does: a name of non-Latin letters may be
+  longer than before (22 CJK characters were already too many). The
+  errors now say "at most 64 characters of plain text";
+  `docs/api/auth.yaml` says the same and describes `device` for the
+  first time. A name that fitted before still fits.
+
+- **The accounts document is version 10** (#81), for
+  `User.SignInAllowedUntil`. **One-way:** a v0.3.0 build refuses a
+  version-10 document at start-up (ADR-0002), so rolling back means
+  restoring a copy saved before the upgrade. A version-9 document opens
+  as before, with no allowance. No migration code.
+
+- **A sign-in let through by an admin's allowance** (#81) completes as
+  an escape-code one does: history row `confirmed`, `user.login` note
+  `allowed=used`, and the unusual-sign-in notice's `Reason` is
+  `allowed`. `Store.RememberSignIn` now also spends the allowance in its
+  one write.
+
+- **The `sign-in-refused` detail** now reads "... or ask an
+  administrator to allow your next sign-in or reset the account" (#81).
+
+- **Every sign-in ticket is refused from the instant it expires** (#90).
+  The pending-login cookie and the SSO flow state
+  (`oidc.StateCodec.Decode`) used to accept a ticket at exactly its
+  maximum age, while the confirmation and escape tickets refused it
+  then. All four now follow one rule, RFC 7519 §4.1.4's: a ticket is
+  valid only while now is before its expiry. The difference is one
+  instant; no API change.
+
+- **`pwlist` writes its files with the module's shared crash-safe
+  writer** (#90). The list, its checksum, its signature and the build
+  checkpoint now go through `internal/atomicfile`: a missing output
+  directory is created with mode 0700, a replaced file keeps its owner
+  and group (a rebuild run with sudo no longer leaves a list the server
+  cannot read), and the directory is synced after the rename.
+
+- CI: a release is cut on `main` only (#88): release:version and
+  release:gitlab run in `main` pipelines and refuse a commit that is not
+  `main`'s tip; `preview` and `main` pipelines now run every lint and
+  test job, as `dev`'s do (docs/releasing.md).
+
+### Fixed
+
+- **Ten `auth.yaml` descriptions were cut short** (#98). An unquoted
+  value holding a space then `#` (as in "`Config.AdminPasskey`, #82")
+  ends at the `#`, which YAML reads as a comment, so OpenAPI readers saw
+  half a sentence; v0.3.0 shipped nine. They are quoted, and a contract
+  test now fails on any new one.
+- **Four places where the code broke its own contract** (#99). An
+  account with no local password gets `409` "set a local password
+  first" at `DELETE /api/auth/totp`, `DELETE /api/auth/passkeys/{id}`
+  and `POST /api/auth/recovery-codes`, as at every other re-check route,
+  instead of a counted `401`. A country from `Config.Country` is kept
+  only as two letters, upper-cased, else dropped, matching the
+  documented pattern. `POST /api/auth/login/factor` answers `400` to
+  both `code` and `assertion` or neither, before counting anything.
+  An admin clearing the authenticator app or passkeys of an account
+  deleted mid-request gets `404`, not a `500` naming the internal error.
+- **An account deleted mid-request is told to sign in, not given a
+  500** (#95). Passkey register-finish, authenticator-app confirm and
+  recovery-code regenerate answered a store write that found the
+  account gone with 500 `server-error`; they now give the same 401
+  `sign-in-required` "sign in first" they give when it is gone at the
+  start of the request.
+- **A sign-in an admin allowed is audited as an allowance, not a
+  proof** (#97). Its `user.login` line said "via confirmation code" or
+  "via passkey proof", and an SSO sign-in lost "via sso"; it now says
+  "via admin allowance", even when the session loses its signals to a
+  failed remember write.
+
+Low-severity findings from the v0.3.0 audit (#80):
+
+- An SSO sign-in that changes the account's role no longer computes a
+  password hash (about 100 ms, 64 MiB) it throws away while every other
+  request waits on the account store.
+- A sign-in with the old password that was already being checked when
+  a password change or an admin reset landed is refused, rather than
+  given a session the change was meant to end.
+- Holding a first second factor (`HoldFirstPasskey`, `HoldFirstTOTP`)
+  refuses an account that already has one, or has one on hold, before
+  minting the ten recovery codes, rather than hashing all ten and
+  throwing them away.
+- An admin reset issued while the owner's own password change was still
+  being checked is no longer overwritten by it (the code the admin read
+  out never worked). The change is refused instead: `POST
+  /api/auth/password` answers `409 conflict` and saves nothing, and
+  `Store.SetPassword` returns the new `ErrResetDuringChange`. Additive.
+- `Store.ClearAllSecondFactors` on an account with nothing to clear
+  returns the new `ErrNoSecondFactors` and writes nothing, as
+  `ClearPasskeys` answers `ErrNoPasskeys`, instead of saving and
+  reporting success. A recovery tool built on it can now say there was
+  nothing to remove rather than that everything was.
+- A failed SSO callback's warning now ends with `cause="..."`: what the
+  token endpoint answered (its status, error code and description, never
+  its raw body), why the token did not verify, what the provider
+  reported, or why the account could not be saved. A provider that is
+  down, a wrong client secret and a failing disk no longer read the
+  same.
+- `pwlist build` with `--checkpoint`, when the finished run fails a
+  sanity bar, now says its checkpoint is kept and that a retry rechecks
+  the same result without fetching (delete the checkpoint to fetch
+  again), and the retry logs that every chunk was already fetched
+  instead of "resuming at chunk" one past the last.
+- `SweepTokens` reads the account store once to find tokens whose
+  creator is gone, instead of once per token while holding the token
+  store's lock, so a slow accounts backend no longer holds every
+  bearer-token request for the length of the sweep.
+- A token-expiry notice whose notifier answers after the 10-second
+  deadline, but answers that it sent it, is recorded as sent when it
+  answers. Before, the sweep counted it unsent and a notifier that was
+  always slow sent the owner the same notice every day.
+- The password list's stored copy (`blocklist.Refresher`) and the
+  country file and its `state.json` (`geoip`) keep their owner and group
+  when a refresh replaces them, as the account store's file has since
+  #79: a refresh run as another user, such as a CLI with sudo, no
+  longer leaves files the server cannot read or replace. The list and
+  `state.json` use the module's shared crash-safe writer; the country
+  file streams to its own temp file and takes the old file's owner and
+  group through the same package (`atomicfile.KeepOwner`).
+- The Unicode line and paragraph separators (U+2028, U+2029), which a
+  few mail and chat clients show as a new line, are now treated like
+  control characters wherever those are: dropped from a session's and a
+  sign-in record's browser and address and from a masked unknown
+  username, and refused in a new username, token name, token device ID
+  and an admin's sign-out-everywhere reason. An owner's notice can no
+  longer show a made-up extra line.
+- `login/prove/begin` counts each begin on the account's passkey-step
+  begin budget, as `login/factor/begin` does since #85, so a held
+  sign-in's ticket can no longer mint passkey challenges without limit
+  for its life; past it, begin is `429 rate-limited`. Like
+  `login/factor/begin` it also refuses a locked or disabled account and
+  a banned address (`429`, with the same known-browser exceptions)
+  before any challenge, so an owner locked out between the password and
+  the passkey step is told at once instead of after touching their key.
+
 ## [0.3.0] - 2026-10-08
 
 Reading notes for this release:

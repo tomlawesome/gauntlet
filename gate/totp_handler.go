@@ -134,7 +134,9 @@ type totpConfirmResponse struct {
 // which does all three).
 //
 // On an account that already has a second factor (a passkey) the app is
-// confirmed live at once, with no codes, and confirming ends every other
+// confirmed live at once (ConfirmLaterTOTP), with no codes -- or, if
+// that passkey has gone by the time of the write, held with codes as a
+// first factor (#80) -- and confirming live ends every other
 // session on the account: turning on a second factor is exactly the
 // moment a stale or forgotten session elsewhere should not get to ride
 // along unchallenged without ever having to prove it. Same shape as
@@ -209,22 +211,40 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	g.deps.Limiter.ReleaseRecheck(user.ID, now)
 
-	if !current.HasSecondFactor() {
-		// The first factor: held with its codes, in one write. The store
-		// decides again under its lock; one that lost to a passkey going
-		// live in between is confirmed live below instead.
+	// The first factor: held with its codes, in one write. The store
+	// decides again under its lock; one that lost to a passkey going
+	// live in between is confirmed live below instead.
+	holdFirst := func() (done bool) {
 		codes, err := g.deps.Users.HoldFirstTOTP(user.ID, current.TOTPSecret, matched, now)
 		if err == nil {
 			writeJSON(w, http.StatusOK, totpConfirmResponse{RecoveryCodes: codes, PendingConfirmation: true})
-			return
+			return true
 		}
 		if !errors.Is(err, gauntlet.ErrSecondFactorExists) {
 			g.writeTOTPConfirmError(w, r, err)
-			return
+			return true
 		}
+		return false
+	}
+	triedFirst := !current.HasSecondFactor()
+	if triedFirst && holdFirst() {
+		return
 	}
 
-	if err := g.deps.Users.ConfirmTOTP(user.ID, now, matched); err != nil {
+	// Beside a live passkey, whose codes stand. The store refuses under
+	// its lock if every passkey has gone since (taking the codes with
+	// them), leaving the secret pending, so the app never goes live
+	// without codes (#80): it is held with its own instead, once. A
+	// factor that went live again in between answers 409.
+	err := g.deps.Users.ConfirmLaterTOTP(user.ID, current.TOTPSecret, now, matched)
+	if errors.Is(err, gauntlet.ErrNoOtherSecondFactor) {
+		if !triedFirst && holdFirst() {
+			return
+		}
+		g.writeAuthError(w, r, gauntlet.ErrSecondFactorExists, http.StatusConflict, classConflict)
+		return
+	}
+	if err != nil {
 		g.writeTOTPConfirmError(w, r, err)
 		return
 	}
@@ -243,10 +263,14 @@ func (g *Gate) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeTOTPConfirmError answers a refused confirmation: 409 when there
-// is nothing pending any more or another enrolment is on hold, 500
-// otherwise.
+// writeTOTPConfirmError answers a refused confirmation: 401 for an
+// account deleted mid-request (#95), 409 when there is nothing pending
+// any more or another enrolment is on hold, 500 otherwise.
 func (g *Gate) writeTOTPConfirmError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since the handler read it (#95)
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
 	status, class := http.StatusInternalServerError, classServerError
 	if errors.Is(err, gauntlet.ErrNoPendingTOTP) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
 		status, class = http.StatusConflict, classConflict
@@ -274,6 +298,9 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refuseWithoutLocalPassword(w, user) {
+		return
+	}
 	var req totpDeleteRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
@@ -366,6 +393,10 @@ func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 		// of a removal that did not happen.
 		if errors.Is(err, gauntlet.ErrNoTOTP) {
 			writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": false})
+			return
+		}
+		if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since the read above
+			writeProblem(w, http.StatusNotFound, classNotFound, "this account was deleted before the request finished", nil)
 			return
 		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)

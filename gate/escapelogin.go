@@ -2,7 +2,6 @@ package gate
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
@@ -106,7 +106,7 @@ func decodeEscapeLogin(value string, now time.Time) (escapeLoginState, bool) {
 	if !escapeLoginCodec.open(value, &st) || st.ID == "" || st.UserID == "" || st.CodeHash == "" {
 		return escapeLoginState{}, false
 	}
-	if !now.Before(st.IssuedAt.Add(EscapeCodeLifetime)) {
+	if expiry.Expired(st.IssuedAt, EscapeCodeLifetime, now) {
 		return escapeLoginState{}, false
 	}
 	return st, true
@@ -149,9 +149,10 @@ func (g *Gate) escapeOffered(user *gauntlet.User, method gauntlet.SignInMethod, 
 // cookie exists and the refusal is as it always was.
 //
 // Each code is counted on the account's escape-code budget
-// (ReserveDelivery, #84) before it is minted, and never handed back:
-// with the budget spent no code is issued, exactly as when nothing can
-// announce one, so a password holder cannot fill the server's log.
+// (ReserveDelivery, #84, with its cooldown and hourly cap, #83) before
+// it is minted, and never handed back: with the budget spent no code is
+// issued, exactly as when nothing can announce one, so a password
+// holder cannot fill the server's log.
 func (g *Gate) startEscape(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, signals gauntlet.SignInSignals, now time.Time) bool {
 	if !g.escapeOffered(user, method, now) {
 		return false
@@ -160,13 +161,13 @@ func (g *Gate) startEscape(w http.ResponseWriter, r *http.Request, user *gauntle
 		return false
 	}
 	display, canonical := gauntlet.NewOneTimeCode()
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := newTicketID()
+	if err != nil {
 		g.logError("gate: generating an escape ticket id: " + err.Error())
 		return false
 	}
 	ticket, err := escapeLoginCodec.seal(escapeLoginState{
-		UserID: user.ID, IssuedAt: now, ID: hex.EncodeToString(id),
+		UserID: user.ID, IssuedAt: now, ID: id,
 		CodeHash: escapeCodeHash(canonical), Signals: signals, Method: method,
 	})
 	if err != nil {
@@ -242,14 +243,12 @@ func (g *Gate) handleLoginEscape(w http.ResponseWriter, r *http.Request) {
 		expired()
 		return
 	}
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodCode, false, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, gauntlet.SignInMethodCode, now)
 	if !ok {
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	if !escapeCodeMatches(req.Code, st.CodeHash) {
-		g.endAfterReset(res)
 		g.secondFactorFailed(user, now)
 		g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInEscapeRefused, gauntlet.SignInMethodCode), res, now)
 		writeUnauthorized(w, classInvalidCredentials, "invalid escape code")
@@ -257,13 +256,11 @@ func (g *Gate) handleLoginEscape(w http.ResponseWriter, r *http.Request) {
 	}
 	// One-shot: of two completions racing on one ticket, the loser is a
 	// replay and is told to sign in again, as confirm's is.
-	if !spentEscapeLogins.Claim(st.ID, st.IssuedAt.Add(EscapeCodeLifetime), now) {
-		g.endAfterReset(res)
+	if !spentEscapeLogins.Claim(st.ID, expiry.At(st.IssuedAt, EscapeCodeLifetime), now) {
 		expired()
 		return
 	}
 	g.completeLogin(res, now)
-	g.endAfterReset(res)
 	g.clearEscapeLoginCookie(w)
 	place := g.placeOf(r, res.address)
 	notice := g.completeSignIn(w, r, user, res, st.Method, place,

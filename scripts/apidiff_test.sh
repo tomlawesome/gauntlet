@@ -69,7 +69,25 @@ git checkout -q -- go.sum
 
 # With -mod=mod in the environment (as `go env -w GOFLAGS=-mod=mod`
 # leaves it on a workstation), the script still leaves the files alone.
-expect pass "GOFLAGS=-mod=mod in the environment changes nothing" env GOFLAGS=-mod=mod scripts/apidiff.sh
+# This throwaway module has no requirements, so even -mod=mod would
+# have nothing to write: the files staying put proves nothing about the
+# override. A `go` that records the GOFLAGS each call runs with does:
+# every call the script makes must have been given -mod=readonly.
+mkdir "$WORK/stub2"
+cat > "$WORK/stub2/go" <<STUB
+#!/usr/bin/env bash
+echo "\${1:-}: \$GOFLAGS" >> "$WORK/goflags.log"
+exec "$REAL_GO" "\$@"
+STUB
+chmod +x "$WORK/stub2/go"
+: > "$WORK/goflags.log"
+expect pass "GOFLAGS=-mod=mod in the environment changes nothing" env GOFLAGS=-mod=mod PATH="$WORK/stub2:$PATH" scripts/apidiff.sh
 [ -z "$(git status --short go.mod go.sum)" ] || { echo "FAIL: -mod=mod run changed go.mod or go.sum" >&2; exit 1; }
+grep -q '^list: ' "$WORK/goflags.log" || { echo "FAIL: the stub saw no go list call, so it checked nothing" >&2; cat "$WORK/goflags.log" >&2; exit 1; }
+if grep -v ': -mod=readonly$' "$WORK/goflags.log" | grep -q .; then
+  echo "FAIL: the script ran go with GOFLAGS other than -mod=readonly:" >&2
+  grep -v ': -mod=readonly$' "$WORK/goflags.log" >&2
+  exit 1
+fi
 
 echo "apidiff_test.sh: all cases passed"

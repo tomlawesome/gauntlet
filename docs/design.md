@@ -1,8 +1,8 @@
 # Design: `gauntlet`, the shared authentication module
 
-**Status:** describes gauntlet as built, up to v0.3.0 (v0.1.0 shipped
-2026-09-30, v0.2.0 2026-10-03). Originally proposed 2026-09-26 as the
-API and layout that birdcage's
+**Status:** describes gauntlet as built for v0.4.0 (v0.1.0 shipped
+2026-09-30, v0.2.0 2026-10-03, v0.3.0 2026-10-08). Originally proposed
+2026-09-26 as the API and layout that birdcage's
 [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md)
 left to this design. **Issue:** #8 (build `gauntlet` and use it).
 **Later consumer:** mikroview #1202. Sections 5 (build plan) and 6
@@ -17,6 +17,32 @@ Mikroview and birdcage are separate repositories, so their file names,
 line numbers and "today" behaviour are as read then, not re-checked
 here.
 
+**Words used throughout.** Each is defined here once and kept.
+
+- *Second factor*: the extra proof asked for after the password: a
+  TOTP code, a passkey or a recovery code.
+- *TOTP*: a six-digit code from an authenticator app (time-based
+  one-time password).
+- *SSO* (single sign-on): signing in through an outside service, the
+  *identity provider*. *OIDC* (OpenID Connect) is the standard
+  protocol for it.
+- *Passkey ceremony*: the exchange between server and browser that
+  registers or uses a passkey (standard name WebAuthn).
+- *Re-check* (also *step-up*): asking a signed-in person for their
+  password, and for some actions a current second factor, again
+  before the action goes ahead.
+- *Sealed*: encrypted and signed with a key, so whoever holds the
+  value can neither read nor change it. A sealed cookie is one the
+  browser carries but cannot open.
+- *Fails closed*: when in doubt, refuses rather than lets through.
+- *NIST SP 800-63B-4*: the US National Institute of Standards and
+  Technology's guideline for authentication. *OWASP* (the Open
+  Worldwide Application Security Project) publishes cheat sheets and
+  the *ASVS* (Application Security Verification Standard), whose items
+  are cited as "ASVS 5.0 6.6.3".
+- *Door*: a check that holds an account back until it has done one
+  thing; defined in §1.3, beside the sign-in limits.
+
 ## Summary
 
 - One module, seven public packages. The four the design started with:
@@ -26,15 +52,19 @@ here.
   storage interface, plus the encryption wrapper and file backend both
   apps share) and `gauntlet/gate` (the HTTP middleware and handlers
   mikroview keeps in `internal/api`). Added since: `gauntlet/passkey`
-  (the WebAuthn ceremony, G8), `gauntlet/blocklist` (the common-password
+  (the passkey ceremony, G8), `gauntlet/blocklist` (the common-password
   list, #52) and `gauntlet/geoip` (the sign-in country, #54), plus
   `persist/persisttest`, a test suite an app runs against its own
   backend (#61).
-- Three seams, as [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) fixed them: storage is `persist.Backend`,
-  copied method-for-method from mikroview so its existing backends
-  satisfy it with no adapter; logging is `*slog.Logger`, which is what
-  mikroview's `logging.New` already returns; eviction is a pure function
-  and goes in as `gauntlet/internal/evict`, not an interface.
+- Three places where each app plugs in its own code (*seams*), as
+  birdcage's [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md)
+  (an architecture decision record; gauntlet has its own ADR-0005, a
+  different one) set them: storage is `persist.Backend`, copied
+  method-for-method from mikroview so its existing backends satisfy it
+  with no adapter; logging is `*slog.Logger`, which is what mikroview's
+  `logging.New` already returns; eviction (dropping old entries from a
+  table that has grown too big) is a plain function with no stored
+  state and goes in as `gauntlet/internal/evict`, not an interface.
 - Gauntlet saves accounts, tokens and the sign-in history each as one
   JSON document -- one file, or one database row -- rewritten in full on
   every save (a whole-document store). The documents hold mikroview's
@@ -42,7 +72,7 @@ here.
   stores, so its existing data loads unchanged.
 - Each document has a top-level `version` (#29, ADR-0002 decision 1).
   Mikroview's documents load as version 1 unchanged. Gauntlet writes
-  accounts as version 9 (#28, #44, #43, #59, #58, #55, #67), tokens as
+  accounts as version 10 (#28, #44, #43, #59, #58, #55, #67, #81), tokens as
   version 3 (#59, #74) and the sign-in history as version 3 (#53, #54,
   #55); `docversion.go` lists what each version added. A document newer
   than the running build is refused.
@@ -88,6 +118,15 @@ github.com/tomlawesome/gauntlet
 │                               sign-in country, and the one importer of maxminddb)
 ├── cmd/pwlist/                 builds, signs, verifies and publishes that list (CI only)
 ├── internal/listsig/           the list's Ed25519 signature format
+├── internal/atomicfile/        WriteFile, KeepOwner -- the crash-safe file writer that persist,
+│                               blocklist and geoip share
+├── internal/browsertoken/      New, WellFormed -- the known-browser token's shape
+├── internal/expiry/            At, Expired -- the one rule every sealed ticket's lifetime is judged by
+├── internal/fetch/             HTTPSRedirectsOnly, Jitter -- the download rules blocklist and geoip share
+├── internal/groupname/         Match -- how SSO group names are compared
+├── internal/plaintext/         Valid, Clean, ... -- what counts as plain text in a name or a client
+│                               detail, and cleaning what does not
+├── internal/seal/              Codec, New, MustNew -- turns a small value into an opaque cookie string
 ├── internal/evict/             Batch, Target, DownTo (copied from mikroview)
 ├── internal/hashcost/          Use, Cheap -- cheap Argon2id hashes for this
 │                               module's own tests
@@ -101,11 +140,13 @@ github.com/tomlawesome/gauntlet
 └── testdata/                   old document fixtures (sign-in history versions 1-3)
 ```
 
-`passkey/` (the WebAuthn ceremony, `github.com/go-webauthn/webauthn`) was
-added in G8 (#20, [ADR-0004](adr/0004-passkey-ceremony.md)).
-It is a leaf: `gate` reaches it only through the `gauntlet.PasskeyCeremony`
-interface in the root, so an application that never imports it -- birdcage
--- never compiles the library in.
+`passkey/` (the passkey register and sign-in exchange between server and
+browser, standard name WebAuthn, using `github.com/go-webauthn/webauthn`)
+was added in G8 (#20, [ADR-0004](adr/0004-passkey-ceremony.md)).
+Nothing else in gauntlet's own code imports it (only tests do): `gate`
+reaches it only through the `gauntlet.PasskeyCeremony` interface in the
+root, so an application that never imports it -- birdcage -- never
+compiles the library in.
 
 ### 1.1 Why these boundaries
 
@@ -116,10 +157,11 @@ interface in the root, so an application that never imports it -- birdcage
   tidiness. Mikroview's move is then an import rewrite
   (`auth "github.com/tomlawesome/gauntlet"`) rather than a refactor.
 - **`persist` holds the interface, plus one shared backend.** Mikroview's
-  `FileBackend`, `PostgresBackend` and the write-behind wrapper serve
-  six other stores there and stay in mikroview; Go's structural typing
-  means they already satisfy gauntlet's interface (same four methods,
-  same `VersionReader` extension) without moving. `EncryptedFileBackend`
+  `FileBackend`, `PostgresBackend` and the wrapper that saves in the
+  background serve six other stores there and stay in mikroview; Go
+  needs no declared link between a type and an interface, and having
+  the same four methods (and the same `VersionReader` extension) is
+  enough, so they already fit gauntlet's interface without moving. `EncryptedFileBackend`
   is the one exception (issue #18): both apps need the same
   authenticated-encryption file backend, so it moved into
   `gauntlet/persist` rather than staying duplicated, and gauntlet takes
@@ -132,7 +174,7 @@ interface in the root, so an application that never imports it -- birdcage
   it is stored, and `OpenStore` refuses a backend that would hold it in
   the clear unless the application says it accepts that
   (`Options.AllowPlaintextAtRest`). The one thing that does not
-  carry across a package boundary is the sentinel `ErrConflict`, so
+  carry across a package boundary is the fixed error value `ErrConflict`, so
   mikroview's `internal/persist` will assign `var ErrConflict =
   gpersist.ErrConflict` when it moves -- one line, no data change.
   Gauntlet also ships a `Memory` backend for its own tests and for
@@ -147,8 +189,11 @@ interface in the root, so an application that never imports it -- birdcage
   website tricking a signed-in browser into sending a request; a header
   that only the app's own frontend sends defeats it.
 - **Eviction is not an interface.** `evict.DownTo` is a generic function
-  with no state; the only caller inside the module is `LoginLimiter`. An
-  interface over a pure function would be ceremony. It is copied into
+  with no state; the callers inside the module are `LoginLimiter` (the
+  attempts and address-ban maps) and `SignInHistory`'s fold index (the table that merges repeated
+  sign-ins from one source into a single history row). An
+  interface over a plain function with no stored state would add code
+  and no benefit. It is copied into
   `internal/evict` so the module owns one implementation; mikroview keeps
   its own copy for its other maps until it chooses to import this one.
 
@@ -179,9 +224,10 @@ func NewMemory() *Memory // in-memory Backend for tests
 ```
 
 Identical to mikroview's `internal/persist/{persist,document,open}.go`.
-`Open`'s fail-closed contract (a document that exists but cannot be
-parsed is a startup error, never "empty") is kept: it is what stops a
-corrupt accounts file re-opening registration to the next visitor.
+`Open` still fails closed, refusing rather than letting through: a
+stored document that exists but cannot be read stops start-up and is
+never treated as empty. That is what stops a corrupt accounts file
+re-opening registration to the next visitor.
 
 `SaveWithRetry` is deprecated (`persist/document.go`). If two processes
 saved at the same moment, it let the later save replace the earlier
@@ -225,6 +271,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
     KnownBrowsers []KnownBrowser // new (#44): accounts version 4; none in older documents
     SeenCountries []SeenCountry; LastPlace *LastPlace // new (#55): accounts version 8; what unusual sign-ins are judged against, none/nil in older documents
+    SignInAllowedUntil time.Time // new (#81): accounts version 10; an admin's allowance of the next sign-in, read with SignInAllowanceLive; zero in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64
@@ -255,7 +302,7 @@ func (s *Store) CheckSetupCode(code string) error                               
 func (s *Store) CheckUnlockCode(username, code string) (*User, error)                       // new (#44): the one-time code a store with its lone admin disabled announced
 func NewOneTimeCode() (display, canonical string)                                          // new (#66): the setup and unlock codes' generator, exported for gate's escape code
 func (s *Store) OtherAdminCanAct(userID string, now time.Time) bool                        // new (#66): some other admin is not LoginDisabled(now); a lockout does not count against it
-func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error) // role may be RoleAdmin since #67; gate step-ups the caller first
+func (s *Store) CreateUser(username, password string, role Role, now time.Time) (*User, error) // role may be RoleAdmin since #67; gate first asks the calling admin to re-enter their password and second factor
 func (s *Store) DeleteUser(id string) (*User, error)                                       // refuses the last admin: ErrCannotDeleteAdmin, also ErrLastAdmin
 func (s *Store) SetRole(id string, role Role, now time.Time) (*User, Role, error)          // new (#67, #75): the user and the role it held; refuses demoting the last admin inside the write (ErrLastAdmin); a downgrade ends the account's sessions; ErrRoleUnchanged when nothing would change
 func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User, err error) // console handover from the one admin; ErrSeveralAdmins with more
@@ -271,7 +318,7 @@ func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint strin
 func (s *Store) LinkOIDCIdentity(userID, issuer, subject string, now time.Time) error
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error
 func (s *Store) UnlockLogin(accountID string) error // #44: lifts a disable, clears the count and the lockout (no limiter: a CLI)
-type KnownBrowser struct { Hash string; IssuedAt time.Time } // new (#44): SHA-256 of a browser's token, never the token
+type KnownBrowser struct { Hash string; IssuedAt time.Time; Confirmed bool } // new (#44): SHA-256 of a browser's token, never the token; Confirmed (#79): the browser brought its token back
 const MaxKnownBrowsers = 3; const KnownBrowserLifetime = 45 * 24 * time.Hour // #44 (owner, 2026-10-02)
 func (s *Store) RememberBrowser(accountID, replacing string, now time.Time) (string, error) // #44: new token, old one's entry dropped, oldest evicted past 3
 func (s *Store) ClearKnownBrowsers(accountID string) error                                 // #44: sign out everywhere; IssueResetCode does it in its own write
@@ -288,13 +335,23 @@ func (s SignInSignals) Has(f SignInSignals) bool; func (s SignInSignals) Names()
 func ParseSignInSignal(name string) (SignInSignals, bool)
 type SignInJudgement struct { Signals SignInSignals; PreviousCountry string } // PreviousCountry is LastPlace.Country when SignalImpossibleTravel is set
 func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, loc *Location, now time.Time) SignInJudgement // read-only; tokens are the known-browser tokens the browser carries
-func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) // one write: rotates the browser token (as RememberBrowser) and remembers the country and last place; RememberBrowser is RememberSignIn with country and loc left blank
+func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) // one write: rotates the browser token (as RememberBrowser) and remembers the country and last place, and spends an allowance (#81); RememberBrowser is RememberSignIn with country and loc left blank
+const SignInAllowanceLifetime = 10 * time.Minute                                   // #81
+func (s *Store) AllowNextSignIn(accountID string, now time.Time) (*User, error)   // #81: SignInAllowedUntil = now + 10 min, replacing any earlier; cleared by RememberSignIn, ClearKnownBrowsers, IssueResetCode
 func (s *Store) List() []User                                              // secrets blanked
 // TOTP, recovery codes, reset codes: SetPendingTOTPSecret, ConfirmTOTP, VerifyAndRecordTOTP,
 // ClearTOTP, GenerateRecoveryCodes(IfAbsent), BurnRecoveryCode, IssueResetCode -- as in mikroview.
-// Passkeys: AddPasskey, RenamePasskey, DeletePasskey, RecordPasskeyAssertionIfFresh, ClearPasskeys,
-// ClearAllSecondFactors, PasskeyCount, AnyPasskeysExist -- storage methods only; no WebAuthn import.
-// The ceremony seam (G8, ADR-0004), implemented by gauntlet/passkey and driven by gate:
+// Added since: RegenerateRecoveryCodes(userID) (#94: GenerateRecoveryCodes for a later set; refuses with
+// ErrNoSecondFactors, writing nothing, when the account has no live second factor); ConfirmLaterTOTP
+// (#80, #93: confirms an authenticator app beside a live factor; ErrNoOtherSecondFactor when there is
+// none); SetPendingTOTPSecretAt, HoldFirstTOTP, HoldFirstPasskey, ConfirmHeldEnrolment (#58, §1.6).
+// Passkeys: AddPasskey, AddLaterPasskey (#80: AddPasskey for a passkey beside a live second factor;
+// ErrNoOtherSecondFactor, nothing stored, when there is none), RenamePasskey, DeletePasskey,
+// RecordPasskeyAssertionIfFresh, ClearPasskeys, ClearAllSecondFactors, PasskeyCount, AnyPasskeysExist --
+// storage methods only; no WebAuthn import. A passkey name that is not plain text is refused with
+// ErrPasskeyNameInvalid (#89).
+// The interface gate uses to run passkey registration and sign-in (the ceremony seam, G8, ADR-0004);
+// gauntlet/passkey supplies it:
 type PasskeyStatus string // PasskeyStatusReady "ready", PasskeyStatusUnset "unset", PasskeyStatusIP "ip", PasskeyStatusInsecure "insecure"
 type PasskeyCeremony interface {
     Status() PasskeyStatus; RPID() string; Origin() string           // RPID and Origin are "" unless ready
@@ -303,11 +360,11 @@ type PasskeyCeremony interface {
     BeginLogin(u *User) (options json.RawMessage, sealed string, err error)
     FinishLogin(u *User, sealed string, assertion json.RawMessage) (PasskeyAssertion, error)
 }
-type PasskeyAssertion struct { CredentialID []byte; SignCount uint32; CloneWarning bool } // what RecordPasskeyAssertionIfFresh consumes
+type PasskeyAssertion struct { CredentialID []byte; SignCount uint32; CloneWarning, UserVerified bool } // what RecordPasskeyAssertionIfFresh consumes; UserVerified is true when the person proved themselves to their passkey device with a PIN or fingerprint (the authenticator's UV flag); always true from FinishSignIn (#77)
 var ErrPasskeyCeremonyInvalid error // wrapped by passkey's Finish methods for a dead ceremony: unreadable, other ceremony, expired, already used
 
-func HashPassword(password string) (string, error)   // argon2id, m=64MiB t=3 p=4, 16-byte salt, 32-byte key
-func VerifyPassword(password, encoded string) bool   // constant-time; parameters read from the encoded string
+func HashPassword(password string) (string, error)   // Argon2id (64 MiB of memory, 3 passes, 4 threads), 16-byte random salt, 32-byte key
+func VerifyPassword(password, encoded string) bool   // compared in a way that takes the same time whether or not it matches; parameters read from the encoded string
 type KDFParams struct{ Memory, Time uint32; Threads uint8 }
 func DefaultKDFParams() KDFParams
 func (p KDFParams) Valid() bool      // zero fields refused, never derived cheaply
@@ -315,7 +372,7 @@ func NewKDFSalt() ([]byte, error)
 func DeriveKey(passphrase string, salt []byte, p KDFParams) []byte  // kept: mikroview's retention key uses it
 
 type Session struct { ID, UserID string; IssuedAt, ExpiresAt, LastUsedAt time.Time; Client SessionClient }
-type SessionClient struct { Address, UserAgent, Country string; Unusual SignInSignals } // new (#48): recorded at sign-in, memory only; Country (#54) is the lookup's answer, not the client's own word; Unusual (#55) is gate's judgement, not the client's word either
+type SessionClient struct { Address, UserAgent, Country string; Unusual SignInSignals; Method SignInMethod } // new (#48): recorded at sign-in, memory only; Country (#54) is the lookup's answer, not the client's own word, and is kept only as two upper-case letters; Unusual (#55) is gate's judgement, not the client's word either; Method (#77) is how the sign-in was made: gate's word, passed through unchanged and kept across Resume
 const ( MaxSessionUserAgent = 256; MaxSessionAddress = 64 )          // bytes kept, after control/format chars are dropped
 func (s Session) Ref() string                                       // new (#48): first 32 hex of SHA-256(ID); shown instead of the ID
 func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore  // new: one constructor; mikroview's two collapse
@@ -340,7 +397,9 @@ func (s *TokenStore) Persisted() bool
 func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) // expires after DefaultTokenLifetime; raw starts gnt_ (#74)
 func (s *TokenStore) CreateWithExpiry(name string, kind TokenKind, device string, creator *User, now, expiresAt time.Time) (raw string, tok *Token, err error) // zero expiresAt = never; not after now is ErrTokenExpiryInvalid
 func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) // SHA-256 lookup; kind must match; an expired token is refused like an unknown one
-func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) // #74: removes tokens unused for a year, marks tokens expiring within a week as warned
+func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) // #74: removes tokens unused for a year and lists those expiring within a week (TokenSweepResult{Removed, Expiring}); the caller sends the notices, then calls MarkExpiryWarned
+func (s *TokenStore) MarkExpiryWarned(ids []string, now time.Time) error // #74: records that those tokens' expiry notices went out, so Sweep stops listing them
+func (s *TokenStore) RemoveOrphans(exists func(userID string) bool, now time.Time) ([]Token, error) // deletes, in one write, the tokens whose creating account `exists` reports gone; the result has HashedValue zeroed
 func (s *TokenStore) Revoke(id string) error
 func (s *TokenStore) RevokeAllCreatedBy(userID string) (int, error)
 func (s *TokenStore) List() []Token
@@ -369,14 +428,16 @@ const AddressBanFailures = 100; const AddressBanDuration = 24 * time.Hour       
 func (l *LoginLimiter) AddressBanned(address string, now time.Time) (until time.Time, banned bool) // new (#70): memory only; IPv6 per /64
 func (l *LoginLimiter) RecordAddressFailure(address string, now time.Time) (banStarted bool)       // new (#70): true once per ban
 func AddressBanGroup(address string) string                                                       // new (#70): the key an address is counted under
-func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // #32
-func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string)
-func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)
+func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool // deprecated (#86): always false; #32's pass is retired
+func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) // deprecated (#86): does nothing
+func (l *LoginLimiter) EndAfterReset(addressKey, accountID string)     // deprecated (#86): does nothing
 func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool
 func (l *LoginLimiter) ReleaseRecheck(accountID string, now time.Time)
-func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; counted, never handed back
-func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool // new (#82): a passkey step-up begin, per account, in the account map; counted, never handed back by a finish
+func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool // new (#84): a code sent, per account and channel; every send uses up one of the account's allowed sends and is never given back; wait 30 seconds before the second send, doubling after each (4 minutes at most), 5 an hour (#83)
+func (l *LoginLimiter) ReserveStepUpBegin(accountID string, now time.Time) bool // new (#82): starting a passkey re-check for one account, in the account map; limited per account, and finishing it does not give the attempt back
 func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time)
+func (l *LoginLimiter) ReserveFactorBegin(accountID string, knownBrowser bool, now time.Time) bool // new (#85): starting the passkey second step for one account (also used when an unusual sign-in is held for a passkey, #80), in the account map. A browser the account remembers (knownBrowser) gets its own separate allowance. Never given back by the step it starts
+func (l *LoginLimiter) ReleaseFactorBegin(accountID string, knownBrowser bool, now time.Time)
 type AccountLockouts interface {                                    // *Store implements it
     LoginLockedUntil(accountID string) time.Time
     SetLoginLockedUntil(accountID string, until time.Time) error
@@ -393,7 +454,7 @@ type SignInOutcome string // new (#45, #53): success, password_ok, no_such_user,
 // refused, confirm_sent, confirm_refused // new (#55): every credential was right; refused is a block, confirm_sent means a code is out (or, under prove, a passkey is owed, #65) and no session yet, confirm_refused is a wrong code (or a refused passkey assertion). refused and confirm_sent cost the full credential, like success, and are never budgeted (signins.go); confirm_refused is budgeted as any failure
 type SignInMethod string  // password, code, passkey, sso; passkey_alone (#77: a passkey sign-in with no password) and resume (#71: a timed-out session resumed)
 type SignInEvent struct { UserID, Username string; Outcome SignInOutcome; Method SignInMethod; Client SessionClient; LockedUntil time.Time; Disabled bool
-    Confirmed bool } // new (#55): the sign-in completed through gate's confirmation-code step
+    Confirmed bool } // new (#55): the sign-in completed after an unusual-sign-in hold: a confirmation code, a passkey, the escape code or an admin's allowance
 func MaskUnknownUsername(typed string) string // new (#53): first two runes + one • per further rune; probe names (root, admin, ...) kept
 
 // The sign-in history (#53, ADR-0006): a third sealed document, "signins".
@@ -427,7 +488,7 @@ func FormatResetCode(code string) string;    func NormaliseResetCode(typed strin
 const MaxDeviceIDLen = 64; const MaxTokenNameLen = 64
 const ResetCodeTTL = 24 * time.Hour
 
-// Sentinel errors, compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
+// Fixed error values (sentinel errors), compared with errors.Is: ErrInvalidCredentials, ErrNotPersisted,
 // ErrTokenNotPersisted, ErrUserNotFound, ErrUsernameTaken/Invalid/Length/IsEmail,
 // ErrPasswordTooShort, ErrPasswordBlocked, ErrPasswordContext (#43), ErrInvalidRole, ErrRegistrationClosed, ErrSetupCodeInvalid,
 // ErrSetupRequired (SSO cannot create the first account), ErrNoAdmin, ErrSingleAdmin
@@ -444,8 +505,12 @@ const ResetCodeTTL = 24 * time.Hour
 // (TransferAdmin with more than one admin), ErrLastLocalAdmin (#79: the
 // last admin that can sign in without the identity provider),
 // ErrUnlockCodeInvalid (#44), ErrTokenExpiryInvalid (#74), ErrNoTOTP and
-// ErrNoPasskeys (nothing to remove, nothing written),
-// ErrSecondFactorExists, ErrEnrolmentHeld, ErrNoHeldEnrolment and
+// ErrNoPasskeys (nothing to remove, nothing written), ErrNoSecondFactors
+// (ClearAllSecondFactors with nothing to clear; RegenerateRecoveryCodes with no live second
+// factor, #94), ErrNoOtherSecondFactor (AddLaterPasskey, ConfirmLaterTOTP: no live factor beside
+// the new one), ErrPasskeyNameInvalid (a passkey name that is not plain text, #89),
+// ErrResetDuringChange (SetPassword: an admin's reset code was issued while the change was being
+// checked; the reset stands and the change is not saved), ErrSecondFactorExists, ErrEnrolmentHeld, ErrNoHeldEnrolment and
 // ErrHeldEnrolmentExpired (#58: the held first factor), and
 // ErrPasskeyCeremonyInvalid (above).
 ```
@@ -456,14 +521,15 @@ Reasons for the *new* items:
   `persistLog`, because a module cannot call an app's `logging.New`.
 - `Options.OnSetupCode` and `CheckSetupCode` are the first-admin setup
   code (#37, [ADR-0003](adr/0003-first-admin-setup-code.md), owner
-  2026-10-01): an empty persisted store makes a one-time 80-bit code,
-  keeps only its hash in memory, and announces it once -- through the
-  hook, or as one `Warn` line on `Log` -- so that creating the first
-  admin needs the server's log, not just its address. It is inert once
-  any account exists and dies with the process; a reload that applies
-  an emptied document issues a new one. `Register` stays the host-side
-  primitive; `gate` checks the code before calling it, rate-limited per
-  address like login. SSO never creates the first account
+  2026-10-01): an empty persisted store makes a random one-time code (80 bits of
+  randomness, too many to guess), keeps only its hash in memory, and
+  announces it once -- through the hook, or as one `Warn` line on
+  `Log` -- so that creating the first admin needs the server's log, not
+  just its address. It does nothing once any account exists, and it is
+  lost when the server stops; a reload that applies an emptied document
+  issues a new one. `Register` stays the low-level call the app's own
+  code makes; it does not check the setup code, so `gate` checks it
+  first, rate-limited per address like login. SSO never creates the first account
   (`ErrSetupRequired`): the first admin is local and links SSO
   afterwards, the end state #1252 requires anyway.
 - `TokenOptions.Kinds` replaces the hard-coded `TokenKind.Valid()`.
@@ -476,27 +542,32 @@ Reasons for the *new* items:
   meaning is "the one principal an ingest token is bound to": a router in
   mikroview, nothing yet in birdcage (§2.3).
 
-**Sign-in limits at a glance** (#19, #44, #70, #84). What an operator
-sees, with the limiter set to 5 attempts per 5 minutes (the application
-chooses both numbers in `NewLoginLimiter`, and the rows that say "5 in
-5 minutes" and the lockout lengths follow them; the 50, the second
-factor's 5, the 100 and the 24 hours are fixed):
+**Sign-in limits at a glance** (#19, #44, #70, #83, #84, #85). What an
+operator sees, with the limiter set to 5 attempts per 5 minutes (the
+application chooses both numbers in `NewLoginLimiter`). Rows marked
+"set by the app" use those settings, and so do the lockout lengths. The
+other limits cannot be changed: the 50 failures, the 5 second-factor
+failures, the 100 failures per address, the 24 hours, the resend delay
+and the hourly cap.
 
 | What happens | Limit | Result |
 |---|---|---|
-| Wrong password or code for one account | 5 in 5 minutes | locked for 5 minutes, then 15, then 45, then 1 hour each time |
+| Wrong password or code for one account | 5 in 5 minutes (set by the app) | locked for 5 minutes, then 15, then 45, then 1 hour each time |
 | Failures in a row on one account | 50 (`MaxConsecutiveLoginFailures`), about 8 hours of lockouts | local sign-in disabled for 24 hours (`LoginDisableDuration`), or until an admin unlocks it |
 | Failed second-factor steps in a row | 5 | the password must be changed, and every session on the account ends |
-| Failed attempts from one address (a right one does not count) | 5 in 5 minutes | `429 rate-limited` until the window passes |
+| Failed attempts from one address (a right one does not count) | 5 in 5 minutes (set by the app) | `429 rate-limited` until the window passes; a password reset does not lift it (#86) |
 | Failed sign-ins from one address | 100 in 24 hours (`AddressBanFailures`) | the address is banned for 24 hours (`AddressBanDuration`) |
-| Codes sent for one account | 5 in 5 minutes, for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
-| Passkey step-ups started by one account (#82) | 5 in 5 minutes, counted and never refunded | `429 rate-limited`, no challenge; the re-check budget is untouched |
-| Sign-ins from a browser the account remembers, while it is locked out | 5 in 5 minutes | allowed, so a stranger cannot lock the owner out |
+| Codes sent for one account | 5 in 5 minutes (set by the app), for each kind (confirmation, escape) | `429 rate-limited`, nothing sent |
+| Another code for one account, before the cooldown (#83) | wait 30 seconds before the second send, then 1 minute, 2 minutes and 4 minutes, doubling with each send in the last hour; 4 minutes is the longest, because the hourly cap below stops the sixth send; for each kind | `429 rate-limited`, nothing sent |
+| Codes sent for one account in an hour (#83) | 5, for each kind | `429 rate-limited`, nothing sent, until the oldest leaves the hour |
+| Re-entering a passkey to confirm an admin action, started by one account (#82) | 5 starts in 5 minutes (set by the app), even abandoned ones | `429 rate-limited` and no passkey prompt; the password re-check allowance is unaffected |
+| Passkey checks after the password, started for one account (#85) | 5 in 5 minutes (set by the app), even abandoned ones; a browser the account has signed in from before gets its own 5 | `429 rate-limited`, no passkey prompt; codes and recovery codes still work and ordinary sign-in attempts are not used up |
+| Sign-ins from a browser the account remembers, while it is locked out | 5 in 5 minutes (set by the app) | allowed, so a stranger cannot lock the owner out |
 
-A *door* is a check in `Protect` that blocks every route but a few until
-the account has done something: set a new password (the
-must-change-password door), added a second factor, or, for an admin
-where the application requires it, registered a passkey (#82). The
+A *door* is a check in `Protect` that stops every request except a few
+until the account has done one thing: set a new password (the
+must-change-password door), add a second factor, or, for an admin where
+the application requires it, register a passkey (#82). The
 change-password door asks for no current password, which is why several
 rules below end every session before sending an account to it.
 
@@ -505,12 +576,12 @@ Mikroview keeps every counter in one map of 4096 caller-chosen keys,
 evicted oldest-first, so a flood of made-up names or addresses can
 evict the counter guarding a real account. Here:
 
-- A real account's counters are keyed by its ID, in a map that is never
-  evicted. It is bounded by the account count; entries leave only by
-  expiring.
-- Only addresses and unknown names share the capped map. It drops every
-  expired key before evicting a live one, and logs, once per window,
-  when it has to.
+- A real account's counters are kept under its ID in a table that never
+  drops entries. Its size is bounded by the number of accounts, and
+  entries leave only by expiring.
+- Only addresses and unknown names share the capped map. It first
+  discards entries that have run out, and only then forgets one still
+  counting, and logs, once per window, when it has to.
 - A login lockout is written to the account (`User.LoginLockedUntil`),
   so it survives a restart. It is saved only as it begins and as it
   clears: one save as a lockout starts, one as the first attempt after
@@ -573,9 +644,10 @@ together in one save, and they survive a restart as on the `*Store`.
   for a process with no limiter.
 - An admin whose own sign-in is disabled, but who still holds a session,
   may unlock it on the same route only by entering their password and a
-  current second factor (a TOTP or recovery code) again. Each is checked
-  on the account's password re-check budget (`ReserveRecheck`); the
-  session alone is not enough (owner, 2026-10-02).
+  current second factor (a TOTP or recovery code, or a passkey
+  assertion since #82) again. Each is checked on the account's
+  password re-check budget (`ReserveRecheck`); the session alone is
+  not enough (owner, 2026-10-02).
 - When the store opens with the admin disabled and no admin left who
   could unlock it, it makes a one-time unlock code and announces it
   (`Options.OnUnlockCode`, else one Warn line on `Options.Log`). It has
@@ -594,43 +666,99 @@ together in one save, and they survive a restart as on the `*Store`.
   record still holds it, and an outstanding code stops working once its
   disable lapses.
 
-**After a reset** (#24, #32):
+**After a reset** (#24, #86):
 
 - A new password or reset code ends the lockout, and guesses from before
   it stop counting (#24). Linking the admin to SSO, which ends its
   sessions but keeps its password, does not.
-- The reset account also gets past the per-address limit (#32; owner,
-  2026-10-01: a reset needs the server's command line or an
-  admin-issued code, so this gives an attacker nothing). Only that
-  account gets the pass, and only when the address and the account both
-  reached their limits before the reset. (The reset ended a lockout, so
-  an account that only changed its own password gets nothing.) It is one
-  attempt at a time, and only until its sign-in issues a session or a
-  password is wrong (`AllowAfterReset`, `ReleaseAfterReset`,
-  `EndAfterReset`).
-- For an account with a second factor, the right password spends the
-  pass, and the pending login carries the code step past the address
-  limit, so a guess sent in between cannot take it. The account's own
-  limit still applies. Other names tried from that address stay
-  refused.
+- The address's limit is left alone: someone reset within five minutes
+  of the wrong guesses, on a browser the account does not remember,
+  waits out that address's window like anyone else there. A browser the
+  account remembers still gets past it on its own allowance (#44); a CLI
+  reset keeps those browsers, a reset code forgets them.
+- *Superseded:* #32 (owner, 2026-10-01) let the reset account past a
+  full address limit, one attempt at a time, carried through the
+  pending login to the code step. Retired by #86 (owner, 2026-10-08): it
+  was the last reservation on the login buckets that spanned requests,
+  and no standard or comparable product exempts a reset account from a
+  per-address limit (NIST SP 800-63B-4 §3.2.2, the OWASP authentication and
+  forgot-password cheat sheets, Entra, Okta, Auth0, Keycloak, GitLab).
+  `AllowAfterReset` now always reports false, and `ReleaseAfterReset`
+  and `EndAfterReset` do nothing; a pending-login cookie still carrying
+  its flag is accepted and the flag ignored.
 - Re-checking a signed-in caller's own password has its own per-account
   budget, memory only.
 
-**One rule for every budget** (#84, owner 2026-10-08). A reservation on
-the login buckets (address, unknown name, account) lives and dies inside
-one request. Anything that must be bounded across requests gets a
-bucket of its own that is counted, never refunded: challenge minting
-(`passkey-begin:` per address, `passkey-stepup-begin:` per account for
-the passkey step-up, #82) and code delivery.
+**One rule for every limit** (#84, owner 2026-10-08). When someone
+tries to sign in, the server takes one attempt from that address's,
+name's and account's allowance (a *reservation* on the login buckets)
+and gives it back at the end of the same request if the attempt turns
+out to be fine. A limit that must hold across several requests has its
+own separate count, which a later request does not give back (#32's
+reset pass, the last reservation that spanned requests, is retired,
+#86). Two things are limited this way: starting a passkey prompt
+(creating the random value the passkey signs) and sending a code.
 
-- A sign-in held for a confirmation code proved every credential, so its
-  attempt goes back to the login buckets in that request (a correct
-  credential is no failure, SP 800-63B-4 §3.2.2). What is bounded
-  instead is the send.
+- The passkey prompts are `passkey-stepup-begin:` per account for the
+  passkey re-check (#82) and `passkey-factor-begin:` per account for
+  the passkey second step (#85). Both are counted and never given back
+  by the step that follows. A start the server itself fails to make is
+  given back.
+- One exception: `passkey-begin:`, per address, for the login page's
+  passkey sign-in. Page loads and cancelled prompts call begin, so it
+  has a count of its own, and it is given back when the sign-in (or the
+  resume of a timed-out session) it began goes through, once every
+  credential has passed or the server fails to record it. A wrong
+  passkey answer keeps it spent. This is the v0.3.0 audit's change
+  (#79, [ADR-0012](adr/0012-passkey-alone-sign-in.md);
+  `gate/login_passkey_handler.go`).
+
+- `login/factor/begin` (starting the passkey second step):
+  - It uses the account's own count (`ReserveFactorBegin`), separate
+    from the sign-in counts, so `login/factor` hands back only what it
+    reserved itself (#85).
+  - The count is per account, since the password step has already named
+    it, so no flood of addresses can reset it. It is not the
+    per-address `passkey-begin:` count, which the login page's passkey
+    sign-in fills and which must not refuse an account's second step.
+  - When the count is full, a browser the account remembers gets an
+    extra count of its own (`passkey-factor-begin-known:`), as it gets
+    one past a lockout, so a stranger holding the password cannot keep
+    the owner from their passkey. A banned address is refused there
+    unless the browser is known.
+  - Begin also reads the account's lockout and disable from its record
+    without counting anything. It refuses a locked account to an unknown
+    browser and a disabled one to any, so nobody touches a passkey for a
+    sign-in that cannot complete; `login/factor`'s own count stays the
+    authority. `LoginLimiter.UnlockLogin` empties both counts.
+- `login/prove/begin` does the same, on the same counts (#80). A
+  sign-in held by the unusual-sign-in check, which asks for a passkey,
+  carries a short-lived sealed cookie
+  (the ticket) showing the password was right, but it must not be usable
+  to start unlimited passkey prompts before it expires, nor to ask for a
+  passkey once the account is locked or disabled. `login/prove`'s own
+  count stays the authority.
+
+- A sign-in held for a confirmation code proved every credential, so it
+  is not counted against the usual sign-in limits: its attempt is given
+  back in that request (a correct credential is no failure,
+  SP 800-63B-4 §3.2.2). What is limited instead is the send.
 - `ReserveDelivery` counts each code as it goes out: confirmation codes
   and escape codes on channels of their own, the limiter's threshold per
   window per account and channel, in the account map, memory only. It
   keeps the count whether or not the delivery reported an error.
+- Two fixed limits sit beside the window (#83), per account and channel,
+  counted the same way: a resend cooldown, 30 seconds after the first
+  send and doubling with each further send in the last hour (30
+  seconds, 1, 2, then 4 minutes), and at most 5 sends in any hour. The
+  doubling would stop at 15 minutes, a code's lifetime, but the hourly
+  cap ends the sends first, so 4 minutes is the longest wait. Thirty
+  seconds is the usual "resend code" delay; five an hour is the
+  limiter's usual five stretched over twelve windows, so filling the
+  window again and again cannot keep a trickle of codes going. A home
+  owner rarely needs a second code and never a sixth in an hour. A
+  refused send is not counted and does not push the wait out. No
+  `Retry-After` header: no other `429` here sends one.
 - Past it, a held sign-in is answered `429 rate-limited` with no code,
   ticket or cookie, and a lone admin's refusal or hold carries no escape
   code.
@@ -638,8 +766,10 @@ the passkey step-up, #82) and code delivery.
   a known browser -- never held, so never sending -- cannot refill a
   stranger's budget. `LoginLimiter.UnlockLogin` empties it, and a
   restart clears it.
-- Rate limiting out-of-band code delivery is the standard control (SP
-  800-63B-4 §3.1.3.2, ASVS 5.0 6.6.3, OWASP MFA cheat sheet).
+- Limiting how many sign-in codes can be sent to someone is the usual
+  defence against code spamming, known as one-time-password flooding
+  (SP 800-63B-4 §3.1.3.2, ASVS 5.0 6.6.3, the OWASP MFA cheat sheet);
+  the growing cooldown and the hourly cap are its usual shape (#83).
 
 **The address ban** (#70, owner 2026-10-05; `addressban.go`) bans the
 address a guesser connects from, as the tool fail2ban does. It sits
@@ -650,24 +780,24 @@ Auth0 brute-force protection).
   account's threshold and window.
 - Separately, each failed sign-in attempt is counted per address: a
   wrong password or code, in any name, an unknown one included, but not
-  an SSO refusal. The 100th (`AddressBanFailures`) within a rolling 24
-  hours bans the address for 24 hours (`AddressBanDuration`): flat, not
+  an SSO refusal. The 100th (`AddressBanFailures`) within any 24-hour
+  stretch (counted back from now, not from midnight) bans the address for 24 hours (`AddressBanDuration`): flat, not
   escalating, not extended by further failures. Only deliberate guessing
   reaches 100; 100 is NIST SP 800-63B-4 §3.2.2's figure, applied per
   address where NIST counts per account.
 - IPv4 addresses count by the whole address. IPv6 addresses count per
   /64: all addresses sharing the same first half, normally one home or
-  office network, count as one (`AddressBanGroup`). Gauntlet normalises
-  the string `ClientIP` returned; one that does not parse counts as
-  itself. An empty address is never counted: nothing was resolved, so it
+  office network, count as one (`AddressBanGroup`). Gauntlet writes
+  the address `ClientIP` returned in one standard form before counting;
+  an address it cannot read is counted exactly as given. An empty address is never counted: nothing was resolved, so it
   would otherwise be one address.
 - A banned address gets the address limit's own `429` (`rate-limited`,
   recorded as `rate_limited` and a rated Warn line, no audit record),
   checked before anything is reserved. The ban starting is one
   `address.banned` audit record, once per ban.
-- The count is each failure's time, kept for 24 hours and at most 99 per
-  address: the simplest structure that gives an exact rolling window. It
-  is dropped when the ban starts.
+- Gauntlet keeps the time of each failure for 24 hours, up to 99 per
+  address: the simplest structure that gives an exact count of the last
+  24 hours. The record is dropped when the ban starts.
 - Counts and bans are memory only. A restart clears them, which costs the
   guesser nothing they could cause; the account lockout, saved on the
   account, is the backstop for an attack spread over many addresses.
@@ -683,11 +813,15 @@ Auth0 brute-force protection).
 owner out.
 
 - A browser that completes a sign-in on an account is remembered on its
-  record (`RememberBrowser`). It gets a 32-byte random token, base64url,
-  and the record keeps only the token's SHA-256 and when it was issued.
-  Remembered browsers are still recognised after the application is
-  restarted or upgraded (the hash needs no per-process key), and each
-  one can be forgotten on its own.
+  record (`RememberBrowser`). It gets a random token (32 random bytes, written
+  in URL-safe text), and the account stores only a one-way hash of it
+  (SHA-256) and when it was issued, so a copy of the data cannot be used
+  to impersonate the browser. Remembered browsers are still recognised
+  after the application is restarted or upgraded (the hash needs no
+  per-process key). No route forgets one browser alone: an entry leaves
+  when the browser's next sign-in replaces it, when it ages out, or when
+  a fourth browser pushes it out. What clears all of them is listed
+  under "Forgetting", below.
 - Each completed sign-in rotates the token, dropping the browser's old
   entry in the same write. An account remembers at most three browsers,
   each for 45 days from its latest sign-in there, checked on the server
@@ -700,8 +834,8 @@ owner out.
   named account (`KnowsBrowser`), the attempt goes ahead on
   `ReserveKnownBrowser`: the limiter's threshold per window, per
   account, no escalation, refused outright while the account is
-  disabled. Its bucket is created only after a match, so there is at
-  most one per account.
+  disabled. The extra attempt allowance is created only after a match, so
+  each account has at most one.
 - Each failure through it counts toward the 50. The attempt that fills
   the budget closes it for one window and adds one lockout's worth to
   `LoginLockoutCount` (which also lengthens the next ordinary lockout),
@@ -709,12 +843,13 @@ owner out.
   the count back (`ReleaseKnownBrowser`, `SignedIn`).
 - Forgetting: sign out everywhere on an account with a local password,
   which asks for it again (`ClearKnownBrowsers`; the calling browser is
-  then remembered again), and an admin's reset code forget every
-  browser. An SSO-only account's sign out everywhere has no password to
+  then remembered again), an admin's reset code, and an admin ending
+  the account's sessions (`POST /api/auth/users/{id}/logout-all`, which
+  asks for no password) forget every browser. An SSO-only account's sign out everywhere has no password to
   ask for, and keeps them. A signed-in password change, an SSO link, an
   unlock and the forced change after second-factor failures do not
   forget them -- that is when the owner needs the allowance.
-- Nothing is keyed on the client's address. A request carrying a token
+- Nothing here is counted by the visitor's address. A request carrying a token
   the named account remembers is also not refused by the address ban
   (#70). So a reverse proxy that hides visitor addresses, where one
   attacker's ban would be everyone's, cannot lock the owner out; the
@@ -741,20 +876,23 @@ Not exported: `newID` (16 random bytes, hex) stays private; apps that
 want the same shape for their own ids already have one.
 
 **Common passwords** (#43, #52, [ADR-0007](adr/0007-common-password-list.md)).
-`gauntlet/blocklist` holds the SHA-1 hashes of the 10,000 most
-prevalent Pwned Passwords. `blocklist.Embedded()` is the copy compiled
+`gauntlet/blocklist` holds fingerprints (SHA-1 hashes) of the 10,000
+passwords that appear most often in public leaks (the Pwned Passwords
+list). `blocklist.Embedded()` is the copy compiled
 into the release and makes no network request. It is a full signed
 list (`blocklist/embedded/top10k.txt` and its `.sig`, built 2026-10-03),
 and a release refuses to tag with a list built more than 90 days
 earlier (`scripts/blocklist-age-check.sh`).
 An application that wants newer lists between releases runs a
 `blocklist.Refresher`, which fetches the published list from the
-public GitHub mirror's `pwned-top10k-current` release, adopts it only
-if its checksum, Ed25519 signature (keys in `blocklist/keys/`) and
-format check out and it is newer than the list in use, and keeps it in
-a directory the app names. `cmd/pwlist` builds the list from the
-range API of Have I Been Pwned (HIBP), the public database of leaked
-passwords, in a monthly scheduled pipeline.
+public GitHub mirror's `pwned-top10k-current` release, uses it only if
+it is intact and signed by the project's key (its checksum, Ed25519
+digital signature -- keys in `blocklist/keys/` -- and format all check
+out) and it is newer than the list in use, and keeps it in a directory
+the app names. `cmd/pwlist` builds the list from the Have I Been Pwned
+(HIBP) service, the public database of leaked passwords, which
+publishes leaked-password fingerprints by prefix, in a monthly
+scheduled pipeline.
 
 **New-password checks** (#43, `passwordcheck.go`). `Register`,
 `CreateUser` and `SetPassword` -- the only places a local password is
@@ -768,10 +906,10 @@ common-password list, as typed and in lower case
 `ErrPasswordBlocked`; and, only when the application sets
 `Options.BreachCheck`, a live query to HIBP (`blocklist.PwnedChecker`)
 -> `ErrPasswordBlocked`. Only the first five characters of the
-password's SHA-1 fingerprint are sent, so the service never learns the
-password; gauntlet compares the rest locally. (The request asks HIBP to
-pad its answer, so the answer's size gives nothing away; the padding
-entries, of count 0, are ignored.) The live check is bounded by
+password's SHA-1 fingerprint leave the machine, so the service never
+learns the password; gauntlet compares the rest locally. (The request
+also asks HIBP to add fake extra entries, so the size of the reply
+reveals nothing; those entries, of count 0, are ignored.) The live check is bounded by
 `BreachCheckTimeout` (5 s) even if the checker ignores its context.
 When it cannot answer, the password is accepted against the local
 list, the miss is logged, and `User.BreachCheckPending` is set (accounts
@@ -790,7 +928,7 @@ Mikroview's `internal/oidc` moves unchanged: `Config`, `New`, `Client.
 AuthCodeURL/Exchange/VerifyIDToken`, `VerifyNonce`, `Identity`,
 `Policy.Permit/Restricted`, `AllowIssuer`, `IsMultiTenantIssuer`,
 `FlowState`, `NewFlowState`, `StateCodec.Encode/Decode`. It is already a
-leaf package with plain-field config and no mikroview imports. The
+package that depends on nothing else in mikroview and takes its settings as ordinary fields. The
 self-hosted-only policy (`multiTenantIssuers`) moves with it, as
 `docs/decisions/multi-tenant-oidc.md` decided and [ADR-0003](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0003-mikroview-sidecar.md) adopted it for birdcage;
 [ADR-0014](adr/0014-shared-issuers.md) since accepts one shared issuer,
@@ -800,9 +938,13 @@ stay refused.
 **Roles from groups (#76, [ADR-0013](adr/0013-sso-group-roles.md)).**
 `Policy` gains `RoleFromGroups` (group -> `user` | `viewer`, matched like
 `AllowedGroups`) and `RoleWithoutGroup` (`""` means `viewer`), and the
-methods `Groups(id)` (the claim's values, as `Permit` reads them) and
-`ValidateRoles(valid)`. `gate.New` refuses a value of `admin` or any
-unknown role: an identity provider never mints an admin, and an account
+methods `Groups(id)` (the groups the provider reports for the person,
+its "groups claim", as `Permit` reads them), `ValidateRoles(valid)` and
+`Validate()` (refuses a blank allow-list entry or `RoleFromGroups` key,
+such as one left by a trailing comma in a setting, so it cannot widen
+access; `oidc.New` and `gate.New` call it). `gate.New` refuses a value
+of `admin` or any unknown role: the sign-in provider can never make
+someone an admin, and an account
 already holding `admin` is never changed by the map. With a map set,
 every SSO sign-in applies the highest role among the identity's mapped
 groups, or the fallback for none (including an absent groups claim), in
@@ -810,7 +952,8 @@ the same store write that finds or creates the account. A downgrade ends
 the account's other sessions; the change is audited as
 `user.role_changed` with actor `sso` and told to `Config.Notices` as
 `NoticeRoleChanged` with `RoleChangeDetail.ViaSSO`. No stored field is
-added, so the accounts document stays at version 9. On such an account
+added, so #76 does not raise the accounts document version (it was 9
+then; 10 since #81). On such an account
 the role route refuses `user`/`viewer` changes (409
 `role-managed-by-sso`); the map narrows roles, not access, so
 `Restricted` is unchanged and who may sign in stays with
@@ -871,7 +1014,7 @@ func (g *Gate) Exempt(paths ...string)                          // beyond the bu
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's paths,
 // request and response bodies. Mount it under the same Protect.
 func (g *Gate) Routes() http.Handler
-func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, error) // #74: call daily; TokenSweep{Removed, Warned int}
+func (g *Gate) SweepTokens(ctx context.Context, now time.Time) (TokenSweep, error) // #74: call daily; TokenSweep{Removed, Warned, Orphaned int}; also removes tokens whose creating account is gone (token.removed_orphaned)
 
 func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
@@ -926,6 +1069,7 @@ type AccountNotice struct {
     UnusualSignIn *UnusualSignInDetail // unusual-sign-in (flag, block -- confirm sends only the code, below)
     RoleChanged   *RoleChangeDetail    // role-changed (#67): From (empty for a created admin), To
     TokenExpiring *TokenExpiringDetail // token-expiring (#74): TokenID, Name, Kind, ExpiresAt; raised by SweepTokens, so By is empty
+    SignInAllowed *SignInAllowedDetail // sign-in-allowed (#81): Until
 }
 const MaxSessionEndReason = 200 // characters
 
@@ -934,12 +1078,12 @@ const MaxSessionEndReason = 200 // characters
 // text, never markup. At most one flag or block notice per account per
 // hour (unusualNoticeInterval); a held one is notify=quiet in the audit.
 type UnusualSignInDetail struct {
-    Action     UnusualSignInAction // flag, confirm or block
+    Action     UnusualSignInAction // flag or block; with Reason "allowed" (#81), the policy's answer the allowance overrode: confirm, prove or block
     Signals    gauntlet.SignInSignals
     Method     gauntlet.SignInMethod
     Client     gauntlet.SessionClient // address, agent (text) and country
     SessionRef string // flag: the ref the session list shows, so a message can say "end this session"
-    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid, notify-failed or prove-failed
+    Reason     string // block: policy, decide-failed, decide-timeout, decide-invalid, notify-failed or prove-failed; "escape" (#66) or "allowed" (#81) on a sign-in let through
 }
 
 // deprecated (#53, kept a minor release, ADR-0002 decision 2): Notices
@@ -961,28 +1105,30 @@ type ConfirmCode struct {
 
 **Sign-in records (#45).** Every sign-in attempt -- the password step,
 the code or passkey step, the SSO callback -- goes through one helper,
-`recordSignIn` (`gate/signin_record.go`), which writes through `Auditor`:
-`user.login` on a completed sign-in, detail `from="<address>"` (quoted:
-`ClientIP` may read a client-set header), prefixed `via second factor; `
-or `via sso; `; `user.login_failed` for each failed attempt the limiter
-admitted, actor and target the account's username or `unknown`, detail
-`outcome=<outcome> method=<method> from="..."` plus `name="Hu••••"`
-(`MaskUnknownUsername`) when no account matched -- the typed name never
-reaches the audit or the log; and `account.locked` (`until=... lockouts=n
-from=...`) or `account.disabled` beside the failure whose limiter
-decision started a lockout or the disable, and `address.banned`
-(actor the account tried or `unknown`, target the address group, detail
-`until=... after 100 failed sign-ins in 24h0m0s from=...`) beside the
-failure that was the 100th from an address (#70), once per ban. An
-attempt that starts a lockout or disable but succeeds hands it back and
-writes neither. A limiter refusal (429)
-is no audit record but a rated Warn line, as are a missing CSRF header,
-a malformed `Authorization` header, a role refusal on `Routes`' admin
-routes and the two door 403s: at most one line per kind and address per
-minute, the next counting what was left out, 4,096 sources tracked
-before the rest share one line (`gate/warnrate.go`). A right password
-with a factor still owed, a "sign in again" refusal and a backend
-failure write nothing.
+`recordSignIn` (`gate/signin_record.go`), which writes through
+`Auditor`:
+
+| What happened | Audit record | What its detail holds |
+|---|---|---|
+| A sign-in completed | `user.login` | `from="<address>"` (quoted, since `ClientIP` may read a client-set header), after a prefix saying how it completed: `via second factor; `, `via passkey; ` (a passkey alone), `via sso; `, `via confirmation code; `, `via passkey proof; `, `via escape code; ` or `via admin allowance; ` (an admin's allowance let it through, #81). A plain password sign-in has no prefix. A sign-in judged unusual starts with `unusual=...; action=...; `, then `escape=used; ` or `allowed=used; ` when an escape code or an allowance let it through, then `notify=...; ` |
+| A timed-out session resumed | `user.reauthenticated` | whether the password or a passkey resumed it, and `from=` |
+| A failed attempt the limiter admitted | `user.login_failed` | `outcome=<outcome> method=<method> from="..."`, plus `name="Hu••••"` (`MaskUnknownUsername`) when no account matched. Actor and target are the account's username or `unknown`. The typed name never reaches the audit or the log |
+| Every credential was right but the unusual-sign-in policy refused the sign-in | `user.login_refused` | the signals, the reason, the method, whether the application was told, and `from=` |
+| A lockout or the disable started | `account.locked` (`until=... lockouts=n from=...`) or `account.disabled`, beside the failure that started it | |
+| The 100th failed sign-in from one address (#70) | `address.banned`, once per ban: actor the account tried or `unknown`, target the address group | `until=... after 100 failed sign-ins in 24h0m0s from=...` |
+
+An attempt that starts a lockout or disable but succeeds hands it back
+and writes neither.
+
+These are warning lines in the log, not audit records: a limiter
+refusal (429), a missing CSRF header, a malformed `Authorization`
+header, a role refusal on `Routes`' admin routes and the door 403s
+(must-change-password, must-enrol-passkey and must-enrol-factor). Each
+is rated: at most one line per kind and address per minute, the next
+counting what was left out, with 4,096 sources tracked before the rest
+share one line (`gate/warnrate.go`). A right password with a factor
+still owed, a "sign in again" refusal and a backend failure write
+nothing.
 
 Every other audit record a request writes ends with `; from="<address>"`
 (`gate.audit` takes the request, so none can leave it out). A wrong
@@ -996,21 +1142,23 @@ sign-in writes `account.disabled`, read from
 **Sign-in history (#53).** `recordSignIn` also appends each event to
 `Deps.SignIns` when set, and `GET /api/auth/sign-ins` (admin) pages
 through it newest first, filtered by `user`, `address` and `outcome`,
-`before` a row's `seq`, `limit` 1-200 (default 50); 404 while
+`unusual=true` (only rows that raised a signal, #55; any other value is
+400), `before` a row's `seq`, `limit` 1-200 (default 50); 404 while
 `Deps.SignIns` is nil. Re-checks are not rows: the caller already holds
 a session. Bounds and write cadence are in §4 and ADR-0006.
 
 **Resuming a timed-out session (#71).** A session idle past the idle
-timeout (`MaxSessionIdle`, 1 h) but inside its lifetime ceiling
-(`MaxSessionLifetime`, 24 h from the sign-in) is "timed out, resumable":
+timeout (`MaxSessionIdle`, 1 h) but still younger than the maximum
+session age (`MaxSessionLifetime`, 24 hours from the sign-in, called
+the ceiling below) is "timed out, resumable":
 `SessionStore.Validate` refuses it, so it authenticates nothing, but the
 store keeps it until the ceiling (the sweep, logout, `RevokeAllForUser`
 and the password-change cutoff drop it like any other). `POST
 /api/auth/reauthenticate`, `{"password": "..."}`, presented with that
-session's cookie, resumes it: the standard pattern is NIST SP 800-63B-4
-section 2.2.3 (after an inactivity timeout and before the overall
-timeout the verifier MAY accept a password in conjunction with the
-session secret), with the session ID regenerated (ASVS 7.2.4). The
+session's cookie, resumes it. This follows NIST SP 800-63B-4 section 2.2.3 (after an
+idle timeout and before the overall time limit, the server may accept
+the password together with the old session cookie), with a fresh
+session ID (OWASP ASVS 7.2.4). The
 route is session-exempt like login and needs the CSRF header. It takes
 the same limiter reservation as a password sign-in (`reserveLogin`: the
 account lockout and disable, the address limit and ban, the known-browser
@@ -1043,51 +1191,71 @@ every gauntlet session the account holds and forgets its remembered
 browsers -- all or nothing, no per-session admin route and no admin list
 of another account's sessions (owner, 2026-10-02). 409 for the caller's
 own account, 404 for none, 400 for a reason over 200 characters or holding a
-control or format character. Audited as `user.sessions_ended`. Once the
+control or format character or a line or paragraph separator. Audited as `user.sessions_ended`. Once the
 response is written, `Config.Notices` (or the deprecated `Config.Notify`)
-is called in its own goroutine with a 10-second deadline and `recover()`;
-an error or panic is one log line, and the response's `notified` means
-asked, not delivered.
+runs in the background with a 10-second deadline, and any error or crash
+is one log line; the response's `notified` means asked, not delivered.
 
 **Several admins and role changes (#67, #75, ADR-0010).**
 `POST /api/auth/users` accepts `role: admin`, and `PUT
 /api/auth/users/{id}/role` moves an account among `admin`, `user` and
-`viewer`. Granting `admin` on either needs the caller's own password
-and a current second factor on the same request (`recheckStepUp`, the
-`UnlockSelfRequest` shape; `password` and `code` on the role route,
-`adminPassword` and `adminCode` on create, whose `password` is the new
-account's), on the account's `ReserveRecheck` budget: either missing
-400, either wrong 401, 429 once the budget is spent. Any other change
-needs none. Since #82 a passkey stands in for the code: `POST
-/api/auth/step-up/passkey/begin` (session-gated, no body) starts a login
-ceremony for the caller's own usable passkeys through
-`Deps.Passkeys.BeginLogin` and sets `gate_passkey_stepup`. It takes
-nothing from the re-check budget: each begin is counted on its own
-per-account bucket (`LoginLimiter.ReserveStepUpBegin`, in the account
-map, so no flood of addresses can reset it), never refunded, 429 when
-full, so an abandoned prompt costs no re-check (the budget rule above).
-The route then takes `password` and `assertion` (`adminAssertion` on
-create) in place of the code -- exactly one of the two, else 400 -- and
-`recheckPasskey` reserves a re-check in that request, finishes the
-ceremony for the caller, refuses a clone warning, records the counter
-and hands the reservation back. A wrong assertion is 401 and keeps it; a
-missing or dead ceremony checks nothing, hands it back and is 401
-`step-expired`. So a passkey-only admin no longer
-spends a recovery code per grant. While every admin must hold a passkey
-(§1.6), a grant to an account with none usable here still succeeds, and
-the account is held at the passkey door from its next request: the role
-and create responses and the users list carry `heldForPasskey`, and the
-audit detail says "held for a passkey". The last admin can be neither demoted nor deleted (409,
-class `last-admin`); an admin may demote themselves while another
-remains, and cannot delete their own account. A downgrade ends the
-account's sessions (the store writes `SessionsEndedAt`; the handler
-drops the in-memory ones). Audited as `user.role_changed` with actor,
-from and to; `Config.Notices` gets `NoticeRoleChanged`
-(`RoleChangeDetail{From, To}`), also for an admin created over HTTP.
-On an SSO account whose role the identity provider's groups decide
-(#76, §1.4), a change to `user` or `viewer` is refused, 409 class
-`role-managed-by-sso`, before any step-up; granting or demoting an admin
-is not.
+`viewer`.
+
+- What an admin sees: granting `admin`, on either route, needs your own
+  password and a current second factor on the same request. Any other
+  change needs neither. This is a re-check (`recheckStepUp`, the
+  `UnlockSelfRequest` shape) on the account's `ReserveRecheck`
+  allowance.
+- The request fields:
+
+  | Route | Your password | Your second factor |
+  |---|---|---|
+  | role route | `password` | `code`, or `assertion` for a passkey |
+  | create route | `adminPassword` (`password` is the new account's) | `adminCode`, or `adminAssertion` for a passkey |
+
+- The errors: either missing is 400, either wrong is 401, and 429 once
+  the allowance is spent.
+- The passkey option (#82), so a passkey-only admin no longer spends a
+  recovery code per grant:
+  - `POST /api/auth/step-up/passkey/begin` (session-gated, no body)
+    asks the browser to prompt for one of the caller's own usable
+    passkeys, through `Deps.Passkeys.BeginLogin`, and sets the cookie
+    `gate_passkey_stepup`.
+  - Starting a prompt does not use up the password re-check allowance.
+    Each start is counted on its own per-account limit
+    (`LoginLimiter.ReserveStepUpBegin`, in the account map, so no flood
+    of addresses can reset it) and not given back, even when the prompt is
+    abandoned. So an abandoned prompt costs no re-check attempt (see the
+    `step-expired` case below), but it does use up one start. It is 429
+    when the limit is full.
+  - The route then takes `password` and `assertion` (`adminAssertion`
+    on create) in place of the code -- exactly one of the two, else
+    400.
+  - `recheckPasskey` counts one re-check attempt, checks the passkey's
+    answer, refuses a passkey that looks copied (its use counter did
+    not increase), saves the new counter, and gives the attempt back if
+    the answer was right. A wrong answer is 401 and the attempt stays
+    counted; a missing or dead prompt checks nothing, gives the attempt
+    back and is 401 `step-expired`.
+
+While every admin must hold a passkey (§1.6), a grant to an account with
+none usable here still succeeds, and the account is held at the passkey
+door from its next request: the role and create responses and the users
+list carry `heldForPasskey`, and the audit detail says "held for a
+passkey". The last admin can be neither demoted nor deleted (409, class
+`last-admin`), and the same holds for the last admin with a local
+password while the others sign in only through SSO; an admin may demote
+themselves while another admin remains (and, if they hold a local
+password, while another admin holds one too), and cannot delete their own
+account. A
+downgrade ends the account's sessions (the store writes
+`SessionsEndedAt`; the handler drops the in-memory ones). Audited as
+`user.role_changed` with actor, from and to; `Config.Notices` gets
+`NoticeRoleChanged` (`RoleChangeDetail{From, To}`), also for an admin
+created over HTTP. On an SSO account whose role the identity provider's
+groups decide (#76, §1.4), a change to `user` or `viewer` is refused,
+409 class `role-managed-by-sso`, before any step-up; granting or
+demoting an admin is not.
 
 **The admin's password on the other admin routes (#72, ASVS 7.5.3).**
 `POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`,
@@ -1110,9 +1278,10 @@ JSON, as on `DELETE /api/auth/totp`.
 (`gauntlet.Store.JudgeSignIn`) against what the account remembers
 (`SeenCountries`, `LastPlace`, known browsers): the one-step password
 path, the second-factor step, the SSO callback's sign-in branch and the
-passkey-alone sign-in (#77). Every other session issue never judges but
-still remembers (`gauntlet.Store.RememberSignIn`), so turning a signal
-on later starts from a baseline.
+passkey-alone sign-in (#77). Every other session issue is not judged
+but is still remembered (`gauntlet.Store.RememberSignIn`), so if you turn
+a signal on later the account already has a history to compare with (a
+baseline).
 
 `Config.UnusualSignIns` resolves the signals raised to one action; the
 strictest of the kept signals wins.
@@ -1141,24 +1310,47 @@ strictest of the kept signals wins.
   and answers `{"prove": "passkey", "passkeyOrigin": ...}` (the SSO
   callback redirects with `?prove=1`). `POST
   /api/auth/login/prove/begin` and `POST /api/auth/login/prove
-  {assertion}` run the existing non-discoverable ceremony
-  (`BeginLogin`/`FinishLogin`, user verification preferred, not
-  required) and the login limiter, as confirm does. It resolves per
+  {assertion}` ask for a passkey for the account already named in the
+  sign-in (the person does not pick a passkey from a list: the existing
+  non-discoverable ceremony, `BeginLogin`/`FinishLogin`). A PIN or
+  fingerprint is asked for if the device supports it, but not required.
+  Both go through the login limiter, as confirm does. It resolves per
   sign-in: a passkey sign-in is already proved, so `flag`; an account
   with no passkey usable here is held for a code (`confirm`) when
   `Config.DeliverConfirmCode` is set, else refused (`block`).
   `UnusualSignInCase.CanProve` tells `Decide` which.
 - **`block`** refuses the one attempt, never the account, and writes
   nothing to the account's memory.
-- **The lone admin's escape code** (#66, ADR-0011). A refused or held
-  admin whom no other admin can act for (`Store.OtherAdminCanAct`) also
-  gets an escape code -- written to the server's log, or handed to
-  `Config.OnEscapeCode`, never answered -- and a ticket cookie
-  `gate_escape_login`. Typing the code into the refused browser at `POST
-  /api/auth/login/escape` lets that one sign-in through, exactly as
+- **The lone admin's escape code** (#66, ADR-0011): a way back in for
+  the only admin. If an admin is blocked, or held for an extra step, and
+  no other admin can step in (`Store.OtherAdminCanAct`), the server
+  also writes a one-time escape code to its log (or hands it to
+  `Config.OnEscapeCode`; it is never put in a reply) and sets a ticket
+  cookie `gate_escape_login`. Typing the code into the refused browser
+  at `POST /api/auth/login/escape` lets that one sign-in through, exactly as
   `confirm` does, through the same login limiter. Never for a user or
   viewer, never on the SSO callback; with neither `Config.Log` nor
   `Config.OnEscapeCode`, nothing is issued.
+- **An admin's allowance of the next sign-in** (#81, ADR-0009 decision
+  11): an admin can let one blocked or held sign-in through during the
+  next 10 minutes. `POST /api/auth/users/{id}/allow-sign-in`, beside
+  `/unlock`, takes the caller's `password` for another account and password plus
+  a current second factor (`code` or `assertion`) for the caller's own,
+  as own unlock does. It sets `User.SignInAllowedUntil` ten minutes on,
+  replacing any earlier window, and answers `{username, allowedUntil}`.
+  While it is live, a sign-in the policy would hold or refuse completes
+  instead, as the escape code lets one through. The sign-in is still
+  checked in full and recorded as unusual, but it completes: the
+  session is issued, the browser, country and place are remembered, the
+  history row is `confirmed`, the `user.login` detail carries the note
+  `allowed=used; ` and the prefix `via admin allowance; `, and the
+  notice has `Reason: "allowed"`. The first completed sign-in from any
+  browser uses the allowance up, and a reset code or sign out
+  everywhere clears it.
+  It lifts no lockout or disable and changes no credential; an SSO-only
+  account's callback completes too. Audited as `user.sign_in_allowed`;
+  the account holder gets `NoticeSignInAllowed`
+  (`SignInAllowedDetail{Until}`, `By`).
 - **Start-up checks.** `gate.New` refuses an unknown action, `confirm`
   with no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on
   with no `Config.Locate` (`prove` needs nothing wired).
@@ -1175,10 +1367,13 @@ strictest of the kept signals wins.
 (`AccountNotifier`) is the one hook for every account event this module
 raises: a password reset, a second factor added or removed, recovery
 codes regenerated, a lockout, a disable, an admin ending every session,
-an unusual sign-in flagged or blocked. Each call carries one
+an unusual sign-in flagged or blocked, a role change (#67, #75), an
+admin allowing the next sign-in (#81), a token about to expire (#74).
+Each call carries one
 `AccountNotice` with a `NoticeKind` and the one typed detail pointer that
-kind names; the async contract (own goroutine, 10 s, `recover()`, errors
-logged only, after the response) is the one `Config.Notify` always had.
+kind names. The notification runs in the background after the reply is
+sent, gets 10 seconds, and any error or crash is only logged -- the
+contract `Config.Notify` always had.
 A confirmation code is different on purpose: `Config.DeliverConfirmCode`
 is called synchronously, before the sign-in is answered, and a failure
 there refuses the attempt, since no code reached anyone to use.
@@ -1243,20 +1438,24 @@ Notes on the table:
   a second against the cap of three. It has no `__Host-` prefix, which
   needs path `/`. It is read for the allowance only once the limiter has
   refused an attempt. Since #55 it carries up to four tokens, one per
-  account, joined by a character base64url never produces, so a browser
+  account, separated by a character that cannot appear in a token, so a browser
   shared by two accounts is not "new" to whichever one is switched to. A
   one-token cookie from before that change reads as a list of one.
 - **Confirm and escape.** `/api/auth/login` is a prefix of
   `/api/auth/login/confirm`, `/api/auth/login/prove` and
   `/api/auth/login/escape`. The SSO callback can still set the confirm
-  cookie, since a response may set a cookie for any path. Each is sealed
-  under its own per-process key, so a restart fails a waiting
-  confirmation cleanly.
-- **Passkey ceremonies.** `passkey` seals the three under three
-  independent keys, and opens each only in the spelling it was written
-  in. A login challenge is usable once; one registration begin stores
-  at most one passkey; a finish the library refuses leaves that
-  registration usable within its five minutes.
+  cookie, since a response may set a cookie for any path. Each of these
+  cookies is sealed with a key made fresh each time the server starts, so after a
+  restart a half-finished sign-in is simply rejected and the person
+  signs in again.
+- **Passkey ceremonies.** `passkey` seals its ceremony state under three
+  independent keys (registration, the login prompt used for second
+  steps, proofs and re-checks, and the passkey-alone sign-in), and opens
+  each only in the spelling it was written in, so a cookie from one
+  cannot be read as another. A sign-in prompt works once. One
+  registration prompt can add at most one passkey. If the browser's
+  answer is rejected, the person can try again until the five minutes
+  are up.
 
 Hard-coded strings that are mikroview's today and must not leak into
 birdcage: the product name in TOTP enrolment URIs and passkey display
@@ -1299,29 +1498,34 @@ it. The data for all of this lives on `User`.
   `Config.PasskeySignIn` (off by default).** The person picks their
   passkey and confirms with a PIN or fingerprint. They type no username,
   because the passkey itself stores which account it belongs to. (For
-  developers: a WebAuthn Level 3 discoverable-credential login, the
-  account named by the user handle, which is the account ID.) User
-  verification, the PIN or fingerprint, is required (800-63B-4: a
-  multi-factor cryptographic authenticator, AAL2). `POST /api/auth/login/passkey/begin` and `POST
+  developers: this is the WebAuthn Level 3 "discoverable credential"
+  sign-in; the passkey stores the account ID as its user handle.) User
+  verification, the PIN or fingerprint, is required, which meets the
+  second assurance level (AAL2) of NIST SP 800-63B-4 as a multi-factor
+  cryptographic authenticator. `POST /api/auth/login/passkey/begin` and `POST
   /api/auth/login/passkey`, through a second optional interface,
   `gauntlet.PasskeySignIn`, that `gauntlet/passkey`'s relying party
   implements beside `PasskeyCeremony`; `go list -deps ./gate` still shows
   no WebAuthn code. Every account keeps its password -- a passkey replaces
-  it at sign-in, never in the account, so the accounts document stays at
-  version 9 -- and every registration asks for a discoverable credential
+  it at sign-in, never in the account, so passkey sign-in stores no new field and adds
+  no accounts document version -- and every registration asks for a discoverable credential
   (`residentKey: preferred`). The sign-in is judged like any other
   (method `passkey_alone` reaches `Decide`; confirm is not skipped), is
   counted for the account's lockout and the address limit and ban before
   the signature is checked, and meets the must-change-password door after
   it. The same passkey resumes a timed-out session (§1.5, #71). Mikroview
-  opts in when its login screen has the button.
-- **The door is always shut: `RequireSecondFactor` is deprecated and
-  ignored (#49).** `gate` no longer offers a way to turn the
+  opts in when its login screen has the button. A refusal for a passkey
+  that one of this application's own accounts does not hold names it
+  (`unknownCredential`, #92), so the application can tell the browser to
+  stop offering it; a handle naming no account here is never named, as a
+  sibling application on the same hostname may still use that passkey.
+- **A second factor is always required: `RequireSecondFactor` is
+  deprecated and ignored (#49).** `gate` no longer offers a way to turn the
   forced-enrolment door off -- every local-password account, mikroview's
   and birdcage's alike, must hold a second factor before it can reach
   anything but the enrolment routes. This closes the gap ASVS 5.0 6.2.1
   and NIST SP 800-63B-4 §3.1.1.2 flagged against the 8-character minimum
-  (`store.go:46`, docs/security-by-design.md): with the door
+  (`store.go:48`, docs/security-by-design.md): with the door
   configurable and off by default, an application that forgot to turn
   it on got 8-character single-factor passwords. Cost: the TOTP enrol
   screen is in birdcage's v1 UI slice (§5); it cannot be deferred the
@@ -1338,8 +1542,8 @@ it. The data for all of this lives on `User`.
   `AdminPasskeyOptional` is for an application reached over plain
   http (anywhere but localhost) or by IP address, or one with no
   passkeys (birdcage today). With
-  the rule on, `Protect` holds an admin with no passkey usable under
-  the current RP ID at a new door, 403 `must-enrol-passkey`, which
+  the rule on, `Protect` holds an admin who has no passkey that works for this site's
+  address (the *RP ID*, the web address a passkey is tied to) at a new door, 403 `must-enrol-passkey`, which
   admits the same enrolment routes as the any-factor door and is
   checked before it; an admin with no local password is held at the
   must-change-password door first, because registering a passkey needs
@@ -1351,7 +1555,8 @@ it. The data for all of this lives on `User`.
   before the password re-check); another admin's clear-all and the
   console `ClearAllSecondFactors` stay open as recovery, and the account
   is held afterwards. Nothing is stored: the rule is computed from
-  `Role` and `Passkeys`, so the accounts document stays at version 9.
+  `Role` and `Passkeys`, so it does not change the accounts document
+  version.
   Users and viewers keep "any factor".
 - **The first factor is held until its recovery codes are confirmed
   (#58, owner 2026-10-04).** An account's first second factor -- its
@@ -1371,11 +1576,37 @@ it. The data for all of this lives on `User`.
   confirmation -- and a scanned but unconfirmed TOTP secret also
   expires ten minutes after it was set (`TOTPPendingLifetime`). One
   enrolment at a time: while one is held, starting another is refused
-  (409). A later factor is added live at once without codes: an account
-  keeps one set across all its factors. This replaces "the factor goes
-  live, then the codes are minted in a second write", where a crash or
-  failed save between the two left a live factor with no codes
+  (409). A later factor is added live at once without codes
+  (`Store.AddLaterPasskey`, `Store.ConfirmLaterTOTP`): an account keeps
+  one set across all its factors. Each checks, inside its own write,
+  that a live factor already stands beside it, and refuses with
+  `ErrNoOtherSecondFactor` if the last one was removed in the meantime;
+  the caller then starts again on the first-factor path above. This
+  replaces the earlier order, where the factor was switched on and the
+  recovery codes were made and saved in a second step, so that a crash
+  or failed save between the two left a live factor with no codes
   (answered `partially-completed`).
+- **Regenerating recovery codes replaces the old set at once (#80
+  P1-S2, owner 2026-10-08).** `POST /api/auth/recovery-codes`
+  (`Store.RegenerateRecoveryCodes`, behind the password re-check) saves ten
+  new codes in one write that replaces the old set, then writes the
+  reply that shows them, once. The old set stops working at the save.
+  A person who missed the new codes (a dropped connection, a closed
+  page) regenerates again; there is no pending set and no second
+  showing. If the save fails the old set stays and nothing is issued.
+  The major providers (GitHub, Google, Microsoft, 1Password, Dropbox)
+  do the same, and NIST SP 800-63B-4 §4.2.1.1 allows it: codes hashed,
+  single-use and throttled, a replacement requestable at any time. The
+  password re-check (ASVS 7.5.1) and its throttle already guard the
+  route. Applications are told to say "your previous recovery codes no
+  longer work" (`docs/using.md`). The first set is different: it waits
+  for `/recovery-codes/confirm` (#58, #30). Regeneration needs a live
+  second factor, so while that first set is on hold the door stops it
+  (403 `must-enrol-factor`, or `must-enrol-passkey` for an admin where
+  a passkey is required), and the store itself refuses with
+  `ErrNoSecondFactors` (answered 409) if the last factor was removed
+  while the request was in flight (#94). An account with no local
+  password gets 409 before its password is checked (#99).
 
 ### 1.7 Deliberately not in the module
 
@@ -1408,7 +1639,7 @@ it. The data for all of this lives on `User`.
 
 | Surface | Today | With gauntlet |
 |---|---|---|
-| Frontend static files | open | open (the login page is in the SPA) |
+| Frontend static files | open | open (the login page is part of the single-page web frontend) |
 | `GET /api/*` dashboard (`dashboardRouteSpecs`) | open | session with role ≥ viewer, **or** API token (`TokenKindAPI`) via `g.Handle(TokenKindAPI, dashboardRoutes(h))` -- the mux already built for exactly this |
 | `GET /api/stream` | open | session only; `EventSource` cannot send a bearer header and a token holder can poll |
 | `POST /api/heartbeat` | open | session-gated by default, which no canary can satisfy -- recommend retiring it (§6); `POST /ingest/heartbeat` on the ingest listener has replaced it |
@@ -1446,13 +1677,13 @@ build a `Gate` over `persist.NewMemory()` with one registered admin.
 
 ### 2.3 Storage: `internal/store/authblob.go`
 
-One table, both dialects, migration `0025_auth_store`:
+One table that works on both SQLite and Postgres, migration `0025_auth_store`:
 
 ```sql
 CREATE TABLE auth_store (
   name       TEXT PRIMARY KEY,   -- 'accounts' | 'tokens' | 'signins'
   payload    TEXT NOT NULL,      -- the JSON document, byte-exact
-  version    BIGINT NOT NULL,    -- compare-and-swap token
+  version    BIGINT NOT NULL,    -- a counter, so a save only succeeds if nobody else changed the row since it was read
   updated_at TEXT NOT NULL
 );
 ```
@@ -1489,8 +1720,8 @@ Why a document table rather than `users`/`tokens` rows: gauntlet's
 `Store` is an in-memory index that persists whole documents -- that is
 the shape [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) fixed by choosing mikroview's seams, and mikroview's
 own Postgres backend (`store_blob`) is the same table under another
-name. A relational model would need a second read model that can
-disagree with the first. The cost is that accounts are not queryable by
+name. Storing accounts as rows would need a second copy of the data in
+memory, and the two copies could differ. The cost is that accounts are not queryable by
 SQL; with a handful of operators that is fine, and audit goes to
 `audit_log` through `gate.Auditor`.
 
@@ -1528,8 +1759,8 @@ table -- and `flag` for everyone else.
 Startup: `oidc.AllowIssuerWithPolicy` refuses a multi-tenant issuer
 whose policy does not pin the tenant ([ADR-0014](adr/0014-shared-issuers.md))
 before listening, as mikroview's `main.go:1723` does -- `oidc.New` and
-`gate.New` refuse it as well, so this call is belt-and-braces, not the
-only check. Login
+`gate.New` refuse it as well, so this call is a second safety check, not
+the only one. Login
 limiter: 5 per 5
 minutes per IP and per username (mikroview's constants). Client IP:
 `RemoteAddr` host until birdcage has a trusted-proxy setting (§5, slice
@@ -1570,7 +1801,7 @@ Not done in this work; recorded so the API above is checked against it.
   version 1, so a copy of real data loads without migration -- the
   acceptance test [ADR-0005](https://gitlab.tomlawson.io/ai/birdcage/-/blob/dev/docs/adr/0005-shared-auth-module.md) assigns
   to #1202. Gauntlet's first save writes the accounts document as
-  `"version": 9` (#28 onwards) and wraps the tokens list as
+  `"version": 10` (#28 to #81) and wraps the tokens list as
   `{"version": 3, "tokens": [...]}` (#29, #59, #74); mikroview's own code cannot
   read that tokens document, so rolling back past the move needs the
   copy taken before it.
@@ -1648,7 +1879,7 @@ once, which is the price of sharing and the reason fixes land once.
 
 | Pitfall | Mikroview today | Module keeps |
 |---|---|---|
-| Session fixation / predictable ids | 128-bit `crypto/rand` id, new id per login, never reused | same; `newID` panics rather than degrades if the CSPRNG fails |
+| Session fixation / predictable ids | 128 random bits from Go's secure random source (`crypto/rand`) as the id, new id per login, never reused | same; if that source fails, `newID` panics rather than make weaker ids |
 | Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51). Changed (#71): a session idle past 1h but inside the ceiling can be resumed with the password alone, under a new ID and the same ceiling (`POST /api/auth/reauthenticate`) |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
@@ -1660,10 +1891,10 @@ once, which is the price of sharing and the reason fixes land once.
 
 | Pitfall | Mikroview today | Module keeps |
 |---|---|---|
-| Code interception / replay | Authorization Code + PKCE S256, `state` and `nonce` compared constant-time, verifier held in an AES-256-GCM cookie the browser cannot read or forge | all of it; the flow-state key is per process |
+| Code interception / replay | Standard authorization-code sign-in with PKCE S256 (a one-time secret that stops a stolen sign-in code being reused); the `state` and `nonce` values are checked in a way that takes equal time; the secret (the verifier) is kept in an AES-256-GCM encrypted cookie the browser cannot read or change | all of it; the flow-state key is per process |
 | Algorithm confusion (`alg:none`, HS256 with the public key) | explicit allowlist RS256/ES256/PS256 on the verifier | kept explicit rather than relying on go-oidc's default |
 | Account takeover by email match | identity is (issuer, subject); email and `preferred_username` are display hints only | kept; the index is a struct key |
-| Public IdP hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | multi-tenant issuers refused, except Google with the `hd` domain pinned in the policy ([ADR-0014](adr/0014-shared-issuers.md)); since #37 SSO never creates the first account -- the first admin is local, created with the setup code from the server's log (ADR-0003) |
+| A public sign-in provider (identity provider) hands admin to the first visitor | multi-tenant issuers refused at startup; first OIDC user becomes admin only when the store is empty | multi-tenant issuers refused, except Google with the `hd` domain pinned in the policy ([ADR-0014](adr/0014-shared-issuers.md)); since #37 SSO never creates the first account -- the first admin is local, created with the setup code from the server's log (ADR-0003) |
 | Redirect URL from `Host` | built from `publicBaseUrl` only | birdcage: `BIRDCAGE_PUBLIC_URL` |
 | Slow or hung IdP blocks login or startup | 10 s HTTP timeout on discovery, JWKS and exchange | kept |
 | Group/claim policy failing open | every missing or unreadable claim is a refusal; policy re-checked on every login | kept |
@@ -1677,7 +1908,7 @@ once, which is the price of sharing and the reason fixes land once.
 | A read token used to write | dispatch to a mux that has no write routes, decided by token kind, never by handler checks | `gate.Handle(kind, mux)`; the app can only register whole muxes |
 | Token kind confusion | `Authenticate(raw, want)` refuses any other kind | kept; unknown kinds in the document are logged and never authenticate |
 | Plaintext at rest | SHA-256 of a 128-bit random value; raw shown once | kept, and documented why SHA-256 not Argon2id here |
-| A token valid for years, and a leaked one no scanner recognises | no expiry, a bare hex value | new (#74), GitHub's personal-access-token lifecycle: `Token.ExpiresAt`, a year by default, `never` only by asking (a router's ingest token would stop reporting on its expiry day); `Authenticate` refuses an expired token as it refuses an unknown one; `Gate.SweepTokens` removes tokens unused for a year (`token.removed_unused`) and sends `NoticeTokenExpiring` once per token, seven days ahead; new values start `gnt_` and `.gitleaks.toml` has a rule for them, while the old bare shape still authenticates. Tokens that exist already keep no expiry |
+| A token valid for years, and a leaked one no scanner recognises | no expiry, a bare hex value | new (#74), GitHub's personal-access-token lifecycle: `Token.ExpiresAt`, a year by default, `never` only by asking (a router's ingest token would stop reporting on its expiry day); `Authenticate` refuses an expired token as it refuses an unknown one; `Gate.SweepTokens` removes tokens unused for a year (`token.removed_unused`) and tokens whose creating account is gone (`token.removed_orphaned`), and sends `NoticeTokenExpiring` once per token, seven days ahead; new values start `gnt_` and `.gitleaks.toml` has a rule for them, while the old bare shape still authenticates. Tokens that exist already keep no expiry |
 | Username or token enumeration | one 401 body for missing, wrong and revoked; `ErrInvalidCredentials` for unknown user and wrong password alike; dummy Argon2id hash so timing matches | kept |
 | Argon2id as a DoS lever | 64 MiB per hash, at most 4 concurrent (`maxConcurrentHashes`), login limiter in front | kept |
 | Unseen failures | only successes audited | new (#45): every failed sign-in, and every wrong password or code at an in-session re-check, is `user.login_failed`; a lockout or disable starting, through a known browser too, is `account.locked` or `account.disabled`, and an address ban starting is `address.banned` (#70); every audit record a request writes carries the client address; refused requests and oversize bodies are rated Warn lines (§1.5) |
@@ -1687,19 +1918,22 @@ once, which is the price of sharing and the reason fixes land once.
 | `golang.org/x/crypto` advisories | all 30 entries are in `ssh`, `ssh/agent` or `openpgp`; none touches `argon2` | import only `argon2`; birdcage already carries this module at 0.57.0 |
 
 The application must call `Gate.SweepTokens` once a day: the library
-has no timer of its own, so without that call unused tokens are never
-removed and no expiry notice is sent.
+has no timer of its own, so without that call unused tokens (and tokens
+whose creating account is gone) are never removed and no expiry notice is
+sent.
 
 ### Second factors (data in v1; ceremonies per §1.6)
 
 TOTP replay is guarded by `TOTPLastCounter`; recovery codes are
 Argon2id-hashed and single-use; the reset code is Argon2id-hashed,
-24-hour, single-use, and replaces the password outright. A passkey
-sign-count that fails to advance refuses the login (the library's clone
-warning, then `RecordPasskeyAssertionIfFresh` under the store's lock)
-and never moves the stored count; each login challenge is used once,
-a registration replay is refused as a duplicate credential, and every
-ceremony expires five minutes after begin; attestation is `none`. As a
+24-hour, single-use, and replaces the password outright. Each
+passkey keeps a use counter. If it does not go up, the passkey may have
+been copied, so the sign-in is refused and the stored counter is left
+alone (the library's clone warning, then
+`RecordPasskeyAssertionIfFresh` under the store's lock). Each login
+challenge is used once, a registration replay is refused as a duplicate
+credential, and every ceremony expires five minutes after begin. The
+device is not asked to prove its make or model (attestation is `none`). As a
 second factor, user verification (a PIN or fingerprint on the
 authenticator) is requested, not required (ADR-0004 decision 5); a
 passkey sign-in on its own requires it (#77, ADR-0012, which supersedes
@@ -1713,7 +1947,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | Pitfall | Module does |
 |---|---|
 | A flood of failed attempts becomes a flood of writes | attempts change memory only; one writer saves the whole document at most every 5 s while a new row is unsaved and every 60 s while only counts changed; `Flush`/`Close` at shutdown. A crash loses at most that much; the audit sink has every attempt |
-| A flood of attempts fills the history | alike attempts within 10 minutes fold into one row (`count`, `until`); failures may start at most 100 rows per 10-minute bucket, the rest counted in one `unrecorded` row; a success or a passed password step is never budgeted. 100,000 made-up names in 10 minutes are 101 rows |
+| A flood of attempts fills the history | repeated identical attempts within 10 minutes become one row with a count (`count`, `until`); at most 100 new rows for failures in each 10-minute window (windows start on the clock: :00, :10, ...), and any more in that window are summed in one `unrecorded` row; successes and passed password steps are always recorded. So 100,000 made-up names inside one window make 101 rows |
 | The history grows without end | the newest `MaxRows` kept, 10,000 by default (owner, 2026-10-02), at most 50,000, oldest dropped; `total` and `since` show how full and how far back. ~340 B a row typically, ~645 B worst: 6.5 MB of JSON, 8.6 MB sealed in a text column, at the default |
 | A save holds up sign-ins | rows are copied under the lock; encode, seal and save run outside it (about 60 ms for a full worst-case history), one at a time |
 | A password typed into the username box is kept | a name matching no account is masked before it is stored, audited or logged (`MaskUnknownUsername`); probe names in full |
@@ -1748,7 +1982,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 
 | Pitfall | Module does |
 |---|---|
-| A flag that fires on every account right after the upgrade | each signal is raised only against something the account already remembers (the baseline rule); an account with nothing remembered of a kind remembers this sign-in instead and raises nothing, so the first sign-in after the upgrade is always quiet |
+| A flag that fires on every account right after the upgrade | an unusual-sign-in warning only appears when there is something earlier to compare with (the baseline rule: each signal is raised only against something the account already remembers); an account with nothing remembered of a kind remembers this sign-in instead and raises nothing, so the first sign-in after the upgrade is always quiet |
 | A flood of notices | at most one `flag` or `block` notice per account per hour (`unusualNoticeInterval`), in memory; a `confirm` notice is never held back, since it carries the code the person is waiting for |
 | A notifier or `Decide` that hangs the sign-in | `Decide` and the `confirm` notice run under `DecideTimeout` (3 s, fixed); a function that ignores its context is abandoned at the deadline and its answer goes nowhere; the `flag`/`block` notice runs after the response, with its own 10 s bound, so it never holds a sign-in up at all |
 | A `Decide` bug that quietly weakens the policy | every failure -- panic, error, timeout, or an answer that is not `flag`/`confirm`/`prove`/`block` (`off` included), or `confirm` with no `Config.DeliverConfirmCode` -- fails closed to `block`, logged once and audited with the reason, rather than silently falling back to the settings' own (looser) answer |
@@ -1757,18 +1991,20 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | A confirmation code in a log, an error or a record | only its SHA-256 is kept, inside the sealed ticket cookie; the digits themselves are never logged, audited or written to the history |
 | A blocking action chosen with nothing wired to deliver a code | `gate.New` refuses `confirm` on any field with no `Config.DeliverConfirmCode`, and `ImpossibleTravel` turned on with no `Config.Locate`, as a missing-dependency error at startup, not a runtime surprise |
 | A browser shared by two accounts refused on every switch | the known-browser cookie carries up to four tokens, one per account (#55 change to #44), so switching accounts in one browser is not "new" to the second account |
-| A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; the docs (geoip.md, this file's pitfalls) recommend `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
+| A VPN or carrier toggle refused on every hop | impossible travel is a risk signal, not proof; this document recommends `flag` or `confirm` for it, never `block`, since a toggle across a few hundred kilometres within an hour is an honest false positive |
 | Memory lost on a restart | `SeenCountries` and `LastPlace` are on the sealed account record, not in process memory, so they survive a restart; only the per-process confirm-ticket key and the hourly notice rate do not, which costs at most one stale ticket or one extra notice |
-| The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011): when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. First remedy is still a second admin (#67), who can issue the reset code, and `Decide` answering `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written, and two admins both abroad on new laptops stays a residual. Since the v0.3.0 audit (#79) the code is also issued when the admin's sign-in is held for a code or a passkey (`confirm`, `prove`), so a lost passkey or an undelivered code has the same way out |
-| A password holder flooding the owner's mailbox or the server's log with codes | each confirmation code and escape code is counted per account as it is sent (`ReserveDelivery`, #84): five per five-minute window each at the consumers' defaults, never handed back, a failed delivery included; past it the held sign-in gets `429 rate-limited` and nothing is sent |
-| A log-written escape code that an attacker reads | someone who can read the log already owns the host and holds the setup and unlock codes; without the log, a thief holding the password and second factor has the ticket but no code, and the code without that browser's ticket is nothing. Eighty bits behind the login limiter, one outstanding per refused attempt, single use, gone at expiry or restart |
+| The lone admin refused from a new laptop under `block` | an escape exists (#66, ADR-0011). What happens: when no other admin can act, the refusal writes a one-time code to the server's log (or `Config.OnEscapeCode`) and sets a ticket in the refused browser; typing the code at `POST /api/auth/login/escape` lets that one sign-in through. It needs host access (the log), not the address. What to do first: have a second admin (#67), who can issue the reset code, and let `Decide` answer `confirm` or `flag` for admins (§2.4); with two admins able to act no code is written. What is still not covered: two admins both abroad on new laptops at once. Since the v0.3.0 audit (#79) the code is also issued when the admin's sign-in is held for a code or a passkey (`confirm`, `prove`), so a lost passkey or an undelivered code has the same way out |
+| A password holder flooding the owner's mailbox or the server's log with codes | each confirmation code and escape code is counted per account as it is sent (`ReserveDelivery`, #84): five per five-minute window each at the consumers' defaults, a resend cooldown of 30 seconds doubling per send, and five an hour (#83), never handed back, a failed delivery included; past it the held sign-in gets `429 rate-limited` and nothing is sent |
+| An SSO-only account, or a local one whose password should survive, refused under `block` | an admin allows its next sign-in (#81): ten minutes, single use, remembered as any completed sign-in; the reset code stays for an account whose credentials may be in the wrong hands |
+| A log-written escape code that an attacker reads | anyone who can read the server log already controls the server and already sees the setup and unlock codes; without the log, a thief holding the password and second factor has the ticket but no code, and the code without that browser's ticket is nothing. The code is also too long to guess (80 bits), guesses go through the login limiter, one is outstanding per refused attempt, each works once, and it disappears when it expires or the server restarts |
 
 ### Fail-closed list
 
-Unparseable accounts document → refuse to start. Unknown role → denied
-everything. Unknown token kind → never authenticates. Missing claim →
-refused. Backend write failure → in-memory change rolled back and the
-error returned (every mutating `Store` method in mikroview does this;
+If the stored accounts cannot be parsed (or were written by a newer
+version), the server will not start. An
+account with an unknown role gets no access at all. A token of an unknown
+kind never authenticates. A missing claim is refused. If a backend write
+fails, the in-memory change is rolled back and the error returned (every mutating `Store` method in mikroview does this;
 the module's tests assert it per method). Accounts or tokens file
 removed while the server runs → never recreated from memory, since
 moving it aside is how an operator resets; every write fails with
@@ -1794,16 +2030,16 @@ To reset the accounts, the operator moves the file aside:
 replacing one.
 
 - As a safeguard, a running service refuses an older copy (#59,
-  v0.3.0). Each document carries a save counter inside the seal; a
-  running store refuses to adopt a document with a lower counter than
-  it has already loaded or written. It leaves the file on disk alone,
+  v0.3.0). Each saved file has a save number written inside its
+  encryption (the seal); a running store refuses to load a file with a
+  lower number than the one it has already loaded or written. It leaves the file on disk alone,
   keeps what it holds, logs once why, and refuses writes until the file
   is replaced or the process restarts -- the same way a document from a
   newer build is refused. Before #59 such a copy was adopted at the
   next request, undoing later changes and reviving revoked tokens, with
   nothing logged.
 - But a service that is stopped and restarted accepts an older copy
-  without warning: the counter is not remembered once the process
+  without warning: the save number is not remembered once the process
   exits. So restore only a copy you mean to go back to.
 
 ## 5. Build plan (history, complete for gauntlet)
@@ -1866,8 +2102,10 @@ once G4 is tagged.
   `GET /api/*` answers 401 without a session and 200 with one, and an API
   token reaches `GET /api/alerts` but not `/api/auth/users`.
 - **B3 CLI `birdcage user`.** *Done when:* `reset-password` against a
-  live server is honoured on the next request without restart --
-  including from an address the lockout's guesses filled (#32).
+  live server is honoured on the next request without restart; from
+  the address the lockout's guesses filled, once that address's
+  five-minute window has passed (#86), or at once from a browser the
+  account remembers (#44).
 - **B4 Frontend: login, register, change-password, TOTP enrolment,
   recovery codes.** *Done when:* a fresh install can be set up and signed
   into from the browser with a second factor, screenshots in the MR.

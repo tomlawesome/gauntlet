@@ -585,9 +585,26 @@ func TestUnusualSignInsRoute(t *testing.T) {
 	if status, _, _ := getSignIns(t, e.admin, e.ts, "?outcome=confirm_sent"); status != http.StatusOK {
 		t.Errorf("outcome=confirm_sent = %d, want 200", status)
 	}
-	if status, _, _ := getSignIns(t, b.at(addrParis), e.ts, "?unusual=true"); status != http.StatusForbidden {
-		t.Errorf("a non-admin = %d, want 403", status)
+	// Bob has no second factor, so as he stands the forced-enrolment door
+	// would refuse him before any role check ran. Enrol one first, so it
+	// is adminOnly that answers.
+	// The TOTP code is made at the fixture's clock, which has moved on.
+	bob := b.at(addrParis)
+	enrolled := totpEnrol(t, bob, e.ts)
+	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if status, body := readAll(t, postJSON(t, bob, e.ts.URL+"/api/auth/totp/confirm",
+		totpConfirmRequest{Code: gauntlet.GenerateTOTPCode(secret, totpCounterNow(e.clock.now()))})); status != http.StatusOK {
+		t.Fatalf("confirming bob's factor = %d %s", status, body)
+	}
+	confirmEnrolmentOK(t, bob, e.ts)
+	resp, err := bob.Get(e.ts.URL + "/api/auth/sign-ins?unusual=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, resp, http.StatusForbidden, classForbidden)
 }
 
 // The passkey branch of the second-factor step judges too.
@@ -846,7 +863,7 @@ func TestUnusualFailedRememberTellsNobody(t *testing.T) {
 
 // wantRefusedDetail is the sign-in-refused class's one detail, as the
 // design words it.
-const wantRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+const wantRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to allow your next sign-in or reset the account"
 
 // cookieNamed is the cookie resp sets under name, or nil.
 func cookieNamed(resp *http.Response, name string) *http.Cookie {

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -471,5 +472,66 @@ func TestIssueResetCodeOnlyHashIsPersisted(t *testing.T) {
 	}
 	if !strings.HasPrefix(got.ResetCodeHash, "argon2id$") {
 		t.Errorf("ResetCodeHash = %q, not an Argon2id hash", got.ResetCodeHash)
+	}
+}
+
+// breachHook is a BreachChecker that runs hook on its first call and
+// reports nothing breached: the way into the window SetPassword leaves
+// between reading the account and its write, since the check runs
+// before the hash.
+type breachHook struct {
+	once sync.Once
+	hook func()
+}
+
+func (b *breachHook) Breached(context.Context, string) (bool, error) {
+	if b.hook != nil {
+		b.once.Do(b.hook)
+	}
+	return false, nil
+}
+
+// An admin reset issued while a password change on the same account is
+// still being checked and hashed must not be overwritten by it: the
+// change used to clear the new code on its way in, so the code the
+// admin read out never worked (#80). The change is refused instead and
+// the reset stands.
+func TestSetPasswordDoesNotOverwriteAResetIssuedDuringIt(t *testing.T) {
+	checker := &breachHook{}
+	s, _ := openCheckedStore(t, Options{BreachCheck: checker})
+	alice, err := s.CreateUser("alice", "alice first passphrase", RoleUser, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code string
+	checker.hook = func() {
+		_, c, err := s.IssueResetCode(alice.ID, time.Now())
+		if err != nil {
+			t.Errorf("IssueResetCode: %v", err)
+		}
+		code = c
+	}
+
+	if err := s.SetPassword("alice", "alice second passphrase", time.Now()); !errors.Is(err, ErrResetDuringChange) {
+		t.Fatalf("SetPassword across a reset = %v, want ErrResetDuringChange", err)
+	}
+	if code == "" {
+		t.Fatal("the reset was never issued")
+	}
+	u, err := s.Authenticate("alice", code, time.Now())
+	if err != nil {
+		t.Fatalf("the admin's reset code does not sign in: %v", err)
+	}
+	if !u.MustChangePassword {
+		t.Error("the sign-in with the reset code is not held for a password change")
+	}
+	if _, err := s.Authenticate("alice", "alice second passphrase", time.Now()); !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("the refused change's password signs in: %v", err)
+	}
+
+	// The forced change that follows, from the code's own sign-in, is
+	// not a change the reset raced: it goes through.
+	if err := s.SetPassword("alice", "alice third passphrase", time.Now()); err != nil {
+		t.Fatalf("the forced change after the reset: %v", err)
 	}
 }

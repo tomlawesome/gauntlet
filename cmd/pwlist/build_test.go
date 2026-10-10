@@ -762,3 +762,35 @@ func TestSleepCtx(t *testing.T) {
 		t.Fatal("sleepCtx ignored a cancelled context")
 	}
 }
+
+// A run whose every chunk was fetched but whose result failed a sanity
+// bar keeps its checkpoint, so a retry fetches nothing and fails the
+// same bar at once. Both the failure and the retry say so, and say how
+// to fetch again (#80): before, the retry logged only that it was
+// resuming, and failed with no hint why it had not fetched.
+func TestBuildRetryOfAFailedBarSaysItReplaysTheCheckpoint(t *testing.T) {
+	t.Parallel()
+	srv := newRangeServer(t, variedCorpus(12))
+	b, log, _ := testBuilder(t, srv, 12)
+	b.minTotal = 12001
+	err := b.run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "nothing written") {
+		t.Fatalf("first run = %v", err)
+	}
+	if !strings.Contains(err.Error(), "checkpoint") || !strings.Contains(err.Error(), "delete it") {
+		t.Errorf("first run's error %q does not say the checkpoint is kept and how to fetch again", err)
+	}
+
+	hits := srv.totalHits()
+	log.Reset()
+	err = b.run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "nothing written") {
+		t.Fatalf("retry = %v", err)
+	}
+	if srv.totalHits() != hits {
+		t.Fatalf("the retry fetched %d ranges; want none", srv.totalHits()-hits)
+	}
+	if !strings.Contains(log.String(), "every chunk was already fetched") {
+		t.Errorf("the retry's log does not say it is rechecking a finished checkpoint:\n%s", log)
+	}
+}

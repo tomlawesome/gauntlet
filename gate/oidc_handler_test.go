@@ -17,6 +17,7 @@ import (
 	"github.com/tomlawesome/gauntlet"
 	"github.com/tomlawesome/gauntlet/internal/testutil"
 	"github.com/tomlawesome/gauntlet/oidc"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 const oidcTestClientID = "test-client"
@@ -110,6 +111,39 @@ func TestOIDCCallbackFakeProviderHappyPath(t *testing.T) {
 	u, ok := g.deps.Users.ByOIDCIdentity(fp.Issuer(), fp.DefaultClaims(oidcTestClientID, fs.Nonce).Subject)
 	if !ok || u.Role != "user" {
 		t.Errorf("expected an SSO-provisioned account to be an ordinary user (the admin is local, #37), got %v %v", u, ok)
+	}
+}
+
+// The code exchange carries the verifier held in the flow cookie. The
+// fake refuses it, as a PKCE-enforcing provider would, if the verifier is
+// missing or not the one this browser's sign-in started with; the other
+// callback tests do not check it.
+func TestOIDCCallbackSendsTheFlowCodeVerifier(t *testing.T) {
+	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	fs, err := oidc.NewFlowState(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.CodeVerifier == "" {
+		t.Fatal("setup: the flow state has no code verifier")
+	}
+	fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+	fp.ExpectCodeVerifier = fs.CodeVerifier
+
+	req := oidcCallbackRequest(t, g, ts, fs, "state="+fs.State+"&code=test-code")
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback returned %d, want 302; the provider refused the code exchange unless it carried the flow's verifier", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/" {
+		t.Errorf("redirect location = %q, want %q (a refused exchange redirects to an error page)", loc, "/")
+	}
+	if g.deps.Users.Count() != 2 {
+		t.Errorf("expected the admin plus one provisioned account, got %d", g.deps.Users.Count())
 	}
 }
 
@@ -611,46 +645,76 @@ func TestOIDCLinkCallbackRefusesIdentityAlreadyLinkedElsewhere(t *testing.T) {
 
 // TestOIDCLinkCallbackSessionChangedRefused covers completeOIDCLink's
 // "the browser is signed in as someone else by the time the provider
-// comes back" branch.
+// comes back" branch. It has two halves, each a way the check can fail
+// open on its own: the callback carrying no session at all, and carrying
+// the session of a different account (the case the check is named for --
+// with it gone, the identity would be linked to the account that started
+// the flow, or to nobody, by a browser that is no longer that account's).
 func TestOIDCLinkCallbackSessionChangedRefused(t *testing.T) {
-	g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
-	admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
+	// callbackWith starts a link as admin, then runs the provider's
+	// callback with whatever session cookies cookiesFor returns.
+	callbackWith := func(t *testing.T, cookiesFor func(operator *http.Client, req *http.Request) []*http.Cookie) {
+		t.Helper()
+		g, ts, fp := newEmptyOIDCTestGate(t, oidc.Policy{})
+		admin := registerAdmin(t, ts, "admin", "password-placeholder-1")
+		_ = postJSON(t, admin, ts.URL+"/api/auth/users",
+			createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
+		operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
 
-	startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
-	defer func() { _ = startResp.Body.Close() }()
-	var flowCookie *http.Cookie
-	for _, c := range startResp.Cookies() {
-		if c.Name == oidcFlowCookieName {
-			flowCookie = c
+		startResp := postJSON(t, admin, ts.URL+"/api/auth/oidc/link", oidcLinkStartRequest{Password: testAdminPassword})
+		defer func() { _ = startResp.Body.Close() }()
+		var flowCookie *http.Cookie
+		for _, c := range startResp.Cookies() {
+			if c.Name == oidcFlowCookieName {
+				flowCookie = c
+			}
+		}
+		if flowCookie == nil {
+			t.Fatal("expected the OIDC flow cookie to be set by link start")
+		}
+		fs, err := g.deps.OIDCState.Decode(flowCookie.Value, oidcFlowCookieMaxAge, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/oidc/callback?state="+fs.State+"&code=test-code", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(flowCookie)
+		for _, c := range cookiesFor(operator, req) {
+			req.AddCookie(c)
+		}
+		resp, err := noRedirectClient().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=link_session_changed" {
+			t.Errorf("redirect location = %q, want the link_session_changed ssoError", loc)
+		}
+		for _, name := range []string{"admin", "operator"} {
+			if u, ok := g.deps.Users.ByUsername(name); !ok || u.OIDCSubject != "" {
+				t.Errorf("%s was linked to an identity (%q) by a refused callback", name, u.OIDCSubject)
+			}
 		}
 	}
-	if flowCookie == nil {
-		t.Fatal("expected the OIDC flow cookie to be set by link start")
-	}
-	fs, err := g.deps.OIDCState.Decode(flowCookie.Value, oidcFlowCookieMaxAge, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
 
-	// No session cookie at all on the callback request -- as if the
-	// browser had signed out (or a different browser altogether)
-	// between starting the link and the provider redirect back.
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/oidc/callback?state="+fs.State+"&code=test-code", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.AddCookie(flowCookie)
-	resp, err := noRedirectClient().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=link_session_changed" {
-		t.Errorf("redirect location = %q, want the link_session_changed ssoError", loc)
-	}
+	t.Run("no session cookie at all", func(t *testing.T) {
+		// As if the browser had signed out (or a different browser
+		// altogether) between starting the link and the provider redirect
+		// back.
+		callbackWith(t, func(*http.Client, *http.Request) []*http.Cookie { return nil })
+	})
 
-	g.deps.Users.List() // silence unused warnings if any
+	t.Run("another account's session", func(t *testing.T) {
+		// The browser signed out of admin and in as operator while the
+		// provider round trip was in flight.
+		callbackWith(t, func(operator *http.Client, req *http.Request) []*http.Cookie {
+			return operator.Jar.Cookies(req.URL)
+		})
+	})
 }
 
 // TestOIDCLinkNonAdminLosesLocalPassword covers completeOIDCLink's
@@ -1320,5 +1384,81 @@ func TestSSOFirstSignInAuditsTheCreation(t *testing.T) {
 	f.signIn(t, "newcomer", []string{"other"})
 	if n := len(creates()); n != 1 {
 		t.Errorf("%d user.create records after a second sign-in, want still 1", n)
+	}
+}
+
+// A failed callback's warning says why (#80): a provider that refused
+// the code exchange, a token that did not verify and an account store
+// that could not save all read differently, where each used to be a
+// bare ssoError code. The token endpoint's raw body is not logged --
+// only its status, error code and description -- since it is the
+// provider's text and may echo what was sent to it.
+func TestOIDCCallbackFailureLogNamesTheCause(t *testing.T) {
+	cases := []struct {
+		name, code string
+		want       []string
+		setup      func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState)
+	}{
+		{"exchange refused", "provider_error", []string{"401", "invalid_client", "client authentication failed"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.TokenErrorStatus = http.StatusUnauthorized
+			fp.TokenErrorBody = `{"error":"invalid_client","error_description":"client authentication failed","echo":"raw-body-marker"}`
+		}},
+		{"provider unreachable", "provider_error", []string{"exchanging authorization code"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.Server.Close()
+		}},
+		{"token does not verify", "verification_failed", []string{"verifying id_token"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.NextIDToken = fp.SignNoneAlgorithm(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+		}},
+		{"account store fails", "login_failed", []string{"save refused"}, func(t *testing.T, g *Gate, fp *testutil.FakeProvider, fs oidc.FlowState) {
+			fp.NextIDToken = fp.SignRS256(t, fp.DefaultClaims(oidcTestClientID, fs.Nonce))
+			backend := &budgetBackend{inner: persist.NewMemory(), left: -1}
+			users := openTrackedStore(t, backend)
+			if _, err := users.Register("setup-admin", "setup-admin-password", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			backend.left = 0
+			g.deps.Users = users
+		}},
+		{"provider reported an error", "provider_error", []string{"access_denied"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+			fs, err := oidc.NewFlowState(time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := "state=" + fs.State + "&code=test-code"
+			if tc.setup == nil {
+				query = "state=" + fs.State + "&error=access_denied"
+			} else {
+				tc.setup(t, g, fp, fs)
+			}
+			logs := &warnRecorder{}
+			g.cfg.Log = slog.New(logs)
+
+			resp, err := noRedirectClient().Do(oidcCallbackRequest(t, g, ts, fs, query))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if want := testLoginPath + "?ssoError=" + tc.code; resp.Header.Get("Location") != want {
+				t.Fatalf("redirect location = %q, want %q", resp.Header.Get("Location"), want)
+			}
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			if len(logs.msgs) != 1 {
+				t.Fatalf("got %d warnings, want one: %q", len(logs.msgs), logs.msgs)
+			}
+			line := logs.msgs[0]
+			for _, w := range tc.want {
+				if !strings.Contains(line, "cause=") || !strings.Contains(line, w) {
+					t.Errorf("warning %q does not give the cause (want %q)", line, w)
+				}
+			}
+			if strings.Contains(line, "raw-body-marker") {
+				t.Errorf("warning %q carries the token endpoint's raw body", line)
+			}
+		})
 	}
 }

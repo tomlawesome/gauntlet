@@ -28,6 +28,8 @@ func TestValidateUsernameRejectsHostileInput(t *testing.T) {
 		{"RTL override", "alice\u202eeslaf", "renders as a different name than it stores"},
 		{"LTR override", "alice\u202d", "bidi override"},
 		{"zero-width joiner", "ali\u200dce", "invisible, so two accounts can look identical"},
+		{"line separator", "alice\u2028admin", "a new line in some mail and chat clients"},
+		{"paragraph separator", "alice\u2029admin", "a new line in some mail and chat clients"},
 		{"leading space", " alice", "indistinguishable from alice in a list"},
 		{"trailing space", "alice ", "indistinguishable from alice in a list"},
 		{"empty", "", "no name at all"},

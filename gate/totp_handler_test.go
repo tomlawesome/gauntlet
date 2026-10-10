@@ -174,9 +174,28 @@ func TestTOTPEnrolConfirmLoginFactorAndDelete(t *testing.T) {
 
 func TestTOTPDeleteLeavingNoFactorSignsOutEverySession(t *testing.T) {
 	g, ts, _ := totpFixture(t)
+	// Both devices must hold a live session when the factor goes. Enrolling
+	// ends bob's other sessions, so deviceB signs in after it, through the
+	// second-factor step: signing in with the password alone would stop
+	// short of a session and leave nothing for the delete to revoke.
 	deviceA := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
-	totpEnrolAndConfirm(t, deviceA, ts)
-	deviceB := loggedInClient(t, ts, totpBobUsername, totpBobPassword)
+	secret, _, counter := totpEnrolAndConfirm(t, deviceA, ts)
+	deviceB := startTOTPLogin(t, ts, totpBobUsername, totpBobPassword)
+	factorResp := submitLoginFactor(t, deviceB, ts, gauntlet.GenerateTOTPCode(secret, counter+1))
+	_ = factorResp.Body.Close()
+	if factorResp.StatusCode != http.StatusOK {
+		t.Fatalf("deviceB's second-factor sign-in returned %d, want 200", factorResp.StatusCode)
+	}
+	for name, client := range map[string]*http.Client{"deviceA (the caller)": deviceA, "deviceB": deviceB} {
+		r, err := client.Get(ts.URL + "/api/protected")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("%s's session got %d before the factor was removed, want 200: it must be live for the sign-out to mean anything", name, r.StatusCode)
+		}
+	}
 
 	resp := deleteJSON(t, deviceA, ts.URL+"/api/auth/totp", totpDeleteRequest{Password: totpBobPassword})
 	defer func() { _ = resp.Body.Close() }()
@@ -459,14 +478,13 @@ func TestTOTPAdminClearRefusals(t *testing.T) {
 		totpEnrolAndConfirm(t, bob, ts)
 		id := totpBobID(t, g)
 
-		_ = postJSON(t, adminClient, ts.URL+"/api/auth/users",
-			createUserRequest{Username: "operator", Password: "operator-password-placeholder", Role: "user"}).Body.Close()
-		operator := loggedInClient(t, ts, "operator", "operator-password-placeholder")
+		// Past the second-factor door, so it is the role check that answers.
+		operator := userClientPastTheDoor(t, ts, adminClient, "operator", "operator-password-placeholder")
 
-		resp := deleteJSON(t, operator, ts.URL+"/api/auth/users/"+id+"/totp", adminStepUpRequest{Password: testAdminPassword})
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusForbidden {
-			t.Errorf("a user-tier caller got %d, want 403", resp.StatusCode)
+		wantProblem(t, deleteJSON(t, operator, ts.URL+"/api/auth/users/"+id+"/totp", adminStepUpRequest{Password: testAdminPassword}),
+			http.StatusForbidden, classForbidden)
+		if u, ok := g.deps.Users.Get(id); !ok || !u.HasActiveTOTP() {
+			t.Error("a refused request cleared the factor anyway")
 		}
 	})
 

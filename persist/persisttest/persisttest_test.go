@@ -1,6 +1,7 @@
 package persisttest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -46,10 +47,19 @@ const (
 	racyCompareAndSwap
 	// closeFails returns an error from Close.
 	closeFails
+	// reformatsBytes stores the document with its spaces removed, the way
+	// a jsonb column normalises whitespace.
+	reformatsBytes
+	// emptyIsAbsent treats an empty document as no document: the version
+	// moves on, but the store still reports it was never written.
+	emptyIsAbsent
+	// leftoverOnUnwritten answers a Load of a store never written with
+	// bytes it does not have, though it says no document exists.
+	leftoverOnUnwritten
 )
 
 func (f flaw) String() string {
-	return [...]string{"noFlaw", "dropsWrites", "ignoresVersion", "cachesReads", "racyCompareAndSwap", "closeFails"}[f]
+	return [...]string{"noFlaw", "dropsWrites", "ignoresVersion", "cachesReads", "racyCompareAndSwap", "closeFails", "reformatsBytes", "emptyIsAbsent", "leftoverOnUnwritten"}[f]
 }
 
 // storage is what every fakeBackend over one store shares.
@@ -89,6 +99,9 @@ func (b *fakeBackend) Load(ctx context.Context) (persist.Snapshot, error) {
 		snap.Payload = append([]byte{}, b.s.payload...)
 	}
 	b.s.mu.Unlock()
+	if b.flaw == leftoverOnUnwritten && !snap.Exists {
+		snap.Payload = []byte("leftover")
+	}
 	if b.flaw == cachesReads {
 		b.cache = &snap
 	}
@@ -120,6 +133,12 @@ func (b *fakeBackend) Save(ctx context.Context, payload []byte, expect int64) (i
 		return next, nil
 	}
 	s.payload, s.version, s.exists = append([]byte{}, payload...), next, true
+	if b.flaw == reformatsBytes {
+		s.payload = bytes.ReplaceAll(s.payload, []byte(" "), nil)
+	}
+	if b.flaw == emptyIsAbsent && len(payload) == 0 {
+		s.exists = false
+	}
 	if b.flaw == cachesReads {
 		b.mu.Lock()
 		b.cache = &persist.Snapshot{Payload: append([]byte{}, payload...), Version: next, Exists: true}
@@ -248,6 +267,9 @@ func TestSuiteFailsEachBrokenBackend(t *testing.T) {
 		{ignoresVersion, []string{stale, unwritten, create, second, concurrent}},
 		{cachesReads, []string{second, versionRead, concurrent}},
 		{racyCompareAndSwap, []string{concurrent}},
+		{reformatsBytes, []string{roundTrip}},
+		{emptyIsAbsent, []string{empty}},
+		{leftoverOnUnwritten, []string{load}},
 		{closeFails, []string{load, roundTrip, empty, chain, stale, unwritten, create, second, versionRead, concurrent, closeUnused}},
 	}
 	for _, c := range cases {

@@ -1,6 +1,6 @@
 //go:build unix
 
-package persist
+package atomicfile
 
 import (
 	"errors"
@@ -9,13 +9,13 @@ import (
 	"syscall"
 )
 
-// copyOwner gives f the owner and group of the file described by was,
+// CopyOwner gives f the owner and group of the file described by was,
 // which f is about to replace by rename. Permission denied is not an
 // error: only root may give a file away, and a writer that is not root
-// but may replace the store is in practice its owner already, so the
+// but may replace the file is in practice its owner already, so the
 // chown it was refused would have changed nothing that matters. Any
 // other failure is real and fails the write.
-func copyOwner(f *os.File, was fs.FileInfo) error {
+func CopyOwner(f *os.File, was fs.FileInfo) error {
 	st, ok := was.Sys().(*syscall.Stat_t)
 	if !ok {
 		return nil

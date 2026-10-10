@@ -105,6 +105,12 @@ func (g *Gate) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		case gauntlet.ErrPasswordBlocked, gauntlet.ErrPasswordContext:
 			g.writeAuthError(w, r, err, http.StatusBadRequest, classInvalidRequest)
 			return
+		case gauntlet.ErrResetDuringChange:
+			// An admin reset landed while this change was being
+			// checked: the reset stands, this session is already
+			// ended by it, and the owner signs in with its code.
+			g.writeAuthError(w, r, err, http.StatusConflict, classConflict)
+			return
 		}
 		// The 500 tells the caller nothing by design; the log is the
 		// only place an operator can find out why.

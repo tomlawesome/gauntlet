@@ -1259,3 +1259,36 @@ func TestWritesPickUpAnotherProcessesAccountFirst(t *testing.T) {
 		})
 	}
 }
+
+// A sign-in with the old password whose check was already running when
+// a password change landed must not get a session: the change ends
+// every session issued before it, and one issued after it from the old
+// password would outlive that (#80). The hash is compared again under
+// the write lock, as the reset-code branch compares its own.
+func TestAuthenticateRefusesAPasswordChangedDuringTheCheck(t *testing.T) {
+	s := openTestStoreWithAdmin(t)
+	if _, err := s.CreateUser("alice", "alice-old-password", RoleUser, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	testHookAuthenticateVerified = func() {
+		if changed {
+			return
+		}
+		changed = true
+		if err := s.SetPassword("alice", "alice-new-password", time.Now()); err != nil {
+			t.Errorf("SetPassword: %v", err)
+		}
+	}
+	t.Cleanup(func() { testHookAuthenticateVerified = nil })
+
+	if u, err := s.Authenticate("alice", "alice-old-password", time.Now()); err != ErrInvalidCredentials {
+		t.Fatalf("Authenticate with the password changed mid-check = (%v, %v), want ErrInvalidCredentials", u, err)
+	}
+	if !changed {
+		t.Fatal("the hook never ran")
+	}
+	if _, err := s.Authenticate("alice", "alice-new-password", time.Now()); err != nil {
+		t.Errorf("the new password does not sign in: %v", err)
+	}
+}

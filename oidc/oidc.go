@@ -19,6 +19,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -81,8 +82,9 @@ type Identity struct {
 
 // claimValues reads one claim as a list of strings, tolerating the three
 // shapes providers actually emit: a list, a single string, or a list
-// containing non-strings. Anything it can't interpret yields no values,
-// which Policy treats as a refusal rather than a pass.
+// containing non-strings. Blank values (empty or whitespace-only) are
+// dropped, so one never counts as a group. Anything it can't interpret
+// yields no values, which Policy treats as a refusal rather than a pass.
 func (i *Identity) claimValues(name string) []string {
 	raw, ok := i.Claims[name]
 	if !ok {
@@ -90,7 +92,7 @@ func (i *Identity) claimValues(name string) []string {
 	}
 	switch v := raw.(type) {
 	case string:
-		if v == "" {
+		if strings.TrimSpace(v) == "" {
 			return nil
 		}
 		return []string{v}
@@ -101,7 +103,7 @@ func (i *Identity) claimValues(name string) []string {
 	case []any:
 		var out []string
 		for _, item := range v {
-			if s, ok := item.(string); ok && s != "" {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
 				out = append(out, s)
 			}
 		}
@@ -135,6 +137,11 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	// a public provider sign itself in.
 	if err := AllowIssuerWithPolicy(cfg.IssuerURL, cfg.Policy); err != nil {
 		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	// A blank allow-list entry (a trailing comma in an app's setting) is
+	// refused at startup, not left to widen access (#91).
+	if err := cfg.Policy.Validate(); err != nil {
+		return nil, err
 	}
 
 	timeout := cfg.HTTPTimeout

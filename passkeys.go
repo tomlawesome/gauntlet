@@ -33,6 +33,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 const (
@@ -46,6 +48,12 @@ const (
 	// generous for "YubiKey 5C NFC (backup)" while keeping the list
 	// readable and the stored document small.
 	maxPasskeyNameLength = 64
+	// maxPasskeyTransports and maxPasskeyTransportLength bound what is
+	// kept of a passkey's Transports (see boundTransports): WebAuthn
+	// defines six values, so eight leaves room for new ones, and the
+	// longest defined value, "smart-card", is ten bytes.
+	maxPasskeyTransports      = 8
+	maxPasskeyTransportLength = 32
 )
 
 var (
@@ -59,6 +67,12 @@ var (
 	// so a caller can answer without auditing or notifying a removal
 	// that never happened.
 	ErrNoPasskeys = errors.New("gauntlet: this account has no passkeys")
+	// ErrNoSecondFactors is returned by ClearAllSecondFactors when the
+	// account has nothing to clear: no authenticator app (live or
+	// pending), no passkey, no recovery codes and nothing on hold; and
+	// by RegenerateRecoveryCodes when it has no live second factor (#94).
+	// Nothing is written.
+	ErrNoSecondFactors = errors.New("gauntlet: this account has no second factor to clear")
 	// ErrPasskeyLimitReached is returned by AddPasskey once an account
 	// already holds maxPasskeysPerAccount credentials.
 	ErrPasskeyLimitReached = fmt.Errorf("gauntlet: an account may hold at most %d passkeys -- remove one before adding another", maxPasskeysPerAccount)
@@ -69,6 +83,14 @@ var (
 	// credential is never reported as "limit reached" merely because
 	// the account happens to be full.
 	ErrPasskeyDuplicate = errors.New("gauntlet: this passkey is already registered to this account")
+	// ErrPasskeyNameInvalid is returned by AddPasskey, RenamePasskey and
+	// HoldFirstPasskey for a name holding a control or format character,
+	// a line or paragraph separator, invalid UTF-8 (#89) or U+FFFD
+	// (#90): a name is
+	// plain text, shown in lists and in notices to the account's owner.
+	// Nothing is stored or changed. A blank name is not an error; it
+	// becomes "Passkey <n>".
+	ErrPasskeyNameInvalid = errors.New("gauntlet: passkey name contains characters that are not allowed")
 	// ErrPasskeyCeremonyInvalid is wrapped by gauntlet/passkey's
 	// FinishRegistration and FinishLogin (PasskeyCeremony), and FinishSignIn (PasskeySignIn), whenever the
 	// sealed ceremony state is unusable: it fails the authentication
@@ -232,7 +254,8 @@ type Passkey struct {
 	// RecordPasskeyAssertionIfFresh below.
 	SignCount uint32 `json:"signCount"`
 	// Transports is what the authenticator reported it can be reached
-	// over (usb, nfc, ble, internal, hybrid, ...) at registration.
+	// over (usb, nfc, ble, internal, hybrid, ...) at registration --
+	// at most eight well-formed entries once stored (boundTransports).
 	Transports []string `json:"transports,omitempty"`
 	// Flags carries the four authenticator flags a real WebAuthn
 	// credential exposes, reproduced here as PasskeyFlags so this
@@ -275,6 +298,22 @@ type PasskeyFlags struct {
 	BackupState    bool `json:"backupState"`
 }
 
+// checkPasskeyName refuses a name that is not plain text, U+FFFD
+// included (plaintext.ValidWithin, #90), before normalisePasskeyName
+// trims, cuts or defaults it: an unprintable character past the 64th
+// would otherwise be cut off unseen, and one among spaces trimmed away,
+// so the answer would depend on where it sat. Shared by AddPasskey,
+// RenamePasskey and HoldFirstPasskey so the three can't drift apart.
+//
+// The limit given is len(name), which no name's character count can
+// pass: a long name is cut to maxPasskeyNameLength, not refused.
+func checkPasskeyName(name string) error {
+	if !plaintext.ValidWithin(name, len(name)) {
+		return ErrPasskeyNameInvalid
+	}
+	return nil
+}
+
 // normalisePasskeyName trims name, bounds it to maxPasskeyNameLength
 // runes, and falls back to a numbered default ("Passkey <n>") if what's
 // left is empty. Shared by AddPasskey and RenamePasskey so a stored
@@ -294,6 +333,50 @@ func normalisePasskeyName(name string, n int) string {
 	return trimmed
 }
 
+// storedPasskey is the credential as AddPasskey and HoldFirstPasskey
+// store it: a copy of pk sharing no slice with the caller's value, its
+// name normalised (n as in normalisePasskeyName) and its transports
+// bounded. The one place a passkey record is built, so the two
+// registration paths cannot drift apart.
+func storedPasskey(pk Passkey, n int) Passkey {
+	p := pk.clone()
+	p.Name = normalisePasskeyName(pk.Name, n)
+	p.Transports = boundTransports(pk.Transports)
+	return p
+}
+
+// boundTransports keeps at most maxPasskeyTransports entries of in,
+// each 1 to maxPasskeyTransportLength bytes of printable ASCII (0x21 to
+// 0x7e), first-seen order kept, and drops every other entry and every
+// repeat; a dropped entry takes no place in the eight. WebAuthn Level 3
+// s5.8.4 (AuthenticatorTransport) defines six values and has clients
+// ignore ones they do not know, so the list is only a hint sent back in
+// allowCredentials: an entry is dropped, never a registration refused.
+// The bound is what stops a registration storing an unbounded list of
+// arbitrary strings in the accounts document.
+func boundTransports(in []string) []string {
+	var out []string
+	for _, t := range in {
+		if len(out) == maxPasskeyTransports {
+			break
+		}
+		if len(t) == 0 || len(t) > maxPasskeyTransportLength || slices.Contains(out, t) {
+			continue
+		}
+		printable := true
+		for i := range len(t) {
+			if t[i] < 0x21 || t[i] > 0x7e {
+				printable = false
+				break
+			}
+		}
+		if printable {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // findPasskeyIndex returns the index of the passkey on u matching
 // credID by exact bytes, or -1. Shared by every method below that acts
 // on one specific credential.
@@ -310,19 +393,43 @@ func findPasskeyIndex(u *User, credID []byte) int {
 // the store-layer half of the registration ceremony gauntlet/passkey
 // runs (PasskeyCeremony.FinishRegistration). pk arrives fully populated
 // by the caller. The passkey is live at once and no recovery codes are
-// minted: what gate does for an account that already has a second
-// factor. An account's first factor is held with its codes instead,
-// until confirmed (HoldFirstPasskey, ConfirmHeldEnrolment; #58).
+// minted, unconditionally: on an account with no other second factor
+// that leaves a live passkey with no recovery codes, so gate uses
+// AddLaterPasskey, which refuses that case. An account's first factor
+// is held with its codes instead, until confirmed (HoldFirstPasskey,
+// ConfirmHeldEnrolment; #58).
 //
 // The credential ID is checked against every passkey already on the
 // account before the account's capacity is: ErrPasskeyDuplicate takes
 // priority over ErrPasskeyLimitReached, so an authenticator presented
 // twice against a full account is told it's already registered rather
-// than that the account is full. Name is normalised (see
-// normalisePasskeyName) before it's stored. Returns the stored Passkey,
-// with its normalised name, so the caller's response doesn't have to
-// re-derive it.
+// than that the account is full. Before either, a name that is not
+// plain text is refused with ErrPasskeyNameInvalid and nothing is
+// stored. Name is normalised (see normalisePasskeyName) and
+// Transports bounded (see boundTransports) before it's stored. Returns
+// the stored Passkey, with its normalised name, so the caller's
+// response doesn't have to re-derive it.
 func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
+	return s.addPasskey(userID, pk, false)
+}
+
+// AddLaterPasskey is AddPasskey for a passkey added beside a live
+// second factor, whose recovery codes stand: it refuses with
+// ErrNoOtherSecondFactor, storing nothing, when the account has none.
+// That is decided in the same locked write that adds the passkey
+// (check-and-set, as HoldFirstPasskey's ErrSecondFactorExists is), so a
+// factor removed after the caller looked -- which took the codes with
+// it -- cannot leave this passkey live with no codes (#80). The caller
+// starts again on the first-factor path, HoldFirstPasskey.
+func (s *Store) AddLaterPasskey(userID string, pk Passkey) (Passkey, error) {
+	return s.addPasskey(userID, pk, true)
+}
+
+// addPasskey is AddPasskey, and with later set AddLaterPasskey.
+func (s *Store) addPasskey(userID string, pk Passkey, later bool) (Passkey, error) {
+	if err := checkPasskeyName(pk.Name); err != nil {
+		return Passkey{}, err
+	}
 	if !s.Persisted() {
 		return Passkey{}, ErrNotPersisted
 	}
@@ -346,11 +453,14 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 		if len(u.Passkeys) >= maxPasskeysPerAccount {
 			return ErrPasskeyLimitReached
 		}
+		if later && !u.HasSecondFactor() {
+			return ErrNoOtherSecondFactor
+		}
 		// Copied in and out, as the other passkey methods do: the
 		// stored credential must not share its ID, PublicKey or
-		// Transports with the caller's value or with what is returned.
-		p := pk.clone()
-		p.Name = normalisePasskeyName(pk.Name, len(u.Passkeys)+1)
+		// Transports with the caller's value or with what is returned
+		// (storedPasskey copies in).
+		p := storedPasskey(pk, len(u.Passkeys)+1)
 		u.Passkeys = append(u.Passkeys, p)
 		added = p.clone()
 		return nil
@@ -366,8 +476,12 @@ func (s *Store) AddPasskey(userID string, pk Passkey) (Passkey, error) {
 // cosmetic and reversible, unlike DeletePasskey below. Runs the same
 // normalisation AddPasskey does, so a rename to blank or to something
 // absurdly long behaves the same way giving that name at registration
-// would have.
+// would have. A name that is not plain text is refused with
+// ErrPasskeyNameInvalid and the stored name is left as it was.
 func (s *Store) RenamePasskey(userID string, credID []byte, name string) (Passkey, error) {
+	if err := checkPasskeyName(name); err != nil {
+		return Passkey{}, err
+	}
 	if !s.Persisted() {
 		return Passkey{}, ErrNotPersisted
 	}
@@ -583,7 +697,8 @@ func (s *Store) ClearPasskeys(userID string) error {
 // "I've lost everything" recovery path: unlike DeletePasskey,
 // ClearPasskeys and ClearTOTP there is no factor-remaining check to make
 // here -- there is nothing left standing after this call, by
-// construction.
+// construction. An account with nothing to clear is ErrNoSecondFactors,
+// and nothing is written.
 func (s *Store) ClearAllSecondFactors(userID string) error {
 	if !s.Persisted() {
 		return ErrNotPersisted
@@ -599,6 +714,11 @@ func (s *Store) ClearAllSecondFactors(userID string) error {
 		u, ok := st.byID[userID]
 		if !ok {
 			return ErrUserNotFound
+		}
+		// Not errNoChange, which mutate answers with nil: the caller
+		// must hear that nothing was removed, not a success.
+		if u.TOTPSecret == "" && len(u.Passkeys) == 0 && len(u.RecoveryCodes) == 0 && u.HeldEnrolment == nil {
+			return ErrNoSecondFactors
 		}
 		clearTOTPFields(u)
 		u.Passkeys = nil

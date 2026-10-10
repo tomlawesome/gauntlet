@@ -2,12 +2,16 @@ package gate
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/groupname"
 	"github.com/tomlawesome/gauntlet/oidc"
 )
 
@@ -52,17 +56,55 @@ func (g *Gate) redirectWithSSOError(w http.ResponseWriter, r *http.Request, code
 // failSSO is redirectWithSSOError plus a Warn line, so an operator whose
 // users keep landing back on the login page can see why. identity is
 // the verified identity, or nil before one exists; its subject and
-// issuer are quoted, as the provider chose them. Rated like the other
-// refusals a stranger can send at will (warnRated): most of these need
-// no more than a request to the callback URL.
-func (g *Gate) failSSO(w http.ResponseWriter, r *http.Request, code string, identity *oidc.Identity) {
+// issuer are quoted, as the provider chose them. cause, when not nil,
+// is what went wrong behind the code (ssoCause), so a provider that is
+// down, a wrong client secret and a failing disk do not read the same
+// (#80). Rated like the other refusals a stranger can send at will
+// (warnRated): most of these need no more than a request to the
+// callback URL.
+func (g *Gate) failSSO(w http.ResponseWriter, r *http.Request, code string, identity *oidc.Identity, cause error) {
 	address := g.cfg.ClientIP(r)
 	msg := fmt.Sprintf("gate: SSO callback failed: ssoError=%s from=%q", code, address)
 	if identity != nil {
 		msg += fmt.Sprintf(" subject=%q issuer=%q", identity.Subject, identity.Issuer)
 	}
+	if cause != nil {
+		msg += fmt.Sprintf(" cause=%q", ssoCause(cause))
+	}
 	g.warnRated("sso "+code+" "+address, msg)
 	g.redirectWithSSOError(w, r, code)
+}
+
+// maxSSOCause bounds the cause failSSO logs: much of it can be text a
+// provider, or anyone calling the callback, chose.
+const maxSSOCause = 300
+
+// ssoCause is the text failSSO logs for err. A refusal from the token
+// endpoint is its status, error code and description only, never the
+// raw body oauth2 would print, which is the provider's own text and may
+// echo what was sent to it. Nothing here carries a secret: the client
+// secret and the PKCE verifier are sent, never part of an error, and the
+// authorization code is not in the token endpoint's URL. Cut to
+// maxSSOCause bytes on a character boundary; failSSO quotes it.
+func ssoCause(err error) string {
+	msg := err.Error()
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) {
+		msg = "the token endpoint refused the code exchange"
+		if re.Response != nil {
+			msg += ": " + re.Response.Status
+		}
+		if re.ErrorCode != "" {
+			msg += ": " + re.ErrorCode
+		}
+		if re.ErrorDescription != "" {
+			msg += " (" + re.ErrorDescription + ")"
+		}
+	}
+	if len(msg) > maxSSOCause {
+		msg = strings.ToValidUTF8(msg[:maxSSOCause], "") + "..."
+	}
+	return msg
 }
 
 // handleOIDCLogin starts a login: generates fresh PKCE/state/nonce
@@ -185,13 +227,13 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.FlowState, identity *oidc.Identity, now time.Time) {
 	caller, ok := g.sessionUser(r, now)
 	if !ok || caller.ID != fs.LinkUserID {
-		g.failSSO(w, r, "link_session_changed", identity)
+		g.failSSO(w, r, "link_session_changed", identity, nil)
 		return
 	}
 
 	if err := g.deps.Users.LinkOIDCIdentity(caller.ID, identity.Issuer, identity.Subject, now); err != nil {
 		if err == gauntlet.ErrOIDCIdentityTaken {
-			g.failSSO(w, r, "link_identity_taken", identity)
+			g.failSSO(w, r, "link_identity_taken", identity, nil)
 			return
 		}
 		g.logWarn("linking SSO identity to account " + caller.ID + " failed: " + err.Error())
@@ -251,46 +293,51 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// taken.
 	g.clearOIDCFlowCookie(w)
 	if cookieErr != nil {
-		g.failSSO(w, r, "state_mismatch", nil)
+		g.failSSO(w, r, "state_mismatch", nil, errors.New("no flow cookie: the sign-in was not started from this browser, or it took longer than the cookie lives"))
 		return
 	}
 
 	now := g.now()
 	fs, err := g.deps.OIDCState.Decode(cookie.Value, oidcFlowCookieMaxAge, now)
 	if err != nil {
-		g.failSSO(w, r, "state_mismatch", nil)
+		g.failSSO(w, r, "state_mismatch", nil, err)
 		return
 	}
 
 	q := r.URL.Query()
 	if q.Get("error") != "" {
 		// The provider itself reported a failure (access_denied, etc) --
-		// never surfaced verbatim, see this handler's doc comment.
-		g.failSSO(w, r, "provider_error", nil)
+		// never surfaced verbatim to the browser, see this handler's doc
+		// comment; logged, quoted and cut short.
+		cause := "the provider answered error=" + q.Get("error")
+		if d := q.Get("error_description"); d != "" {
+			cause += " (" + d + ")"
+		}
+		g.failSSO(w, r, "provider_error", nil, errors.New(cause))
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(fs.State)) != 1 {
-		g.failSSO(w, r, "state_mismatch", nil)
+		g.failSSO(w, r, "state_mismatch", nil, errors.New("the state parameter does not match this browser's sign-in"))
 		return
 	}
 	code := q.Get("code")
 	if code == "" {
-		g.failSSO(w, r, "provider_error", nil)
+		g.failSSO(w, r, "provider_error", nil, errors.New("the provider sent no code"))
 		return
 	}
 
 	tok, err := g.deps.OIDC.Exchange(r.Context(), code, fs.CodeVerifier)
 	if err != nil {
-		g.failSSO(w, r, "provider_error", nil)
+		g.failSSO(w, r, "provider_error", nil, err)
 		return
 	}
 	identity, err := g.deps.OIDC.VerifyIDToken(r.Context(), tok)
 	if err != nil {
-		g.failSSO(w, r, "verification_failed", nil)
+		g.failSSO(w, r, "verification_failed", nil, err)
 		return
 	}
 	if !oidc.VerifyNonce(identity.Nonce, fs.Nonce) {
-		g.failSSO(w, r, "state_mismatch", nil)
+		g.failSSO(w, r, "state_mismatch", nil, errors.New("the token's nonce does not match this browser's sign-in"))
 		return
 	}
 
@@ -330,7 +377,7 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	wantRole, _ := g.ssoRoleFor(identity)
 	signIn, err := g.deps.Users.FindOrCreateOIDCUserWithRole(identity.Issuer, identity.Subject, ssoUsernameHint(identity), wantRole, now)
 	if err != nil {
-		g.failSSO(w, r, "login_failed", identity)
+		g.failSSO(w, r, "login_failed", identity, err)
 		return
 	}
 	user := signIn.User
@@ -383,11 +430,12 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 // Policy.RoleWithoutGroup ("viewer" when unset). The second result is
 // false when no map is configured, which leaves every role alone.
 //
-// Groups match like AllowedGroups -- trimmed, case-insensitive -- and
-// the highest wins, so the result does not depend on the order the
-// provider lists groups in. Only user and viewer are ever given: gate.New
-// refuses any other value, and one that got past it here would fall to
-// the lowest role rather than a higher one (ADR-0013).
+// Groups match like AllowedGroups -- trimmed, case-insensitive, by the
+// same groupname.Match -- and the highest wins, so the result does not
+// depend on the order the provider lists groups in. Only user and
+// viewer are ever given: gate.New refuses any other value, and one that
+// got past it here would fall to the lowest role rather than a higher
+// one (ADR-0013).
 func (g *Gate) ssoRoleFor(identity *oidc.Identity) (gauntlet.Role, bool) {
 	p := g.deps.OIDCPolicy
 	if len(p.RoleFromGroups) == 0 {
@@ -396,7 +444,7 @@ func (g *Gate) ssoRoleFor(identity *oidc.Identity) (gauntlet.Role, bool) {
 	var best gauntlet.Role
 	for _, group := range p.Groups(identity) {
 		for name, value := range p.RoleFromGroups {
-			if !strings.EqualFold(strings.TrimSpace(group), strings.TrimSpace(name)) {
+			if !groupname.Match(group, name) {
 				continue
 			}
 			role := gauntlet.Role(value)

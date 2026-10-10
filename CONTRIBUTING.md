@@ -10,10 +10,14 @@ contributors.
 ## Branching
 
 Branch from `dev` and send merge requests to `dev`, the default branch.
-The repository also has `preview` and `main` branches, which CI copies
-to the GitHub mirror; only the owner merges `dev` into them. Never
-branch from them or send work to them. A release is a version tag on
-`dev`, created by a button in the `dev` pipeline; see [docs/releasing.md](docs/releasing.md).
+The repository also has `preview` and `main` branches, which the build
+system copies to the public GitHub copy of the repository. Only the
+owner merges into them, in the order `dev`, then `preview`, then `main`,
+by merge request. Never branch from them or send work to them. A release
+is a version tag on `main`, made by the owner pressing a release button
+in the automated build that runs on `main`; `dev` and `preview` are not
+releases. See
+[docs/releasing.md](docs/releasing.md).
 
 ## Before starting work
 
@@ -26,14 +30,15 @@ description or a commit message.
 
 ## Testing expectations
 
-- New behavior needs a test that would fail without it -- prefer testing
-  observable behavior over internal implementation details.
-- A bug fix should include a regression test reproducing the bug where
-  practical.
+- Write the test first, for new features and bug fixes alike. Write it
+  from the issue, run it, and watch it fail before writing the code that
+  makes it pass. Prefer testing observable behavior over
+  internal implementation details.
 - Where gauntlet's code is copied from mikroview (the application
-  gauntlet's auth code was factored out of; see [the
-  README](README.md)), the port carries mikroview's own tests across
-  with it. It is not re-tested from scratch. See
+  gauntlet's auth code was factored out of; see
+  [ADR-0001](docs/adr/0001-shared-auth-module.md)), the copied code
+  keeps mikroview's original tests rather than being re-tested from
+  scratch; only behaviour that differs from mikroview gets a new test. See
   [docs/testing.md](docs/testing.md).
 
 ## Secrets

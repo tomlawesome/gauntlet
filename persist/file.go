@@ -6,6 +6,8 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
+
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
 )
 
 // fileBackend is a Backend over one JSON (or any) document in a single
@@ -74,73 +76,13 @@ func contentVersion(data []byte) int64 {
 	return v
 }
 
-// writeFileAtomic replaces path's contents crash-safely: a temp file is
-// written in path's own directory, fsynced, renamed over path, and the
-// directory is fsynced after the rename.
-//
-// The rename puts a new inode at path, owned by whoever wrote it, so
-// when path already exists the temp file first takes on its owner and
-// group. Otherwise one save from an app's CLI run with sudo leaves a
-// store the server sharing it (persist.go's Backend doc) can no longer
-// read or replace, and every save after that fails. The mode is always
-// perm, not the old file's: a store loosened by hand is tightened again
-// on the next save rather than kept as it was found.
+// writeFileAtomic replaces path's contents crash-safely, keeping an
+// existing file's owner and group and always setting perm: see
+// atomicfile.WriteFile, which this is. A store shared between a server
+// and an app's CLI run with sudo (persist.go's Backend doc) stays
+// readable by both.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	existing, err := os.Stat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	// Best effort on both counts: the function is already returning the
-	// real error from whichever step failed, and there is nothing more
-	// useful to do with a failure to close or remove a temp file we are
-	// abandoning anyway.
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-	}
-	if err := f.Chmod(perm); err != nil {
-		cleanup()
-		return err
-	}
-	if existing != nil {
-		if err := copyOwner(f, existing); err != nil {
-			cleanup()
-			return err
-		}
-	}
-	if _, err := f.Write(data); err != nil {
-		cleanup()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if d, err := os.Open(dir); err == nil {
-		// Best effort: some filesystems refuse to sync a directory, and
-		// a failure here costs durability of the rename, not
-		// correctness of the bytes.
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return nil
+	return atomicfile.WriteFile(path, data, perm)
 }
 
 // Save atomically replaces the file. expect is checked against

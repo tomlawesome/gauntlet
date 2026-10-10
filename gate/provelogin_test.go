@@ -635,3 +635,62 @@ func TestProveSSOCallback(t *testing.T) {
 		}
 	}
 }
+
+// -- begin's limits (#80) -----------------------------------------------------
+
+// Each prove begin is counted on the account's own begin budget, as
+// login/factor/begin's are (#85): a held sign-in's ticket cannot mint
+// passkey challenges without limit for its life. Past the budget begin
+// is 429 rate-limited, with no ceremony cookie.
+func TestProveBeginIsCountedOnTheAccountsBudget(t *testing.T) {
+	e := newProveEnv(t)
+	const threshold = 3
+	e.g.deps.Limiter = mustNewLoginLimiter(t, threshold, time.Minute)
+	c := e.held(t)
+	for i := range threshold {
+		if resp := e.proveBegin(t, c); resp.StatusCode != http.StatusOK {
+			status, body := readAll(t, resp)
+			t.Fatalf("begin %d = %d %s, want 200", i+1, status, body)
+		} else {
+			_ = resp.Body.Close()
+		}
+	}
+	resp := e.proveBegin(t, c)
+	status, body := readAll(t, resp)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("begin past the budget = %d %s, want 429", status, body)
+	}
+	for _, ck := range resp.Cookies() {
+		if ck.Name == passkeyAssertCookieName && ck.MaxAge >= 0 {
+			t.Error("a refused begin set a ceremony cookie")
+		}
+	}
+	if ev := lastEvent(t, e.aloneEnv); ev.Outcome != gauntlet.SignInRateLimited || ev.Method != gauntlet.SignInMethodPasskey {
+		t.Errorf("event = %+v, want rate_limited/passkey", ev)
+	}
+}
+
+// An account locked between the password and the passkey step is
+// refused at begin, before the owner is asked to touch their key, as
+// login/factor/begin refuses it: begin reads the lockout without
+// reserving anything, and login/prove still decides.
+func TestProveBeginRefusesALockedAccountEarly(t *testing.T) {
+	e := newProveEnv(t)
+	e.withFreshAddresses()
+	c := e.held(t)
+	failLoginWindow(t, e.g, e.ts, e.clock, passkeyBilboUsername)
+
+	resp := e.proveBegin(t, c)
+	status, body := readAll(t, resp)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("begin during the lockout = %d %s, want 429", status, body)
+	}
+	for _, ck := range resp.Cookies() {
+		if ck.Name == passkeyAssertCookieName && ck.MaxAge >= 0 {
+			t.Error("begin during the lockout set a ceremony cookie")
+		}
+	}
+	if ev := lastEvent(t, e.aloneEnv); ev.Outcome != gauntlet.SignInLocked || ev.LockedUntil.IsZero() || ev.Method != gauntlet.SignInMethodPasskey {
+		t.Errorf("event = %+v, want locked/passkey with its end", ev)
+	}
+}

@@ -47,6 +47,14 @@ func TestSessionCreateFromCleansAndCutsTheClient(t *testing.T) {
 			wantAddress: "",
 		},
 		{
+			// A few mail and chat clients start a new line at these
+			// (#80), as they would at a newline.
+			name:        "line and paragraph separators are dropped",
+			in:          SessionClient{Address: "198.51.100.7\u2028", UserAgent: "Agent\u2028Fake line\u2029/1"},
+			wantAgent:   "AgentFake line/1",
+			wantAddress: "198.51.100.7",
+		},
+		{
 			name:        "invalid UTF-8 is dropped",
 			in:          SessionClient{Address: "198.51.\xff100.7", UserAgent: "A\xc3\x28gent"},
 			wantAgent:   "A(gent",

@@ -46,9 +46,11 @@ var maxLoginLimiterKeys = 4096
 // failures in a row disable the account's sign-in until UnlockLogin or
 // until LoginDisableDuration has passed (#70), whichever is first. The
 // count of lockouts and the disable are written in the same write that
-// starts a lockout. Both reset only on a completed sign-in (SignedIn), a
-// new password or a disable running out -- never on a correct password
-// alone, nor on a lockout running out.
+// starts a lockout. The count of lockouts resets only on a completed
+// sign-in (SignedIn), a new password, UnlockLogin or a disable running
+// out -- never on a correct password alone, nor on a lockout running
+// out. A new password does not lift a disable: only UnlockLogin, an
+// admin's reset code (IssueResetCode) or the disable running out does.
 //
 // Separately, failed sign-in attempts are counted per source address and
 // a persistent source is banned for a day (AddressBanned,
@@ -71,12 +73,6 @@ type LoginLimiter struct {
 	addresses             map[string]addressRecord
 	lastAddressPressure   time.Time
 	addressPressureLogged bool
-
-	// resetPasses are the address-limit passes AllowAfterReset has
-	// handed out, keyed by resetPassKey. Bounded like the capped map:
-	// one is made only for an address key that map holds, and it goes
-	// once that key does or its password change leaves the window.
-	resetPasses map[string]resetPass
 
 	// wantLockout is the lockout state each account's record should
 	// carry, until syncLockout has written it: a lockout as one begins
@@ -178,16 +174,59 @@ const lockoutRetryInterval = 30 * time.Second
 // #44) is a third, kept apart from the login budget it stands in for.
 //
 // Sends of a code out of band (ReserveDelivery, #84) are a fourth, one
-// per channel: deliveryBucket + channel + ":" + account ID.
+// per channel: deliveryBucket + channel + ":" + account ID, each send
+// kept for the longer of the window and sendCapPeriod (#83).
 //
-// Passkey step-up begins (ReserveStepUpBegin, #82) are a fifth.
+// Passkey step-up begins (ReserveStepUpBegin, #82) are a fifth, and
+// second-step passkey begins (ReserveFactorBegin, #85) a sixth, with a
+// known browser's own beside it.
 const (
-	loginBucket        = "login:"
-	recheckBucket      = "password-recheck:"
-	knownBrowserBucket = "known:"
-	deliveryBucket     = "deliver:"
-	stepUpBeginBucket  = "passkey-stepup-begin:"
+	loginBucket            = "login:"
+	recheckBucket          = "password-recheck:"
+	knownBrowserBucket     = "known:"
+	deliveryBucket         = "deliver:"
+	stepUpBeginBucket      = "passkey-stepup-begin:"
+	factorBeginBucket      = "passkey-factor-begin:"
+	knownFactorBeginBucket = "passkey-factor-begin-known:"
 )
+
+// The send limits beyond the window (#83), per account and channel,
+// fixed whatever NewLoginLimiter is given: a resend cooldown that starts
+// at sendCooldownBase and doubles with each send in the last
+// sendCapPeriod, up to maxSendCooldown, and at most maxSendsPerHour
+// sends in any sendCapPeriod. Sized for a self-hosted home app, where one
+// owner rarely needs a second code and never a sixth in an hour; rate
+// limiting out-of-band sends is SP 800-63B-4 §3.1.3.2, ASVS 5.0 6.6.3
+// and the OWASP MFA cheat sheet's control against OTP flooding.
+const (
+	// sendCooldownBase is the wait after a first send: the usual
+	// "resend code" delay, long enough to stop a burst and short enough
+	// for a slow mailbox.
+	sendCooldownBase = 30 * time.Second
+	// maxSendCooldown caps the doubling at a code's lifetime (the gate's
+	// ConfirmCodeLifetime and EscapeCodeLifetime), so a wait never
+	// outlasts the code it follows. maxSendsPerHour refuses the sixth
+	// send before the doubling reaches it.
+	maxSendCooldown = 15 * time.Minute
+	// sendCapPeriod is the cap's period, twelve of the consumers'
+	// five-minute windows, so filling the window over and over cannot
+	// keep a trickle of codes going.
+	sendCapPeriod = time.Hour
+	// maxSendsPerHour is the cap: the limiter's usual five, over an hour
+	// instead of a window.
+	maxSendsPerHour = 5
+)
+
+// sendCooldown is the wait after the latest send, when the last
+// sendCapPeriod holds n sends (n >= 1): sendCooldownBase, doubled for
+// each send before the latest, never over maxSendCooldown.
+func sendCooldown(n int) time.Duration {
+	d := sendCooldownBase
+	for i := 1; i < n && d < maxSendCooldown; i++ {
+		d *= 2
+	}
+	return min(d, maxSendCooldown)
+}
 
 // ErrLimiterConfig is returned by NewLoginLimiter for a threshold or
 // window that cannot run: threshold below one would block every login
@@ -211,7 +250,6 @@ func NewLoginLimiter(threshold int, window time.Duration) (*LoginLimiter, error)
 		attempts:     make(map[string][]time.Time),
 		accounts:     make(map[string][]time.Time),
 		addresses:    make(map[string]addressRecord),
-		resetPasses:  make(map[string]resetPass),
 		wantLockout:  make(map[string]pendingLockout),
 		mem:          memoryLockouts{states: make(map[string]lockoutState)},
 		secondFactor: make(map[string]secondFactorRun),
@@ -387,9 +425,12 @@ func (l *LoginLimiter) evictOldestLocked(now time.Time) {
 		l.pruneLocked(key, now)
 	}
 	for key := range l.accounts {
+		if strings.HasPrefix(key, deliveryBucket) {
+			l.sendsLocked(key, now)
+			continue
+		}
 		l.pruneIn(l.accounts, key, now)
 	}
-	l.pruneResetPassesLocked(now)
 	target := evict.Target(maxLoginLimiterKeys)
 	if len(l.attempts) <= target {
 		return
@@ -508,19 +549,7 @@ func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountI
 	recorded := cur
 	cur = l.liftLapsedLocked(accountID, cur, now)
 	if cur.disabled() || now.Before(cur.until) {
-		// Refused. A decision this limiter has yet to save is tried
-		// again here, once per lockoutRetryInterval; so is a clamped
-		// lockout (readRecord), which while its save fails still reads
-		// as far off and lands here on every guess.
-		base := stored
-		if pending {
-			base = p.state
-		}
-		sync := l.settleLocked(accountID, base, cur, p, pending, now)
-		l.mu.Unlock()
-		if sync {
-			l.syncLockout(rec, accountID, now)
-		}
+		l.refuseAndUnlock(rec, accountID, stored, cur, p, pending, now)
 		d := AccountDecision{Disabled: cur.disabled(), Lockouts: cur.episodes}
 		if !d.Disabled {
 			d.Locked, d.LockedUntil = true, cur.until
@@ -528,11 +557,7 @@ func (l *LoginLimiter) ReserveAccountDecision(lockouts AccountLockouts, accountI
 		return d
 	}
 	key := loginBucket + accountID
-	cutoff := now.Add(-l.window)
-	if changed.After(cutoff) {
-		cutoff = changed // guesses at the old password do not count
-	}
-	entries := dropBefore(l.accounts, key, cutoff)
+	entries := l.windowEntriesLocked(key, changed, now)
 	if len(entries) >= l.threshold {
 		// Refused by the in-memory count. A lockout outlasts the window
 		// (lockoutFor), so this is reached only when the record lost a
@@ -751,10 +776,11 @@ func (l *LoginLimiter) SignedIn(lockouts AccountLockouts, accountID string, now 
 // this limiter holds about the account that the record does not -- its
 // count of attempts in the current window, a known browser's too
 // (ReserveKnownBrowser), any lockout decision it has yet to save
-// (#44), and the codes sent on every channel (ReserveDelivery, #84). Without that, the account would stay refused
-// by this process's count until the window passed, or have a disable
-// that failed to save written back over the unlock by the next refused
-// attempt's retry.
+// (#44), the codes sent on every channel (ReserveDelivery, #84) and the
+// passkey second steps begun (ReserveFactorBegin, #85). Without that,
+// the account would stay refused by this process's count until the
+// window passed, or have a disable that failed to save written back
+// over the unlock by the next refused attempt's retry.
 //
 // The run of second-factor failures is kept: an unlock is not a
 // completed sign-in, and the password those failures followed has not
@@ -789,6 +815,8 @@ func (l *LoginLimiter) UnlockLogin(lockouts AccountLockouts, accountID string) e
 	l.mu.Lock()
 	delete(l.accounts, loginBucket+accountID)
 	delete(l.accounts, knownBrowserBucket+accountID)
+	delete(l.accounts, factorBeginKey(accountID, false))
+	delete(l.accounts, factorBeginKey(accountID, true))
 	delete(l.wantLockout, accountID)
 	for key := range l.accounts {
 		if strings.HasPrefix(key, deliveryBucket) && strings.HasSuffix(key, ":"+accountID) {
@@ -850,21 +878,13 @@ func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, acc
 	recorded := cur
 	cur = l.liftLapsedLocked(accountID, cur, now)
 	if cur.disabled() {
-		// Refused, and a disable this limiter has yet to save is tried
-		// again, as ReserveAccount does while refusing.
-		base := stored
-		if pending {
-			base = p.state
-		}
-		sync := l.settleLocked(accountID, base, cur, p, pending, now)
-		l.mu.Unlock()
-		if sync {
-			l.syncLockout(rec, accountID, now)
-		}
+		// Refused only while disabled: a lockout is what this allowance
+		// lets the owner past.
+		l.refuseAndUnlock(rec, accountID, stored, cur, p, pending, now)
 		return AccountDecision{Disabled: true, Lockouts: cur.episodes}
 	}
 	key := knownBrowserBucket + accountID
-	entries := l.knownEntriesLocked(key, changed, now)
+	entries := l.windowEntriesLocked(key, changed, now)
 	if len(entries) >= l.threshold {
 		l.mu.Unlock()
 		return AccountDecision{Lockouts: cur.episodes}
@@ -893,15 +913,44 @@ func (l *LoginLimiter) ReserveKnownBrowserDecision(lockouts AccountLockouts, acc
 	return AccountDecision{Allowed: true, DisabledNow: !cur.disabled() && next.disabled(), Lockouts: next.episodes}
 }
 
-// knownEntriesLocked is a known browser's budget for key: its attempts
-// in the window, less any made before a password change (changed, zero
-// for none).
-func (l *LoginLimiter) knownEntriesLocked(key string, changed, now time.Time) []time.Time {
+// windowEntriesLocked is the attempts key holds that still count at
+// now: those in the window, less any made before a password change
+// (changed, from readRecord, zero for none), since guesses at the old
+// password do not count. An account's login budget and a known
+// browser's allowance are both cut by it, so the two cannot come to
+// disagree about which guesses a password change ended (#90).
+func (l *LoginLimiter) windowEntriesLocked(key string, changed, now time.Time) []time.Time {
 	cutoff := now.Add(-l.window)
 	if changed.After(cutoff) {
 		cutoff = changed
 	}
 	return dropBefore(l.accounts, key, cutoff)
+}
+
+// refuseAndUnlock settles an attempt on accountID that is refused --
+// disabled, or for ReserveAccount locked out -- and releases mu, which
+// the caller holds. Nothing new is decided; cur is the state the
+// refusal was decided on. A decision this limiter has yet to save is
+// tried again here, once per lockoutRetryInterval; so is a clamped
+// lockout (readRecord), which while its save fails still reads as far
+// off and lands here on every guess. It is settled against the pending
+// decision if there is one, else the record as stored -- not the
+// clamped record -- so a clamp is a change to save. ReserveAccount and
+// ReserveKnownBrowser share it, so a fix to how a refusal is saved
+// lands in both (#90).
+//
+// mu is released before syncLockout, which writes through the store
+// and its own lock.
+func (l *LoginLimiter) refuseAndUnlock(rec lockoutRecorder, accountID string, stored, cur lockoutState, p pendingLockout, pending bool, now time.Time) {
+	base := stored
+	if pending {
+		base = p.state
+	}
+	sync := l.settleLocked(accountID, base, cur, p, pending, now)
+	l.mu.Unlock()
+	if sync {
+		l.syncLockout(rec, accountID, now)
+	}
 }
 
 // ReleaseKnownBrowser is ReleaseAccount for ReserveKnownBrowser: the
@@ -923,7 +972,7 @@ func (l *LoginLimiter) ReleaseKnownBrowser(lockouts AccountLockouts, accountID s
 
 	l.mu.Lock()
 	key := knownBrowserBucket + accountID
-	full := len(l.knownEntriesLocked(key, changed, now)) >= l.threshold
+	full := len(l.windowEntriesLocked(key, changed, now)) >= l.threshold
 	l.releaseIn(l.accounts, key, now)
 	cur, p, pending := l.currentLocked(accountID, stored, record, changed, reset)
 	next := cur
@@ -1025,8 +1074,13 @@ func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool {
 }
 
 // ReserveDelivery counts one out-of-band delivery for accountID on
-// channel ("confirm", "escape"): threshold per window, per account and
-// channel, in the account map (never evicted). Never handed back: a
+// channel ("confirm", "escape"), per account and channel, in the account
+// map (never evicted), and refuses it past any of three limits: the
+// limiter's threshold per window; a resend cooldown since the latest
+// send, 30 seconds after one send in the last hour and doubling with
+// each further one (sendCooldown, #83); and five sends in any hour
+// (maxSendsPerHour, #83). A refused send is not counted, so it neither
+// spends the budget nor pushes the cooldown out. Never handed back: a
 // delivery that happened is a fact, and the mailer may have sent it
 // even when it reported an error.
 //
@@ -1035,20 +1089,39 @@ func (l *LoginLimiter) ReserveRecheck(accountID string, now time.Time) bool {
 // attempt goes back to the login budget, and the send is what must be
 // bounded instead. Counted at the point of sending, within one request,
 // so there is nothing for a later request to hand back. UnlockLogin
-// empties the account's delivery budgets (an admin's unlock means "let
-// the owner in"); SignedIn does not, so the owner signing in on a known
-// browser cannot refill a stranger's sends. Memory only: a restart
-// clears it.
+// empties the account's delivery budgets, the cooldown and hourly cap
+// with them (an admin's unlock means "let the owner in"); SignedIn does
+// not, so the owner signing in on a known browser cannot refill a
+// stranger's sends. Memory only: a restart clears it.
 func (l *LoginLimiter) ReserveDelivery(channel, accountID string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := deliveryBucket + channel + ":" + accountID
-	entries := l.pruneIn(l.accounts, key, now)
-	if len(entries) >= l.threshold {
-		return false
+	sends := l.sendsLocked(key, now)
+	if n := len(sends); n > 0 {
+		inHour, inWindow := 0, 0
+		for _, t := range sends {
+			if !t.Before(now.Add(-sendCapPeriod)) {
+				inHour++
+			}
+			if !t.Before(now.Add(-l.window)) {
+				inWindow++
+			}
+		}
+		if inHour >= maxSendsPerHour || inWindow >= l.threshold ||
+			now.Sub(sends[n-1]) < sendCooldown(max(inHour, 1)) {
+			return false
+		}
 	}
-	l.accounts[key] = append(entries, now)
+	l.accounts[key] = append(sends, now)
 	return true
+}
+
+// sendsLocked is pruneIn for a delivery key: its sends are kept for the
+// longer of the window and sendCapPeriod, so neither ReserveDelivery nor
+// evictOldestLocked's sweep drops one the hour still counts.
+func (l *LoginLimiter) sendsLocked(key string, now time.Time) []time.Time {
+	return dropBefore(l.accounts, key, now.Add(-max(l.window, sendCapPeriod)))
 }
 
 // ReserveStepUpBegin counts one passkey step-up begin for accountID
@@ -1075,6 +1148,53 @@ func (l *LoginLimiter) ReleaseStepUpBegin(accountID string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.releaseIn(l.accounts, stepUpBeginBucket+accountID, now)
+}
+
+// ReserveFactorBegin counts one begin of a passkey second login step,
+// or of the passkey proof a held sign-in owes (#80), for accountID
+// (#85): threshold per window, per account, in the account map (never
+// evicted), so a password alone cannot mint challenges without limit
+// and no flood of addresses or made-up names can reset the count. Keyed on the account because the password step has already
+// named it, and kept apart from the challenge budget the login page's
+// passkey sign-in spends per address, so filling one does not refuse
+// the other.
+//
+// knownBrowser selects the budget of a browser the account remembers
+// (Store.KnowsBrowser), asked for only once the ordinary one has
+// refused, as ReserveKnownBrowser stands in for ReserveAccount: a
+// stranger holding the password who fills the ordinary budget cannot
+// keep the owner's own browser from its passkey.
+//
+// Never handed back by the step it starts, so it spends nothing a wrong
+// guess is limited by and leaves nothing for a later request to return;
+// ReleaseFactorBegin is only for a begin the server failed to start, in
+// the same request. UnlockLogin empties both budgets; a completed
+// sign-in leaves them. Memory only: a restart clears them.
+func (l *LoginLimiter) ReserveFactorBegin(accountID string, knownBrowser bool, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := factorBeginKey(accountID, knownBrowser)
+	entries := l.pruneIn(l.accounts, key, now)
+	if len(entries) >= l.threshold {
+		return false
+	}
+	l.accounts[key] = append(entries, now)
+	return true
+}
+
+// ReleaseFactorBegin is Release for ReserveFactorBegin.
+func (l *LoginLimiter) ReleaseFactorBegin(accountID string, knownBrowser bool, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.releaseIn(l.accounts, factorBeginKey(accountID, knownBrowser), now)
+}
+
+// factorBeginKey is ReserveFactorBegin's bucket in the account map.
+func factorBeginKey(accountID string, knownBrowser bool) string {
+	if knownBrowser {
+		return knownFactorBeginBucket + accountID
+	}
+	return factorBeginBucket + accountID
 }
 
 // ReleaseRecheck is Release for ReserveRecheck.
@@ -1151,146 +1271,29 @@ func (l *LoginLimiter) syncLockout(rec lockoutRecorder, accountID string, now ti
 	l.mu.Unlock()
 }
 
-// resetPass is one entry in LoginLimiter.resetPasses: the password
-// change a pass was handed out for, whether an attempt holds it now,
-// and whether it has been used up.
-type resetPass struct {
-	address   string
-	changedAt time.Time
-	held      bool
-	ended     bool
-}
-
-func resetPassKey(addressKey, accountID string) string {
-	return addressKey + "\x00" + accountID
-}
-
-// AllowAfterReset reports whether an attempt on accountID from
-// addressKey may go ahead although addressKey is at its limit (Reserve
-// refused it), because the account's password was reset after that
-// address reached the limit (#32). It reserves nothing on addressKey;
-// the account's own counter (ReserveAccount) still applies in full.
+// Deprecated: AllowAfterReset always reports false. It was the reset
+// pass (#32): an account reset out of a lockout could sign in past its
+// address's full limit. That pass is retired (#86): a reset clears the
+// account's own count and lockout (#24) and leaves the address's limit
+// to run out like anyone else's, and a browser the account remembers
+// still gets past it on its own allowance (ReserveKnownBrowser, #44).
 //
-// A reset needs the server's command line or a code an admin issued, so
-// letting that account's next sign-in past the address limit gives an
-// attacker nothing they did not already have, while refusing it reads to
-// the operator as the reset having failed. The pass therefore holds for
-// that one account only -- other accounts tried from the address stay
-// refused -- and only when at least the threshold's worth of both the
-// address's attempts and the account's own in the window predate the
-// change: the change ended a lockout. An account changing its own
-// password while guesses at other names fill its address gets none.
-//
-// One attempt holds the pass at a time: AllowAfterReset hands it out
-// and refuses everyone else until the attempt hands it back
-// (ReleaseAfterReset) or uses it up (EndAfterReset: a session issued,
-// the right password for an account with a second factor, or a wrong
-// guess), so a burst of concurrent guesses gets one try, not one each.
-// A caller with a second step carries the owner through it itself (gate
-// does so in its pending login), so nobody can take the pass in
-// between. A later reset out of a lockout grants a fresh one; the
-// window ends it anyway.
-//
-// The change is read from lockouts as ReserveAccount reads it, so it
-// takes lockouts being the *Store itself (see lockoutRecorder), and a
-// reset made by a separate process counts once the store sees it. A
-// record still carrying a lockout gets no pass: a password change
-// clears the lockout in the same write, so a bump without that clear --
-// linking the admin to SSO -- is not a reset.
+// A caller that asks it after Reserve refused an attempt keeps the
+// refusal, which is the answer every other account at that address
+// gets; there is never a pass to hand back or use up, so
+// ReleaseAfterReset and EndAfterReset have nothing to do. Kept because
+// removing an exported method is an incompatible change, which
+// ADR-0002 allows only at a major version.
 func (l *LoginLimiter) AllowAfterReset(addressKey string, lockouts AccountLockouts, accountID string, now time.Time) bool {
-	if lockouts == nil {
-		return false
-	}
-	lockedUntil, changed := readLockout(lockouts, accountID)
-	if !lockedUntil.IsZero() || changed.IsZero() || changed.After(now) {
-		return false
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := resetPassKey(addressKey, accountID)
-	// Checked before the counts: the account's first attempt under the
-	// pass drops its pre-change guesses (ReserveAccount), so an attempt
-	// after a handed-back pass no longer sees the lockout it ended.
-	if p, ok := l.resetPasses[key]; ok && p.changedAt.Equal(changed) {
-		if p.changedAt.Before(now.Add(-l.window)) {
-			delete(l.resetPasses, key) // no attempt in the window predates it
-			return false
-		}
-		if p.ended || p.held {
-			return false
-		}
-		p.held = true
-		l.resetPasses[key] = p
-		return true
-	}
-	if countBefore(l.pruneLocked(addressKey, now), changed) < l.threshold {
-		return false
-	}
-	cutoff := now.Add(-l.window)
-	var own []time.Time
-	for _, t := range l.accounts[loginBucket+accountID] {
-		if !t.Before(cutoff) {
-			own = append(own, t)
-		}
-	}
-	if countBefore(own, changed) < l.threshold {
-		return false
-	}
-	// Rare -- a full address and a reset inside one window -- so the
-	// sweep runs here too, not only when the capped map is full.
-	l.pruneResetPassesLocked(now)
-	l.resetPasses[key] = resetPass{address: addressKey, changedAt: changed, held: true}
-	return true
+	return false
 }
 
-// countBefore counts the attempts in entries made before t.
-func countBefore(entries []time.Time, t time.Time) int {
-	n := 0
-	for _, e := range entries {
-		if e.Before(t) {
-			n++
-		}
-	}
-	return n
-}
+// Deprecated: ReleaseAfterReset does nothing: AllowAfterReset hands out
+// no pass any more (#86), so there is none to hand back. Kept until a
+// major version (ADR-0002).
+func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) {}
 
-// ReleaseAfterReset hands back the pass AllowAfterReset gave accountID
-// at addressKey, unused: the attempt holding it has finished without a
-// session or a wrong guess -- a refusal by the account's own limit, a
-// storage error. A no-op once
-// EndAfterReset has used the pass up.
-func (l *LoginLimiter) ReleaseAfterReset(addressKey, accountID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := resetPassKey(addressKey, accountID)
-	if p, ok := l.resetPasses[key]; ok {
-		p.held = false
-		l.resetPasses[key] = p
-	}
-}
-
-// EndAfterReset uses up the pass AllowAfterReset gave accountID at
-// addressKey, if there is one: the sign-in it was for has finished, or
-// a guess under it was wrong.
-func (l *LoginLimiter) EndAfterReset(addressKey, accountID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := resetPassKey(addressKey, accountID)
-	if p, ok := l.resetPasses[key]; ok {
-		p.held, p.ended = false, true
-		l.resetPasses[key] = p
-	}
-}
-
-// pruneResetPassesLocked drops every pass that can no longer apply: its
-// password change has left the window, so no attempt in the window can
-// predate it, or its address has left the capped map.
-func (l *LoginLimiter) pruneResetPassesLocked(now time.Time) {
-	cutoff := now.Add(-l.window)
-	for key, p := range l.resetPasses {
-		if _, ok := l.attempts[p.address]; !ok || p.changedAt.Before(cutoff) {
-			delete(l.resetPasses, key)
-		}
-	}
-}
+// Deprecated: EndAfterReset does nothing: AllowAfterReset hands out no
+// pass any more (#86), so there is none to use up. Kept until a major
+// version (ADR-0002).
+func (l *LoginLimiter) EndAfterReset(addressKey, accountID string) {}

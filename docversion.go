@@ -61,6 +61,13 @@ import (
 // version-9 document, so a deployment rolled back to it fails to start
 // with a message naming the version rather than a misleading one about
 // the admin count.
+// Version 10 (#81) added User.SignInAllowedUntil, an administrator's
+// allowance of the account's next sign-in; an older document reads it
+// as zero -- no allowance -- which is what it meant. Version 9 shipped
+// in v0.3.0, so this added field takes a new number rather than riding
+// on it as #79's did inside one release. A build that reads up to
+// version 9 refuses a version-10 document rather than drop a live
+// allowance on its next save.
 //
 // The sign-in history (#53, signins.go) is the third document, version 1
 // from its first release: {"version":1,"nextSeq":n,"rows":[...]}, and
@@ -82,7 +89,7 @@ import (
 // version-3 document rather than save it back without the expiry, which
 // would turn every token that has one into a token that never expires.
 const (
-	accountsDocumentVersion = 9
+	accountsDocumentVersion = 10
 	tokensDocumentVersion   = 3
 	signInsDocumentVersion  = 3
 )

@@ -266,16 +266,6 @@ func (s *Store) requirePasswordChange(accountID string, now time.Time) error {
 	})
 }
 
-// readLockout reads accountID's lockout from lockouts, and when the
-// password last changed if lockouts can say (see lockoutRecorder).
-func readLockout(lockouts AccountLockouts, accountID string) (lockedUntil, passwordChangedAt time.Time) {
-	if r, ok := lockouts.(lockoutRecorder); ok {
-		st, changed, _ := r.lockoutRecord(accountID)
-		return st.until, changed
-	}
-	return lockouts.LoginLockedUntil(accountID), time.Time{}
-}
-
 // memoryLockouts is the lockoutRecorder a LoginLimiter uses when it is
 // not given the *Store: nil, or some other AccountLockouts. The count of
 // lockouts and a disabled sign-in live here, in this process's memory

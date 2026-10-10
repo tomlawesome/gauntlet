@@ -1,13 +1,13 @@
 package gate
 
 import (
-	"encoding/base64"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/browsertoken"
 )
 
 // The known-browser cookie (#44): the token gauntlet.Store.RememberBrowser
@@ -44,18 +44,17 @@ const (
 	// them (#55 §4). The tokens are joined by "."; base64url never
 	// contains one.
 	maxKnownBrowserTokens = 4
-
-	// knownBrowserTokenLen is a token's length: 32 bytes as unpadded
-	// base64url, the shape gauntlet.Store.RememberBrowser issues.
-	knownBrowserTokenLen = 43
 )
 
 // knownBrowserTokens returns the known-browser tokens r carries, most
 // recent first, at most maxKnownBrowserTokens and each once. A part that
 // is not a well-formed token is dropped, so neither a forged nor a
-// truncated value costs a store lookup. A cookie from before tokens were
-// joined holds one token and reads as a list of one. Only requests under
-// /api/auth carry it (knownBrowserCookiePath).
+// truncated value costs a store lookup. Well-formed is
+// internal/browsertoken's rule, the one the store applies to its own
+// tokens before it hashes anything (#90), so the two cannot disagree.
+// A cookie from before tokens were joined holds one token and reads as
+// a list of one. Only requests under /api/auth carry it
+// (knownBrowserCookiePath).
 func knownBrowserTokens(r *http.Request) []string {
 	cookie, err := r.Cookie(knownBrowserCookieName)
 	if err != nil {
@@ -63,7 +62,7 @@ func knownBrowserTokens(r *http.Request) []string {
 	}
 	var tokens []string
 	for part := range strings.SplitSeq(cookie.Value, ".") {
-		if !wellFormedKnownBrowserToken(part) || slices.Contains(tokens, part) {
+		if !browsertoken.WellFormed(part) || slices.Contains(tokens, part) {
 			continue
 		}
 		tokens = append(tokens, part)
@@ -72,17 +71,6 @@ func knownBrowserTokens(r *http.Request) []string {
 		}
 	}
 	return tokens
-}
-
-// wellFormedKnownBrowserToken reports whether part has a token's shape.
-// The store checks the same before it hashes anything; this only keeps
-// junk out of the cookie gate writes back.
-func wellFormedKnownBrowserToken(part string) bool {
-	if len(part) != knownBrowserTokenLen {
-		return false
-	}
-	b, err := base64.RawURLEncoding.DecodeString(part)
-	return err == nil && len(b) == 32
 }
 
 // isKnownBrowser reports whether r comes from a browser accountID

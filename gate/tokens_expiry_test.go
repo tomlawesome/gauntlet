@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/persist"
 )
 
 // Token expiry, the gnt_ prefix and the sweep (#74).
@@ -399,5 +401,70 @@ func TestSweepTokensTreatsASlowNotifierAsNotSent(t *testing.T) {
 	f.g.notifying.Wait()
 	if err != nil || res.Warned != 0 {
 		t.Errorf("SweepTokens = %+v, %v; want nothing marked", res, err)
+	}
+}
+
+// The orphan check reads the account store once per sweep, not once per
+// token (#80): each read is a staleness check against the store's
+// backend, which can stall for seconds, and they ran under the token
+// store's write lock, holding every bearer-token request behind them.
+func TestSweepTokensChecksTheAccountStoreOncePerSweep(t *testing.T) {
+	backend := &versionCountingBackend{Memory: persist.NewMemory()}
+	users := openTrackedStore(t, backend)
+	g := newTestGateWithUsers(t, users)
+	ts := newTestServer(t, g)
+	registerAdmin(t, ts, "admin", testAdminPassword)
+	admin, _ := users.ByUsername("admin")
+	now := time.Now()
+	for i := range 20 {
+		if _, _, err := g.deps.Tokens.CreateWithExpiry(fmt.Sprintf("token-%d", i), gauntlet.TokenKindAPI, "", admin, now.Add(-time.Hour), now.Add(300*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := backend.versionCalls.Load()
+	if _, err := g.SweepTokens(context.Background(), now); err != nil {
+		t.Fatalf("SweepTokens: %v", err)
+	}
+	if got := backend.versionCalls.Load() - before; got > 3 {
+		t.Errorf("a sweep over 20 tokens checked the account store %d times; want a fixed few, not one per token", got)
+	}
+}
+
+// A notifier that answers after the deadline, successfully, did deliver
+// the notice: the token is marked warned when it answers, so the next
+// sweep does not send it again (#80). Before, every sweep abandoned it
+// at the deadline and a notifier that was always slow resent the
+// notice every day.
+func TestSweepTokensRecordsALateNotifierThatSucceeded(t *testing.T) {
+	f := newSweepFixture(t)
+	old := notifyTimeout
+	notifyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { notifyTimeout = old })
+	now := time.Now()
+	soon := f.mint(t, "soon", f.admin, now.Add(-24*time.Hour), now.Add(5*24*time.Hour))
+
+	release := make(chan struct{})
+	f.notes.fail = func(context.Context) error { <-release; return nil }
+	if _, err := f.g.SweepTokens(context.Background(), now); err != nil {
+		t.Fatalf("SweepTokens: %v", err)
+	}
+	close(release)
+	f.g.notifying.Wait()
+
+	for _, tok := range f.g.deps.Tokens.List() {
+		if tok.ID == soon && !tok.ExpiryWarnedAt.Equal(now) {
+			t.Errorf("ExpiryWarnedAt = %v after the late success, want %v", tok.ExpiryWarnedAt, now)
+		}
+	}
+	f.notes.mu.Lock()
+	f.notes.fail = nil
+	f.notes.mu.Unlock()
+	sent := len(f.notes.all())
+	if _, err := f.g.SweepTokens(context.Background(), now.Add(24*time.Hour)); err != nil {
+		t.Fatalf("second SweepTokens: %v", err)
+	}
+	if got := len(f.notes.all()) - sent; got != 0 {
+		t.Errorf("the next sweep sent the delivered notice again (%d more)", got)
 	}
 }

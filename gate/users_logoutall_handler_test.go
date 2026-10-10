@@ -132,6 +132,7 @@ func TestAdminLogoutAllRefusals(t *testing.T) {
 		{"reason over 200 characters", admin, bobID, adminLogoutAllRequest{Reason: strings.Repeat("é", MaxSessionEndReason+1)}, http.StatusBadRequest},
 		{"reason with a newline", admin, bobID, adminLogoutAllRequest{Reason: "line\nforged"}, http.StatusBadRequest},
 		{"reason with a bidi override", admin, bobID, adminLogoutAllRequest{Reason: "abc\u202Edef"}, http.StatusBadRequest},
+		{"reason with a line separator", admin, bobID, adminLogoutAllRequest{Reason: "abc\u2028def"}, http.StatusBadRequest},
 		{"unknown field", admin, bobID, map[string]string{"why": "x"}, http.StatusBadRequest},
 		{"not an admin", bobs[0], bobID, nil, http.StatusForbidden},
 	}

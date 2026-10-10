@@ -672,89 +672,82 @@ func TestLinkingTheAdminKeepsItsLoginLockout(t *testing.T) {
 	}
 }
 
-// AllowAfterReset (#32) passes the address limit only for an address
-// that filled before the account's password changed, only while the
-// record carries no lockout, and only for one sign-in per change.
-func TestAllowAfterResetConditions(t *testing.T) {
+// The reset pass is retired (#86): an account reset out of a lockout at
+// a full address -- what #32's pass was for -- gets no pass, and the
+// two methods that handed one back or used it up change nothing.
+func TestAllowAfterResetGivesNoPass(t *testing.T) {
 	s, id := openLockoutStore(t, persist.NewMemory())
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	l := mustNewLoginLimiter(t, 3, time.Minute)
 	const addr = "ip:192.0.2.1"
 
-	if l.AllowAfterReset(addr, s, id, start) {
-		t.Fatal("a pass with no password change since the address filled")
-	}
-	for range 2 {
-		l.Reserve(addr, start)
-	}
-	if err := s.SetPassword("alice", "new-password-placeholder", start.Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	l.Reserve(addr, start.Add(2*time.Second)) // fills the address after the change
-	if l.AllowAfterReset(addr, s, id, start.Add(3*time.Second)) {
-		t.Error("a pass for an address that filled only after the change")
-	}
-
-	// The address is full from before the next change, but the account
-	// was never locked out: a change of its own password is not a reset
-	// that ended a lockout, and earns nothing.
-	if err := s.SetPassword("alice", "own-change-placeholder", start.Add(4*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if l.AllowAfterReset(addr, s, id, start.Add(5*time.Second)) {
-		t.Error("a pass for a password change on an account that was never locked out")
-	}
-
-	// Locked out, then reset: the pass.
 	for range 3 {
-		l.ReserveAccount(s, id, start.Add(6*time.Second))
+		l.Reserve(addr, start)
+		l.ReserveAccount(s, id, start)
 	}
-	if err := s.SetPassword("alice", "newer-password-placeholder", start.Add(7*time.Second)); err != nil {
+	if err := s.SetPassword("alice", "newer-password-placeholder", start.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	now := start.Add(8 * time.Second)
-	if !l.AllowAfterReset(addr, s, id, now) {
-		t.Fatal("no pass for an account reset out of a lockout at a full address")
-	}
-	if l.AllowAfterReset("ip:192.0.2.2", s, id, now) {
-		t.Error("a pass for an address that never reached the limit")
-	}
-
-	// One attempt holds the pass at a time: a second, concurrent one is
-	// refused until the first hands it back.
+	now := start.Add(2 * time.Second)
 	if l.AllowAfterReset(addr, s, id, now) {
-		t.Error("a second attempt got the pass while the first still held it")
+		t.Error("a pass past the full address for an account reset out of a lockout")
 	}
 	l.ReleaseAfterReset(addr, id)
-	if !l.AllowAfterReset(addr, s, id, now) {
-		t.Error("the pass was not handed back by ReleaseAfterReset")
-	}
 	l.EndAfterReset(addr, id)
-	l.ReleaseAfterReset(addr, id)
-	if l.AllowAfterReset(addr, s, id, now) {
-		t.Error("the pass outlived EndAfterReset")
+	if l.Reserve(addr, now) {
+		t.Error("the address limit let an attempt through after ReleaseAfterReset and EndAfterReset")
 	}
+	if !l.ReserveAccount(s, id, now) {
+		t.Error("the reset did not clear the account's own count (#24)")
+	}
+}
 
-	// A further reset out of a lockout grants a fresh pass -- unless the
-	// record carries a lockout, which a real password change would have
-	// cleared.
-	if err := s.SetPassword("alice", "newest-password-placeholder", start.Add(9*time.Second)); err != nil {
-		t.Fatal(err)
+// failAccount makes n password guesses against the account, each of which
+// must be let through to be checked.
+func failAccount(t *testing.T, l *LoginLimiter, s *Store, id string, n int, at time.Time) {
+	t.Helper()
+	for i := range n {
+		if !l.ReserveAccount(s, id, at) {
+			t.Fatalf("account attempt %d at %v was refused", i+1, at)
+		}
 	}
-	if err := s.SetLoginLockedUntil(id, start.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if l.AllowAfterReset(addr, s, id, start.Add(10*time.Second)) {
-		t.Error("a pass while the record carries a lockout")
-	}
-	if err := s.SetLoginLockedUntil(id, time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-	if !l.AllowAfterReset(addr, s, id, start.Add(10*time.Second)) {
-		t.Error("no fresh pass after a further reset")
-	}
-	l.ReleaseAfterReset(addr, id)
-	if l.AllowAfterReset(addr, s, id, start.Add(2*time.Minute)) {
-		t.Error("a pass after the address's attempts left the window")
+}
+
+// A password change ends the count of guesses before it for the account's
+// own budget too, as it does for the known-browser allowance
+// (TestKnownBrowserGuessesBeforeAPasswordChangeStopCounting): the
+// guesses were at the old password. With a threshold of 5, even one
+// guess from before the change, counted, would make the fifth after it
+// the sixth and start the lockout early, so the boundary is one guess.
+func TestAccountGuessesBeforeAPasswordChangeStopCounting(t *testing.T) {
+	const threshold = 5
+	for _, before := range []int{1, threshold - 1} {
+		t.Run(fmt.Sprintf("%d before the change", before), func(t *testing.T) {
+			s, id := openLockoutStore(t, persist.NewMemory())
+			l := mustNewLoginLimiter(t, threshold, 5*time.Minute)
+			failAccount(t, l, s, id, before, escalationStart)
+			if got := s.LoginLockedUntil(id); !got.IsZero() {
+				t.Fatalf("test setup: %d guesses locked the account until %v", before, got)
+			}
+
+			if err := s.SetPassword("alice", "a-new-password", escalationStart.Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			after := escalationStart.Add(2 * time.Second)
+
+			// A full budget of new guesses is let through, and the lockout
+			// starts with the last of them, not before.
+			failAccount(t, l, s, id, threshold-1, after)
+			if got := s.LoginLockedUntil(id); !got.IsZero() {
+				t.Fatalf("%d guesses after the change, %d before it, locked the account until %v", threshold-1, before, got)
+			}
+			failAccount(t, l, s, id, 1, after)
+			if got := s.LoginLockedUntil(id); got.IsZero() {
+				t.Fatalf("the %dth guess after the change did not start the lockout", threshold)
+			}
+			if l.ReserveAccount(s, id, after) {
+				t.Fatal("a guess past the threshold was let through")
+			}
+		})
 	}
 }

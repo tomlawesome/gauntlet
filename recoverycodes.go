@@ -12,12 +12,14 @@
 // cleared only when the account's last second factor of either kind
 // goes -- see ClearTOTP (totp.go) and DeletePasskey/ClearPasskeys
 // (passkeys.go), which own that clearing rule from each side.
+// Unlike mikroview's copy, the generator, formatter and normaliser call
+// the helpers resetcode.go shares with the reset code (newCode,
+// formatCode, normaliseCode; #90), so the two kinds of code have one
+// rule each.
 
 package gauntlet
 
 import (
-	"crypto/rand"
-	"strings"
 	"time"
 )
 
@@ -25,17 +27,15 @@ const (
 	// recoveryCodeCount is how many codes GenerateRecoveryCodes mints,
 	// and how many User.RecoveryCodes holds afterward.
 	recoveryCodeCount = 10
-	// recoveryCodeAlphabet reuses the reset code's alphabet: no 0/O, no
-	// 1/I/l, so a code copied off a screen (or read aloud) has no
-	// ambiguous character.
-	recoveryCodeAlphabet = resetCodeAlphabet
 	// recoveryCodeLength is characters per code, excluding the grouping
-	// dash. Ten characters over the 32-character alphabet above is 50
-	// bits -- ample for a hashed, single-use, backup-only credential a
-	// person copies out of a list once and keeps offline; the reset
-	// code is longer only because it stands in for a whole password
-	// indefinitely, while a recovery code is checked once and then
-	// dead.
+	// dash, over the reset code's alphabet (resetCodeAlphabet, through
+	// newCode): no 0/O, no 1/I/l, so a code copied off a screen (or read
+	// aloud) has no ambiguous character. Ten characters over that
+	// 32-character alphabet is 50 bits -- ample for a hashed,
+	// single-use, backup-only credential a person copies out of a list
+	// once and keeps offline; the reset code is longer only because it
+	// stands in for a whole password indefinitely, while a recovery code
+	// is checked once and then dead.
 	recoveryCodeLength = 10
 	// recoveryCodeGroup is how many characters sit between dashes in the
 	// form shown to a person: xxxxx-xxxxx.
@@ -56,49 +56,22 @@ type RecoveryCode struct {
 // newRecoveryCode returns a fresh code in its canonical (dashless) form
 // -- the form that gets hashed, mirroring newResetCode.
 func newRecoveryCode() string {
-	b := make([]byte, recoveryCodeLength)
-	if _, err := rand.Read(b); err != nil {
-		// Same stance as newID/newResetCode: a CSPRNG that cannot
-		// produce bytes is not a condition to degrade from gracefully
-		// when the output is about to stand in for a login credential.
-		panic("gauntlet: crypto/rand unavailable: " + err.Error())
-	}
-	out := make([]byte, recoveryCodeLength)
-	for i, v := range b {
-		out[i] = recoveryCodeAlphabet[v&31]
-	}
-	return string(out)
+	return newCode(recoveryCodeLength)
 }
 
 // FormatRecoveryCode groups a canonical code for display: xxxxx-xxxxx.
 // The dash is presentation only -- NormaliseRecoveryCode strips it again
 // on the way back in.
 func FormatRecoveryCode(code string) string {
-	var b strings.Builder
-	for i, r := range code {
-		if i > 0 && i%recoveryCodeGroup == 0 {
-			b.WriteByte('-')
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
+	return formatCode(code, recoveryCodeGroup)
 }
 
 // NormaliseRecoveryCode turns whatever a person typed into the canonical
 // form a stored hash was computed over: upper case, with dashes, spaces
-// and tabs they may have copied (or added themselves) removed. Mirrors
-// NormaliseResetCode exactly, for the same reasons.
+// and tabs they may have copied (or added themselves) removed. It is
+// normaliseCode, the same rule as NormaliseResetCode, not a copy of it.
 func NormaliseRecoveryCode(typed string) string {
-	var b strings.Builder
-	b.Grow(len(typed))
-	for _, r := range typed {
-		switch r {
-		case '-', ' ', '\t':
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.ToUpper(b.String())
+	return normaliseCode(typed)
 }
 
 // GenerateRecoveryCodes mints a fresh set of ten single-use codes for
@@ -106,13 +79,31 @@ func NormaliseRecoveryCode(typed string) string {
 // clear -- grouped for display -- exactly once. The caller must show
 // them to the user immediately and must never itself persist the
 // returned strings; only the hashes this writes to the store survive.
-// It backs gate's "regenerate recovery codes" route; an account's first
-// set is minted with its first factor instead (HoldFirstPasskey,
-// HoldFirstTOTP).
+// It writes whether or not the account has a second factor; gate's
+// regenerate route uses RegenerateRecoveryCodes, which refuses that case
+// (#94). An account's first set is minted with its first factor instead
+// (HoldFirstPasskey, HoldFirstTOTP).
 //
 // now is unused: a recovery code records no issue time. It stays so the
 // signature matches mikroview's and gauntlet v0.1.0's.
 func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, error) {
+	return s.generateRecoveryCodes(userID, false)
+}
+
+// RegenerateRecoveryCodes is GenerateRecoveryCodes for an account's
+// later sets: it refuses with ErrNoSecondFactors, storing nothing, when
+// the account has no live second factor (an app or passkey only pending
+// or held does not count). That is decided in the same locked write that
+// replaces the set (check-and-set, as AddLaterPasskey is), so a last
+// factor removed after the caller looked -- which cleared the codes --
+// cannot leave a new set on an account with no factor (#94).
+func (s *Store) RegenerateRecoveryCodes(userID string) ([]string, error) {
+	return s.generateRecoveryCodes(userID, true)
+}
+
+// generateRecoveryCodes is GenerateRecoveryCodes, and with needFactor
+// set RegenerateRecoveryCodes.
+func (s *Store) generateRecoveryCodes(userID string, needFactor bool) ([]string, error) {
 	if !s.Persisted() {
 		return nil, ErrNotPersisted
 	}
@@ -138,6 +129,9 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 		u, ok := st.byID[userID]
 		if !ok {
 			return ErrUserNotFound
+		}
+		if needFactor && !u.HasSecondFactor() {
+			return ErrNoSecondFactors
 		}
 		u.RecoveryCodes = hashed
 		return nil

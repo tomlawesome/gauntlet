@@ -2,8 +2,8 @@ package gauntlet
 
 import (
 	"strings"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 // probeUsernames are the names an attacker tries against any login
@@ -27,9 +27,10 @@ const maskRune = '•'
 // Applied before the name reaches an audit record, a log line or a
 // stored row, so the typed name exists only in the request.
 //
-// Control (Cc) and format (Cf) characters and invalid UTF-8 are
-// dropped, surrounding white space trimmed, and the result cut to the
-// username length limit (64 characters). A name on the fixed probe list
+// Control (Cc) and format (Cf) characters, the line and paragraph
+// separators (Zl, Zp) and invalid UTF-8 are dropped (plaintext.Clean),
+// surrounding white space trimmed, and the result cut to the username
+// length limit (64 characters). A name on the fixed probe list
 // (root, admin, postgres and the like, matched exactly in any case) is
 // returned as it now stands: an exact match only, so "admin123" is
 // masked. Any other name keeps its first two characters and shows the
@@ -41,19 +42,7 @@ const maskRune = '•'
 // A name that matched an account is not unknown and is recorded as the
 // account's own username, whatever its role (owner, 2026-10-02).
 func MaskUnknownUsername(typed string) string {
-	var b strings.Builder
-	for len(typed) > 0 {
-		r, size := utf8.DecodeRuneInString(typed)
-		typed = typed[size:]
-		if r == utf8.RuneError && size == 1 {
-			continue
-		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	runes := []rune(strings.TrimSpace(b.String()))
+	runes := []rune(strings.TrimSpace(plaintext.Clean(typed)))
 	if len(runes) > maxUsernameLength {
 		runes = runes[:maxUsernameLength]
 	}

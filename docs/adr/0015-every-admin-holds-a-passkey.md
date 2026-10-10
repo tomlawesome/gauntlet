@@ -175,3 +175,9 @@ Settled without a question:
   usable from stale); with the rule optional it costs what it did (#42).
 - Step-up routes can now answer 401 `step-expired`, for a missing or
   used passkey ceremony.
+- Status note (v0.4.0 audit, 2026-10-10): decision 6 lists three step-up
+  routes; a fourth uses the same step-up: the admin's own allow-sign-in
+  (#81).
+- Status note (v0.4.0 audit, 2026-10-10): the accounts document did stay
+  at version 9 for this decision; #81's `User.SignInAllowedUntil` has
+  since raised it to version 10.

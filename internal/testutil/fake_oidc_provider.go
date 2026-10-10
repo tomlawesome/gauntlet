@@ -63,6 +63,20 @@ type FakeProvider struct {
 	// instead of a freshly-signed one -- lets a test hand the token
 	// endpoint an adversarial token (wrong algorithm, tampered, etc).
 	NextIDToken string
+
+	// TokenErrorStatus, when non-zero, makes the token endpoint answer
+	// with that status and TokenErrorBody as a JSON body instead of a
+	// token -- a provider refusing the code exchange (a wrong client
+	// secret, an expired code).
+	TokenErrorStatus int
+	TokenErrorBody   string
+
+	// ExpectCodeVerifier, when non-empty, makes the token endpoint behave
+	// like a PKCE-enforcing provider (Authentik, Keycloak): a code
+	// exchange whose code_verifier is missing or different is refused
+	// with invalid_grant, as RFC 7636 §4.6 says. Set it to the verifier
+	// the flow state carries to prove the caller sends that one.
+	ExpectCodeVerifier string
 }
 
 // NewFakeProvider starts an httptest server serving discovery, JWKS and
@@ -135,6 +149,20 @@ func (fp *FakeProvider) serveJWKS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (fp *FakeProvider) serveToken(w http.ResponseWriter, r *http.Request) {
+	if fp.TokenErrorStatus != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(fp.TokenErrorStatus)
+		_, _ = w.Write([]byte(fp.TokenErrorBody))
+		return
+	}
+	if fp.ExpectCodeVerifier != "" {
+		if err := r.ParseForm(); err != nil || r.PostForm.Get("code_verifier") != fp.ExpectCodeVerifier {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"code_verifier missing or does not match"}`))
+			return
+		}
+	}
 	idToken := fp.NextIDToken
 	if idToken == "" {
 		fp.T.Fatal("serveToken called but no ID token was queued -- call fp.SignRS256 (or a sibling) and set fp.NextIDToken first")

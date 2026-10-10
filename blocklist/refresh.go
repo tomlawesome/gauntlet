@@ -10,7 +10,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
+	"github.com/tomlawesome/gauntlet/internal/fetch"
 	"github.com/tomlawesome/gauntlet/internal/listsig"
 )
 
@@ -208,14 +209,12 @@ func newRefresher(cfg RefreshConfig, keys func() (listsig.Keyring, error), embed
 	return r, nil
 }
 
-// httpsRedirectsOnly is the default clients' redirect policy: follow
-// up to five redirects, each to https.
+// httpsRedirectsOnly is the default clients' redirect policy, shared
+// with geoip (internal/fetch): follow up to five redirects, each to
+// https.
 func httpsRedirectsOnly(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return errors.New("blocklist: refused a redirect away from https")
-	}
-	if len(via) >= 5 {
-		return errors.New("blocklist: too many redirects")
+	if err := fetch.HTTPSRedirectsOnly(req, via); err != nil {
+		return fmt.Errorf("blocklist: %w", err)
 	}
 	return nil
 }
@@ -243,10 +242,10 @@ func (r *Refresher) Run(ctx context.Context) {
 	}
 }
 
-// nextDelay is the interval moved by up to a tenth either way.
+// nextDelay is the interval moved by up to a tenth either way
+// (internal/fetch, shared with geoip).
 func (r *Refresher) nextDelay() time.Duration {
-	tenth := int64(r.interval / 10)
-	return r.interval + time.Duration(rand.Int64N(2*tenth+1)-tenth) //nolint:gosec // spreading load, not a secret
+	return fetch.Jitter(r.interval)
 }
 
 // loadStored adopts the copy kept in Dir when it verifies and is newer
@@ -471,27 +470,10 @@ func (r *Refresher) store(data, sig []byte) error {
 	return nil
 }
 
-func writeFileAtomic(dir, name string, data []byte) (err error) {
-	f, err := os.CreateTemp(dir, "."+name+".*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err = f.Chmod(0o600); err == nil {
-		if _, err = f.Write(data); err == nil {
-			err = f.Sync()
-		}
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(dir, name))
+// writeFileAtomic writes name in dir crash-safely, 0600, keeping an
+// existing file's owner and group (atomicfile.WriteFile), as persist's
+// store writes do: a refresh run as another user (a CLI with sudo) must
+// not leave a file the server cannot read or replace (#80).
+func writeFileAtomic(dir, name string, data []byte) error {
+	return atomicfile.WriteFile(filepath.Join(dir, name), data, 0o600)
 }

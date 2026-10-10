@@ -65,15 +65,11 @@ func (g *Gate) decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) err
 	return nil
 }
 
-// writeJSON is the only place gate writes a successful JSON response
-// body -- every handler goes through it rather than setting headers of
-// its own, so these three headers only have to be right once (#46).
-// writeProblem below is its sibling for every error body (#23): the
-// same three headers, Content-Type aside.
+// setBodyHeaders sets the headers every JSON and problem body gate
+// writes carries: contentType, and two that are the same for all of
+// them. writeJSON, writeProblem and writeBlankProblem each call it, so
+// the two only have to be right once (#46, #90 item 19).
 //
-//   - Content-Type: application/json; charset=utf-8 -- the charset is
-//     explicit rather than assumed, the same reasoning RFC 8259 gives
-//     for naming it even though UTF-8 is JSON's only legal encoding.
 //   - Cache-Control: no-store -- every response here either carries
 //     this account's own state or says why a request failed; a shared
 //     or browser cache holding either across accounts or across a state
@@ -82,11 +78,23 @@ func (g *Gate) decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) err
 //   - X-Content-Type-Options: nosniff -- stops a browser that ignores
 //     Content-Type from sniffing a JSON body as HTML and rendering it,
 //     which would turn a reflected value into script execution.
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func setBodyHeaders(w http.ResponseWriter, contentType string) {
 	h := w.Header()
-	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Content-Type", contentType)
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
+}
+
+// writeJSON is the only place gate writes a successful JSON response
+// body -- every handler goes through it rather than setting headers of
+// its own (#46). writeProblem below is its sibling for every error body
+// (#23). Both set their headers through setBodyHeaders.
+//
+// Content-Type is application/json; charset=utf-8 -- the charset is
+// explicit rather than assumed, the same reasoning RFC 8259 gives for
+// naming it even though UTF-8 is JSON's only legal encoding.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	setBodyHeaders(w, "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	// Best-effort: the status line is already on the wire, so a write
 	// failure here cannot become a different status code. There is
@@ -126,6 +134,7 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrTokenDeviceInvalid:    gauntlet.ErrTokenDeviceInvalid.Error(),
 	gauntlet.ErrTokenNameInvalid:      gauntlet.ErrTokenNameInvalid.Error(),
 	gauntlet.ErrTokenExpiryInvalid:    gauntlet.ErrTokenExpiryInvalid.Error(),
+	gauntlet.ErrPasskeyNameInvalid:    passkeyNameInvalidMessage,
 	gauntlet.ErrUserNotFound:          "no such user",
 	gauntlet.ErrCannotDeleteAdmin:     "the last admin account cannot be deleted -- make another account an admin first",
 	gauntlet.ErrTOTPAlreadyActive:     gauntlet.ErrTOTPAlreadyActive.Error(), // already phrased for an end user
@@ -135,8 +144,13 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrPasskeyLimitReached:   gauntlet.ErrPasskeyLimitReached.Error(), // already phrased for an end user
 	gauntlet.ErrPasskeyNotFound:       "no such passkey on this account",
 	gauntlet.ErrEnrolmentHeld:         "a second factor is waiting for you to confirm you have saved its recovery codes -- confirm it, or wait ten minutes for it to expire, before setting up another",
-	gauntlet.ErrNoHeldEnrolment:       "no second factor is waiting to be confirmed",
-	gauntlet.ErrHeldEnrolmentExpired:  "that second factor was not confirmed within ten minutes and has been removed -- set it up again",
+	// Only the first-factor hold tried after the additional-factor path
+	// found no other factor answers this (#80): the account's factors
+	// changed twice while one request was deciding which path it was on.
+	gauntlet.ErrSecondFactorExists:   "your second factors changed while this was in progress -- start again",
+	gauntlet.ErrNoHeldEnrolment:      "no second factor is waiting to be confirmed",
+	gauntlet.ErrHeldEnrolmentExpired: "that second factor was not confirmed within ten minutes and has been removed -- set it up again",
+	gauntlet.ErrResetDuringChange:    "an administrator reset this account's password while you were changing it, so your change was not saved -- sign in with the code they give you",
 }
 
 // writeAuthError translates err into a safe, user-facing message via
@@ -158,11 +172,12 @@ func (g *Gate) writeAuthError(w http.ResponseWriter, r *http.Request, err error,
 // problemClass is one of the fixed error classes every error Routes or
 // Protect answers with belongs to (gauntlet #23, RFC 9457 Problem
 // Details): type and title never vary by call site, only detail (and,
-// for partially-completed, extra) do. status is not part of the type --
-// it is passed separately at each writeProblem/writeAuthError call --
-// but every class here in fact has exactly one fixed status, held to by
-// convention at the call site and pinned by the tests in
-// problem_test.go, not enforced by the type itself.
+// for partially-completed and invalid-credentials, extra) do. status
+// is not part of the type -- it is passed separately at each
+// writeProblem/writeAuthError call -- but every class here in fact has
+// exactly one fixed status, held to by convention at the call site and
+// pinned by the tests in problem_test.go, not enforced by the type
+// itself.
 //
 // docs/api/errors.md has one permanent section per anchor: the anchor
 // is part of a public URL once released, so it is never renamed, and a
@@ -216,18 +231,15 @@ var (
 // (problemTypeBase+class.anchor), title (class.title) and status always;
 // detail (the call site's own message text, unchanged -- gauntlet #23)
 // only when it is not empty. extra adds further top-level members --
-// only partially-completed's username does (its totpActive is no longer
-// sent, #58); every other call site passes nil.
+// only partially-completed's username (its totpActive is no longer
+// sent, #58) and a refused passkey's unknownCredential (#92) do; every
+// other call site passes nil.
 //
-// The same two of writeJSON's three headers (Cache-Control: no-store,
-// X-Content-Type-Options: nosniff; see that function's own doc comment)
-// plus Content-Type: application/problem+json, with no charset
-// parameter -- RFC 9457 does not define one for this media type.
+// Its headers are setBodyHeaders', as writeJSON's are, with
+// Content-Type: application/problem+json and no charset parameter --
+// RFC 9457 does not define one for this media type.
 func writeProblem(w http.ResponseWriter, status int, class problemClass, detail string, extra map[string]any) {
-	h := w.Header()
-	h.Set("Content-Type", "application/problem+json")
-	h.Set("Cache-Control", "no-store")
-	h.Set("X-Content-Type-Options", "nosniff")
+	setBodyHeaders(w, "application/problem+json")
 	body := map[string]any{
 		"type":   problemTypeBase + class.anchor,
 		"title":  class.title,
@@ -249,10 +261,7 @@ func writeProblem(w http.ResponseWriter, status int, class problemClass, detail 
 // one of the documented classes, since no frontend ever branches on
 // which path or method it mistyped.
 func writeBlankProblem(w http.ResponseWriter, status int) {
-	h := w.Header()
-	h.Set("Content-Type", "application/problem+json")
-	h.Set("Cache-Control", "no-store")
-	h.Set("X-Content-Type-Options", "nosniff")
+	setBodyHeaders(w, "application/problem+json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"type":   "about:blank",

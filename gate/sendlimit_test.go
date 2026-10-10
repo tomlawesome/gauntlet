@@ -13,11 +13,21 @@ import (
 	"github.com/tomlawesome/gauntlet/oidc"
 )
 
-// The send limit (#84): confirmation codes and escape codes are counted
-// per account as they go out (gauntlet.LoginLimiter.ReserveDelivery),
-// five per window at the fixtures' limiter (5 per 5 minutes), and never
-// handed back. A held sign-in past it is answered 429 rate-limited with
-// no code, no ticket and no cookie.
+// The send limit (#84, #83): confirmation codes and escape codes are
+// counted per account as they go out (gauntlet.LoginLimiter.ReserveDelivery)
+// and never handed back: five per window at the fixtures' limiter (5 per
+// 5 minutes), a resend cooldown of 30 seconds doubling with each send in
+// the hour, and five in any hour. A held sign-in past any of them is
+// answered 429 rate-limited with no code, no ticket and no cookie.
+
+// sendGaps are the waits before each of an hour's five sends that just
+// clear the resend cooldown: none, then 30 s, 1, 2 and 4 minutes (#83).
+var sendGaps = []time.Duration{0, 30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute}
+
+// pastLastCooldown is a wait after the fifth send that clears its
+// cooldown (8 minutes) and the fixtures' window, so only the hourly cap
+// refuses a sixth.
+const pastLastCooldown = 8 * time.Minute
 
 // newBrowserConfirmEnv is newNotifiedEnv confirming a new browser, with
 // bob signed in once from London in the returned known browser.
@@ -67,17 +77,21 @@ func checkSendLimited(t *testing.T, e *unusualEnv, resp *http.Response, status i
 	}
 }
 
-// Six holds from one address in one window: five codes, then 429 and
-// no sixth call to Config.DeliverConfirmCode. No notice, no escape (bob
-// is a user), and a browser the account knows still signs in.
+// Six holds from one address, each past the last one's cooldown: five
+// codes, then 429 and no sixth call to Config.DeliverConfirmCode. No
+// notice, no escape (bob is a user), and a browser the account knows
+// still signs in.
 func TestSendLimitConfirmFromOneAddress(t *testing.T) {
 	e, rec, known := newBrowserConfirmEnv(t)
-	for i := range 5 {
+	start := e.clock.now()
+	for i, gap := range sendGaps {
+		e.advance(gap)
 		resp, status, body := e.heldFrom(t, addrParis)
 		if status != http.StatusOK || strings.TrimSpace(body) != `{"confirm":true}` || cookieNamed(resp, confirmLoginCookieName) == nil {
 			t.Fatalf("hold %d = %d %s, want the confirm challenge and its ticket", i+1, status, body)
 		}
 	}
+	e.advance(pastLastCooldown)
 	resp, status, body := e.heldFrom(t, addrParis)
 	checkSendLimited(t, e, resp, status, body)
 	if n := len(rec.allCodes()); n != 5 {
@@ -90,21 +104,46 @@ func TestSendLimitConfirmFromOneAddress(t *testing.T) {
 	// knows is never held, so never sends.
 	e.mustSignIn(t, known, addrLondon)
 	e.expectSignals(t, 0)
-	// One window later the budget is back.
-	e.advance(5*time.Minute + time.Second)
+	// Once the first send leaves the hour there is room again.
+	e.clock.set(start.Add(time.Hour + time.Second))
 	if _, status, body := e.heldFrom(t, addrParis); status != http.StatusOK {
-		t.Errorf("a window later = %d %s, want the confirm challenge", status, body)
+		t.Errorf("an hour after the first = %d %s, want the confirm challenge", status, body)
+	}
+}
+
+// The resend cooldown (#83): a second hold 29 seconds after the first is
+// 429 with no code, from any address, and does not push the wait out; at
+// 30 seconds it gets its code, and the next waits a minute.
+func TestSendLimitConfirmCooldown(t *testing.T) {
+	e, rec, _ := newBrowserConfirmEnv(t)
+	if _, status, body := e.heldFrom(t, addrParis); status != http.StatusOK {
+		t.Fatalf("the first hold = %d %s", status, body)
+	}
+	e.advance(29 * time.Second)
+	resp, status, body := e.heldFrom(t, "198.51.100.7")
+	checkSendLimited(t, e, resp, status, body)
+	e.advance(time.Second)
+	if _, status, body := e.heldFrom(t, addrParis); status != http.StatusOK {
+		t.Fatalf("30 seconds after the first = %d %s, want the confirm challenge", status, body)
+	}
+	e.advance(59 * time.Second)
+	resp, status, body = e.heldFrom(t, addrParis)
+	checkSendLimited(t, e, resp, status, body)
+	if n := len(rec.allCodes()); n != 2 {
+		t.Errorf("codes delivered = %d, want 2", n)
 	}
 }
 
 // The budget is the account's, not the address's: six addresses share it.
 func TestSendLimitConfirmAcrossAddresses(t *testing.T) {
 	e, rec, _ := newBrowserConfirmEnv(t)
-	for i := range 5 {
+	for i, gap := range sendGaps {
+		e.advance(gap)
 		if _, status, body := e.heldFrom(t, fmt.Sprintf("198.51.100.%d", i+1)); status != http.StatusOK {
 			t.Fatalf("hold %d = %d %s", i+1, status, body)
 		}
 	}
+	e.advance(pastLastCooldown)
 	resp, status, body := e.heldFrom(t, "198.51.100.6")
 	checkSendLimited(t, e, resp, status, body)
 	if n := len(rec.allCodes()); n != 5 {
@@ -117,7 +156,8 @@ func TestSendLimitConfirmAcrossAddresses(t *testing.T) {
 func TestSendLimitFailedDeliveryIsSpent(t *testing.T) {
 	e, rec, _ := newBrowserConfirmEnv(t)
 	rec.fail = func(context.Context) error { return errors.New("mailer down") }
-	for range 5 {
+	for _, gap := range sendGaps {
+		e.advance(gap)
 		resp := postJSON(t, newTestBrowser(t).at(addrParis), e.ts.URL+"/api/auth/login",
 			credentialsRequest{Username: totpBobUsername, Password: totpBobPassword})
 		checkRefused(t, e.g, resp)
@@ -131,6 +171,7 @@ func TestSendLimitFailedDeliveryIsSpent(t *testing.T) {
 	e.audit.mu.Lock()
 	e.audit.entries = nil
 	e.audit.mu.Unlock()
+	e.advance(pastLastCooldown)
 	resp, status, body := e.heldFrom(t, addrParis)
 	checkSendLimited(t, e, resp, status, body)
 	if n := len(rec.allCodes()); n != 5 {
@@ -167,15 +208,24 @@ func (e *escapeEnv) escapeCodesLogged() int {
 	return len(escapeCodeRE.FindAllString(e.logText(), -1))
 }
 
-// A lone admin refused six times in one window: five escape codes, then
-// the same refusal with none.
+// A lone admin refused six times in an hour, each past the last one's
+// cooldown: five escape codes, then the same refusal with none. A
+// refusal inside the cooldown carries none either.
 func TestSendLimitEscapeCodesWhenBlocked(t *testing.T) {
 	e := loneAdminEnv(t)
-	for i := range 5 {
+	for i, gap := range sendGaps {
+		e.advance(gap)
 		if _, resp := e.refusedFrom(t, addrParis); cookieNamed(resp, escapeLoginCookieName) == nil {
 			t.Fatalf("refusal %d carried no escape ticket", i+1)
 		}
+		if i == 0 {
+			e.advance(time.Second)
+			if _, resp := e.refusedFrom(t, addrParis); cookieNamed(resp, escapeLoginCookieName) != nil {
+				t.Fatal("a refusal inside the cooldown carried an escape ticket")
+			}
+		}
 	}
+	e.advance(pastLastCooldown)
 	_, resp := e.refusedFrom(t, addrParis)
 	if c := cookieNamed(resp, escapeLoginCookieName); c != nil {
 		t.Errorf("the sixth refusal set an escape ticket: %+v", c)
@@ -194,14 +244,16 @@ func TestSendLimitEscapeCodesWhenBlocked(t *testing.T) {
 
 // A lone admin held under confirm: each hold sends a code and an escape
 // code, each on its own channel, so five holds get five of each. The
-// sixth is past the confirm budget: 429, and no escape code either.
+// sixth in the hour is past the confirm budget: 429, and no escape code
+// either.
 func TestSendLimitConfirmAndEscapeAreSeparateChannels(t *testing.T) {
 	rec := &noticeRecorder{}
 	e := newEscapeEnv(t, gauntlet.RoleAdmin, true, func(c *Config) {
 		c.UnusualSignIns = UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm}
 		c.DeliverConfirmCode = rec.deliver
 	})
-	for i := range 5 {
+	for i, gap := range sendGaps {
+		e.advance(gap)
 		resp, status, body := e.heldFrom(t, addrParis)
 		if status != http.StatusOK || cookieNamed(resp, confirmLoginCookieName) == nil || cookieNamed(resp, escapeLoginCookieName) == nil {
 			t.Fatalf("hold %d = %d %s, want a confirm and an escape ticket", i+1, status, body)
@@ -210,6 +262,7 @@ func TestSendLimitConfirmAndEscapeAreSeparateChannels(t *testing.T) {
 	if codes, escapes := len(rec.allCodes()), e.escapeCodesLogged(); codes != 5 || escapes != 5 {
 		t.Fatalf("after five holds: %d codes, %d escape codes; want 5 and 5", codes, escapes)
 	}
+	e.advance(pastLastCooldown)
 	resp, status, body := e.heldFrom(t, addrParis)
 	checkSendLimited(t, e.unusualEnv, resp, status, body)
 	if codes, escapes := len(rec.allCodes()), e.escapeCodesLogged(); codes != 5 || escapes != 5 {
@@ -217,16 +270,20 @@ func TestSendLimitConfirmAndEscapeAreSeparateChannels(t *testing.T) {
 	}
 }
 
-// The SSO callback's sixth hold in a window redirects refused, with no
+// The SSO callback's sixth hold in an hour redirects refused, with no
 // code and no ticket.
 func TestSendLimitSSO(t *testing.T) {
 	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
+	// The gate's clock runs ahead of the provider's by offset, so the
+	// holds can be spaced past each cooldown while the tokens stay fresh.
+	var offset time.Duration
+	g.cfg.Now = func() time.Time { return time.Now().Add(offset) }
 	rec := &noticeRecorder{}
 	g.cfg.DeliverConfirmCode = rec.deliver
 	g.cfg.UnusualSignIns = UnusualSignInPolicy{NewBrowser: UnusualSignInConfirm}
 	callback := func() *http.Response {
 		t.Helper()
-		fs, err := oidc.NewFlowState(time.Now())
+		fs, err := oidc.NewFlowState(g.now())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,11 +298,13 @@ func TestSendLimitSSO(t *testing.T) {
 		return resp
 	}
 	callback() // the first sign-in raises nothing
-	for i := range 5 {
+	for i, gap := range sendGaps {
+		offset += gap
 		if loc := callback().Header.Get("Location"); loc != testLoginPath+"?confirm=1" {
 			t.Fatalf("hold %d redirect = %q", i+1, loc)
 		}
 	}
+	offset += pastLastCooldown
 	resp := callback()
 	if loc := resp.Header.Get("Location"); loc != testLoginPath+"?ssoError=refused" {
 		t.Errorf("the sixth hold's redirect = %q, want ssoError=refused", loc)

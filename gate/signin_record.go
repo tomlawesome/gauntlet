@@ -178,6 +178,8 @@ func (g *Gate) recordSignInNote(r *http.Request, ev gauntlet.SignInEvent, res lo
 		switch {
 		case ev.Confirmed && strings.Contains(note, escapeUsedNote):
 			detail = "via escape code; " + from
+		case ev.Confirmed && strings.Contains(note, allowanceUsedNote):
+			detail = "via admin allowance; " + from
 		case ev.Confirmed && strings.Contains(note, proveActionNote):
 			detail = "via passkey proof; " + from
 		case ev.Confirmed:

@@ -152,6 +152,39 @@ func TestCityDownloadLocates(t *testing.T) {
 	}
 }
 
+// The file locates every address, so a non-public one is refused by
+// Locate itself and not by missing from the file.
+func TestLocateOnlyPublicUnicast(t *testing.T) {
+	e := newCityEnv(t, t.TempDir())
+	db := buildCoveringDB(t, "GeoLite2-City", func() mmdbtype.Map {
+		return mmdbtype.Map{
+			"country": mmdbtype.Map{"iso_code": mmdbtype.String("GB")},
+			"location": mmdbtype.Map{
+				"latitude":        mmdbtype.Float64(fixtureLat),
+				"longitude":       mmdbtype.Float64(fixtureLon),
+				"accuracy_radius": mmdbtype.Uint16(fixtureRadius),
+			},
+		}
+	})
+	e.fp.set("/maxmind-city", cityArchive(t, db))
+	e.m.refresh(context.Background())
+	want := gauntlet.Location{Latitude: fixtureLat, Longitude: fixtureLon, RadiusKm: fixtureRadius}
+	for _, addr := range []string{inV4, outV4, "::ffff:" + outV4, inV6} {
+		if loc, ok := e.m.Locate(addr); !ok || loc != want {
+			t.Fatalf("setup: Locate(%s) = %+v %v, want %+v", addr, loc, ok, want)
+		}
+	}
+	for _, addr := range []string{
+		"10.0.0.1", "172.16.5.4", "192.168.1.1", "127.0.0.1", "::ffff:127.0.0.1",
+		"::1", "::", "0.0.0.0", "169.254.169.254", "fe80::1", "fd00::1", "100.64.0.1",
+		"192.0.2.1", "2001:db8::1", "224.0.0.1", "255.255.255.255", "not-an-address", "",
+	} {
+		if loc, ok := e.m.Locate(addr); ok {
+			t.Errorf("Locate(%q) = %+v, want refused", addr, loc)
+		}
+	}
+}
+
 func TestLocateNotOkWithoutLocations(t *testing.T) {
 	// Country edition: the Country file has no location.
 	e := newEnv(t, SourceMaxMind)

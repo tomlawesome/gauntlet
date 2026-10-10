@@ -211,3 +211,13 @@ mikroview's fake authenticator copies and this module reuses.
   the application's explicit choice rather than the default. A fourth
   ceremony cookie, `gate_passkey_stepup` on `/api/auth`, five minutes,
   carries a passkey step-up.
+- Status note (#85, 2026-10-08): decision 5's "`login/factor/begin`
+  spends the same login limiter reservations as the code step" no
+  longer holds. Begin is counted on the account's own begin budget
+  (`LoginLimiter.ReserveFactorBegin`; a browser the account remembers
+  has one of its own beside it), never handed back except on begin's
+  own server-side failure, so `login/factor` releases only the
+  reservation it took itself (design.md, "One rule for every budget").
+- Status note (v0.4.0 audit, 2026-10-10): the v0.3.0 note above that
+  says the **Status** line "was never moved from Proposed" describes it
+  before that audit; the same audit moved it to Accepted.

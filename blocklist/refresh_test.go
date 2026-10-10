@@ -529,6 +529,46 @@ func TestRefreshRefuses(t *testing.T) {
 	}
 }
 
+// The size limit itself is what refuses an oversized body: the log names
+// the limit, so a refusal for another reason (a bad checksum, a bad
+// signature) does not satisfy this. The bodies run well past the limit,
+// as a hostile host streaming without end would.
+func TestRefreshRefusesABodyOverTheSizeLimit(t *testing.T) {
+	cases := map[string]struct {
+		limit int
+		set   func(t *testing.T, f *fixture)
+	}{
+		"checksum file": {maxSumFile, func(t *testing.T, f *fixture) {
+			data, sig := f.signedList(t, testBuilt, "a")
+			f.reg.publish(data, sig)
+			f.reg.set("top10k.txt.sha256", []byte(strings.Repeat("a", 10*maxSumFile)))
+		}},
+		"list": {maxListFile, func(t *testing.T, f *fixture) {
+			big := make([]byte, 3*maxListFile)
+			f.reg.publish(big, sign(t, big, f.priv))
+		}},
+		"signature file": {listsig.MaxSignatureFile, func(t *testing.T, f *fixture) {
+			data, _ := f.signedList(t, testBuilt, "a")
+			f.reg.publish(data, bytes.Repeat([]byte("a"), 10*listsig.MaxSignatureFile))
+		}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			embedded := &List{}
+			r := f.refresher(t, embedded)
+			c.set(t, f)
+			r.refresh(context.Background())
+			if r.Current() != embedded {
+				t.Fatalf("Current changed to a list built %v", r.Current().Built())
+			}
+			if want := fmt.Sprintf("larger than the %d-byte limit", c.limit); !strings.Contains(f.log.String(), want) {
+				t.Fatalf("the refusal does not say %q, log:\n%s", want, f.log)
+			}
+		})
+	}
+}
+
 func TestRefreshRefusesAListNoNewerThanTheCurrentOne(t *testing.T) {
 	f := newFixture(t)
 	current, err := Parse(listFile(testBuilt, listHashes("e")))

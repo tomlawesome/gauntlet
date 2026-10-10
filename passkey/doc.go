@@ -10,9 +10,10 @@
 // the WebAuthn library in.
 //
 // What lives here: turning the application's public URL into a relying
-// party, or a reason it cannot be one (New, Status); the two sealing
-// keys that let the browser carry ceremony state it can neither read nor
-// alter; the set of login challenges already used (registrations are
+// party, or a reason it cannot be one (New, Status); the three sealing
+// keys, one per ceremony, that let the browser carry ceremony state it
+// can neither read nor alter; the set of login challenges already used
+// (both login ceremonies draw on it; registrations are
 // spent by gate, by the sealed cookie's hash, where the store decides);
 // the library calls; and the
 // conversion between gauntlet.Passkey and the library's credential. It
@@ -20,8 +21,8 @@
 // login limiter, sessions, recovery codes and audit.
 //
 // Signing in with a passkey alone (gauntlet.PasskeySignIn, #77,
-// docs/adr/0012-passkey-alone-sign-in.md) is the third ceremony, with
-// its own sealing key; the same relying party runs it.
+// docs/adr/0012-passkey-alone-sign-in.md) is the third ceremony, under
+// the third sealing key; the same relying party runs it.
 //
 // Ported from mikroview's internal/api/webauthn.go (NewRelyingParty,
 // webauthnSessionCodec; its spentChallenges became gauntlet's shared

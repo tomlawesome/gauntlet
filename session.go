@@ -20,8 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/tomlawesome/gauntlet/internal/plaintext"
 )
 
 // MaxSessionIdle is the longest a session may go unused before gate.New
@@ -98,19 +98,42 @@ type SessionClient struct {
 
 // Clean is c with Address and UserAgent cleaned and cut the way every
 // session and sign-in record keeps them: control and Unicode formatting
-// characters and invalid UTF-8 dropped, then UserAgent cut to
+// characters, the line and paragraph separators (unprintable) and
+// invalid UTF-8 dropped, then UserAgent cut to
 // MaxSessionUserAgent bytes and Address to MaxSessionAddress, never
 // mid-character. Both are the client's own word, so neither may carry a
 // terminal escape, a bidirectional override, a line break or a megabyte
 // of padding into a page, a log or a message that later shows them.
-// Country, Unusual and Method are gate's own and pass through unchanged.
-// It is one rule: CreateFrom, CreateContinuing and Resume clean through
-// it, and gate cleans through it the client it hands to a notice or a
-// confirmation code.
+// Country is kept only as exactly two ASCII letters, upper-cased (an
+// ISO 3166-1 alpha-2 code); anything else a lookup returned becomes "",
+// no country. Unusual and Method are gate's own and pass through
+// unchanged. It is one rule: CreateFrom, CreateContinuing and Resume
+// clean through it, and gate cleans through it the client it hands to a
+// notice or a confirmation code.
 func (c SessionClient) Clean() SessionClient {
 	c.Address = cleanClientText(c.Address, MaxSessionAddress)
 	c.UserAgent = cleanClientText(c.UserAgent, MaxSessionUserAgent)
+	c.Country = cleanCountry(c.Country)
 	return c
+}
+
+// cleanCountry returns s upper-cased when it is exactly two ASCII
+// letters, else "".
+func cleanCountry(s string) string {
+	if len(s) != 2 {
+		return ""
+	}
+	b := []byte(s)
+	for i, ch := range b {
+		switch {
+		case 'a' <= ch && ch <= 'z':
+			b[i] = ch - 'a' + 'A'
+		case 'A' <= ch && ch <= 'Z':
+		default:
+			return ""
+		}
+	}
+	return string(b)
 }
 
 // Session is deliberately an opaque random ID (see newID), not a JWT --
@@ -286,28 +309,24 @@ func (s *SessionStore) CreateContinuing(from Session, client SessionClient, now 
 	return sess
 }
 
-// cleanClientText is Clean's rule for one SessionClient field: the
-// characters printableWithin (token.go) refuses in a token name are
-// dropped rather than refused -- a session is never refused for what a
-// browser sent -- and what is left is cut to at most maxBytes on a
-// character boundary.
+// cleanClientText is Clean's rule for one SessionClient field:
+// plaintext.Clean drops what is not plain text rather than refusing it
+// -- a session is never refused for what a browser sent -- and what is
+// left is cut to at most maxBytes on a character boundary. Client text
+// keeps a byte cap (#90): it is not a name a person chose.
 func cleanClientText(s string, maxBytes int) string {
-	var b strings.Builder
-	for len(s) > 0 {
-		r, size := utf8.DecodeRuneInString(s)
-		s = s[size:]
-		if r == utf8.RuneError && size == 1 {
-			continue // invalid UTF-8
-		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			continue
-		}
-		if b.Len()+size > maxBytes {
+	s = plaintext.Clean(s)
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := 0
+	for i := range s {
+		if i > maxBytes {
 			break
 		}
-		b.WriteRune(r)
+		cut = i
 	}
-	return b.String()
+	return s[:cut]
 }
 
 // sweepLocked checks the next sweepBatch entries of order: an ID no
