@@ -22,6 +22,7 @@ func TestContractFix99LoginFactorNeedsExactlyOneOfCodeAndAssertion(t *testing.T)
 		{"both", loginFactorRequest{Code: "000000", Assertion: assertion}},
 		{"neither, empty code", loginFactorRequest{}},
 		{"neither, empty object", map[string]any{}},
+		{"neither, null assertion", map[string]any{"assertion": nil}},
 	}
 	const threshold = 3
 	for _, tc := range bodies {
