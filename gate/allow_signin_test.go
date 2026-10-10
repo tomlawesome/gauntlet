@@ -235,7 +235,7 @@ func TestAdminAllowsAnotherAccountsNextSignIn(t *testing.T) {
 	if out.Username != totpBobUsername || !out.AllowedUntil.Equal(until) {
 		t.Errorf("answer = %+v, want bob until %v", out, until)
 	}
-	if u, _ := e.g.deps.Users.Get(e.bobID); !u.SignInAllowed(now) || !u.SignInAllowedUntil.Equal(until) {
+	if u, _ := e.g.deps.Users.Get(e.bobID); !u.SignInAllowanceLive(now) || !u.SignInAllowedUntil.Equal(until) {
 		t.Errorf("stored allowance ends %v, want %v", u.SignInAllowedUntil, until)
 	}
 
