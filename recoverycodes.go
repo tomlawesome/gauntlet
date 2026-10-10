@@ -79,15 +79,13 @@ func NormaliseRecoveryCode(typed string) string {
 // clear -- grouped for display -- exactly once. The caller must show
 // them to the user immediately and must never itself persist the
 // returned strings; only the hashes this writes to the store survive.
-// It backs gate's "regenerate recovery codes" route; an account's first
-// set is minted with its first factor instead (HoldFirstPasskey,
-// HoldFirstTOTP).
+// It writes whether or not the account has a second factor; gate's
+// regenerate route uses RegenerateRecoveryCodes, which refuses that case
+// (#94). An account's first set is minted with its first factor instead
+// (HoldFirstPasskey, HoldFirstTOTP).
 //
 // now is unused: a recovery code records no issue time. It stays so the
 // signature matches mikroview's and gauntlet v0.1.0's.
-//
-// It writes whether or not the account has a second factor; gate uses
-// RegenerateRecoveryCodes, which refuses that case (#94).
 func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, error) {
 	return s.generateRecoveryCodes(userID, false)
 }
