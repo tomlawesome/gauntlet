@@ -365,7 +365,11 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	}
 	// Exactly one of a code and an assertion, refused before anything
 	// is reserved or looked up: a malformed request is no guess, so it
-	// spends no attempts and leaves the pending login as it was.
+	// spends no attempts and leaves the pending login as it was. A JSON
+	// null is no assertion, as an absent one is.
+	if string(req.Assertion) == "null" {
+		req.Assertion = nil
+	}
 	if (req.Code == "") == (len(req.Assertion) == 0) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "send a code or an assertion, not both and not neither", nil)
 		return
