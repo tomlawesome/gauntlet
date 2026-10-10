@@ -444,8 +444,13 @@ type unusualVerdict struct {
 	// sign-in (#81, gauntlet.User.SignInAllowedUntil). action keeps the
 	// policy's answer. completeSignIn records it confirmed, with
 	// allowed=used in the audit detail, and a notice whose Reason is
-	// "allowed".
+	// "allowed". The allowance is spent before anything else of the
+	// sign-in is done (spendAllowance), which sets remembered.
 	allowed bool
+	// remembered marks a verdict whose browser, country and place are
+	// already remembered (spendAllowance): completeSignIn does not
+	// remember them again.
+	remembered bool
 }
 
 // escapeUsedNote is the audit note a sign-in completed with an escape
@@ -563,15 +568,41 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 	return fail("decide-invalid", fmt.Sprintf("answered %q, which is not flag, confirm, prove or block", string(answer)))
 }
 
+// spendAllowance spends the administrator's allowance an allowed sign-in
+// came through on (#81), before anything else of the sign-in is done:
+// the limiter's count, the replaced session, the session itself. The
+// allowance is spent by the write that remembers the browser
+// (rememberSignIn, gauntlet.Store.RememberSignIn), so that write comes
+// first here, and v is marked remembered so completeSignIn does not
+// repeat it. When it fails the sign-in fails closed (#101): it reports
+// false, nothing else has been written and the allowance stays live,
+// and the caller hands the limiter back (releaseLogin), answers 500
+// server-error -- or, at the SSO callback, redirects login_failed --
+// and issues no session. A session issued without the spend would leave
+// the allowance open for another sign-in. rememberSignIn has logged the
+// error. Any other verdict reports true and writes nothing: an ordinary
+// sign-in whose remembering fails still completes, its signals dropped.
+func (g *Gate) spendAllowance(w http.ResponseWriter, r *http.Request, user *gauntlet.User, place signInPlace, v *unusualVerdict, now time.Time) bool {
+	if !v.allowed {
+		return true
+	}
+	if !g.rememberSignIn(w, r, user.ID, place, now) {
+		return false
+	}
+	v.remembered = true
+	return true
+}
+
 // completeSignIn issues the session a judged sign-in has earned and
 // records it: the session carries the verdict's signals, as do the
 // history row and the audit record (unusual=...; action=...;
 // notify=...; before the existing detail). When remembering the sign-in
 // fails, nothing is flagged and nobody is told: the signals are dropped
-// (issueSignInSession). It returns the notice to send once the response
+// (issueSignInSession). An allowed verdict has been through
+// spendAllowance first. It returns the notice to send once the response
 // is written (notifyUnusualSignIn), nil for none.
 func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *AccountNotice {
-	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, method, now)
+	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, method, v.remembered, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
 	ev.Client.Unusual, ev.Confirmed = signals, v.escape || v.allowed
 	if signals == 0 {

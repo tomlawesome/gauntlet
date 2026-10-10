@@ -545,6 +545,12 @@ Short route names such as `login/factor` are under `/api/auth/`.
   complete the request" or "unable to create token".
 - Returned wherever a store, session or token operation fails for a
   reason none of the other classes name.
+- A sign-in let through by an admin's allowance of the next sign-in
+  (#81) whose allowance cannot be saved as spent answers it at `POST
+  /api/auth/login`, `POST /api/auth/login/factor` and `POST
+  /api/auth/login/passkey`, with "unable to complete sign-in" (#101). No
+  session is issued and the allowance stays live. The SSO callback
+  redirects with `ssoError=login_failed` instead.
 
 ## partially-completed
 

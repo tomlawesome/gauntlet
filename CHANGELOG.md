@@ -21,6 +21,16 @@ All notable changes to this project are documented in this file.
   (#101). A username refused for a zero-width space, a line separator or
   another invisible formatting character now gets a `detail` that says
   so, instead of naming only control characters and edge spaces.
+- **A sign-in let through by an admin's allowance fails closed when the
+  allowance cannot be saved as spent** (#101). It used to complete,
+  leaving the allowance live for another sign-in. It now answers `500`
+  `server-error` "unable to complete sign-in" at `POST
+  /api/auth/login`, `POST /api/auth/login/factor` and `POST
+  /api/auth/login/passkey`, and the SSO callback redirects with
+  `ssoError=login_failed`. No session is issued, the attempt is not
+  counted as a failure, and the allowance stays live, so the same
+  sign-in tried again once the store recovers completes. Ordinary
+  sign-ins are unchanged.
 
 ## [0.4.0] - 2026-10-10
 

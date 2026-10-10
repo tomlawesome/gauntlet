@@ -321,6 +321,16 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !g.spendAllowance(w, r, user, place, &verdict, now) {
+		// The allowance this sign-in came through on could not be saved
+		// as spent: refused, as the backend's failure (#101). No 401,
+		// no lockout count, no session, and the allowance stays live.
+		g.releaseLogin(res, now)
+		g.clearPendingLoginCookie(w)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
+		return
+	}
+
 	// A leftover pending-login cookie from an earlier, abandoned attempt
 	// (this account or another one on the same browser) has no bearing
 	// on a login that just completed through the ordinary one-step path.
@@ -502,6 +512,14 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		g.clearPendingLoginCookie(w)
 		out, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
+		return
+	}
+	if !g.spendAllowance(w, r, user, place, &verdict, now) {
+		// As in handleLogin: the allowance could not be saved as spent,
+		// so no session (#101).
+		g.releaseLogin(res, now)
+		g.clearPendingLoginCookie(w)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	}
 	g.completeLogin(res, now)

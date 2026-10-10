@@ -1346,7 +1346,14 @@ strictest of the kept signals wins.
   `allowed=used; ` and the prefix `via admin allowance; `, and the
   notice has `Reason: "allowed"`. The first completed sign-in from any
   browser uses the allowance up, and a reset code or sign out
-  everywhere clears it.
+  everywhere clears it. It is spent by the write that remembers the
+  browser, which comes before anything else of the sign-in. When that
+  write fails the sign-in is refused (#101): `500` `server-error`
+  "unable to complete sign-in" at `login`, `login/factor` and
+  `login/passkey`, and a redirect with `ssoError=login_failed` at the
+  SSO callback. No session is issued, nothing is recorded, the attempt
+  is not counted as a failure, and the allowance stays live for the
+  same sign-in tried again.
   It lifts no lockout or disable and changes no credential; an SSO-only
   account's callback completes too. Audited as `user.sign_in_allowed`;
   the account holder gets `NoticeSignInAllowed`

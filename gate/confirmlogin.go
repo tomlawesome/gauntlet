@@ -299,7 +299,7 @@ func (g *Gate) completeHeldSignIn(w http.ResponseWriter, r *http.Request, user *
 	g.completeLogin(res, now)
 	g.clearConfirmLoginCookie(w)
 	place := g.placeOf(r, res.address)
-	_, signals := g.issueSignInSession(w, r, user.ID, place, st.Signals, st.Method, now)
+	_, signals := g.issueSignInSession(w, r, user.ID, place, st.Signals, st.Method, false, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, st.Method)
 	ev.Client.Unusual, ev.Confirmed = signals, true
 	// The note names what was judged -- the ticket's signals -- and how
