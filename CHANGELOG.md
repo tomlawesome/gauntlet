@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Turning off an authenticator app or removing a passkey for an
+  account deleted mid-request answers 401, not 500** (#100). `DELETE
+  /api/auth/totp` and `DELETE /api/auth/passkeys/{id}` answered `500`
+  `server-error` with detail "no such user" when an admin deleted the
+  account between the password re-check and the save. They now answer
+  `401` `sign-in-required` "sign in first", as `POST
+  /api/auth/recovery-codes` already did (#95).
+- **`ErrNoSecondFactors` no longer says "to clear"** (#101). Its text is
+  now "gauntlet: this account has no second factor", which fits both
+  `Store.ClearAllSecondFactors` and `Store.RegenerateRecoveryCodes`.
+  Code that matches it with `errors.Is` is unaffected.
+- **The "username not allowed" message names invisible characters**
+  (#101). A username refused for a zero-width space, a line separator or
+  another invisible formatting character now gets a `detail` that says
+  so, instead of naming only control characters and edge spaces.
+
 ## [0.4.0] - 2026-10-10
 
 ### Added
