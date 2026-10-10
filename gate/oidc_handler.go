@@ -399,7 +399,7 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// above, whose caller already holds a session.
 	place := g.placeOf(r, "")
 	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodSSO, place, now)
-	if verdict.stopsSignIn() {
+	stop := func() {
 		out, notice := g.stopSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)
 		if out == stopHeld {
 			// The frontend asks for the code and posts it to
@@ -418,6 +418,21 @@ func (g *Gate) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		// carries a notice.
 		g.redirectWithSSOError(w, r, "refused")
 		g.notify(r.Context(), notice)
+	}
+	if verdict.stopsSignIn() {
+		stop()
+		return
+	}
+	switch g.spendAllowance(w, r, user, place, &verdict, now) {
+	case allowanceNotAllowed:
+		// The allowance was already used: the policy's own answer, as
+		// login's (#103) -- refused, or held for a code or a passkey.
+		stop()
+		return
+	case allowanceFailed:
+		// The allowance could not be saved as spent: no session, as
+		// login's (#101). rememberAllowedSignIn has logged why.
+		g.redirectWithSSOError(w, r, "login_failed")
 		return
 	}
 	notice := g.completeSignIn(w, r, user, loginReservation{}, gauntlet.SignInMethodSSO, place, verdict, now)

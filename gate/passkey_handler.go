@@ -549,6 +549,10 @@ func (g *Gate) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	removed, err := g.deps.Users.DeletePasskey(user.ID, credID)
+	if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since recheckPassword read it (#95, #100)
+		writeUnauthorized(w, classSignInRequired, "sign in first")
+		return
+	}
 	if err != nil {
 		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrPasskeyNotFound) {

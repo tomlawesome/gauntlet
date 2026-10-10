@@ -150,7 +150,7 @@ func (g *Gate) revokeReplacedSession(r *http.Request, userID string, now time.Ti
 // session continues the same sign-in, as its client does, and the list
 // of sessions keeps saying how it was made.
 func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, userID string, method gauntlet.SignInMethod, now time.Time) {
-	g.issueSignInSession(w, r, userID, g.placeOf(r, ""), 0, method, now)
+	g.issueSignInSession(w, r, userID, g.placeOf(r, ""), 0, method, false, now)
 }
 
 // sessionMethod is the method of the live session r's cookie names, when
@@ -198,11 +198,13 @@ func (g *Gate) issueContinuedSession(w http.ResponseWriter, r *http.Request, old
 // is where it came from, looked up once, and signals the unusual-sign-in
 // signals the session carries (#55), and method how it was made (#77). The browser, country and place are
 // remembered first (rememberSignIn); if that write fails, nothing is
-// flagged and the session carries no signals. It returns the session
-// and the signals it carries.
-func (g *Gate) issueSignInSession(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, signals gauntlet.SignInSignals, method gauntlet.SignInMethod, now time.Time) (gauntlet.Session, gauntlet.SignInSignals) {
+// flagged and the session carries no signals. remembered is true when
+// the caller has remembered them already, as a sign-in let through by
+// an allowance has (spendAllowance, #101): they are not remembered
+// twice. It returns the session and the signals it carries.
+func (g *Gate) issueSignInSession(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, signals gauntlet.SignInSignals, method gauntlet.SignInMethod, remembered bool, now time.Time) (gauntlet.Session, gauntlet.SignInSignals) {
 	g.revokeReplacedSession(r, userID, now)
-	if !g.rememberSignIn(w, r, userID, place, now) {
+	if !remembered && !g.rememberSignIn(w, r, userID, place, now) {
 		signals = 0
 	}
 	client := place.client

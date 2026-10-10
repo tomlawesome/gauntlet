@@ -3,6 +3,7 @@ package gauntlet
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -306,6 +307,33 @@ func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, l
 // caller's to log. Refused with ErrUserNotFound for an account that
 // does not exist.
 func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) {
+	return s.rememberSignIn(accountID, replacing, country, loc, now, false)
+}
+
+// ErrSignInNotAllowed is returned by RememberAllowedSignIn when the
+// administrator's allowance the sign-in relied on (#81) is no longer
+// live: another sign-in, here or in another process, has spent it, or
+// its window has closed.
+var ErrSignInNotAllowed = errors.New("gauntlet: the administrator's allowance of this account's next sign-in has been used or has expired")
+
+// RememberAllowedSignIn is RememberSignIn for a sign-in the policy
+// would have stopped and an administrator's allowance (#81) let through.
+// The allowance is spent at most once (#103): the same locked write
+// that remembers the sign-in first checks the allowance is still live
+// in the document as it is now, and spends it. When it is not --
+// already spent by another sign-in, here or in another process, or
+// expired -- nothing is written and the sign-in is refused with
+// ErrSignInNotAllowed; the caller then gives the policy's own answer.
+// Refused with ErrUserNotFound for an account that does not exist.
+func (s *Store) RememberAllowedSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) {
+	return s.rememberSignIn(accountID, replacing, country, loc, now, true)
+}
+
+// rememberSignIn is the write RememberSignIn and RememberAllowedSignIn
+// share. With allowed set, the op refuses with ErrSignInNotAllowed,
+// before changing anything, unless the account's allowance is live
+// against the state it is given -- on a replay, the fresh document.
+func (s *Store) rememberSignIn(accountID, replacing, country string, loc *Location, now time.Time, allowed bool) (string, error) {
 	token := newKnownBrowserToken()
 	entry := KnownBrowser{Hash: knownBrowserHash(token), IssuedAt: now}
 	var replaced string
@@ -318,6 +346,9 @@ func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Locati
 		u, ok := st.byID[accountID]
 		if !ok {
 			return ErrUserNotFound
+		}
+		if allowed && !u.SignInAllowanceLive(now) {
+			return ErrSignInNotAllowed
 		}
 		kept := make([]KnownBrowser, 0, len(u.KnownBrowsers)+1)
 		fresh := entry

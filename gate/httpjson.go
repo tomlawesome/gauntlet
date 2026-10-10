@@ -121,7 +121,7 @@ var gateErrorMessages = map[error]string{
 	gauntlet.ErrPasswordTooShort:      gauntlet.ErrPasswordTooShort.Error(), // already phrased for an end user
 	gauntlet.ErrPasswordBlocked:       "that password is on a list of common or breached passwords -- choose a different one",
 	gauntlet.ErrPasswordContext:       "that password is too close to the username or the product's name -- choose a different one",
-	gauntlet.ErrUsernameInvalid:       "that username contains characters that aren't allowed -- no control characters, and no leading or trailing spaces",
+	gauntlet.ErrUsernameInvalid:       "that username contains characters that aren't allowed -- no control characters, no invisible formatting characters such as zero-width spaces, and no leading or trailing spaces",
 	gauntlet.ErrUsernameLength:        gauntlet.ErrUsernameLength.Error(), // already phrased for an end user
 	gauntlet.ErrUsernameIsEmail:       "a local account's username can't be an email address -- pick a plain name",
 	gauntlet.ErrInvalidRole:           `role must be "admin", "user" or "viewer"`,
