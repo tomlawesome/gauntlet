@@ -10,14 +10,19 @@ operators who run it.
 
 The application runs a `geoip.Manager` and passes its `Country` method
 as `gate.Config.Country`. The manager downloads one provider's country
-file to your server, keeps it up to date, and looks addresses up in it
-there. **No address is ever sent to the provider**; the only request
-out is the daily check for a new file.
+file to your server, keeps it up to date, and looks up the sign-in's IP
+address in that file on your own server. **No address is ever sent to
+the provider**; the only request out is the daily check for a new file.
+
+Start it with `go m.Run(ctx)` (it downloads at once and then every
+`Interval`) and call `m.Close()` after `Run` has returned. Without
+`Run`, only a file already in `Config.Dir` is used.
 
 The country is looked up once, when the sign-in happens, and stored
-with it. It is blank when the address is private (a sign-in from your
-own network), when no file has been downloaded yet, or when the file
-has no entry for the address. A blank country is never filled in later.
+with it. The country is blank when the IP address is private (a sign-in
+from your own network), when no file has been downloaded yet, or when
+the file has no entry for the address. A blank country stays blank: it
+is never filled in later.
 
 Leave `gate.Config.Country` unset and no country is recorded and no
 request is made.
@@ -45,25 +50,26 @@ Gauntlet does not store the key. Keep it the way the application keeps
 its other secrets -- a mounted secret file is best -- and pass it in
 when the application starts. It never appears in a log line, an error
 or `Manager.Status`. If the provider refuses the key, the manager logs
-one warning naming the provider and tries again a day later; check the
-key and restart.
+one warning naming the provider and tries again a day later. If the key
+is wrong, correct it and restart the application.
 
 ## Where the file is kept
 
-Both providers ship their data as an `.mmdb` file: a database of
-address ranges in a format both use. You name a folder in `Config.Dir`
+Both providers ship their data as an `.mmdb` file: a file listing
+network address ranges and the country each belongs to. You name a folder in `Config.Dir`
 (required), and the manager keeps there:
 
 - the last good file, as `maxmind.mmdb` or `ipinfo.mmdb` (or
   `maxmind-city.mmdb`, below);
 - a small `state.json` saying when it was fetched.
 
-The manager creates the folder readable by the service only (0700),
-and writes the files 0600. After a restart the kept file is used
+The manager creates the folder so that only the account the application
+runs as can open it (permissions 0700), and the files likewise (0600). After a restart the kept file is used
 straight away, before any download.
 
-**Leave the `Config.Dir` folder out of backups.** It holds the
-provider's public data, downloaded again on demand, not your data.
+**Leave the `Config.Dir` folder out of backups.** It holds only the
+provider's public data, which the manager downloads again when needed,
+not your data.
 Expect a few MB for MaxMind's country file, and tens of MB for IPinfo's
 and for MaxMind's city file. Gauntlet refuses any download over
 128 MiB.
@@ -74,25 +80,26 @@ again in an hour. If the file it has is more than 45 days old, every
 check logs a warning, and `Status().Stale` is true, but it is still
 used.
 
-The download only ever goes to the provider's own https address. The
-built-in downloader will not follow a redirect to an unencrypted
-`http` address. It also refuses to connect to an address on your own
-network or any other non-public address, redirects included. This
-stops a hijacked download link from reaching your internal systems.
+The download only goes to the provider's own secure (https) web
+address. The built-in downloader will not follow a forwarding link
+(redirect) to an unencrypted `http` address. It also refuses to connect
+to any address on your own network or any other non-public address,
+redirects included. So a hijacked download link cannot reach your
+internal systems.
 
-## Locations, for impossible travel
+## Locations, for spotting sign-ins from too far apart
 
 Gauntlet can also judge whether a sign-in travelled further than is
 physically possible since the account's last one -- one of the
 "unusual sign-in" signals (#55, [ADR-0009](adr/0009-unusual-sign-ins.md)).
 This needs the approximate latitude and longitude of each address,
-not just its country, which only MaxMind's larger GeoLite2-City file
-carries.
+not just its country. Only MaxMind's larger GeoLite2-City file contains
+them.
 
 Set `geoip.Config.Edition` to `geoip.EditionCity` and `Config.Source`
 to `geoip.SourceMaxMind` -- IPinfo Lite has no coordinates, so
-`New` refuses `EditionCity` with `SourceIPinfo`, and impossible travel
-is simply unavailable on that provider. The city file is kept
+choosing the city file with IPinfo is an error (`New` refuses it), and
+this check cannot be used with IPinfo. The city file is kept
 separately, as `maxmind-city.mmdb`, so switching back to the country
 file does not lose it; delete whichever edition's file you are no
 longer using.
@@ -115,8 +122,8 @@ cfg := gate.Config{
 }
 ```
 
-`Manager.Status().Locates` is true once a city file is loaded, so an
-application can show whether impossible travel is actually available
+`Manager.Status().Locates` becomes true once the city file has loaded,
+so an application can show whether the too-far-apart check is working
 yet, the same way it already shows whether a country file is loaded.
 
 Everything above -- the key, the download, the `Config.Dir` folder,
@@ -138,7 +145,9 @@ What each provider asks for, as checked on 2026-10-04:
   includes GeoLite Data created by MaxMind, available from
   https://www.maxmind.com'.)"
 - **IPinfo**, [IPinfo Lite](https://ipinfo.io/lite), licensed under
-  Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0): "The
+  Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0). The licence
+  asks you to credit IPinfo: place a link to IPinfo wherever the data is
+  shown. IPinfo's own words: "The
   attribution requirements can be met by giving our service credit as
   your data source. Simply place a link to IPinfo on the website,
   application, or social media account that uses our data."
@@ -151,5 +160,5 @@ a release that shows the data somewhere new.
 `Manager.Status()` reports the source, the edition, whether a file is
 loaded, whether it carries locations (`Locates`), when it was fetched,
 when the next check is, the last error (if the last check failed) and
-whether the file is stale. An application can show it on a health or
+whether the file is out of date (over 45 days old). An application can show it on a health or
 settings page; it carries no key.
