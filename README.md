@@ -2,14 +2,19 @@
 
 A shared Go authentication library for the applications that embed it:
 local accounts and roles, sessions, API tokens, single sign-on through
-OIDC (OpenID Connect), the second factor every account must have -- an
-authenticator app (TOTP) or a passkey, with recovery codes -- and the
+OIDC (OpenID Connect), the second step every account must have when
+signing in -- a code from an authenticator app (TOTP) or a passkey, with
+recovery codes -- and the
 HTTP layer that checks all of that in front of an application's own
 routes. One implementation, so a security fix lands once.
 
-**Status: pre-1.0, so the API may change between minor versions.**
-[CHANGELOG.md](CHANGELOG.md) says what each release added and what
-changed shape. Nothing has a stability guarantee until v1.0.
+**Status: pre-1.0.** From v0.1.0 nothing exported -- Go identifiers,
+routes, response fields and stored fields -- is removed or renamed
+within a major version ([ADR-0002](docs/adr/0002-api-standards-and-compatibility.md);
+CI checks the Go identifiers with a tool called apidiff). A release can
+still add a required setting. [CHANGELOG.md](CHANGELOG.md) flags that as
+breaking (v0.3.0's `Config.AdminPasskey` was one) and says what each
+release added.
 
 ## What ships
 
@@ -21,34 +26,37 @@ changed shape. Nothing has a stability guarantee until v1.0.
 - Single sign-on through OIDC, with the account's role taken from the
   provider's groups when the application asks for that.
 - Second factors: an authenticator app (TOTP) and passkeys, with
-  recovery codes. A passkey can also be the whole sign-in.
+  recovery codes. A passkey (a sign-in key stored on your phone or
+  computer, unlocked by fingerprint or PIN) can also replace the
+  password entirely.
 - Lockout after repeated failures, and a chosen response to an unusual
-  sign-in: a new browser, a new country, or an impossible distance from
-  the last one.
+  sign-in: a new browser, a new country, or a place too far from the last
+  sign-in to have travelled to in the time between.
 - A sign-in history an admin can page through, with the country each
   sign-in came from.
-- A built-in list of common passwords, rebuilt by CI, and an optional
+- A built-in list of common passwords, rebuilt automatically on a schedule, and an optional
   live check against Have I Been Pwned.
 - The HTTP layer, `gauntlet/gate`: a `net/http` middleware and the
   `/api/auth/*` and `/api/tokens` routes.
 
 ## What stays with the application
 
-gauntlet does not talk to a database or a browser directly. Three
-things are the application's:
+gauntlet leaves three things to the application:
 
-- **Storage.** gauntlet keeps each store's data in memory as one
-  *document* (a single JSON blob, written out whole after every change)
-  through a `persist.Backend` the application implements over its own
-  storage: a file, a database row. `persist.Encrypt` *seals* (encrypts)
-  the document before the backend sees it; `OpenStore` refuses a backend
-  that would store it in the clear. Two backends ship:
+- **Storage.** gauntlet keeps each store's data (accounts, tokens,
+  sign-in history) in memory and saves it whole, as one block of JSON
+  text, after every change. It saves through a `persist.Backend` the
+  application writes over its own storage: a file, a database row.
+  `persist.Encrypt` encrypts the data before the backend sees it;
+  `OpenStore` refuses a backend that would save it unencrypted. Two
+  backends ship:
   `persist.NewEncryptedFileBackend` for a single file, and
   `persist.NewMemory()` for tests.
 - **Logging.** Every store's options take a `*slog.Logger`; nil
   discards.
-- **The clock.** Every method that needs "now" takes a `time.Time`, so
-  the application decides and tests can hold time still.
+- **The clock.** Every method that needs the current time takes it as an
+  argument (a `time.Time`), so the application supplies it and tests can
+  use a fixed time.
 
 ## A minimal sketch
 
@@ -58,7 +66,8 @@ accounts, err := persist.Encrypt(myBackend, key, persist.EncryptOptions{Label: "
 store, err := gauntlet.OpenStore(accounts, gauntlet.Options{Log: logger, ProductName: "myapp"})
 // An empty store announces a one-time setup code: it logs it, or hands
 // it to Options.OnSetupCode. Whoever creates the first account must
-// type it in; the HTTP layer checks it before Register.
+// type it in. In a web app the gate package checks it for you; here
+// you call CheckSetupCode yourself, before Register.
 err = store.CheckSetupCode(typedCode)
 admin, err := store.Register("alice", password, time.Now()) // the first account is always the admin
 ```
@@ -76,8 +85,8 @@ in [docs/using.md](docs/using.md).
   decision, from why the module exists
   ([ADR-0001](docs/adr/0001-shared-auth-module.md)) to requiring a
   passkey on every admin account (ADR-0015).
-- [docs/api/auth.yaml](docs/api/auth.yaml): every route, as an OpenAPI
-  contract.
+- [docs/api/auth.yaml](docs/api/auth.yaml): every route, written as an
+  OpenAPI file (a standard machine-readable description of web routes).
 - [docs/api/errors.md](docs/api/errors.md): every error body.
 - [SECURITY.md](SECURITY.md): the threat model and how to report a
   vulnerability.
@@ -94,7 +103,8 @@ puts no licence terms on that data, so no credit is owed; gauntlet
 gives one anyway, here and in the header of every copy of the list, and
 an application that embeds gauntlet does not have to repeat it.
 
-The `geoip` package downloads MaxMind's or IPinfo's data at run time and
-ships none. Both providers require the application that shows their
+The `geoip` package downloads country data from MaxMind or IPinfo (two
+IP-location services) while the application runs, and includes none in
+the library. Both providers require the application that shows their
 data to credit them, and gauntlet has no page of its own to do it on;
 [docs/geoip.md](docs/geoip.md) quotes what each asks for.
