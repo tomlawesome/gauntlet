@@ -449,16 +449,25 @@ func (g *Gate) handleLoginPasskey(w http.ResponseWriter, r *http.Request) {
 	g.deps.Limiter.Release(passkeyBeginKey(address), now) // the begin step's reservation
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodPasskeyAlone, place, now)
-	if verdict.stopsSignIn() {
+	stop := func() {
 		// The credential was right, so the attempt is handed back rather
 		// than completed; nothing completed, so the account's count is
 		// not reset.
 		g.releaseLogin(res, now)
 		out, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPasskeyAlone, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
+	}
+	if verdict.stopsSignIn() {
+		stop()
 		return
 	}
-	if !g.spendAllowance(w, r, user, place, &verdict, now) {
+	switch g.spendAllowance(w, r, user, place, &verdict, now) {
+	case allowanceNotAllowed:
+		// The allowance was already used: the policy's own answer, as
+		// login's (#103).
+		stop()
+		return
+	case allowanceFailed:
 		// The allowance could not be saved as spent: no session, as
 		// login's (#101).
 		g.releaseLogin(res, now)

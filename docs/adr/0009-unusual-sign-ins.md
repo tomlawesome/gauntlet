@@ -286,3 +286,12 @@ remembers, and let the application decide what happens next.
   session, no record and no failure counted, and the allowance stays
   live. An ordinary sign-in whose remembering write fails still
   completes, its signals dropped, as before.
+- Status note (#103, 2026-10-10): decision 11's allowance is spent at
+  most once. The write that remembers an allowed sign-in now checks, in
+  the same locked write, that the allowance is still live in the
+  accounts document as it is then, and spends it
+  (`Store.RememberAllowedSignIn`). A sign-in judged allowed whose
+  allowance another sign-in -- here or in another process -- has used in
+  the meantime writes nothing and gets the policy's own answer: refused
+  with `sign-in-refused` (`ssoError=refused` at the SSO callback), or
+  held for a code or a passkey. It is not a `500`.

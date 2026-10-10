@@ -336,6 +336,8 @@ func ParseSignInSignal(name string) (SignInSignals, bool)
 type SignInJudgement struct { Signals SignInSignals; PreviousCountry string } // PreviousCountry is LastPlace.Country when SignalImpossibleTravel is set
 func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, loc *Location, now time.Time) SignInJudgement // read-only; tokens are the known-browser tokens the browser carries
 func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) // one write: rotates the browser token (as RememberBrowser) and remembers the country and last place, and spends an allowance (#81); RememberBrowser is RememberSignIn with country and loc left blank
+func (s *Store) RememberAllowedSignIn(accountID, replacing, country string, loc *Location, now time.Time) (string, error) // new (#103): RememberSignIn for a sign-in an allowance let through, in the same one locked write, made only if the allowance is still live there; else ErrSignInNotAllowed and nothing written
+var ErrSignInNotAllowed error // new (#103): RememberAllowedSignIn found the allowance already used or expired
 const SignInAllowanceLifetime = 10 * time.Minute                                   // #81
 func (s *Store) AllowNextSignIn(accountID string, now time.Time) (*User, error)   // #81: SignInAllowedUntil = now + 10 min, replacing any earlier; cleared by RememberSignIn, ClearKnownBrowsers, IssueResetCode
 func (s *Store) List() []User                                              // secrets blanked
@@ -1347,7 +1349,14 @@ strictest of the kept signals wins.
   notice has `Reason: "allowed"`. The first completed sign-in from any
   browser uses the allowance up, and a reset code or sign out
   everywhere clears it. It is spent by the write that remembers the
-  browser, which comes before anything else of the sign-in. When that
+  browser, which comes before anything else of the sign-in. That write
+  spends it at most once (#103, `Store.RememberAllowedSignIn`): it
+  checks the allowance is still live in the same locked write, against
+  the accounts document as it is then, so of two sign-ins relying on
+  one allowance -- in this process or another -- only one completes.
+  The other finds it already used, writes nothing, and gets the
+  policy's own answer, as if no allowance had been made: refused,
+  or held for a code or a passkey. When that
   write fails the sign-in is refused (#101): `500` `server-error`
   "unable to complete sign-in" at `login`, `login/factor` and
   `login/passkey`, and a redirect with `ssoError=login_failed` at the
