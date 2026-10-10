@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-10
+
 ### Fixed
 
 - **Turning off an authenticator app or removing a passkey for an
