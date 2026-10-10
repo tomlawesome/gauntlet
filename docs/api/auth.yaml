@@ -3,7 +3,7 @@ info:
   title: gauntlet gate HTTP API
   # Always the VERSION file's value; the release merge request bumps
   # both, and gate/contracttest fails if they differ.
-  version: 0.4.1
+  version: 0.4.2
   license:
     name: Apache-2.0
     identifier: Apache-2.0

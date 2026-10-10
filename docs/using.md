@@ -138,6 +138,56 @@ handler := g.Protect(mux) // serve this
   is refused. `g.Exempt(paths...)` adds paths reachable without a
   session.
 
+### Long-lived responses
+
+`Protect` checks a request once, when it arrives. A response held open
+for a long time -- a server-sent event stream, a websocket -- would
+otherwise never hear that its session ended: a sign-out, "sign out
+everywhere", a password change, a deleted account. Re-check it on the
+stream's own keepalive tick with `g.StillSignedIn(r)`, and end the
+stream when it refuses:
+
+```go
+func events(w http.ResponseWriter, r *http.Request) {
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-tick.C:
+			if err := g.StillSignedIn(r); err != nil {
+				var refused *gate.Refusal
+				if errors.As(err, &refused) {
+					// The same reason the next ordinary request gets:
+					// 401 sign-in-required, 403 must-enrol-factor, ...
+					fmt.Fprintf(w, "event: ended\ndata: %d %s\n\n", refused.Status, refused.Class)
+				}
+				return
+			}
+			// write the keepalive or the next event
+		}
+	}
+}
+```
+
+- `StillSignedIn` is `Protect`'s own decision -- the same cookie or
+  bearer token, the same rules, the same doors, against the request's
+  own path -- so it refuses exactly what `Protect` would refuse now.
+  Pass it the request as `Protect` saw it: middleware that rewrites the
+  path in between (`http.StripPrefix`) changes which `Exempt` paths and
+  doors it matches.
+- The check never keeps a session awake. It does not slide the
+  session's expiry or move a token's last-used time, revokes nothing
+  and logs none of `Protect`'s refusals, so a tab left open on a stream
+  signs out at the idle limit you gave `NewSessionStore` (at most an
+  hour), like any other, not at its maximum lifetime (the second
+  argument, at most a day).
+- `gate` runs no timer: the call is the application's to make, from
+  the tick it already has.
+- An `Exempt` path is admitted whatever its cookie says, as `Protect`
+  admits it, so a stream that must be re-checked must not be exempt.
+
 ### Audit and logs
 
 - gate sends each completed sign-in, each failed one, and each one the
