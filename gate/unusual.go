@@ -481,7 +481,7 @@ func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet
 	if v.action == UnusualSignInProve {
 		v.action = g.resolveProve(user, method)
 	}
-	if v.stopsSignIn() && user.SignInAllowed(now) {
+	if v.stopsSignIn() && user.SignInAllowanceLive(now) {
 		v.allowed = true
 	}
 	return v

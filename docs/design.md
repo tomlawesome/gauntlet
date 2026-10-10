@@ -225,7 +225,7 @@ type User struct { // JSON tags exactly as mikroview internal/auth/store.go:81
     LoginLockoutCount int; LoginDisabledAt time.Time // new (#44): gauntlet's own, zero in older documents
     KnownBrowsers []KnownBrowser // new (#44): accounts version 4; none in older documents
     SeenCountries []SeenCountry; LastPlace *LastPlace // new (#55): accounts version 8; what unusual sign-ins are judged against, none/nil in older documents
-    SignInAllowedUntil time.Time // new (#81): accounts version 10; an admin's allowance of the next sign-in, read with SignInAllowed; zero in older documents
+    SignInAllowedUntil time.Time // new (#81): accounts version 10; an admin's allowance of the next sign-in, read with SignInAllowanceLive; zero in older documents
     OIDCIssuer, OIDCSubject string; HasLocalPassword bool
     ResetCodeHash string; ResetCodeExpiresAt time.Time; MustChangePassword bool
     TOTPSecret string; TOTPConfirmedAt time.Time; TOTPLastCounter uint64

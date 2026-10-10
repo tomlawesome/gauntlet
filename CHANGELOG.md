@@ -39,7 +39,7 @@ All notable changes to this project are documented in this file.
   holder is told through the new `NoticeSignInAllowed`
   (`AccountNotice.SignInAllowed`, `SignInAllowedDetail{Until}`). New
   `Store.AllowNextSignIn`, `User.SignInAllowedUntil`,
-  `User.SignInAllowed` and `SignInAllowanceLifetime`. Additive.
+  `User.SignInAllowanceLive` and `SignInAllowanceLifetime`. Additive.
 
 ### Security
 
