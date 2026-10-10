@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-10
+
+### Added
+
+- **`Gate.StillSignedIn`, `gate.Refusal`, `SessionStore.Peek` and
+  `TokenStore.Peek`** (#104, ADR-0016). A long-lived response -- a
+  server-sent event stream, a websocket -- can ask on its keepalive tick
+  whether `Protect` would still admit the request that opened it.
+  `StillSignedIn` returns nil while it would, and otherwise a
+  `*Refusal` with the status and class `Protect` would answer. It is
+  `Protect`'s own decision, but it changes nothing: the session's expiry
+  does not slide, no `LastUsedAt` moves, nothing is revoked and none of
+  `Protect`'s refusals is logged, so an open tab now signs out at the
+  idle limit given to `NewSessionStore` (at most an hour) after the
+  person's last real request, instead of staying signed in until the
+  session's maximum lifetime (at most a day). The two
+  `Peek` methods are the read-only checks beside `Validate` and
+  `Authenticate` it is built on.
+
 ## [0.4.1] - 2026-10-10
 
 ### Added

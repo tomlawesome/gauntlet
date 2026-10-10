@@ -56,7 +56,7 @@ type logoutAllRequest struct {
 // sessions are what the caller asked to end, and they are already gone.
 func (g *Gate) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	now := g.now()
-	user, ok := g.sessionUser(r, now)
+	user, ok := g.sessionUser(r, now, true)
 	if !ok {
 		writeUnauthorized(w, classSignInRequired, "sign in first")
 		return

@@ -381,6 +381,7 @@ func NewSessionStore(ttl, maxLifetime time.Duration) *SessionStore  // new: one 
 func (s *SessionStore) Create(userID string, now time.Time) Session // CreateFrom with an empty client
 func (s *SessionStore) CreateFrom(userID string, client SessionClient, now time.Time) Session // new (#48)
 func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) // sliding ttl, capped at IssuedAt+maxLifetime; moves LastUsedAt; refuses but keeps a session idle past its ttl inside the ceiling (#71)
+func (s *SessionStore) Peek(id string, now time.Time) (Session, bool) // new (#104): Validate's answer, changing nothing -- no slide, no LastUsedAt, no eviction
 func (s *SessionStore) Resumable(id string, now time.Time) (Session, bool) // new (#71): the timed-out session id names, if still inside the ceiling; authenticates nothing
 func (s *SessionStore) Resume(id string, client SessionClient, now time.Time) (Session, bool) // new (#71): ends that session and starts one with a new ID, same account and IssuedAt, in one step
 func (s *SessionStore) ListForUser(userID string, now time.Time) []Session // new (#48): live only, newest first; evicts what is past the ceiling, skips a resumable one
@@ -399,6 +400,7 @@ func (s *TokenStore) Persisted() bool
 func (s *TokenStore) Create(name string, kind TokenKind, device string, creator *User, now time.Time) (raw string, tok *Token, err error) // expires after DefaultTokenLifetime; raw starts gnt_ (#74)
 func (s *TokenStore) CreateWithExpiry(name string, kind TokenKind, device string, creator *User, now, expiresAt time.Time) (raw string, tok *Token, err error) // zero expiresAt = never; not after now is ErrTokenExpiryInvalid
 func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*Token, bool) // SHA-256 lookup; kind must match; an expired token is refused like an unknown one
+func (s *TokenStore) Peek(raw string, want TokenKind, now time.Time) (*Token, bool) // new (#104): Authenticate's answer, recording no use; still reloads a stale document
 func (s *TokenStore) Sweep(now time.Time) (TokenSweepResult, error) // #74: removes tokens unused for a year and lists those expiring within a week (TokenSweepResult{Removed, Expiring}); the caller sends the notices, then calls MarkExpiryWarned
 func (s *TokenStore) MarkExpiryWarned(ids []string, now time.Time) error // #74: records that those tokens' expiry notices went out, so Sweep stops listing them
 func (s *TokenStore) RemoveOrphans(exists func(userID string) bool, now time.Time) ([]Token, error) // deletes, in one write, the tokens whose creating account `exists` reports gone; the result has HashedValue zeroed
@@ -1012,6 +1014,13 @@ func New(cfg Config, deps Deps) (*Gate, error)
 func (g *Gate) Protect(next http.Handler) http.Handler
 func (g *Gate) Handle(kind gauntlet.TokenKind, h http.Handler) // e.g. TokenKindAPI -> the app's read-only mux
 func (g *Gate) Exempt(paths ...string)                          // beyond the built-in /api/auth/* set
+
+// StillSignedIn (#104, ADR-0016): would Protect admit r again now? nil
+// if so, else *Refusal; Protect's own decision, touching nothing -- for
+// a long-lived response's keepalive tick.
+func (g *Gate) StillSignedIn(r *http.Request) error
+type Refusal struct { Status int; Class string } // what Protect's response would carry (docs/api/errors.md)
+func (e *Refusal) Error() string                  // "gate: no longer admitted: 403 must-enrol-factor"
 
 // Routes serves /api/auth/* and /api/tokens[/{id}] with mikroview's paths,
 // request and response bodies. Mount it under the same Protect.

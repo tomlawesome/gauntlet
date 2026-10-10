@@ -794,22 +794,11 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id, ok := s.byHash[hash]
+	t, ok := s.lookupLocked(hash, want, now)
 	if !ok {
 		return nil, false
 	}
-	t, ok := s.byID[id]
-	if !ok {
-		return nil, false
-	}
-	if t.Kind != want {
-		return nil, false
-	}
-	// Refused exactly as an unknown value is, and without recording a
-	// use: nothing tells an expired token from one that never existed.
-	if !t.ExpiresAt.IsZero() && !now.Before(t.ExpiresAt) {
-		return nil, false
-	}
+	id := t.ID
 	// See mikroview's own comment on this line (kept): persisting only
 	// once the recorded value is more than lastUsedGranularity stale
 	// keeps the display honest to the minute while collapsing a poll
@@ -835,6 +824,59 @@ func (s *TokenStore) Authenticate(raw string, want TokenKind, now time.Time) (*T
 	}
 	cp := *t
 	return &cp, true
+}
+
+// Peek reports whether raw is a live token of kind want, as
+// Authenticate does -- same hash lookup, same kind rule, same
+// expiry rule, same reload of a stale document first -- without
+// recording a use: LastUsedAt does not move and the tokens document
+// is not written. The token returned is a copy, as Authenticate's is.
+//
+// Reloading a stale document is a read of the backend, not a write,
+// and is what lets a revoke made through the CLI end a stream in the
+// running server (#104). Like Authenticate's, it logs once if it meets
+// a document it refuses.
+func (s *TokenStore) Peek(raw string, want TokenKind, now time.Time) (*Token, bool) {
+	if raw == "" {
+		return nil, false
+	}
+	hash := hashTokenValue(raw)
+	s.reloadIfStale()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.lookupLocked(hash, want, now)
+	if !ok {
+		return nil, false
+	}
+	cp := *t
+	return &cp, true
+}
+
+// lookupLocked is the token hash names when it is live and of kind
+// want -- Authenticate and Peek both, so the two cannot disagree on
+// which tokens are live. Unknown, of another kind (or of one this
+// store does not register: indexTokens leaves those out of byHash) and
+// expired are all the same false. The caller holds s.mu, for reading at
+// least.
+func (s *TokenStore) lookupLocked(hash string, want TokenKind, now time.Time) (*Token, bool) {
+	id, ok := s.byHash[hash]
+	if !ok {
+		return nil, false
+	}
+	t, ok := s.byID[id]
+	if !ok {
+		return nil, false
+	}
+	if t.Kind != want {
+		return nil, false
+	}
+	// Refused exactly as an unknown value is, and without recording a
+	// use: nothing tells an expired token from one that never existed.
+	if !t.ExpiresAt.IsZero() && !now.Before(t.ExpiresAt) {
+		return nil, false
+	}
+	return t, true
 }
 
 // Revoke permanently deletes a token by ID -- there is no "disable and
