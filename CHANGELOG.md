@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file.
 
 ## [0.4.1] - 2026-10-10
 
+### Added
+
+- **`Store.RememberAllowedSignIn` and `ErrSignInNotAllowed`** (#103).
+  `RememberAllowedSignIn` is `RememberSignIn` for a sign-in an admin's
+  allowance let through: the same write, made only if the allowance is
+  still live, in one locked write. When it is not -- already used, here
+  or in another process, or expired -- nothing is written and it
+  returns `ErrSignInNotAllowed`.
+
 ### Fixed
 
 - **Turning off an authenticator app or removing a passkey for an
@@ -34,6 +43,15 @@ All notable changes to this project are documented in this file.
   once the store recovers completes. At `login/factor` the second-factor
   code given in the failed attempt stays used, so that sign-in needs
   another code. Ordinary sign-ins are unchanged.
+- **An admin's allowance of the next sign-in is spent at most once**
+  (#103). Two sign-ins relying on one allowance at the same moment --
+  in one server or in two sharing the accounts store -- could both
+  complete. Now only one does. The other writes nothing and gets the
+  policy's own answer: `403` `sign-in-refused` at `POST
+  /api/auth/login`, `POST /api/auth/login/factor` and `POST
+  /api/auth/login/passkey` (or held for a code or a passkey, if that is
+  what the policy does), and a redirect with `ssoError=refused` at the
+  SSO callback.
 
 ## [0.4.0] - 2026-10-10
 

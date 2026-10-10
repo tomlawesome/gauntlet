@@ -467,7 +467,7 @@ store, keep and protect:
 
   | Group | Action | Recorded when |
   |---|---|---|
-  | Sign-in | `user.login` | A sign-in completed (#45, `gate/signin_record.go`). One that an admin's allowance let through (#81) carries the note `allowed=used; ` and says `via admin allowance; `; one whose allowance cannot be saved as spent is refused with `500` and records nothing, the allowance left live (#101) |
+  | Sign-in | `user.login` | A sign-in completed (#45, `gate/signin_record.go`). One that an admin's allowance let through (#81) carries the note `allowed=used; ` and says `via admin allowance; `; one whose allowance cannot be saved as spent is refused with `500` and records nothing, the allowance left live (#101). The allowance is spent at most once: a sign-in that finds it already used by another gets the policy's own answer, such as `user.login_refused` (#103) |
   | Sign-in | `user.login_failed` | A wrong password, code or passkey the limiter let through; or a wrong password or code at an in-session re-check (`step=recheck`) |
   | Sign-in | `user.login_refused` | The account's sign-in policy refused a sign-in whose credentials were right (#55) |
   | Sign-in | `user.reauthenticated` | A timed-out session was resumed with the password or a passkey (#71, #77) |

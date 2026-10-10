@@ -277,8 +277,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
   the attempt from this browser or place (#55): the application chose
   to block unusual sign-ins (one from a new browser, a new country, or
   too far from the last one to have travelled), or its own check could
-  not run. Retrying from the same browser and place changes nothing;
-  the account itself is not locked.
+  not run, or the administrator's allowance the sign-in relied on was
+  already used by another sign-in (#103). Retrying from the same
+  browser and place changes nothing; the account itself is not locked.
 - Returned by `POST /api/auth/login`, `POST /api/auth/login/factor` and
   `POST /api/auth/login/passkey`. The SSO callback redirects with
   `ssoError=refused` instead. An administrator lets an account in from
@@ -550,7 +551,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
   /api/auth/login`, `POST /api/auth/login/factor` and `POST
   /api/auth/login/passkey`, with "unable to complete sign-in" (#101). No
   session is issued and the allowance stays live. The SSO callback
-  redirects with `ssoError=login_failed` instead.
+  redirects with `ssoError=login_failed` instead. An allowance another
+  sign-in has already used is not this: that sign-in gets the policy's
+  own answer, such as `sign-in-refused` (#103).
 
 ## partially-completed
 
