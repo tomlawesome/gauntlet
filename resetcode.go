@@ -57,15 +57,32 @@ const ResetCodeTTL = 24 * time.Hour
 // LinkOIDCIdentity's doc comment sets out.
 var ErrNoLocalPassword = errors.New("gauntlet: this account signs in through its identity provider, so there is no local password to reset")
 
+// ErrResetDuringChange is returned by SetPassword when an admin reset
+// (IssueResetCode) was issued for the account while the change was
+// being checked and hashed. The reset stands and the change is not
+// saved: overwriting it would kill the code the admin is reading out.
+// The owner signs in with that code and sets the password then.
+var ErrResetDuringChange = errors.New("gauntlet: an administrator reset this account's password while it was being changed, so the change was not saved -- sign in with the code they give you")
+
 // NormaliseResetCode turns whatever a person typed into the canonical
-// form a stored hash was computed over: upper case, with the dashes and
-// spaces they may have copied (or added themselves) removed.
+// form a stored hash was computed over: upper case, with the dashes,
+// spaces and tabs they may have copied (or added themselves) removed.
+// It is normaliseCode, the one rule every code over resetCodeAlphabet is
+// typed back through.
+func NormaliseResetCode(typed string) string {
+	return normaliseCode(typed)
+}
+
+// normaliseCode is the one normaliser for every code over
+// resetCodeAlphabet: reset, recovery, setup, unlock and escape codes.
+// They used to carry two identical copies (NormaliseResetCode and
+// NormaliseRecoveryCode), so a fix to one could miss the other (#90).
 //
 // Only separators are dropped. A character that is not in the alphabet
 // is left exactly where it is rather than deleted, so a mistyped code
 // stays a mistyped code -- silently discarding unknown characters would
 // make "abcd!efgh" and "abcdefgh" the same secret.
-func NormaliseResetCode(typed string) string {
+func normaliseCode(typed string) string {
 	var b strings.Builder
 	b.Grow(len(typed))
 	for _, r := range typed {
@@ -91,14 +108,21 @@ func (u *User) resetCodeLive(now time.Time) bool {
 // hashed; FormatResetCode below is only ever applied on the way to a
 // human.
 func newResetCode() string {
-	b := make([]byte, resetCodeLength)
+	return newCode(resetCodeLength)
+}
+
+// newCode returns length characters drawn uniformly from
+// resetCodeAlphabet: the canonical form of a reset or recovery code,
+// which differ only in length (#90).
+func newCode(length int) string {
+	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
 		// Same stance as newID: a CSPRNG that cannot produce bytes is
 		// not a condition to degrade gracefully from when the output is
 		// about to stand in for someone's password.
 		panic("gauntlet: crypto/rand unavailable: " + err.Error())
 	}
-	out := make([]byte, resetCodeLength)
+	out := make([]byte, length)
 	for i, v := range b {
 		out[i] = resetCodeAlphabet[v&31]
 	}
@@ -111,9 +135,16 @@ func newResetCode() string {
 // who types the code with them, without them, or in lower case is
 // accepted either way.
 func FormatResetCode(code string) string {
+	return formatCode(code, resetCodeGroup)
+}
+
+// formatCode puts a dash between every group characters of a canonical
+// code, for display. Reset and recovery codes differ only in the group
+// size (#90).
+func formatCode(code string, group int) string {
 	var b strings.Builder
 	for i, r := range code {
-		if i > 0 && i%resetCodeGroup == 0 {
+		if i > 0 && i%group == 0 {
 			b.WriteByte('-')
 		}
 		b.WriteRune(r)
@@ -148,11 +179,9 @@ func FormatResetCode(code string) string {
 // reset. A running LoginLimiter drops its own count of the guesses
 // before it by PasswordChangedAt, and, seeing the code on the record,
 // any disable it decided but has not managed to save (only while saves
-// are failing) too, so no retry writes it back over the reset. The
-// reset route must not call LoginLimiter.UnlockLogin for that: it would
-// also drop the limiter's count of the guesses before the reset, which
-// is what lets the reset account past its address's limit
-// (AllowAfterReset, #32).
+// are failing) too, so no retry writes it back over the reset, and the
+// reset route has no need to call LoginLimiter.UnlockLogin. The reset
+// lifts nothing on the address's own limit (#86).
 //
 // Refused with ErrNoLocalPassword for an SSO-only account. Refusing an
 // admin's *own* account is the caller's job, not this method's: the
@@ -225,8 +254,10 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		u.KnownBrowsers = nil
 		// So are the countries and last place unusual sign-ins judge
 		// against (#55), by the same rule: the next sign-in sets a
-		// fresh baseline and raises nothing.
+		// fresh baseline and raises nothing. An administrator's allowance
+		// of the next sign-in goes too (#81): the reset is the remedy now.
 		u.SeenCountries, u.LastPlace = nil, nil
+		u.SignInAllowedUntil = time.Time{}
 		issued = *u
 		return nil
 	})

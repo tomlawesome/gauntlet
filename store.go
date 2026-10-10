@@ -258,7 +258,7 @@ func (f storeFile) checkUsernames() error {
 		if u == nil {
 			continue
 		}
-		key := strings.ToLower(u.Username)
+		key := usernameKey(u.Username)
 		if seen[key] {
 			clashes++
 		}
@@ -423,13 +423,24 @@ type Store struct {
 	breachTimeout time.Duration
 }
 
+// usernameKey is the key a username is indexed and looked up by in
+// byName: lower case, so "Bob" and "bob" are one account. Every lookup,
+// uniqueness check and index write goes through it, so the fold is
+// written once rather than at each of the fourteen places that used to
+// spell out strings.ToLower (#90). gate's limiter key for an unknown
+// name (unknownNameKey) folds the same way with its own call, since
+// gate cannot reach this.
+func usernameKey(username string) string {
+	return strings.ToLower(username)
+}
+
 // storeState is the in-memory index over the accounts document: the
 // accounts and the lookups the store answers from. It is what a write
 // changes, as a whole -- see Store.mutate -- and what OpenStore and
 // reloadIfStale replace on a load.
 type storeState struct {
 	byID      map[string]*User
-	byName    map[string]string  // lowercased username -> ID
+	byName    map[string]string  // usernameKey(username) -> ID
 	oidcIndex map[oidcKey]string // (issuer, subject) -> ID, see ByOIDCIdentity
 	// lastLoginSaved is each account's LastLogin as of the last load or
 	// save, by ID -- what Authenticate measures staleness against (see
@@ -468,7 +479,7 @@ func indexUsers(file storeFile) storeState {
 			continue
 		}
 		st.byID[u.ID] = u
-		st.byName[strings.ToLower(u.Username)] = u.ID
+		st.byName[usernameKey(u.Username)] = u.ID
 		st.lastLoginSaved[u.ID] = u.LastLogin
 		if u.OIDCIssuer != "" || u.OIDCSubject != "" {
 			st.oidcIndex[oidcKey{issuer: u.OIDCIssuer, subject: u.OIDCSubject}] = u.ID
@@ -1061,7 +1072,7 @@ func (s *Store) DeleteUser(id string) (*User, error) {
 			return ErrLastLocalAdmin
 		}
 		delete(st.byID, id)
-		delete(st.byName, strings.ToLower(u.Username))
+		delete(st.byName, usernameKey(u.Username))
 		if u.OIDCIssuer != "" {
 			delete(st.oidcIndex, oidcKey{issuer: u.OIDCIssuer, subject: u.OIDCSubject})
 		}
@@ -1114,7 +1125,7 @@ func (s *Store) TransferAdmin(toUsername string, now time.Time) (from, to *User,
 		if current == nil {
 			return ErrNoAdmin
 		}
-		targetID, ok := st.byName[strings.ToLower(toUsername)]
+		targetID, ok := st.byName[usernameKey(toUsername)]
 		if !ok {
 			return ErrUserNotFound
 		}
@@ -1354,7 +1365,7 @@ func (s *Store) createAccount(username, password string, role Role, now time.Tim
 	// document being saved: on a replay that is the one another process
 	// just wrote, which may already hold an admin or this username.
 	id := newID()
-	key := strings.ToLower(username)
+	key := usernameKey(username)
 	var created User
 	err = s.mutate(func(st *storeState) error {
 		if guard != nil {
@@ -1416,7 +1427,7 @@ func (s *Store) ValidateNewAccount(username, password string) error {
 	}
 	s.reloadIfStale()
 	s.mu.RLock()
-	_, taken := s.byName[strings.ToLower(username)]
+	_, taken := s.byName[usernameKey(username)]
 	s.mu.RUnlock()
 	if taken {
 		return ErrUsernameTaken
@@ -1572,16 +1583,6 @@ func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint strin
 		}
 	}
 
-	if unmatchable == "" {
-		// The identity's account was deleted between the read above
-		// and this lock -- rare enough that hashing under the lock here
-		// is cheaper than making every sign-in pay for the hash.
-		var err error
-		if unmatchable, err = unmatchablePasswordHash(); err != nil {
-			return OIDCSignIn{}, err
-		}
-	}
-
 	// A JIT-provisioned account that only exists in memory must not be
 	// reported as created: the caller is about to sign this person in as
 	// though the account durably exists, and a restart before the next
@@ -1615,6 +1616,19 @@ func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint strin
 		if len(st.byID) == 0 {
 			return ErrSetupRequired
 		}
+		if unmatchable == "" {
+			// The identity looked known above, but its account is gone
+			// from the document being saved: deleted since, here or by
+			// another process. Rare enough that hashing under the lock
+			// is cheaper than every returning sign-in paying for a hash
+			// -- and a role change, which also reaches this op, must
+			// not pay for one it throws away (#80). Kept across a
+			// replay, which runs this op again.
+			var err error
+			if unmatchable, err = unmatchablePasswordHash(); err != nil {
+				return err
+			}
+		}
 		newRole := RoleUser
 		if role != "" {
 			newRole = role
@@ -1635,7 +1649,7 @@ func (s *Store) FindOrCreateOIDCUserWithRole(issuer, subject, usernameHint strin
 			HasLocalPassword: false,
 		}
 		st.byID[u.ID] = u
-		st.byName[strings.ToLower(u.Username)] = u.ID
+		st.byName[usernameKey(u.Username)] = u.ID
 		st.oidcIndex[key] = u.ID
 		result, created, before, ended = *u, true, newRole, false
 		return nil
@@ -1682,7 +1696,7 @@ func (st *storeState) uniqueUsername(hint, issuer, subject string) string {
 	// still gets a stable account under the generated name below.
 	hint = sanitiseUsernameHint(hint)
 	if hint != "" {
-		if _, taken := st.byName[strings.ToLower(hint)]; !taken {
+		if _, taken := st.byName[usernameKey(hint)]; !taken {
 			return hint
 		}
 	}
@@ -1702,7 +1716,7 @@ func (st *storeState) uniqueUsername(hint, issuer, subject string) string {
 	const prefix = "oidc-"
 	for n := 8; n <= len(full) && len(prefix)+n <= maxUsernameLength; n += 8 {
 		candidate := prefix + full[:n]
-		if _, taken := st.byName[strings.ToLower(candidate)]; !taken {
+		if _, taken := st.byName[usernameKey(candidate)]; !taken {
 			return candidate
 		}
 	}
@@ -1897,12 +1911,17 @@ func (s *Store) Authenticate(username, password string, now time.Time) (*User, e
 	return s.recheckBreach(u, password, now), nil
 }
 
+// testHookAuthenticateVerified, when a test sets it, runs in
+// authenticate after the unlocked password check and before the write
+// lock: the window a concurrent password change can land in.
+var testHookAuthenticateVerified func()
+
 // authenticate is Authenticate without the breach recheck.
 func (s *Store) authenticate(username, password string, now time.Time) (*User, error) {
 	s.reloadIfStale()
 
 	s.mu.RLock()
-	id, known := s.byName[strings.ToLower(username)]
+	id, known := s.byName[usernameKey(username)]
 	hash := dummyHash
 	viaResetCode := false
 	if known {
@@ -1922,6 +1941,9 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 	valid := VerifyPassword(secret, hash)
 	if !known || !valid {
 		return nil, ErrInvalidCredentials
+	}
+	if h := testHookAuthenticateVerified; h != nil {
+		h()
 	}
 
 	s.mu.Lock()
@@ -1969,6 +1991,15 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 		}
 		return &spent, nil
 	}
+	// The password checked above must still be the account's: a
+	// change or an admin reset that landed while it was being checked,
+	// unlocked, ends every session issued before it, and a session
+	// issued now from the old password would outlive that (#80). The
+	// reset-code branch above compares its own hash for the same
+	// reason.
+	if u.PasswordHash != hash {
+		return nil, ErrInvalidCredentials
+	}
 	// Saved only once the saved value is more than lastLoginGranularity
 	// old; otherwise held in memory, where Get and List see it, until
 	// the next save of any kind carries it. Compared against the saved
@@ -1981,13 +2012,15 @@ func (s *Store) authenticate(username, password string, now time.Time) (*User, e
 	}
 	s.mutateBestEffortLocked(func(st *storeState) error {
 		u, ok := st.byID[id]
-		if !ok {
+		if !ok || u.PasswordHash != hash {
 			return ErrInvalidCredentials
 		}
 		u.LastLogin = now
 		return nil
 	})
-	if u, ok = s.byID[id]; !ok {
+	// Read again: a save that conflicted reloaded another process's
+	// document, which may carry its password change.
+	if u, ok = s.byID[id]; !ok || u.PasswordHash != hash {
 		return nil, ErrInvalidCredentials
 	}
 	cp := *u
@@ -2015,7 +2048,7 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 	s.reloadIfStale()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u, ok := s.byID[s.byName[strings.ToLower(username)]]
+	u, ok := s.byID[s.byName[usernameKey(username)]]
 	if !ok {
 		return nil, false
 	}
@@ -2030,10 +2063,26 @@ func (s *Store) ByUsername(username string) (*User, bool) {
 // session issued before this reset (see User.SessionCutoff) -- a CLI
 // tool runs in a different process from the live server, so it has no
 // way to reach into that server's in-memory SessionStore directly.
+//
+// An admin reset (IssueResetCode) issued while the new password is
+// being checked and hashed wins: SetPassword then saves nothing and
+// returns ErrResetDuringChange.
 func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	if passwordTooShort(newPassword) {
 		return ErrPasswordTooShort
 	}
+	// The account's reset state as this change starts. The breach
+	// check and the hash below take from a tenth of a second to
+	// seconds, unlocked, and an admin reset issued in that time must
+	// win (#80): see ErrResetDuringChange.
+	s.reloadIfStale()
+	s.mu.RLock()
+	var resetHash, spentHash string
+	if u, ok := s.byID[s.byName[usernameKey(username)]]; ok {
+		resetHash, spentHash = u.ResetCodeHash, u.ResetCodeSpentHash
+	}
+	s.mu.RUnlock()
+
 	breachPending, err := s.checkNewPassword(username, newPassword)
 	if err != nil {
 		return err
@@ -2053,9 +2102,16 @@ func (s *Store) SetPassword(username, newPassword string, now time.Time) error {
 	// dead, and a restart before the next good write would prove that
 	// wrong. mutate installs it only once it is saved.
 	return s.mutate(func(st *storeState) error {
-		u, ok := st.byID[st.byName[strings.ToLower(username)]]
+		u, ok := st.byID[st.byName[usernameKey(username)]]
 		if !ok {
 			return ErrUserNotFound
+		}
+		// A code issued since the read above -- live, or already spent
+		// by a sign-in -- is an admin reset this change must not undo.
+		// A change made from the code's own sign-in read that code as
+		// spent, so it still matches.
+		if u.ResetCodeHash != resetHash || u.ResetCodeSpentHash != spentHash {
+			return ErrResetDuringChange
 		}
 		u.PasswordHash = hash
 		u.PasswordChangedAt = now

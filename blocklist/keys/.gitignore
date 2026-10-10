@@ -1,0 +1,6 @@
+# Only public keys, this note and the ignore file belong here. A private
+# key left in this folder must never be committed (#87).
+*
+!*.pub
+!README.md
+!.gitignore

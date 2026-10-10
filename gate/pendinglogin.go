@@ -1,17 +1,15 @@
 package gate
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/tomlawesome/gauntlet/internal/expiry"
+	"github.com/tomlawesome/gauntlet/internal/seal"
 	"github.com/tomlawesome/gauntlet/internal/spent"
 )
 
@@ -50,12 +48,9 @@ const pendingLoginCookieMaxAge = 5 * time.Minute
 type pendingLoginState struct {
 	UserID   string
 	IssuedAt time.Time
-	// AfterReset is set when the password step went past a full address
-	// limit on the account's reset pass and spent it (#32): the code step
-	// then skips the address limit too, rather than asking for a pass
-	// that anyone guessing from that address could take in between. Only
-	// the right password earns it; the account's own limit still applies.
-	AfterReset bool `json:",omitempty"`
+	// A cookie sealed before #86 may also carry "AfterReset", the reset
+	// pass's flag (#32): decoding ignores it, so the code step reserves
+	// on the address limit like any other.
 	// ID makes the pending login one-shot (ruling R2 on #20): 16 random
 	// bytes, hex, claimed in spentPendingLogins by the sign-in that
 	// completes it, so one correct password yields one session. A cookie
@@ -70,77 +65,47 @@ type pendingLoginState struct {
 // (or an attacker probing the endpoint) needs to be able to tell apart.
 var errPendingLoginInvalid = errors.New("gate: pending login expired or was tampered with")
 
-// sealCodec seals and opens a small JSON value for a cookie the same
-// way oidc.StateCodec seals an oidc.FlowState: AES-256-GCM, stdlib only,
-// so a tampered cookie fails the auth-tag check rather than decoding
-// into a different account, with a key generated once via crypto/rand
-// and held only in memory. The pending-login ticket and the
-// confirm-login ticket (#55) each have their own, with their own key.
+// sealCodec seals and opens a small JSON value for a cookie with
+// internal/seal, the same AES-256-GCM mechanism oidc.StateCodec and
+// passkey's ceremony state use: a tampered cookie fails the auth-tag
+// check rather than decoding into a different account, under a key
+// generated once via crypto/rand and held only in memory. The
+// pending-login ticket, the confirm-login ticket (#55) and the
+// escape-login ticket each have their own, with their own key, so a
+// ticket sealed for one step cannot be presented at another.
 //
-// A second implementation rather than reusing oidc.StateCodec directly.
-// That type is hard-coded to oidc.FlowState's fields, and gate has no
-// other reason to depend on the oidc package's cookie-sealing internals
-// -- widening a codec that belongs to one login flow to also carry a
-// second, unrelated flow's payload would leave neither flow's cookie
-// shape visible from its own file.
+// A wrapper of gate's own rather than oidc.StateCodec: that type is
+// hard-coded to oidc.FlowState's fields, and widening one login flow's
+// codec to carry another, unrelated flow's payload would leave neither
+// flow's cookie shape visible from its own file. Only the sealing is
+// shared, so a fix to it lands in all three packages at once (#90).
 type sealCodec struct {
-	aead cipher.AEAD
+	codec *seal.Codec
 }
 
 // mustNewSealCodec builds a codec with a fresh key. what names it in a
-// panic.
+// panic: like gauntlet's own newID (id.go), a CSPRNG that cannot
+// produce bytes is not a condition to degrade from gracefully here --
+// every login on an account with a second factor depends on this codec
+// existing.
 func mustNewSealCodec(what string) *sealCodec {
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		// Same stance gauntlet's own newID takes (id.go): a CSPRNG that
-		// cannot produce bytes is not a condition to degrade from
-		// gracefully here -- every login on an account with a second
-		// factor depends on this codec existing.
-		panic("gate: crypto/rand unavailable: " + err.Error())
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic("gate: constructing " + what + " cipher: " + err.Error())
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		panic("gate: constructing " + what + " AEAD: " + err.Error())
-	}
-	return &sealCodec{aead: aead}
+	return &sealCodec{seal.MustNew("gate: " + what + " codec")}
 }
 
 // seal encodes v as JSON and seals it, base64url without padding.
 func (c *sealCodec) seal(v any) (string, error) {
-	plaintext, err := json.Marshal(v)
+	sealed, err := c.codec.Seal(v)
 	if err != nil {
-		return "", fmt.Errorf("gate: encoding sealed state: %w", err)
+		return "", fmt.Errorf("gate: %w", err)
 	}
-	nonce := make([]byte, c.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("gate: generating seal nonce: %w", err)
-	}
-	sealed := c.aead.Seal(nonce, nonce, plaintext, nil)
-	return base64.RawURLEncoding.EncodeToString(sealed), nil
+	return sealed, nil
 }
 
 // open reverses seal into v, reporting whether value opened. Strict:
 // only the spelling seal wrote opens, so a sealed value has one cookie
-// string, as passkey's seal does (#20).
+// string (#20).
 func (c *sealCodec) open(value string, v any) bool {
-	sealed, err := base64.RawURLEncoding.Strict().DecodeString(value)
-	if err != nil {
-		return false
-	}
-	ns := c.aead.NonceSize()
-	if len(sealed) < ns {
-		return false
-	}
-	nonce, ciphertext := sealed[:ns], sealed[ns:]
-	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return false
-	}
-	return json.Unmarshal(plaintext, v) == nil
+	return c.codec.Open(value, v)
 }
 
 // pendingLoginStateCodec seals/opens a pendingLoginState (sealCodec).
@@ -166,14 +131,15 @@ func (c *pendingLoginStateCodec) encode(st pendingLoginState) (string, error) {
 }
 
 // decode reverses encode, refusing (errPendingLoginInvalid) anything
-// malformed, tampered, or older than pendingLoginCookieMaxAge as measured
-// from the sealed IssuedAt against now.
+// malformed, tampered, or pendingLoginCookieMaxAge old or older as
+// measured from the sealed IssuedAt against now (internal/expiry: refused
+// from the instant it expires).
 func (c *pendingLoginStateCodec) decode(cookieValue string, now time.Time) (pendingLoginState, error) {
 	var st pendingLoginState
 	if !c.open(cookieValue, &st) {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}
-	if now.Sub(st.IssuedAt) > pendingLoginCookieMaxAge {
+	if expiry.Expired(st.IssuedAt, pendingLoginCookieMaxAge, now) {
 		return pendingLoginState{}, errPendingLoginInvalid
 	}
 	if st.ID == "" {
@@ -218,12 +184,12 @@ func (g *Gate) pendingLogin(w http.ResponseWriter, r *http.Request, now time.Tim
 // writes it -- called from handleLogin the moment a password checks out
 // against an account holding an active second factor, in place of
 // creating a session.
-func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, afterReset bool, now time.Time) error {
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, now time.Time) error {
+	id, err := newTicketID()
+	if err != nil {
 		return fmt.Errorf("gate: generating pending login id: %w", err)
 	}
-	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, AfterReset: afterReset, ID: hex.EncodeToString(id)})
+	encoded, err := pendingLoginCodec.encode(pendingLoginState{UserID: userID, IssuedAt: now, ID: id})
 	if err != nil {
 		return err
 	}
@@ -233,4 +199,18 @@ func (g *Gate) setPendingLoginCookie(w http.ResponseWriter, userID string, after
 
 func (g *Gate) clearPendingLoginCookie(w http.ResponseWriter) {
 	g.writeCookie(w, pendingLoginCookieName, "", pendingLoginCookiePath, -1)
+}
+
+// newTicketID returns a fresh ID for a sign-in ticket -- pending login,
+// confirm, prove or escape -- the key each is spent by (internal/spent),
+// so a ticket works once. 16 bytes from crypto/rand, hex: the shape of
+// gauntlet's own newID, which is unexported. One helper for all four, so
+// none can be made with a weaker source or a shorter ID than the others
+// (#90 item 11).
+func newTicketID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

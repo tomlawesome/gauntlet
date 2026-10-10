@@ -268,8 +268,14 @@ func (g *Gate) isExempt(path string) bool {
 // required or step-expired -- the three classes a 401 ever carries),
 // never derived from msg.
 func writeUnauthorized(w http.ResponseWriter, class problemClass, msg string) {
+	writeUnauthorizedWith(w, class, msg, nil)
+}
+
+// writeUnauthorizedWith is writeUnauthorized with writeProblem's extra
+// members: only a refused passkey's unknownCredential (#92) passes any.
+func writeUnauthorizedWith(w http.ResponseWriter, class problemClass, msg string, extra map[string]any) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="gate"`)
-	writeProblem(w, http.StatusUnauthorized, class, msg, nil)
+	writeProblem(w, http.StatusUnauthorized, class, msg, extra)
 }
 
 // authGateHeader marks a 403 that means "sign-in worked, but this

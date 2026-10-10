@@ -4,6 +4,8 @@ package gate
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -301,5 +303,54 @@ func TestForcedPasswordChangeRefusesTheSpentResetCode(t *testing.T) {
 	after, _ := g.deps.Users.Get(u.ID)
 	if after.MustChangePassword || after.ResetCodeSpentHash != "" {
 		t.Errorf("after the change: MustChangePassword %v, ResetCodeSpentHash %q; want false, empty", after.MustChangePassword, after.ResetCodeSpentHash)
+	}
+}
+
+// resetDuringCheck is a gauntlet.BreachChecker that issues an admin
+// reset for the account it is pointed at on its first call: the window
+// a password change leaves between reading the account and saving.
+type resetDuringCheck struct {
+	once  sync.Once
+	users *gauntlet.Store
+	id    string
+}
+
+func (c *resetDuringCheck) Breached(context.Context, string) (bool, error) {
+	if c.users != nil {
+		c.once.Do(func() { _, _, _ = c.users.IssueResetCode(c.id, time.Now()) })
+	}
+	return false, nil
+}
+
+// An admin reset that lands while the owner's own password change is
+// being checked wins (#80): the change answers 409 and saves nothing,
+// so the code the admin read out still works.
+func TestChangePasswordRacingAnAdminResetIs409(t *testing.T) {
+	checker := &resetDuringCheck{}
+	var code string
+	users, err := gauntlet.OpenStore(persist.NewMemory(), gauntlet.Options{
+		OnSetupCode: gauntlet.SetupCodeFunc(func(c string) { code = c }),
+		BreachCheck: checker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testSetupCodes.Store(users, code)
+	t.Cleanup(func() { testSetupCodes.Delete(users) })
+	g := newTestGateWithUsers(t, users)
+	ts := newTestServer(t, g)
+	client := registerAdmin(t, ts, "admin", "password-placeholder-1")
+	admin, _ := users.ByUsername("admin")
+	checker.id, checker.users = admin.ID, users
+
+	resp := postJSON(t, client, ts.URL+"/api/auth/password", changePasswordRequest{CurrentPassword: "password-placeholder-1", NewPassword: "new-password-1"})
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	body := decodeProblem(t, raw)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body.Detail, "reset") {
+		t.Fatalf("a change racing a reset got %d %q, want 409 naming the reset", resp.StatusCode, body.Detail)
+	}
+	if u, _ := users.Get(admin.ID); !u.MustChangePassword {
+		t.Error("the reset did not stand")
 	}
 }

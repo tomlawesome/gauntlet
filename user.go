@@ -63,9 +63,10 @@ type User struct {
 	// before SessionsEndedAt existed record an SSO link here too.
 	PasswordChangedAt time.Time `json:"passwordChangedAt,omitzero"`
 	// SessionsEndedAt is when every session issued before it was ended,
-	// whatever ended them: a new password, a reset code, an SSO link
-	// (#28). It lets a session be invalidated by a change that happens
-	// in a *different process* -- a CLI recovery tool has no access to a
+	// whatever ended them: a new password, a reset code, an SSO link, a
+	// role downgrade, or a run of second-factor failures (#28, #44). It
+	// lets a session be invalidated by a change that happens in a
+	// *different process* -- a CLI recovery tool has no access to a
 	// running server's in-memory SessionStore -- since a session's
 	// IssuedAt is compared against it through the persisted store (see
 	// SessionCutoff). Gauntlet's own field: mikroview's documents lack
@@ -85,9 +86,10 @@ type User struct {
 	// apart -- both are valid Argon2id strings -- so this has to be
 	// recorded rather than inferred from the credential.
 	HasLocalPassword bool `json:"hasLocalPassword"`
-	// RoleChangedAt records the last admin transfer touching this
-	// account, on both sides of it. For the audit trail and the UI only:
-	// authorization always reads Role, never this.
+	// RoleChangedAt records the last time this account's role changed:
+	// an admin transfer (on both sides of it), SetRole, or the role an
+	// SSO sign-in took from the provider's groups. For the audit trail
+	// and the UI only: authorization always reads Role, never this.
 	RoleChangedAt time.Time `json:"roleChangedAt,omitzero"`
 	// ResetCodeHash is the Argon2id hash of the one-time code an admin
 	// issued for this account -- the same hash function and parameters a
@@ -180,6 +182,18 @@ type User struct {
 	// documents lack them and read them as nothing remembered.
 	SeenCountries []SeenCountry `json:"seenCountries,omitempty"`
 	LastPlace     *LastPlace    `json:"lastPlace,omitempty"`
+	// SignInAllowedUntil is the end of an administrator's allowance of this
+	// account's next sign-in (#81): until then a sign-in the unusual-sign-in
+	// policy would hold or refuse completes instead, and is remembered as
+	// any completed sign-in is. Set by AllowNextSignIn (SignInAllowanceLifetime
+	// from issue, replacing any earlier window); cleared by RememberSignIn in
+	// the write that remembers the next completed sign-in -- whatever browser
+	// it came from, and whether or not the policy would have stopped it --
+	// and wherever known browsers are cleared (ClearKnownBrowsers,
+	// IssueResetCode). Read with SignInAllowanceLive, never as non-zero. Never shown
+	// by any route. Gauntlet's own field: older documents lack it and read it
+	// as none.
+	SignInAllowedUntil time.Time `json:"signInAllowedUntil,omitzero"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
@@ -212,8 +226,8 @@ type User struct {
 	RecoveryCodes []RecoveryCode `json:"recoveryCodes,omitempty"`
 	// Passkeys are this account's registered WebAuthn credentials -- zero
 	// or more, unlike TOTPSecret's single shared secret. The ceremony
-	// (passkey/, G8) is not part of this module in v0.1.0; this package
-	// only stores what it would produce.
+	// is in the gauntlet/passkey package (G8); this package only stores
+	// what it produces.
 	Passkeys []Passkey `json:"passkeys,omitempty"`
 	// HeldEnrolment is the account's first second factor and its
 	// recovery codes, saved together but not live until the account's
@@ -333,6 +347,13 @@ func (u *User) SessionCutoff() time.Time {
 // though the field still carries its time until the next attempt clears
 // it.
 func (u *User) LoginDisabled(now time.Time) bool { return loginDisabledAt(u.LoginDisabledAt, now) }
+
+// SignInAllowanceLive reports whether an administrator's one-off allowance
+// of this account's next sign-in (#81, SignInAllowedUntil) is still open at
+// now. It does not say whether the user may sign in in general.
+func (u *User) SignInAllowanceLive(now time.Time) bool {
+	return !u.SignInAllowedUntil.IsZero() && now.Before(u.SignInAllowedUntil)
+}
 
 // LocalPassword reports whether this account has a real, user-chosen
 // password that may be reset.

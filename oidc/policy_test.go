@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -438,5 +439,138 @@ func TestPolicyValidateRoles(t *testing.T) {
 		if err := p.ValidateRoles(valid); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// TestPolicyValidateRefusesBlankAllowListEntries pins #91: a blank
+// entry in an allow-list (typically a trailing comma when an app splits
+// a setting) must be refused at startup, naming the field, rather than
+// silently widening access.
+func TestPolicyValidateRefusesBlankAllowListEntries(t *testing.T) {
+	blanks := []string{"", " ", "\t"}
+	for _, blank := range blanks {
+		cases := map[string]Policy{
+			"AllowedGroups":       {AllowedGroups: []string{"family", blank}},
+			"AllowedEmails":       {AllowedEmails: []string{blank, "a@example.com"}},
+			"AllowedEmailDomains": {AllowedEmailDomains: []string{"example.com", blank}},
+			"RoleFromGroups":      {RoleFromGroups: map[string]string{"staff": "user", blank: "user"}},
+		}
+		for field, p := range cases {
+			t.Run(fmt.Sprintf("%s/%q", field, blank), func(t *testing.T) {
+				err := p.Validate()
+				if err == nil {
+					t.Fatalf("Validate accepted a blank %q entry", blank)
+				}
+				if !strings.Contains(err.Error(), field) {
+					t.Errorf("error %q does not name %s", err, field)
+				}
+			})
+		}
+	}
+}
+
+func TestPolicyValidateAcceptsNonBlankEntries(t *testing.T) {
+	if err := (Policy{}).Validate(); err != nil {
+		t.Errorf("zero policy refused: %v", err)
+	}
+	ok := Policy{
+		AllowedGroups:       []string{"family", "netops"},
+		AllowedEmails:       []string{"a@example.com"},
+		AllowedEmailDomains: []string{"example.com"},
+		RoleFromGroups:      map[string]string{"staff": "user", "guests": "viewer"},
+	}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("all-non-blank policy refused: %v", err)
+	}
+}
+
+// TestPolicyWhitespaceGroupNeverCountsAsAGroup pins #91: a groups claim
+// value that is only whitespace is not a group, so it cannot satisfy an
+// allow-list and does not appear in Groups.
+func TestPolicyWhitespaceGroupNeverCountsAsAGroup(t *testing.T) {
+	p := Policy{AllowedGroups: []string{"family"}}
+
+	for name, claims := range map[string]map[string]any{
+		"space only":        {"groups": []any{" "}},
+		"tab only":          {"groups": []any{"\t"}},
+		"bare space string": {"groups": " "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := p.Permit(identity(claims))
+			if err == nil {
+				t.Fatal("permitted an identity whose only group is whitespace")
+			}
+			// Refused the same way as an identity with no groups claim.
+			absent := p.Permit(identity(map[string]any{"email": "someone@example.com"}))
+			if absent == nil {
+				t.Fatal("permitted an identity with no groups claim")
+			}
+			if err.Error() != absent.Error() || errors.Is(err, absent) != errors.Is(absent, err) {
+				t.Errorf("refusal %q differs from the no-groups refusal %q", err, absent)
+			}
+		})
+	}
+
+	var open Policy
+	got := open.Groups(identity(map[string]any{"groups": []any{" ", "", "\t", "family"}}))
+	if len(got) != 1 || got[0] != "family" {
+		t.Errorf("Groups = %q, want [family] with blank values dropped", got)
+	}
+}
+
+// TestPolicyValidateRefusesBlankEmailDomainAfterTrim pins #91: a domain
+// entry that is blank once a leading "@" and whitespace are removed is
+// refused, naming the field; ordinary entries are accepted.
+func TestPolicyValidateRefusesBlankEmailDomainAfterTrim(t *testing.T) {
+	for _, entry := range []string{"@", "@ ", " @"} {
+		t.Run(fmt.Sprintf("refuses/%q", entry), func(t *testing.T) {
+			err := Policy{AllowedEmailDomains: []string{"example.com", entry}}.Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted domain entry %q", entry)
+			}
+			if !strings.Contains(err.Error(), "AllowedEmailDomains") {
+				t.Errorf("error %q does not name AllowedEmailDomains", err)
+			}
+		})
+	}
+	for _, entry := range []string{"@example.com", "example.com"} {
+		t.Run(fmt.Sprintf("accepts/%q", entry), func(t *testing.T) {
+			if err := (Policy{AllowedEmailDomains: []string{entry}}).Validate(); err != nil {
+				t.Errorf("Validate refused domain entry %q: %v", entry, err)
+			}
+		})
+	}
+}
+
+// TestPolicyPermitBlankEmailEntryNeverMatches pins #91 defence in depth:
+// on a policy that was never validated, a blank allow-list entry must not
+// widen access.
+func TestPolicyPermitBlankEmailEntryNeverMatches(t *testing.T) {
+	verified := func(email string) *Identity {
+		return identity(map[string]any{"email": email, "email_verified": true})
+	}
+
+	t.Run("AllowedEmails", func(t *testing.T) {
+		p := Policy{AllowedEmails: []string{"alice@example.com", ""}}
+		for _, email := range []string{"", "   "} {
+			if err := p.Permit(verified(email)); err == nil {
+				t.Errorf("permitted verified email %q via a blank AllowedEmails entry", email)
+			}
+		}
+		if err := p.Permit(verified("alice@example.com")); err != nil {
+			t.Errorf("refused the listed address: %v", err)
+		}
+	})
+
+	for _, blank := range []string{"", "@"} {
+		t.Run(fmt.Sprintf("AllowedEmailDomains/%q", blank), func(t *testing.T) {
+			p := Policy{AllowedEmailDomains: []string{"example.com", blank}}
+			if err := p.Permit(verified("x@")); err == nil {
+				t.Errorf("permitted verified email %q via blank domain entry %q", "x@", blank)
+			}
+			if err := p.Permit(verified("bob@example.com")); err != nil {
+				t.Errorf("refused bob@example.com: %v", err)
+			}
+		})
 	}
 }

@@ -250,3 +250,31 @@ func TestFlowStateDecodeRefusesANonCanonicalSpelling(t *testing.T) {
 		t.Errorf("a re-spelling of a sealed flow state decoded: error = %v, want ErrFlowStateInvalid", err)
 	}
 }
+
+// TestFlowStateDecodeRefusesAtExactlyItsExpiry (#90 item 1, owner call):
+// a flow state is valid only while now is before IssuedAt plus the
+// maximum age, so at that very instant it is refused; one nanosecond
+// earlier it still decodes.
+func TestFlowStateDecodeRefusesAtExactlyItsExpiry(t *testing.T) {
+	codec, err := NewStateCodec()
+	if err != nil {
+		t.Fatalf("NewStateCodec: %v", err)
+	}
+	issuedAt := time.Now()
+	fs, err := NewFlowState(issuedAt)
+	if err != nil {
+		t.Fatalf("NewFlowState: %v", err)
+	}
+	encoded, err := codec.Encode(fs)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	const maxAge = 10 * time.Minute
+
+	if _, err := codec.Decode(encoded, maxAge, issuedAt.Add(maxAge-time.Nanosecond)); err != nil {
+		t.Errorf("Decode one nanosecond before the expiry = %v, want it accepted", err)
+	}
+	if _, err := codec.Decode(encoded, maxAge, issuedAt.Add(maxAge)); err != ErrFlowStateInvalid {
+		t.Errorf("Decode at exactly IssuedAt+maxAge = %v, want ErrFlowStateInvalid", err)
+	}
+}

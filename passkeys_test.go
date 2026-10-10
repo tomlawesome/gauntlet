@@ -21,8 +21,11 @@ package gauntlet
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -923,5 +926,509 @@ func TestAnyPasskeysExistReadsAnotherProcessesWrite(t *testing.T) {
 	}
 	if !server.AnyPasskeysExist() {
 		t.Error("the running store did not see a passkey another process added")
+	}
+}
+
+// An account with nothing to clear is told so, and nothing is written:
+// a caller (an "I've lost everything" CLI) must not report every second
+// factor removed, or audit a removal, when there was none (#80), as
+// ClearPasskeys answers ErrNoPasskeys.
+func TestClearAllSecondFactorsWithNothingToClear(t *testing.T) {
+	b := &countingBackend{Memory: persist.NewMemory()}
+	s, id := openLockoutStore(t, b)
+	before := b.saves.Load()
+	if err := s.ClearAllSecondFactors(id); !errors.Is(err, ErrNoSecondFactors) {
+		t.Errorf("ClearAllSecondFactors on an account with no factor = %v, want ErrNoSecondFactors", err)
+	}
+	if got := b.saves.Load() - before; got != 0 {
+		t.Errorf("clearing nothing caused %d saves, want 0", got)
+	}
+
+	// A pending (scanned, unconfirmed) authenticator app is something
+	// to clear.
+	if err := s.SetPendingTOTPSecretAt(id, testTOTPSecret, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearAllSecondFactors(id); err != nil {
+		t.Errorf("clearing a pending app: %v", err)
+	}
+	if u, _ := s.Get(id); u.TOTPSecret != "" {
+		t.Error("the pending app secret survived")
+	}
+}
+
+// unprintablePasskeyNames are names a passkey must never carry (#89): each
+// holds a control (Cc) or format (Cf) character, the line or paragraph
+// separator (Zl, Zp), or is not valid UTF-8. The refusal comes before the
+// name is trimmed, cut or defaulted, so a name that would have been
+// trimmed or defaulted to "Passkey <n>" is refused too.
+var unprintablePasskeyNames = []struct{ label, name string }{
+	{"NUL", "Yubi\x00Key"},
+	{"BEL", "Yubi\x07Key"},
+	{"ESC", "Yubi\x1bKey"},
+	{"DEL", "Yubi\x7fKey"},
+	{"C1 NEL", "Yubi\u0085Key"},
+	{"zero-width space", "Yubi\u200bKey"},
+	{"left-to-right mark", "Yubi\u200eKey"},
+	{"right-to-left override", "Yubi\u202eKey"},
+	{"left-to-right isolate", "Yubi\u2066Key"},
+	{"byte order mark", "Yubi\ufeffKey"},
+	{"soft hyphen", "Yubi\u00adKey"},
+	{"line separator", "Yubi\u2028Key"},
+	{"paragraph separator", "Yubi\u2029Key"},
+	{"trailing newline", "YubiKey\n"},
+	{"tab", "Yubi\tKey"},
+	{"only a newline, which would default", "\n"},
+	{"spaces around a control, which would trim", "  \x07  "},
+	{"invalid byte", "Yubi\xffKey"},
+	{"truncated multi-byte sequence", "Yubi\xe2\x82Key"},
+	{"past the length cut", strings.Repeat("x", 70) + "\x07"},
+}
+
+// acceptedPasskeyNames stay accepted, unchanged by trimming: letters of
+// every script, accents, emoji and ordinary spaces are not unprintable.
+var acceptedPasskeyNames = []string{"Clé de Zoë 🔑", "鍵", "مفتاح", "My  work key"}
+
+func TestAddPasskeyRefusesAnUnprintableName(t *testing.T) {
+	for _, tc := range unprintablePasskeyNames {
+		t.Run(tc.label, func(t *testing.T) {
+			s, b, id := openHoldStore(t)
+			saves := b.saves.Load()
+
+			_, err := s.AddPasskey(id, testPasskey(1, tc.name))
+			if !errors.Is(err, ErrPasskeyNameInvalid) {
+				t.Fatalf("AddPasskey(%q) = %v, want ErrPasskeyNameInvalid", tc.name, err)
+			}
+			u, _ := s.Get(id)
+			if len(u.Passkeys) != 0 {
+				t.Errorf("a refused name still stored %d passkeys: %+v", len(u.Passkeys), u.Passkeys)
+			}
+			if got := b.saves.Load(); got != saves {
+				t.Errorf("a refused name wrote to the backend (%d saves, was %d)", got, saves)
+			}
+		})
+	}
+}
+
+func TestAddPasskeyKeepsLettersAccentsAndEmojiInAName(t *testing.T) {
+	for i, name := range acceptedPasskeyNames {
+		s := openTestStore(t)
+		u, err := s.Register("admin", "password-placeholder-1", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.AddPasskey(u.ID, testPasskey(byte(i+1), name))
+		if err != nil {
+			t.Fatalf("AddPasskey(%q): %v", name, err)
+		}
+		if got.Name != name {
+			t.Errorf("AddPasskey(%q) stored the name %q", name, got.Name)
+		}
+		stored, _ := s.Get(u.ID)
+		if len(stored.Passkeys) != 1 || stored.Passkeys[0].Name != name {
+			t.Errorf("stored passkeys after AddPasskey(%q) = %+v", name, stored.Passkeys)
+		}
+	}
+}
+
+// A blank name still becomes "Passkey <n>" and a long one is still cut
+// to 64 characters (runes, not bytes), on every path that names a
+// passkey (#89 leaves both as they were).
+func TestAddPasskeyStillDefaultsABlankNameAndCutsALongOneToSixtyFourRunes(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.AddPasskey(u.ID, testPasskey(1, "   "))
+	if err != nil {
+		t.Fatalf("AddPasskey(blank): %v", err)
+	}
+	if got.Name != "Passkey 1" {
+		t.Errorf("a blank name became %q, want %q", got.Name, "Passkey 1")
+	}
+
+	long := strings.Repeat("鍵", 70)
+	got, err = s.AddPasskey(u.ID, testPasskey(2, long))
+	if err != nil {
+		t.Fatalf("AddPasskey(70 runes): %v", err)
+	}
+	if want := strings.Repeat("鍵", 64); got.Name != want {
+		t.Errorf("a 70-rune name became %d runes (%q), want the first 64", len([]rune(got.Name)), got.Name)
+	}
+}
+
+func TestRenamePasskeyRefusesAnUnprintableName(t *testing.T) {
+	for _, tc := range unprintablePasskeyNames {
+		t.Run(tc.label, func(t *testing.T) {
+			s, b, id := openHoldStore(t)
+			if _, err := s.AddPasskey(id, testPasskey(1, "original")); err != nil {
+				t.Fatal(err)
+			}
+			saves := b.saves.Load()
+
+			_, err := s.RenamePasskey(id, []byte{1}, tc.name)
+			if !errors.Is(err, ErrPasskeyNameInvalid) {
+				t.Fatalf("RenamePasskey(%q) = %v, want ErrPasskeyNameInvalid", tc.name, err)
+			}
+			u, _ := s.Get(id)
+			if len(u.Passkeys) != 1 || u.Passkeys[0].Name != "original" {
+				t.Errorf("a refused rename changed the passkeys to %+v", u.Passkeys)
+			}
+			if got := b.saves.Load(); got != saves {
+				t.Errorf("a refused rename wrote to the backend (%d saves, was %d)", got, saves)
+			}
+		})
+	}
+}
+
+func TestRenamePasskeyKeepsLettersAccentsAndEmojiAndStillDefaultsAndCuts(t *testing.T) {
+	s := openTestStore(t)
+	u, err := s.Register("admin", "password-placeholder-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPasskey(u.ID, testPasskey(1, "original")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range acceptedPasskeyNames {
+		got, err := s.RenamePasskey(u.ID, []byte{1}, name)
+		if err != nil {
+			t.Fatalf("RenamePasskey(%q): %v", name, err)
+		}
+		if got.Name != name {
+			t.Errorf("RenamePasskey(%q) stored the name %q", name, got.Name)
+		}
+	}
+	got, err := s.RenamePasskey(u.ID, []byte{1}, "  ")
+	if err != nil {
+		t.Fatalf("RenamePasskey(blank): %v", err)
+	}
+	if got.Name != "Passkey 1" {
+		t.Errorf("a blank rename became %q, want %q", got.Name, "Passkey 1")
+	}
+	got, err = s.RenamePasskey(u.ID, []byte{1}, strings.Repeat("鍵", 70))
+	if err != nil {
+		t.Fatalf("RenamePasskey(70 runes): %v", err)
+	}
+	if want := strings.Repeat("鍵", 64); got.Name != want {
+		t.Errorf("a 70-rune rename became %d runes, want 64", len([]rune(got.Name)))
+	}
+}
+
+// A3b-R1 (#80). The invariant: an account with at least one live second
+// factor (authenticator app or passkey) holds recovery codes, and one
+// with none holds none. Standard pattern: check-and-set -- the decision
+// ("was that the last factor?") and the write happen in one store
+// operation under the store's lock, so no interleaving of a removal with
+// another factor change can break it.
+
+// wantCodesToMatchFactors fails unless id holds recovery codes exactly
+// when it has a live second factor.
+func wantCodesToMatchFactors(t *testing.T, s *Store, id, when string) {
+	t.Helper()
+	u, ok := s.Get(id)
+	if !ok {
+		t.Fatalf("%s: the account vanished", when)
+	}
+	if factor, codes := u.HasSecondFactor(), len(u.RecoveryCodes) > 0; factor != codes {
+		t.Errorf("%s: live second factor = %v but recovery codes held = %v (totp=%v passkeys=%d codes=%d)",
+			when, factor, codes, u.HasActiveTOTP(), len(u.Passkeys), len(u.RecoveryCodes))
+	}
+}
+
+// raceStart runs a and b on goroutines released at the same moment.
+func raceStart(a, b func()) {
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, f := range []func(){a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			f()
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+const factorRaceRounds = 200
+
+// seedPasskeyWithCodes gives id one live passkey and the recovery codes
+// that back it.
+func seedPasskeyWithCodes(t *testing.T, s *Store, id string, now time.Time) {
+	t.Helper()
+	if _, err := s.AddPasskey(id, testPasskey(1, "only")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GenerateRecoveryCodes(id, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedTOTPWithCodes gives id a live authenticator app and its codes.
+func seedTOTPWithCodes(t *testing.T, s *Store, id string, now time.Time) {
+	t.Helper()
+	if err := s.SetPendingTOTPSecretAt(id, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConfirmTOTP(id, now, 42); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GenerateRecoveryCodes(id, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// resetFactors takes id back to no second factor at all.
+func resetFactors(t *testing.T, s *Store, id string) {
+	t.Helper()
+	if err := s.ClearAllSecondFactors(id); err != nil && !errors.Is(err, ErrNoSecondFactors) {
+		t.Fatalf("resetting factors: %v", err)
+	}
+}
+
+// Both orders of "remove the last passkey" and "confirm a pending
+// authenticator app" are legal; the second one to run must see what the
+// first did. Run in order, as a lock would let them, the codes must
+// still match the factors after the removal-first order too.
+func TestRemovingTheLastPasskeyThenConfirmingTOTPKeepsRecoveryCodesConsistent(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPasskeyWithCodes(t, s, u.ID, now)
+	if err := s.SetPendingTOTPSecretAt(u.ID, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.DeletePasskey(u.ID, []byte{1}); err != nil {
+		t.Fatalf("DeletePasskey: %v", err)
+	}
+	// With no other live factor the add side refuses, under the lock.
+	if err := s.ConfirmLaterTOTP(u.ID, testTOTPSecret, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Errorf("ConfirmLaterTOTP after the last factor went = %v, want ErrNoOtherSecondFactor", err)
+	}
+	wantCodesToMatchFactors(t, s, u.ID, "passkey removed, then the app confirmed")
+}
+
+// The same hole from the other side: clearing the only authenticator app
+// strips the codes, and a passkey added after that must not go live
+// without any.
+func TestClearingTheLastTOTPThenAddingAPasskeyKeepsRecoveryCodesConsistent(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTOTPWithCodes(t, s, u.ID, now)
+
+	if err := s.ClearTOTP(u.ID); err != nil {
+		t.Fatalf("ClearTOTP: %v", err)
+	}
+	if _, err := s.AddLaterPasskey(u.ID, testPasskey(2, "late")); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Errorf("AddLaterPasskey after the last factor went = %v, want ErrNoOtherSecondFactor", err)
+	}
+	wantCodesToMatchFactors(t, s, u.ID, "app cleared, then a passkey added")
+}
+
+func TestConcurrentFactorChangesKeepRecoveryCodesConsistent(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	cases := []struct {
+		name string
+		// seed puts the account in its starting state; a and b are the
+		// two changes released together. mustSucceed is whether both
+		// have to return nil (two removals of factors that stand).
+		seed        func(t *testing.T, s *Store, id string)
+		a, b        func(s *Store, id string) error
+		mustSucceed bool
+	}{
+		{
+			name: "remove the last passkey while confirming an authenticator app",
+			seed: func(t *testing.T, s *Store, id string) {
+				seedPasskeyWithCodes(t, s, id, now)
+				if err := s.SetPendingTOTPSecretAt(id, testTOTPSecret, now); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a: func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
+			b: func(s *Store, id string) error { return s.ConfirmLaterTOTP(id, testTOTPSecret, now, 42) },
+		},
+		{
+			name: "clear the only authenticator app while adding a passkey",
+			seed: func(t *testing.T, s *Store, id string) { seedTOTPWithCodes(t, s, id, now) },
+			a:    func(s *Store, id string) error { return s.ClearTOTP(id) },
+			b: func(s *Store, id string) error {
+				_, err := s.AddLaterPasskey(id, testPasskey(2, "late"))
+				return err
+			},
+		},
+		{
+			name: "remove the app and the passkey, each the other's backup",
+			seed: func(t *testing.T, s *Store, id string) {
+				seedTOTPWithCodes(t, s, id, now)
+				if _, err := s.AddPasskey(id, testPasskey(1, "only")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a:           func(s *Store, id string) error { return s.ClearTOTP(id) },
+			b:           func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
+			mustSucceed: true,
+		},
+		{
+			name: "clear the app and clear all passkeys",
+			seed: func(t *testing.T, s *Store, id string) {
+				seedTOTPWithCodes(t, s, id, now)
+				if _, err := s.AddPasskey(id, testPasskey(1, "one")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.AddPasskey(id, testPasskey(2, "two")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a:           func(s *Store, id string) error { return s.ClearTOTP(id) },
+			b:           func(s *Store, id string) error { return s.ClearPasskeys(id) },
+			mustSucceed: true,
+		},
+		{
+			name: "remove two passkeys of a passkey-only account",
+			seed: func(t *testing.T, s *Store, id string) {
+				if _, err := s.AddPasskey(id, testPasskey(1, "one")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.AddPasskey(id, testPasskey(2, "two")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.GenerateRecoveryCodes(id, now); err != nil {
+					t.Fatal(err)
+				}
+			},
+			a:           func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{1}); return err },
+			b:           func(s *Store, id string) error { _, err := s.DeletePasskey(id, []byte{2}); return err },
+			mustSucceed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			u, err := s.Register("admin", "password-placeholder-1", now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for round := range factorRaceRounds {
+				resetFactors(t, s, u.ID)
+				tc.seed(t, s, u.ID)
+				var errA, errB error
+				raceStart(
+					func() { errA = tc.a(s, u.ID) },
+					func() { errB = tc.b(s, u.ID) },
+				)
+				if tc.mustSucceed && (errA != nil || errB != nil) {
+					t.Fatalf("round %d: both removals stand to succeed, got %v and %v", round, errA, errB)
+				}
+				wantCodesToMatchFactors(t, s, u.ID, fmt.Sprintf("round %d (a: %v, b: %v)", round, errA, errB))
+				if t.Failed() {
+					return
+				}
+			}
+		})
+	}
+}
+
+// The additional-factor path: AddLaterPasskey stores a passkey, and
+// ConfirmLaterTOTP makes a pending app live, only beside a live second
+// factor -- decided under the store's lock -- and refuse with
+// ErrNoOtherSecondFactor, storing nothing, otherwise.
+func TestAddLaterPasskeySucceedsBesideALiveFactor(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTOTPWithCodes(t, s, u.ID, now)
+	before, _ := s.Get(u.ID)
+
+	pk, err := s.AddLaterPasskey(u.ID, testPasskey(5, "later"))
+	if err != nil {
+		t.Fatalf("AddLaterPasskey beside a live app: %v", err)
+	}
+	if pk.Name != "later" || len(pk.ID) != 1 || pk.ID[0] != 5 {
+		t.Errorf("returned passkey = %+v, want the one added", pk)
+	}
+	got, _ := s.Get(u.ID)
+	if len(got.Passkeys) != 1 || !got.HasActiveTOTP() {
+		t.Errorf("passkeys=%d totp=%v, want the new passkey beside the app", len(got.Passkeys), got.HasActiveTOTP())
+	}
+	if !reflect.DeepEqual(before.RecoveryCodes, got.RecoveryCodes) {
+		t.Error("adding a later passkey changed the recovery codes")
+	}
+}
+
+func TestAddLaterPasskeyRefusesWithoutALiveFactorAndStoresNothing(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddLaterPasskey(u.ID, testPasskey(5, "later")); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Fatalf("AddLaterPasskey on an account with no factor = %v, want ErrNoOtherSecondFactor", err)
+	}
+	got, _ := s.Get(u.ID)
+	if len(got.Passkeys) != 0 || len(got.RecoveryCodes) != 0 || got.HeldEnrolment != nil {
+		t.Errorf("a refused add stored something: passkeys=%d codes=%d held=%+v", len(got.Passkeys), len(got.RecoveryCodes), got.HeldEnrolment)
+	}
+}
+
+func TestConfirmLaterTOTPSucceedsBesideALiveFactor(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPasskeyWithCodes(t, s, u.ID, now)
+	if err := s.SetPendingTOTPSecretAt(u.ID, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.Get(u.ID)
+
+	if err := s.ConfirmLaterTOTP(u.ID, testTOTPSecret, now, 42); err != nil {
+		t.Fatalf("ConfirmLaterTOTP beside a live passkey: %v", err)
+	}
+	got, _ := s.Get(u.ID)
+	if !got.HasActiveTOTP() || len(got.Passkeys) != 1 {
+		t.Errorf("totp=%v passkeys=%d, want the app live beside the passkey", got.HasActiveTOTP(), len(got.Passkeys))
+	}
+	if !reflect.DeepEqual(before.RecoveryCodes, got.RecoveryCodes) {
+		t.Error("confirming a later app changed the recovery codes")
+	}
+}
+
+func TestConfirmLaterTOTPRefusesWithoutALiveFactorAndLeavesItPending(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	u, err := s.Register("admin", "password-placeholder-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPendingTOTPSecretAt(u.ID, testTOTPSecret, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConfirmLaterTOTP(u.ID, testTOTPSecret, now, 42); !errors.Is(err, ErrNoOtherSecondFactor) {
+		t.Fatalf("ConfirmLaterTOTP on an account with no factor = %v, want ErrNoOtherSecondFactor", err)
+	}
+	got, _ := s.Get(u.ID)
+	if got.HasActiveTOTP() || len(got.RecoveryCodes) != 0 {
+		t.Errorf("a refused confirm went live: totp=%v codes=%d", got.HasActiveTOTP(), len(got.RecoveryCodes))
+	}
+	if got.TOTPSecret != testTOTPSecret || got.TOTPPendingSince.IsZero() || !got.TOTPConfirmedAt.IsZero() {
+		t.Errorf("the pending secret did not stay pending: secret=%q pendingSince=%v confirmedAt=%v",
+			got.TOTPSecret, got.TOTPPendingSince, got.TOTPConfirmedAt)
 	}
 }

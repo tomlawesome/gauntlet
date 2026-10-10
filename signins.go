@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tomlawesome/gauntlet/internal/evict"
 	"github.com/tomlawesome/gauntlet/persist"
 )
 
@@ -62,7 +63,7 @@ var (
 	// row is unsaved; signInFoldSaveInterval while only counts changed.
 	signInSaveInterval     = 5 * time.Second
 	signInFoldSaveInterval = 60 * time.Second
-	// maxSignInFoldKeys caps the fold index; the oldest entry goes.
+	// maxSignInFoldKeys caps the fold index; the oldest eighth goes.
 	maxSignInFoldKeys = 4096
 )
 
@@ -495,23 +496,24 @@ func (h *SignInHistory) bumpLocked(r *SignInRow, now time.Time) {
 	h.foldGen++
 }
 
-// foldLocked indexes key, keeping the index at maxSignInFoldKeys:
-// entries past the span go first, then the oldest.
+// foldLocked indexes key, keeping the index within maxSignInFoldKeys:
+// when a new key would pass the cap, entries past the span go first,
+// then the oldest are shed a batch at a time (internal/evict). Shedding
+// only the one oldest, as this used to, leaves the index full, so under
+// a flood of distinct sources every new one paid the whole scan again --
+// the pattern internal/evict exists to replace (#90). evict.Target keeps
+// at least one entry, so the shed goes one lower for a cap of one, and
+// the new key still fits.
 func (h *SignInHistory) foldLocked(key string, e foldEntry, now time.Time) {
 	if _, ok := h.fold[key]; !ok && len(h.fold) >= maxSignInFoldKeys {
-		var oldestKey string
-		var oldest time.Time
 		for k, v := range h.fold {
 			if now.Sub(v.at) >= signInFoldSpan {
 				delete(h.fold, k)
-				continue
-			}
-			if oldestKey == "" || v.at.Before(oldest) {
-				oldestKey, oldest = k, v.at
 			}
 		}
 		if len(h.fold) >= maxSignInFoldKeys {
-			delete(h.fold, oldestKey)
+			target := min(evict.Target(maxSignInFoldKeys), maxSignInFoldKeys-1)
+			evict.DownTo(h.fold, target, func(v foldEntry) time.Time { return v.at })
 		}
 	}
 	h.fold[key] = e

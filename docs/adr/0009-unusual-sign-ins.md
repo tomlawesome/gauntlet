@@ -3,7 +3,7 @@
 **Status:** Accepted (owner decisions 2026-10-04 on #55)
 **Date:** 2026-10-04
 **Amended by:** #65 (the `prove` action, decision 10; owner answers
-2026-10-05)
+2026-10-05), #81 (the admin allowance, decision 11)
 **Relates to:** #55 (this change), #44 (the known-browser memory it
 judges against), #53 and ADR-0006 (the sign-in history it adds to),
 #54 and ADR-0008 (the country it judges against), #73 (the
@@ -153,6 +153,34 @@ remembers, and let the application decide what happens next.
     - **Standard pattern:** step-up authentication (ASVS 5.0 7.5.3), as
       ADR-0010's role grant.
 
+11. **Amended by #81: an administrator may allow the next sign-in.**
+    `POST /api/auth/users/{id}/allow-sign-in` (step-up: the caller's
+    password; for the caller's own account, password and a current
+    second factor, as own unlock) records
+    `User.SignInAllowedUntil`, ten minutes from issue
+    (`SignInAllowanceLifetime`). A judged sign-in the policy would hold
+    or refuse completes instead while the window is live, let through
+    the way the escape code lets one through: judged in full first, so
+    the signals and `Decide`'s answer are recorded; session issued;
+    browser, country and place remembered; history row `confirmed`;
+    `user.login` note `allowed=used`; the unusual-sign-in notice's
+    `Reason` is `allowed`. The window is single use -- `RememberSignIn`
+    clears it in the write that remembers the next completed sign-in,
+    whatever browser it came from -- and is also cleared wherever
+    known browsers are cleared. It lifts no lockout or disable, and
+    changes no credential: for a local account it is the alternative
+    to a reset code that destroys the password; for an SSO-only
+    account it is the first administrator remedy. Audited as
+    `user.sign_in_allowed` with the window's end; the account holder
+    is told (`NoticeSignInAllowed`, with who and until when). Accounts
+    document version 10.
+    - **Standard pattern:** Microsoft Entra's "confirm user safe /
+      dismiss user risk" -- an admin's out-of-band judgement sets a
+      state the policy stands down to once, before the person signs in
+      again -- bounded and single use as NIST SP 800-63B-4 §4 asks of
+      recovery, and distinct from the "held attempt released later"
+      shape this ADR rejects: the person signs in once, normally.
+
 ## Rejected options
 
 - **A country-only travel rule**, comparing only the country between
@@ -168,7 +196,9 @@ remembers, and let the application decide what happens next.
   already proves.
 - **`admin` role approval** of a held sign-in. Dropped for the same
   reason as the previous option: it is the same "come back later" shape
-  with an administrator in place of a link.
+  with an administrator in place of a link. #81's allowance is not
+  this: nothing is held; the admin sets a state and the person signs in
+  again.
 - **Fail open on a failing `Decide`.** Rejected: a hook that lets
   people in when it fails makes breaking the hook the attack; failing
   closed costs an occasional extra confirmation or refusal, never an
@@ -224,11 +254,9 @@ remembers, and let the application decide what happens next.
   lone admin's. Shipped as designed, documented (design.md §4's
   pitfalls table); the follow-up, a server-log escape code, is
   [ADR-0011](0011-escape-code.md) (#66).
-- An SSO-only account under `block` has no administrator remedy in
-  this release: it is refused at the SSO callback (`ssoError=refused`),
-  and the reset code needs a local password, so the way back is a
-  browser or place it has signed in from before. An admin "allow the
-  next sign-in for a short window" is a next-release issue (#79).
+- An SSO-only account under `block` is let in by an administrator
+  allowing its next sign-in (decision 11, #81); the reset code still
+  needs a local password.
 - Sign out everywhere clears the baseline only for an account with a
   local password, which it asks for again (#79): with only a session
   cookie, a thief could otherwise wipe what the account trusts and leave
@@ -246,3 +274,7 @@ remembers, and let the application decide what happens next.
   is a fourth, passkey-alone sign-in (`SignInMethodPasskeyAlone`,
   [ADR-0012](0012-passkey-alone-sign-in.md)). The other session issues
   still never judge.
+- Status note: the accounts document is version 10 (#81).
+- Status note (v0.4.0 audit, 2026-10-10): "§17a of the design note" is now
+  `docs/design.md` §2.4 (Configuration) and the §4 "Unusual sign-ins"
+  pitfalls table.

@@ -112,16 +112,23 @@ type UnusualSignInCase struct {
 }
 
 // UnusualSignInDetail is NoticeUnusualSignIn's detail (Config.Notices):
-// an unusual sign-in flagged, confirmed or blocked. It never carries the
-// account's coordinates. The application chooses the wording, address
-// and channel; it should treat Client.UserAgent as text, never markup.
+// an unusual sign-in flagged or blocked, or one an administrator's
+// allowance let through (#81). It never carries the account's
+// coordinates. The application chooses the wording, address and
+// channel; it should treat Client.UserAgent as text, never markup.
 //
 // Under flag the notice is asked for after the response is written, as
-// every AccountNotice is; a block and the confirm notifier.go sends are
-// the same. At most one flag or block notice per account per hour is
-// sent; one held back is "notify=quiet" in the audit.
+// every AccountNotice is; a block's is the same. A sign-in held for a
+// confirmation code or a passkey sends no notice of its own: the code
+// goes out through Config.DeliverConfirmCode, and a hold that ends in a
+// refusal is noticed as a block. At most one flag or block notice per
+// account per hour is sent; one held back is "notify=quiet" in the
+// audit.
 type UnusualSignInDetail struct {
-	// Action is what happened: flag, confirm or block.
+	// Action is what happened: flag or block. On the notice of a
+	// sign-in an administrator's allowance let through (Reason
+	// "allowed", #81) it is what the policy would have done instead:
+	// confirm, prove or block.
 	Action  UnusualSignInAction
 	Signals gauntlet.SignInSignals
 	Method  gauntlet.SignInMethod
@@ -134,7 +141,9 @@ type UnusualSignInDetail struct {
 	// Reason, under block, says why: policy, decide-failed,
 	// decide-timeout, decide-invalid, notify-failed or prove-failed. On the notice of
 	// a block let through by a lone admin's escape code (#66, ADR-0011)
-	// it is "escape", with SessionRef set.
+	// it is "escape", with SessionRef set. On the notice of a sign-in let
+	// through by an admin's allowance (#81) it is "allowed", with
+	// SessionRef set.
 	Reason string
 }
 
@@ -261,8 +270,12 @@ func (g *Gate) answerStopped(w http.ResponseWriter, r *http.Request, v unusualVe
 	}
 }
 
-// stopsSignIn reports whether v is confirm, prove or block.
+// stopsSignIn reports whether v is confirm, prove or block, and not let
+// through by an administrator's allowance (#81).
 func (v unusualVerdict) stopsSignIn() bool {
+	if v.allowed {
+		return false
+	}
 	switch v.action {
 	case UnusualSignInConfirm, UnusualSignInProve, UnusualSignInBlock:
 		return true
@@ -426,16 +439,32 @@ type unusualVerdict struct {
 	// confirmed, with escape=used in the audit detail, and a notice
 	// whose Reason is "escape".
 	escape bool
+	// allowed marks a sign-in the policy would have held or refused,
+	// let through by an administrator's allowance of the account's next
+	// sign-in (#81, gauntlet.User.SignInAllowedUntil). action keeps the
+	// policy's answer. completeSignIn records it confirmed, with
+	// allowed=used in the audit detail, and a notice whose Reason is
+	// "allowed".
+	allowed bool
 }
 
 // escapeUsedNote is the audit note a sign-in completed with an escape
 // code carries (#66), after unusual= and action=.
 const escapeUsedNote = "escape=used; "
 
+// allowanceUsedNote is the audit note a sign-in let through by an
+// administrator's allowance carries (#81), in escapeUsedNote's place.
+const allowanceUsedNote = "allowed=used; "
+
 // judgeSignIn judges user's completed sign-in from place: read-only,
 // and skipped altogether when the policy turns every signal off. When
 // a signal is kept and the policy has a Decide, Decide's answer
-// replaces the settings' (decide).
+// replaces the settings' (decide). A verdict that would hold or refuse
+// the sign-in while an administrator's allowance of the account's next
+// sign-in is live (#81) is marked allowed, last, so the signals and
+// Decide's answer are judged and recorded in full first, and the
+// admin's step-up-authenticated say-so beats even a Decide answering
+// block.
 func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet.SignInMethod, place signInPlace, now time.Time) unusualVerdict {
 	if g.judgesNothing() {
 		return unusualVerdict{}
@@ -451,6 +480,9 @@ func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet
 	}
 	if v.action == UnusualSignInProve {
 		v.action = g.resolveProve(user, method)
+	}
+	if v.stopsSignIn() && user.SignInAllowanceLive(now) {
+		v.allowed = true
 	}
 	return v
 }
@@ -541,10 +573,15 @@ func (g *Gate) decide(r *http.Request, user *gauntlet.User, method gauntlet.Sign
 func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, method gauntlet.SignInMethod, place signInPlace, v unusualVerdict, now time.Time) *AccountNotice {
 	sess, signals := g.issueSignInSession(w, r, user.ID, place, v.signals, method, now)
 	ev := loginEvent(user, "", gauntlet.SignInSuccess, method)
-	ev.Client.Unusual, ev.Confirmed = signals, v.escape
+	ev.Client.Unusual, ev.Confirmed = signals, v.escape || v.allowed
 	if signals == 0 {
 		if v.escape {
 			g.recordSignInNote(r, ev, res, escapeUsedNote, now)
+			return nil
+		}
+		// Without the note the record would read as a proof the user gave.
+		if v.allowed {
+			g.recordSignInNote(r, ev, res, allowanceUsedNote, now)
 			return nil
 		}
 		g.recordSignIn(r, ev, res, now)
@@ -553,6 +590,9 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	note := fmt.Sprintf("unusual=%s; action=%s; ", signals, v.action)
 	if v.escape {
 		note += escapeUsedNote
+	}
+	if v.allowed {
+		note += allowanceUsedNote
 	}
 	notify := g.noticeAllowed(user.ID, now)
 	if notify != "" {
@@ -566,6 +606,9 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	if v.escape {
 		detail.Reason = v.reason
 	}
+	if v.allowed {
+		detail.Reason = "allowed"
+	}
 	return &AccountNotice{
 		Kind: NoticeUnusualSignIn, UserID: user.ID, Username: user.Username, Role: user.Role, At: now,
 		UnusualSignIn: detail,
@@ -577,7 +620,7 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 // sent. Only an account with a local password gets this answer: an
 // SSO-only one is refused at the SSO callback, which redirects with
 // ssoError=refused and carries no text.
-const signInRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to reset the account"
+const signInRefusedDetail = "this sign-in was refused by the account's sign-in policy -- use a browser or place this account has signed in from before, or ask an administrator to allow your next sign-in or reset the account"
 
 // writeSignInRefused answers a refused sign-in: 403 sign-in-refused,
 // with no X-Auth-Gate header, which marks a session stopped at a door,

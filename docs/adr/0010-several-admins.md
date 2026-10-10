@@ -149,3 +149,16 @@ the step-up).
   passkeys (ADR-0015 decision 5): an SSO-only admin is held at the
   `must-change-password` door until it sets one, then at the passkey
   door.
+- Status note (v0.4.0 audit, 2026-10-10): the accounts document is version
+  10 since #81; version 9 is what #67 introduced (decision 7, and the
+  consequence "The accounts document is version 9").
+- Status note (v0.4.0 audit, 2026-10-10): `recheckStepUp` also serves the
+  caller's own allow-sign-in (#81). ("No longer named" in the note above is
+  loose: `recheckUnlockSelf` still exists, as a wrapper around
+  `recheckStepUp` for the unlock route.)
+- Status note (v0.4.0 audit, 2026-10-10): the consequence that only role
+  grants are re-checked is superseded: since #72 reset-password, delete
+  user, clearing a user's factors and token creation, and since #81
+  allowing another account's next sign-in, re-check the caller's password
+  (`recheckAdminPassword`); role grants and admin creation take password
+  plus second factor.

@@ -69,12 +69,66 @@ func TestVerifyPasswordRejectsMalformedHash(t *testing.T) {
 	}
 }
 
+// reachesHashing reports whether VerifyPassword gets as far as taking a
+// hash slot for encoded. A plain `== false` cannot tell "refused before
+// hashing" from "hashed and did not match" -- argon2 ignores a wrong
+// version, clamps a small memory, takes an empty salt -- so every slot
+// is held first: a call that is refused returns at once, one that is
+// not blocks on the slot. The slots are then freed and the blocked call
+// is let finish (a panic inside it is swallowed; the caller sees the
+// answer).
+func reachesHashing(encoded string) bool {
+	for range maxConcurrentHashes {
+		hashSlots <- struct{}{}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = recover() }()
+		_ = VerifyPassword("anything", encoded)
+	}()
+	reached := false
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		reached = true
+	}
+	for range maxConcurrentHashes {
+		<-hashSlots
+	}
+	<-done
+	return reached
+}
+
+// requireUnmatchableHash fails unless hash is one a login attempt must do
+// the full Argon2id work against, and still nothing can match it. A
+// hash VerifyPassword refuses at once ("", "!id", anything it cannot
+// parse) answers faster than a real one, which tells an attacker which
+// accounts are SSO-only, so "non-empty" is not enough and neither is a
+// false from VerifyPassword.
+func requireUnmatchableHash(t *testing.T, hash string) {
+	t.Helper()
+	if !reachesHashing(hash) {
+		t.Errorf("VerifyPassword refuses %q before hashing; want a real Argon2id hash, so a login against this account costs what any other does", hash)
+	}
+	for _, guess := range []string{"anything-at-all", "", hash} {
+		if VerifyPassword(guess, hash) {
+			t.Errorf("the hash matched the guess %q", guess)
+		}
+	}
+}
+
 // Not from mikroview (issue #12): a stored hash is data this module did
 // not necessarily write, so VerifyPassword must refuse -- without
 // hashing, panicking or keeping a hash slot -- any cost setting or
 // length outside what HashPassword could have produced.
 func TestVerifyPasswordRejectsOutOfRangeStoredHash(t *testing.T) {
 	const salt, key = "AAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	// The same hash with nothing out of range, so reachesHashing is shown
+	// to see a call that is not refused.
+	if valid := "argon2id$v=19$m=65536,t=3,p=4$" + salt + "$" + key; !reachesHashing(valid) {
+		t.Fatal("setup: a well-formed hash was not seen to take a hash slot")
+	}
 	cases := map[string]string{
 		"zero_rounds":      "argon2id$v=19$m=65536,t=0,p=4$" + salt + "$" + key,
 		"zero_threads":     "argon2id$v=19$m=65536,t=3,p=0$" + salt + "$" + key,
@@ -85,6 +139,7 @@ func TestVerifyPasswordRejectsOutOfRangeStoredHash(t *testing.T) {
 		"huge_memory":      "argon2id$v=19$m=4294967295,t=3,p=4$" + salt + "$" + key,
 		"huge_rounds":      "argon2id$v=19$m=65536,t=4294967295,p=4$" + salt + "$" + key,
 		"huge_key":         "argon2id$v=19$m=65536,t=3,p=4$" + salt + "$" + strings.Repeat("A", 1<<20),
+		"huge_salt":        "argon2id$v=19$m=65536,t=3,p=4$" + strings.Repeat("A", 1<<20) + "$" + key,
 	}
 	for name, encoded := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -101,6 +156,9 @@ func TestVerifyPasswordRejectsOutOfRangeStoredHash(t *testing.T) {
 			}()
 			if after := len(hashSlots); after != before {
 				t.Errorf("hash slots in use went from %d to %d: a slot leaked", before, after)
+			}
+			if reachesHashing(encoded) {
+				t.Error("VerifyPassword took a hash slot for it: it was not refused before hashing")
 			}
 		})
 	}

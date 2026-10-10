@@ -259,4 +259,31 @@ except "pkg:golang/example.com/dep@v1.0.0  # ISC, reviewed 2026-10-06"
 gate fail "an exception whose path prefixes another module fails" \
   "allow-dependencies-licenses entry for example.com/dep would also except example.com/depx"
 
+# The two refusals that come before go-licenses runs. go-licenses treats
+# a blank --allowed_licenses as no restriction, so a policy that lost its
+# allow-list, or whose key drifted from what the script parses, would let
+# a GPL dependency through if the gate carried on: the dependency here is
+# under ISC, which an allow-list of MIT would refuse and an empty one
+# does not. The gate must stop for that reason, said in its output.
+new_case no-allow-list
+printf '%s\n' "$ISC" > "$C/dep/LICENSE"
+for body in \
+  'go-bundled-assets: []' \
+  'allow-licenses: []
+go-bundled-assets: []' \
+  'allow-licenses:
+go-bundled-assets: []' \
+  'allowed-licenses:
+  - MIT
+  - ISC
+go-bundled-assets: []'; do
+  printf '%s\n' "$body" > "$C/policy.yml"
+  gate fail "a policy with no usable allow-licenses entries is refused: $(printf '%s' "$body" | head -n 1)" \
+    "no allow-licenses entries found"
+done
+
+new_case no-policy-file
+rm -f "$C/policy.yml"
+gate fail "a missing policy file is refused" "policy file not found"
+
 echo "licence-check_test.sh: all cases passed"

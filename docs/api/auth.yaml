@@ -3,7 +3,7 @@ info:
   title: gauntlet gate HTTP API
   # Always the VERSION file's value; the release merge request bumps
   # both, and gate/contracttest fails if they differ.
-  version: 0.3.0
+  version: 0.4.0
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -29,63 +29,82 @@ info:
     - `401` class `sign-in-required` on every route that needs a session
       and has none. Exempt from that: session, register, login,
       login/factor, login/factor/begin, login/passkey/begin,
-      login/passkey, login/prove/begin, login/prove, logout, unlock and the two `GET /api/auth/oidc/*`
-      routes.
+      login/passkey, login/confirm, login/prove/begin, login/prove,
+      login/escape, reauthenticate, logout, unlock and the two
+      `GET /api/auth/oidc/*` routes.
     - `403` class `forbidden` on a session-gated route when the account's
       role is not one gauntlet knows, or, on the admin routes, when the
       caller is not an admin; class `must-change-password`,
       `must-enrol-factor` or `must-enrol-passkey` when the session is
       stopped at one of the three doors (see the `X-Auth-Gate` header).
 
-    A request carrying `Authorization: Bearer ...` never reaches these
-    routes: `Protect` sends it to the application's own handler for that
-    token kind, or answers `401` class `invalid-credentials` "invalid or
-    revoked token".
+    A request carrying an `Authorization` header never reaches these
+    routes once an account exists: `Protect` sends a valid `Bearer` token
+    to the application's own handler for that token kind, and answers any
+    other value `401` class `invalid-credentials` "invalid or revoked
+    token".
 
     **Session cookie.** Its name is the application's `Config.CookieName`,
     prefixed `__Host-` while `Config.SecureCookie` is true; it is
-    `HttpOnly`, `SameSite=Lax`, path `/`, with `Max-Age` equal to the
-    session store's lifetime ceiling. Routes marked "sets the session
-    cookie" issue a fresh one, and a login ends the same account's
-    session the browser already held; logout clears it.
+    `HttpOnly`, `SameSite=Lax`, `Secure` while `Config.SecureCookie` is
+    true, path `/`. Routes marked "sets the session cookie" issue a fresh
+    one, and a login ends the same account's session the browser already
+    held; logout clears it. Its `Max-Age` is
+    normally the session store's lifetime ceiling (the longest a session
+    may last from its sign-in). Two routes continue the sign-in the
+    browser already had instead of starting a new one:
+    `POST /api/auth/reauthenticate` and `POST /api/auth/logout-all`. Their
+    new session keeps the original sign-in time, so its cookie ends at
+    that sign-in's ceiling, not a fresh one.
 
-    **Known-browser cookie.** Every route that sets the session cookie
-    also sets `gate_known_browser` (#44): `HttpOnly`, `SameSite=Lax`,
-    `Secure` while `Config.SecureCookie` is true, path `/api/auth` (every
-    route that sets the session cookie is under it, so each one replaces
-    the browser's value instead of adding another; only `login`,
-    `login/factor`, `login/factor/begin` and `login/passkey` use it for the
-    allowance),
+    **Known-browser cookie.** Every route that sets the session cookie,
+    except `reauthenticate`, also sets `gate_known_browser` (#44), unless
+    saving it fails, when the browser keeps the value it had. It is
+    `HttpOnly`, `SameSite=Lax`, `Secure` while `Config.SecureCookie` is
+    true, path `/api/auth` (every route that sets the session cookie is
+    under it, so each one replaces the browser's value instead of adding
+    another; the routes that read it for the allowance below are `login`,
+    `login/factor`, `login/confirm`, `login/prove`, `login/escape`,
+    `login/passkey` and `reauthenticate`, and `login/factor/begin` and
+    `login/prove/begin` read it only for the ban and lockout exceptions
+    and the remembered browsers' own begin limit (see
+    `login/factor/begin`)),
     no `__Host-` prefix (that needs path `/`),
     `Max-Age` 45 days. Its value is up to four tokens joined by `.`,
     one per account the browser has signed in to, most recent first
     (#55); each is 32 random bytes, base64url, and names nothing. An
     account's record holds only its own tokens' SHA-256, and a fresh
-    token replaces that account's one at every sign-in. While the account is locked out,
-    or the client's address is at its limit, a browser carrying a value
-    the named account remembers keeps a small allowance of its own (the
-    limiter's attempts per window), where any other browser gets `429`.
+    token replaces that account's one at every sign-in. While the account
+    is locked out, or the client's address is at its limit, a browser
+    carrying a value the named account remembers still gets through on
+    one small allowance that all of that account's remembered browsers
+    share (the limiter's attempts per window), separate from the ordinary
+    limits; any other browser gets `429`.
     A request carrying such a value is also not refused by the address
-    ban (#70: 100 failed sign-ins from one address in a day ban it for 24
-    hours, answered with the same `429`).
+    ban (#70: 100 failed sign-ins from one address (an IPv6 address
+    counts by its /64) in a day ban it for 24 hours, answered with the
+    same `429`).
     It never signs anyone in by itself, is refused while the account's
     sign-in is disabled, and every failure through it counts toward the
     disable. An account remembers at most three browsers, each for 45
-    days from its latest sign-in there; sign out everywhere and an
-    admin's password reset or sign-out forget them all. A frontend does nothing with
+    days from its latest sign-in there; sign out everywhere (for an
+    account with a local password), an admin's password reset and an
+    admin's sign-out forget them all. A frontend does nothing with
     it: the browser keeps and sends it.
 
     **Errors.** Every error body is RFC 9457 Problem Details
     (`application/problem+json`, gauntlet #23): `type`, a permanent link
-    into [`docs/api/errors.md`](../errors.md) naming a fixed `title` and
+    into [`docs/api/errors.md`](errors.md) naming a fixed `title` and
     `status`; `detail`, free text that may change wording and is never
-    parsed; and, on the one response marked below, an extension member
-    (`username`) that is part of the contract and does not change.
-    (`totpActive`, the other extension member, was last sent by 0.2.0's
-    `totp/confirm`; see `PartiallyCompletedProblem`.) A frontend branches on `type` (or the status code and
+    parsed; and, on the three responses marked below, an extension member
+    (`username` on a user delete's `500`; `unknownCredential` on the `401`
+    of `login/passkey` and `reauthenticate`) that is part of the contract
+    and does not change. (`totpActive`, the other extension member, was last
+    sent by 0.2.0's `totp/confirm`; see `PartiallyCompletedProblem`.) A frontend branches on `type` (or the status code and
     the `X-Auth-Gate` header, for the three forced-auth-gate classes),
     never on `detail`'s text. An unmatched path or method (a typo, or a
-    method the route does not take) answers the same shape with `type:
+    method the route does not take), once past `Protect`'s own checks
+    above, answers the same shape with `type:
     about:blank` and no `detail` -- not a documented class, and the one
     response this document cannot enumerate per-route; the `Allow` header
     on a `405` lists the methods the path does take.
@@ -171,7 +190,7 @@ paths:
         - sessionCookie: []
       responses:
         "200":
-          description: The caller's state. Account fields are present only while `authenticated` is true.
+          description: The caller's state. `username`, `role`, `adminPasskeyRequired` and `signedInSince` are present only while `authenticated` is true; the account booleans are always sent, false while signed out.
           content:
             application/json:
               schema:
@@ -229,12 +248,11 @@ paths:
       operationId: login
       summary: Sign in with username and password
       description: |
-        Rate-limited per client address and per account; only a success
-        releases the attempt. An account whose password was reset after
-        its address reached the limit gets past that address limit (not
-        its own) until its next sign-in finishes or a guess fails (#32).
-        A browser the account remembers (the known-browser cookie) keeps
-        an allowance of its own past either limit (#44).
+        Rate-limited per client address and per account; only a right
+        password, or a server error, hands the attempt back. A password
+        reset clears the account's own count, not the address's (#86).
+        A browser the account remembers (the known-browser cookie) shares
+        the account's known-browser allowance past either limit (#44).
         On an account with no second factor this
         signs in and sets the session cookie. On an account holding one it
         does not: it sets a short-lived pending-login cookie and names the
@@ -252,17 +270,21 @@ paths:
         `{"confirm": true}`, the confirm cookie set and no session
         cookie; `POST /api/auth/login/confirm` finishes it). The response
         never says which signal was raised or where a code went. Codes
-        sent are limited per account (#84): past the limit a sign-in
-        that would be held is answered `429` `rate-limited` instead, with
-        no code and no cookie. The second-factor and passkey steps do the
-        same.
+        sent are limited per account (#84, #83): a second code waits 30
+        seconds after the first, each further one in the hour twice as
+        long, and no more than five go out in an hour. Past the limit a
+        sign-in that would be held is answered `429` `rate-limited`
+        instead, with no code and no cookie. The second-factor and
+        passkey steps do the same.
 
         A `403` `sign-in-refused` for an admin whom no other admin can act
         for may also set the escape cookie (#66): the code that lets that
-        one attempt through is in the server's log, not in any response,
-        and `POST /api/auth/login/escape` redeems it. The `403` body is
-        the same either way. A sign-in held for such an admin (`200` with
-        `confirm` or `prove`) sets the cookie too, so a lost passkey or an
+        one attempt through is in the server's log (or handed to the
+        application's `Config.OnEscapeCode`), not in any response, and
+        `POST /api/auth/login/escape` redeems it. The `403` body is the
+        same either way. A sign-in held for such an admin (`200`
+        `confirm` here; `confirm` or `prove` at `login/factor`; `confirm`
+        at `login/passkey`) sets the cookie too, so a lost passkey or an
         undelivered code has the same way out.
       security:
         - {}
@@ -307,9 +329,8 @@ paths:
         authenticator-app code or one unused recovery code (spent on use).
         `assertion` is the browser's answer to the options
         `POST /api/auth/login/factor/begin` gave, checked against the
-        passkey ceremony cookie that route set; a completed passkey sign-in
-        also hands back the attempt that begin counted. Shares the login
-        rate limit. Sets the session cookie on success. Like `login`, the
+        passkey ceremony cookie that route set. Shares the login rate
+        limit; begin's own count is separate and is not handed back here. Sets the session cookie on success. Like `login`, the
         completed sign-in is first judged for unusual-sign-in signals and
         may be refused (`403` `sign-in-refused`), held for a confirmation
         code (`200` `{"confirm": true}`, #55) or, when the account holds a
@@ -318,7 +339,9 @@ paths:
         "passkeyOrigin": ...}`, #65; `POST /api/auth/login/prove/begin`
         and `POST /api/auth/login/prove` finish it). A passkey assertion
         sent here is already a passkey sign-in and is never held for
-        another.
+        another. Both `code` and `assertion`, or neither (a `null`
+        assertion counts as none), is `400` class `invalid-request`, before
+        anything is counted; the pending login still holds.
       security:
         - pendingLoginCookie: []
         - pendingLoginCookie: []
@@ -344,7 +367,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          description: The code or passkey assertion was wrong (`invalid-credentials`), or the pending login is invalid, expired, already completed, or its account is gone or has lost its second factor (`step-expired`) -- sign in again from the start.
+          description: The code or passkey assertion was wrong (`invalid-credentials`); or the pending login is invalid, expired, already completed, or its account is gone or has lost its second factor (`step-expired`) -- sign in again from the start; or the passkey ceremony `login/factor/begin` started is missing, invalid, expired or already used (`step-expired`, its cookie cleared) -- call `login/factor/begin` again, the pending login still holds.
           headers:
             WWW-Authenticate:
               required: true
@@ -380,9 +403,9 @@ paths:
       summary: Finish a sign-in with a confirmation code
       description: |
         Completes a sign-in the unusual-sign-in policy held for a
-        confirmation code (#55): `login`, `login/factor` or the SSO
-        callback set the confirm cookie and the application delivered the
-        code to the person. `code` is the eight digits, with or without
+        confirmation code (#55): `login`, `login/factor`, `login/passkey`
+        or the SSO callback set the confirm cookie and the application
+        delivered the code to the person. `code` is the eight digits, with or without
         the dash, surrounding whitespace ignored. Shares the login rate
         limit; a wrong code counts as a failed second factor. The ticket
         is used by exactly one sign-in and lives 15 minutes. Sets the
@@ -431,8 +454,6 @@ paths:
           $ref: "#/components/responses/CSRFRequired"
         "429":
           $ref: "#/components/responses/TooManyRequests"
-        "500":
-          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -446,13 +467,17 @@ paths:
         ADR-0009): the account's own passkeys registered for the current
         relying party, user verification preferred (possession of the key
         is the point, so a security key without a PIN qualifies). Reached
-        with the confirm cookie `login/factor` set and no session; takes
-        no body. Sets the passkey ceremony cookie (sealed, path
+        with the confirm cookie `login/factor` or the SSO callback set and
+        no session; takes no body. Sets the passkey ceremony cookie (sealed, path
         `/api/auth/login`, five minutes; each challenge is usable once).
         It takes nothing on the login limit: `login/prove` is what is
-        counted. `404` when the application has no passkeys; `409` while
-        the relying party is not ready or the account has no passkey
-        usable here (one removed since the sign-in was held).
+        counted. Each begin is counted on the account's passkey-step begin
+        budget, as `login/factor/begin`'s are (#80), and a locked or
+        disabled account or a banned address is refused before any
+        challenge, with `login/factor/begin`'s known-browser exceptions:
+        `429` either way. `404` when the application has no passkeys;
+        `409` while the relying party is not ready or the account has no
+        passkey usable here (one removed since the sign-in was held).
       security:
         - confirmLoginCookie: []
       parameters:
@@ -487,6 +512,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -506,15 +533,18 @@ paths:
         `invalid-credentials`, saying nothing of which. Shares the login
         rate limit (`429` before the signature is looked at); a refused
         assertion keeps its reservation, counts as a failed second factor
-        as a wrong confirmation code does, and leaves the ticket and the
-        ceremony open for a corrected one. A dead ceremony (no cookie,
-        expired, already used) is `401` `step-expired`, its cookie is
-        cleared and the ticket stays, so `begin` can be asked again. The
-        ticket is used by exactly one sign-in and lives 15 minutes. Sets
-        the session cookie on success and clears the confirm cookie; the
-        session list, the sign-in history (marked `confirmed`) and the
-        audit record say how the sign-in began (`code`, `password` or
-        `sso`), with `action=prove` in the audit detail.
+        as a wrong confirmation code does, and leaves the ticket open; the
+        ceremony stays open for a corrected one, except after a counter
+        that did not advance or a passkey removed while the assertion was
+        checked, either of which spends it. A dead ceremony (no cookie,
+        expired, already used) is `401` `step-expired` and counts as a
+        refused assertion does; its cookie is cleared and the ticket
+        stays, so `begin` can be asked again. The ticket is used by
+        exactly one sign-in and lives 15 minutes. Sets the session cookie
+        on success and clears the confirm and passkey ceremony cookies;
+        the session list, the sign-in history (marked `confirmed`) and the
+        audit record say how the sign-in began (`code` or `sso`), with
+        `action=prove` in the audit detail.
       security:
         - confirmLoginCookie: []
           passkeyAssertCookie: []
@@ -569,15 +599,16 @@ paths:
   /api/auth/login/escape:
     post:
       operationId: loginEscape
-      summary: Finish a refused sign-in with the escape code from the server log
+      summary: Finish a refused or held sign-in with the escape code from the server log
       description: |
-        Lets through a sign-in the unusual-sign-in policy refused (#66,
-        ADR-0011). Only a lone admin -- an admin with no other admin able
-        to act -- is ever offered it: `login` or `login/factor` answered
-        `403` `sign-in-refused` and set the escape cookie, and the server
-        wrote a one-time code to its own log (or handed it to the
-        application's `Config.OnEscapeCode`); nothing in any response
-        carries it. `code` is that code, `xxxx-xxxx-xxxx-xxxx`, in either
+        Lets through a sign-in the unusual-sign-in policy refused or held
+        (#66, ADR-0011). Only a lone admin -- an admin with no other admin
+        able to act -- is ever offered it: `login`, `login/factor` or
+        `login/passkey` answered `403` `sign-in-refused`, or held the
+        sign-in for a confirmation code or a passkey, and set the escape
+        cookie, and the server wrote a one-time code to its own log (or
+        handed it to the application's `Config.OnEscapeCode`); nothing in
+        any response carries it. `code` is that code, `xxxx-xxxx-xxxx-xxxx`, in either
         case, with or without the dashes. The code is useless without the
         cookie, and the cookie without the code. Shares the login rate
         limit, so an address ban or a lockout refuses it with `429`; a
@@ -626,8 +657,6 @@ paths:
           $ref: "#/components/responses/CSRFRequired"
         "429":
           $ref: "#/components/responses/TooManyRequests"
-        "500":
-          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/SetupRequired"
 
@@ -642,8 +671,17 @@ paths:
         the account's passkeys registered for the current relying party,
         and sets the passkey ceremony cookie (sealed, path
         `/api/auth/login`, five minutes; each challenge is usable once).
-        Takes the same login rate-limit attempt as `login/factor` and
-        keeps it until the assertion signs in. Takes no body.
+        Takes no body.
+
+        Each begin is counted on a limit of the account's own (the
+        limiter's threshold per window), never handed back (except when
+        the server fails to start the ceremony, `500`), and spends
+        none of the sign-in attempts `login/factor` counts: `429` once it
+        is spent, while codes and recovery codes still work. A browser
+        the account remembers has a limit of its own beside it. A banned
+        address or a locked account is `429` unless the browser is one
+        the account remembers; a disabled account is `429` to any
+        browser.
       security:
         - pendingLoginCookie: []
       parameters:
@@ -675,8 +713,8 @@ paths:
       operationId: stepUpPasskeyBegin
       summary: Start a passkey step-up
       description: |
-        For a signed-in caller about to grant admin, create an admin or
-        unlock their own account (#82): answers the W3C request options
+        For a signed-in caller about to grant admin, create an admin,
+        unlock their own account or allow their own next sign-in (#82): answers the W3C request options
         for `navigator.credentials.get()`, allowing only the caller's
         passkeys registered for the current relying party, and sets the
         step-up ceremony cookie (`gate_passkey_stepup`, sealed, path
@@ -688,8 +726,9 @@ paths:
         Takes nothing from the account's password re-check budget, so a
         prompt that is cancelled or expires costs no re-check. Each begin
         is counted on a limit of its own for the account (the limiter's
-        threshold per window), never handed back, so a session alone
-        cannot start ceremonies without limit: `429` once it is spent.
+        threshold per window), never handed back (except when the server
+        fails to start the ceremony, `500`), so a session alone cannot
+        start ceremonies without limit: `429` once it is spent.
         The route that takes the `assertion` checks it on the re-check
         budget, as it checks a code.
         `404` while the application has no passkeys; `409` while its
@@ -739,8 +778,11 @@ paths:
         of its own for the client address -- the same size as the login
         limit, but not shared with it, so challenges a browser asks for and
         never uses spend none of the address's sign-in attempts -- and
-        keeps it until a sign-in completes; a banned address or one at
-        that limit is `429`. The
+        keeps it until an assertion on it checks out at `login/passkey`
+        or a passkey resume (even if the policy then refuses or holds the
+        sign-in, or the server cannot record it); a `500` from begin gives
+        it back at once; a banned address or one at that limit is `429`.
+        The
         known-browser allowance, which belongs to an account, applies at
         `login/passkey`. `404` unless passkey sign-in is on; `409` while
         the relying party is not ready.
@@ -782,9 +824,23 @@ paths:
         limit and the known-browser allowance all apply (`429` before the
         signature is looked at), and a refused assertion keeps its
         reservation, counted. A completed sign-in gives back this attempt
-        and the one `begin` took, and resets the account's count. A wrong
-        or unknown credential does not count toward the account's run of
+        and the one `begin` took, and resets the account's count. A
+        sign-in the policy refuses or holds gives both back too, without
+        resetting the count. A wrong or unknown credential does not count toward the account's run of
         second-factor failures (no password was presented).
+
+        A finish that names no account this credential can sign in to --
+        an unknown handle, a passkey the account does not hold, an account
+        with no local password -- or that never reaches the account (no
+        user handle, an unreadable assertion) is still one attempt on the
+        address (#96): it is checked against the address ban and takes
+        one attempt from the address's limit, the one a password attempt
+        uses, charging no account. At the limit or banned it is `429`
+        `rate-limited`, with no `unknownCredential` and the ceremony
+        cookie kept; otherwise its `401` counts. A dead ceremony counts
+        nothing, except an already-used one whose handle names an account
+        this credential can sign in to, which counts against that account
+        as a refused assertion does.
 
         Every refusal -- an unknown handle, a passkey this account does not
         hold or one that is stale or still held for its recovery codes, a
@@ -794,16 +850,35 @@ paths:
         of which. A dead ceremony (no cookie, expired, tampered with,
         already used) is `401` `step-expired`, and its cookie is cleared; a
         refused credential leaves the ceremony open for a corrected
-        assertion.
+        assertion, except a counter that did not advance or a passkey
+        removed while the assertion was checked, either of which spends
+        it.
+
+        A refusal whose handle names one of this application's accounts
+        that holds no passkey of that ID -- live, stale or held -- names it
+        in `unknownCredential` (#92; `UnknownCredentialProblem`), the
+        argument of the browser's
+        `PublicKeyCredential.signalUnknownCredential()`, so the frontend
+        can tell the browser to stop offering it. A handle naming no
+        account here gets a plain `Problem` with no member, answering as a
+        wrong signature does: an RP ID is a hostname with no port or path
+        (W3C WebAuthn Level 3), so another application on the same
+        hostname shares the browser's passkeys, and naming one of its
+        passkeys would make the browser hide or delete one that still
+        works there. The member shows that the handle named an account
+        here; the handle is a random 128-bit ID only the passkey's holder
+        has. Every other refusal has no member.
 
         A completed sign-in is first judged for unusual-sign-in signals
         (#55, method `passkey_alone`): it may be refused (`403`
         `sign-in-refused`) or held for a confirmation code (`200`
         `{"confirm": true}`; `POST /api/auth/login/confirm` finishes it --
-        a passkey does not skip it). On success the session cookie is set;
-        the session list, the sign-in history and the audit record say
-        `passkey_alone`. The account's password is unchanged and the
-        forced-password-change door still holds.
+        a passkey does not skip it). A refusal or hold for an admin whom no
+        other admin can act for can set the escape cookie, as at `login`
+        (#66). On success the session cookie is set; the session list,
+        the sign-in history and the audit record say `passkey_alone`. The
+        account's password is unchanged and the forced-password-change
+        door still holds.
       security:
         - passkeySignInCookie: []
       parameters:
@@ -826,7 +901,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          description: The assertion was refused (`invalid-credentials`), or the ceremony is dead (`step-expired`) -- begin again.
+          description: "The assertion was refused (`invalid-credentials`; `UnknownCredentialProblem` when the handle names an account here that does not hold the passkey, #92), or the ceremony is dead (`step-expired`) -- begin again."
           headers:
             WWW-Authenticate:
               required: true
@@ -836,13 +911,15 @@ paths:
           content:
             application/problem+json:
               schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties:
-                      type:
-                        enum:
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties:
+                          type:
+                            enum:
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                  - $ref: "#/components/schemas/UnknownCredentialProblem"
         "403":
           $ref: "#/components/responses/CSRFRequiredOrSignInRefused"
         "404":
@@ -861,12 +938,13 @@ paths:
       operationId: reauthenticate
       summary: Resume a timed-out session with the password or a passkey alone
       description: |
-        After a session has been idle past the idle timeout (one hour) and
-        before its lifetime ceiling (24 hours from the sign-in), this takes
-        the timed-out session's cookie and the account's password and
-        issues a new session ID for the same account (#71, NIST SP
-        800-63B-4 section 2.2.3: a password in conjunction with the
-        session secret may re-authenticate after inactivity). The
+        After a session has been idle past the application's idle timeout
+        (at most one hour) and before its lifetime ceiling (at most 24
+        hours from the sign-in), this takes the timed-out session's cookie
+        and the account's password and issues a new session ID for the
+        same account (#71, NIST SP 800-63B-4 section 2.2.3: a password in
+        conjunction with the session secret may re-authenticate after
+        inactivity). The
         sign-in time does not change, so the ceiling does not move, and the
         new cookie ends at it. The old session ID ends. `GET
         /api/auth/session` says `resumable: true` while this is possible.
@@ -878,7 +956,13 @@ paths:
         must be the timed-out session's own account: another account's
         passkey resumes nothing. A refused assertion is `401`
         `invalid-credentials`, counted; a dead ceremony is `401`
-        `step-expired`, not counted. Both fields is `400`. An `assertion`
+        `step-expired`, not counted. When the handle is the session's own
+        account and that account holds no passkey with the assertion's ID
+        (live, stale or held), the refusal names it in `unknownCredential`
+        (#92; `UnknownCredentialProblem`), as `POST /api/auth/login/passkey`
+        does; another account's handle, or one naming no account, is never
+        named. Both fields is `400`. Neither is a wrong password: `401`
+        `invalid-credentials`, counted. An `assertion`
         is `404` unless passkey sign-in is on, and `409` while the relying
         party is not ready. The new session keeps the method of the
         sign-in it continues.
@@ -922,8 +1006,10 @@ paths:
         "401":
           description: |
             Nothing can be resumed (class `sign-in-required`); the password
-            or passkey was wrong (class `invalid-credentials`); or the
-            passkey ceremony is dead (class `step-expired`).
+            or passkey was wrong (class `invalid-credentials`;
+            `UnknownCredentialProblem` when it names a passkey the
+            session's own account does not hold, #92); or the passkey
+            ceremony is dead (class `step-expired`).
           headers:
             WWW-Authenticate:
               required: true
@@ -933,14 +1019,16 @@ paths:
           content:
             application/problem+json:
               schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties:
-                      type:
-                        enum:
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
-                          - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties:
+                          type:
+                            enum:
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+                              - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
+                  - $ref: "#/components/schemas/UnknownCredentialProblem"
         "403":
           $ref: "#/components/responses/CSRFRequired"
         "404":
@@ -990,10 +1078,12 @@ paths:
         browser a fresh session (sets the session cookie) and remembers
         it. An account with a local password sends it in `password`
         (rate-limited re-check), and every browser, country and place the
-        account remembers is forgotten first. An SSO-only account has no
+        account remembers, and any allow-sign-in window an admin opened
+        for it (#81), is forgotten first. An SSO-only account has no
         password to send: the body is optional, its sessions end, and
         what it remembers is kept, so a session cookie alone cannot reset
-        its unusual-sign-in baseline.
+        its unusual-sign-in baseline. The new session keeps the old
+        session's sign-in time, ceiling and method.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1061,8 +1151,8 @@ paths:
       operationId: endSession
       summary: End one of the caller's own sessions
       description: |
-        No password, like sign out everywhere: ending a session is a safe
-        direction. Ending the session the request was made with clears the
+        No password, unlike sign out everywhere for an account with a local
+        password: ending a session is a safe direction. Ending the session the request was made with clears the
         cookie and sets `signedOut`. Ends the gauntlet session only, never
         the single sign-on provider's. Takes no body.
       parameters:
@@ -1092,8 +1182,12 @@ paths:
         When fifty failed sign-ins in a row have disabled the admin's
         sign-in and no other admin can unlock it, a server that starts in
         that state writes a one-time unlock code to its log (#44). This
-        lifts the disable, and nothing else: it issues no session and does
-        not touch the password, the second factors or the sessions. The
+        lifts the disable, and with it any lockout and the count of
+        lockouts (the escalating lockout starts again from zero), and
+        nothing else on the account: it issues no session and does not
+        touch the password, the second factors or the sessions, though
+        this server process also forgets its recent counts for the
+        account, as `POST /api/auth/users/{id}/unlock` does. The
         admin then signs in as normal with their existing password and
         second factor. The code is single use -- it stops working once
         the disable is lifted by any means -- and is typed with or without
@@ -1155,13 +1249,17 @@ paths:
         local password and gets `409`, except an admin: every admin keeps a
         local password (ADR-0010), so an SSO-only admin sets its first one
         here with only `newPassword`, and must do so before any route that
-        re-checks the caller's password will work (those answer `409` until
-        it has). It must do so from a session its identity provider issued
-        in the last ten minutes; any other session gets `409` asking it to
+        re-checks the caller's password will work (while the application
+        requires admin passkeys, every other route that needs a session
+        stops it at the `must-change-password` door, `403`; otherwise they
+        answer `409` until it has). It must do so from a session its
+        identity provider issued in the last ten minutes; any other session gets `409` asking it to
         sign in again through the provider first.
 
         A `newPassword` the same as the current password is `400`, under a
-        forced change too.
+        forced change too. An administrator's reset that lands while the
+        change is being checked wins: the change is `409` and saves
+        nothing, and the owner signs in with the reset code (#80).
 
         A new password is refused with `400`, and a plain-text reason, when
         it is under 8 characters; on the common-password list, in any
@@ -1226,8 +1324,8 @@ paths:
         ten minutes. Enrolling again before confirming replaces the
         pending secret. `409` while the account already has an
         authenticator app, or a first factor is on hold waiting for its
-        recovery codes to be confirmed. Reachable at the
-        must-enrol-factor door.
+        recovery codes to be confirmed, or the account has no local
+        password. Reachable at the must-enrol-factor door.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1279,7 +1377,9 @@ paths:
         /api/auth/recovery-codes/confirm`. On an account that already has
         a second factor (a passkey) the app is active at once, every other
         session ends and a fresh session cookie is set; no codes are
-        returned. Reachable at the must-enrol-factor door.
+        returned. A wrong code is `400` `invalid-request` and is counted on
+        the re-check budget (`429` once it is spent). Reachable at the
+        must-enrol-factor door.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1332,11 +1432,16 @@ paths:
       operationId: totpDelete
       summary: Remove the caller's own authenticator app
       description: |
-        Password-gated (rate-limited re-check). When this leaves the
+        Password-gated (rate-limited re-check). A caller with no local
+        password is `409` class `conflict` before its password is checked,
+        and nothing is counted. When this leaves the
         account with no second factor, every session on it ends, this one
         included, and `signedOut` is true. With no authenticator app on
         the account the answer is `404` and nothing changes: no session
-        ends, nothing is recorded and no notice is sent.
+        ends, nothing is recorded and no notice is sent. An enrolment
+        started but never confirmed, even one past its ten minutes, counts
+        as an app here: it is removed with `200`, recorded, and a notice
+        is sent, as for a confirmed one.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1367,6 +1472,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1378,7 +1485,24 @@ paths:
     post:
       operationId: regenerateRecoveryCodes
       summary: Replace the caller's recovery codes
-      description: Password-gated (rate-limited re-check). Replaces the account's recovery codes with ten fresh ones, shown once. Refused on an account with no second factor. Other sessions are not ended.
+      description: |
+        Password-gated (rate-limited re-check). A caller with no local
+        password is `409` class `conflict` before its password is checked,
+        and nothing is counted. Replaces the account's recovery codes with
+        ten fresh ones, shown once, in this reply.
+        The old set stops working the moment the new one is saved, just
+        before the reply is written; if the save fails, the old set stays
+        and no codes are issued. Nothing can show the new codes again, so
+        a person who missed them (a dropped connection, a closed page)
+        regenerates again. An account with a local password and no live
+        second factor, including one whose first factor still waits for
+        `POST /api/auth/recovery-codes/confirm`, is stopped at its door
+        (`403` `must-change-password` while it owes a password change,
+        otherwise `must-enrol-factor`, or `must-enrol-passkey` for an admin
+        while admin passkeys are required) before this runs; beyond the
+        no-local-password case above, `409` answers only a last second
+        factor removed while the request was in flight. Other sessions are
+        not ended.
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -1542,8 +1666,13 @@ paths:
         /api/auth/recovery-codes/confirm`. On an account that already has
         a second factor the passkey is live at once, with no codes. A
         refused credential keeps the ceremony cookie, so it can be
-        corrected within the five minutes; every other answer clears it.
-        Reachable at the must-enrol-factor door.
+        corrected within the five minutes; a stored passkey, a store
+        refusal and a dead or spent ceremony clear it.
+        A name holding a control or format character, a line or paragraph
+        separator, invalid UTF-8 or U+FFFD is refused with `400` before the
+        ceremony cookie is examined, so the ceremony stays live and the
+        same credential can be finished again with a good name; nothing
+        is stored. Reachable at the must-enrol-factor door.
       security:
         - sessionCookie: []
           passkeyRegisterCookie: []
@@ -1563,7 +1692,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PasskeyRegisterFinishResponse"
         "400":
-          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or the credential was refused (wrong origin, bad signature, malformed; `invalid-request` either way). The ceremony cookie is kept, so a corrected credential can finish it.
+          description: The body is not one JSON object of the documented fields (a malformed body is refused before the ceremony cookie is examined), or `name` holds a character that is not plain text (a control or format character, a line or paragraph separator, or U+FFFD), or the credential was refused (wrong origin, bad signature, malformed; `invalid-request` in every case). The ceremony cookie is kept, so a corrected credential can finish it.
           content:
             application/problem+json:
               schema:
@@ -1605,7 +1734,7 @@ paths:
     patch:
       operationId: renamePasskey
       summary: Rename one of the caller's passkeys
-      description: Cosmetic, so no password. A blank name becomes `Passkey n`; a long one is cut at 64 characters.
+      description: Cosmetic, so no password. A blank name becomes `Passkey n`; a long one is cut at 64 characters. A name holding a control or format character, a line or paragraph separator, invalid UTF-8 or U+FFFD is refused with `400` (`invalid-request`), and the stored name is unchanged.
       parameters:
         - $ref: "#/components/parameters/PasskeyID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -1638,7 +1767,9 @@ paths:
       operationId: deletePasskey
       summary: Remove one of the caller's passkeys
       description: |
-        Password-gated (rate-limited re-check). When this leaves the
+        Password-gated (rate-limited re-check). A caller with no local
+        password is `409` class `conflict` before its password is checked,
+        and nothing is counted. When this leaves the
         account with no second factor, its recovery codes are dropped,
         every session on it ends, this one included, and `signedOut` is
         true. While the application requires every admin to hold a
@@ -1716,8 +1847,9 @@ paths:
         `?ssoError=` and one of `state_mismatch`, `provider_error`,
         `verification_failed`, `not_permitted`, `login_failed`,
         `link_session_changed`, `link_identity_taken`, `link_failed`,
-        `refused` (every credential right, refused by the unusual
-        sign-in policy, #55). A sign-in held for a confirmation code
+        `refused` (every credential right, and the unusual sign-in policy
+        refused it, or held it for a code past the account's
+        confirmation-code budget, #55, #84). A sign-in held for a confirmation code
         (#55) instead redirects to `Config.LoginPath` with `?confirm=1`
         and sets the confirm cookie, no session cookie; the frontend
         asks for the code and posts it to `POST /api/auth/login/confirm`.
@@ -1758,8 +1890,10 @@ paths:
       description: |
         Sets the flow cookie and returns the provider URL for the browser
         to navigate to; `GET /api/auth/oidc/callback` finishes it. A
-        completed link removes the local password of every account except
-        an admin's: every admin keeps theirs (#67). Password-gated
+        completed link removes the local password, authenticator app,
+        recovery codes and passkeys of every account except an admin's:
+        every admin keeps theirs (#67). It ends every session on the
+        account and signs this browser in again. Password-gated
         (rate-limited re-check), checked before the flow cookie is set;
         `409` for an account that is already SSO-only or already linked
         comes first.
@@ -1831,9 +1965,12 @@ paths:
         missing, or neither or both of the others, is `400` and checks
         nothing; any of them wrong is `401` and counts against the
         account's password re-check budget (`429` once it is spent), and
-        nothing is created. A dead or missing passkey step-up is `401`
-        class `step-expired`: start it again. The fields are not read for
-        any other role. The password is
+        nothing is created. A caller with no local password is `409`
+        class `conflict` before any of that. A dead or missing passkey
+        step-up is `401` class `step-expired`: start it again. An
+        `adminAssertion` while the application has no passkeys is `404`
+        once the password has passed, and nothing is created. The fields
+        are not read for any other role. The password is
         checked as every new password is (see `changePassword`); a refused
         one is `400`, with the reason. While the application requires
         every admin to hold a passkey (#82), a new admin is created held
@@ -1856,7 +1993,7 @@ paths:
                   type: string
                 role:
                   type: string
-                  description: "`user` (the default when empty or absent), `viewer` or `admin` (with `adminPassword` and `adminCode`). Anything else is a 400."
+                  description: "`user` (the default when empty or absent), `viewer` or `admin` (with `adminPassword`, and `adminCode` or `adminAssertion`). Anything else is a 400."
                 adminPassword:
                   type: string
                   description: The caller's own current password. Only for role `admin`.
@@ -1880,6 +2017,8 @@ paths:
           $ref: "#/components/responses/StepUpRefused"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
         "429":
@@ -1893,7 +2032,7 @@ paths:
     delete:
       operationId: deleteUser
       summary: Delete an account (admin)
-      description: Deletes the account, then ends its sessions and revokes every token it created. The last admin cannot be deleted (`409` class `last-admin`), and nobody can delete the account they are signed in with (`409` class `conflict`); another admin can be deleted. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked after the `409` for the caller's own account and before anything is deleted.
+      description: "Deletes the account, then ends its sessions and revokes every token it created. The last admin cannot be deleted, nor the last admin with a local password while the other admins sign in only through single sign-on (`409` class `last-admin`), and nobody can delete the account they are signed in with (`409` class `conflict`); another admin can be deleted. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked after the `409` for the caller's own account and before anything is deleted."
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -1961,11 +2100,15 @@ paths:
         `UnlockSelfRequest`): the password missing, or neither or both of
         the others, is `400` and checks nothing; any of them wrong is
         `401` and counts against the account's password re-check budget
-        (`429` once it is spent), and nothing changes. Any other change
-        needs none of them.
+        (`429` once it is spent), and nothing changes. A caller with no
+        local password is `409` class `conflict` before any of that. Any
+        other change needs none of them.
 
-        The last admin cannot be demoted (`409` class `last-admin`); an
-        admin may demote themselves while another admin remains. An
+        The last admin cannot be demoted, nor the last admin with a local
+        password while the other admins sign in only through single
+        sign-on (`409` class `last-admin`); an admin may demote themselves
+        while another admin remains, and, if they hold a local password,
+        while another admin holds one too. An
         account that already holds the role is `409` class `conflict`,
         refused before any step-up is asked for. On an account linked to
         single sign-on, when the deployment maps identity-provider groups
@@ -1979,9 +2122,10 @@ paths:
         told to the application as `role-changed`. While the application
         requires every admin to hold a passkey (#82), a grant to an
         account holding none usable here still succeeds, and the account
-        is held at the `must-enrol-passkey` door from its next request
-        until it registers one (`heldForPasskey`; the audit detail says
-        "held for a passkey").
+        is held from its next request until it registers one: at the
+        `must-enrol-passkey` door, or first at `must-change-password` when
+        it has no local password or owes a password change
+        (`heldForPasskey`; the audit detail says "held for a passkey").
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2013,7 +2157,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          $ref: "#/components/responses/SetupOrNotPersisted"
+          $ref: "#/components/responses/SetupRequired"
 
   /api/auth/users/{id}/reset-password:
     post:
@@ -2021,11 +2165,19 @@ paths:
       summary: Issue a one-time reset code (admin)
       description: |
         Issues a single-use reset code for the account, ends its sessions,
-        and makes it change its password at next sign-in. The code exists
-        only in this response; issuing another kills it. Refused for the
-        caller's own account and for an SSO-only one. Takes the calling admin's
-        own password in the body (a rate-limited re-check, #72); the `409`s
-        for the caller's own account come before it is checked.
+        and makes it change its password at next sign-in. The old password
+        stops working at once; any lockout or disabled sign-in is lifted;
+        the account's remembered browsers, countries and last place are
+        forgotten, and any allow-sign-in window ends. The account's owner
+        is told through the application (`password-reset`). The code
+        exists only in this response; issuing another kills it. Refused
+        for the caller's own account and for an SSO-only one. Takes the
+        calling admin's own password in the body (a rate-limited re-check,
+        #72); the `409` for the caller's own account comes before the
+        password is checked, and the one for an SSO-only account after it.
+        A missing or wrong password is `401` and counts against the
+        re-check budget (`429` once spent); a caller with no local
+        password is `409`.
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2068,7 +2220,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          $ref: "#/components/responses/SetupOrNotPersisted"
+          $ref: "#/components/responses/SetupRequired"
 
   /api/auth/users/{id}/unlock:
     post:
@@ -2079,8 +2231,12 @@ paths:
         also lifts itself 24 hours after it began, #70),
         ends any login lockout and clears the count of lockouts, so the
         account signs in as one that never failed, with the password and
-        second factor it already has. Nothing else changes. Answers `200`
-        whether or not anything was lifted.
+        second factor it already has. Nothing else on the account changes
+        -- not its password, second factors, sessions or a forced password
+        change -- though this server process also forgets its recent
+        counts for the account: attempts, confirmation and escape codes
+        sent, and passkey second steps begun. Answers `200` whether or not anything
+        was lifted.
 
         Another account's unlock takes no body. The caller's own takes
         `UnlockSelfRequest`: an admin whose sign-in is disabled but who
@@ -2090,8 +2246,11 @@ paths:
         password missing, or neither or both of `code` and `assertion`,
         is `400`; any of them wrong is `401` and counts against the
         account's password re-check budget (`429` once it is spent), and
-        nothing is unlocked. An admin with no session left uses the unlock code
-        in the server's log (`POST /api/auth/unlock`).
+        nothing is unlocked. A caller with no local password is `409`. An
+        admin with no session left is unlocked by another admin; when
+        every admin's sign-in is disabled, the server writes a one-time
+        unlock code to its log as it starts (`POST /api/auth/unlock`;
+        restart to get one).
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2139,20 +2298,102 @@ paths:
         "503":
           $ref: "#/components/responses/SetupRequired"
 
+  /api/auth/users/{id}/allow-sign-in:
+    post:
+      operationId: allowSignIn
+      summary: Allow an account's next sign-in for ten minutes (admin)
+      description: |
+        Allows the account's next sign-in from any browser or place for
+        ten minutes (#81, ADR-0009 decision 11): while the window is
+        live, a sign-in the unusual-sign-in policy would hold for a code
+        or a passkey, or refuse, completes instead, and its browser,
+        country and place are remembered as any completed sign-in's are.
+        Nothing is held: the person signs in again, normally. A repeat
+        call starts a fresh ten minutes and answers `200`. The account's
+        owner is told through the application (`sign-in-allowed`).
+
+        The body is `UnlockSelfRequest` either way. For another account
+        it is the calling admin's own `password` alone (a rate-limited
+        re-check, #72): a missing or wrong one is `401` and counts
+        against the caller's re-check budget (`429` once it is spent),
+        and a `code` or `assertion` beside it is `400`. For the caller's
+        own account it is the password and exactly one of `code` and
+        `assertion`, as own unlock takes (#82): the password missing, or
+        neither or both of the two, is `400`; any of them wrong is `401`
+        and counts the same way. A caller with no local password is
+        `409`.
+
+        The window ends at the clock, at the account's next completed
+        sign-in from any browser, and wherever its remembered browsers
+        are cleared (a reset code, sign out everywhere, an admin signing
+        the account out everywhere). It changes no
+        password, second factor or session, and lifts no lockout or
+        disable: a locked or disabled account is still refused at the
+        password step, so unlock it as well. An account that signs in
+        only through single sign-on needs nothing local: its callback
+        completes inside the window.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/CSRFHeader"
+      requestBody:
+        required: true
+        description: |
+          Another account: `password` only. The caller's own: `password`
+          and exactly one of `code` and `assertion`.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnlockSelfRequest"
+      responses:
+        "200":
+          description: Allowed; the window ends at `allowedUntil` unless a completed sign-in spends it first.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [username, allowedUntil]
+                properties:
+                  username:
+                    type: string
+                  allowedUntil:
+                    type: string
+                    format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/StepUpRefused"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SetupRequired"
+
   /api/auth/users/{id}/logout-all:
     post:
       operationId: adminLogoutAll
       summary: Sign another account out everywhere (admin)
       description: |
         Ends every gauntlet session the account holds and forgets every
-        browser it remembers (the known-browser cookie), as the account's
-        own sign out everywhere does, without issuing it a new one. The
+        browser, country and place it remembers, and any allow-sign-in
+        window, whatever kind of account it is, SSO-only included (the account's own
+        sign out everywhere keeps them for an SSO-only account), without
+        issuing it a new session. The
         identity provider's own session is not touched. All of the
         account's sessions or none: there is no admin route to end one
         session, or to list another account's sessions (#53).
 
         The body is optional. `reason` is at most 200 characters of plain text
-        (no control or format characters); it goes into the audit record
+        (no control or format characters, no line or paragraph separators,
+        no U+FFFD);
+        it goes into the audit record
         and to the application's `Config.Notices` (or the deprecated
         `Config.Notify`), which may mail the account's owner. `notified`
         is true when the application was asked -- after this response,
@@ -2193,7 +2434,7 @@ paths:
     delete:
       operationId: clearUserTOTP
       summary: Remove another account's authenticator app (admin)
-      description: For a lost phone when the owner still has their password. Refused on the caller's own account. With no authenticator app to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
+      description: "Recovery codes go too only when the account has no passkey left. For a lost phone when the owner still has their password. Refused on the caller's own account. With no authenticator app to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked. A missing or wrong password is `401` and counts against the re-check budget (`429` once spent); a caller with no local password is `409`."
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2239,7 +2480,7 @@ paths:
     delete:
       operationId: clearUserPasskeys
       summary: Remove every passkey on another account (admin)
-      description: Recovery codes go too only when the account has no authenticator app left. Refused on the caller's own account. With no passkey to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked.
+      description: "Recovery codes go too only when the account has no authenticator app left. While the application requires admin passkeys, an admin cleared here is held from their next request until they register one: at the `must-enrol-passkey` door, or first at `must-change-password` while they owe a password change (#82). Refused on the caller's own account. With no passkey to remove the answer is `200` with `cleared` false, and nothing is recorded or sent. Takes the calling admin's own password in the body (a rate-limited re-check, #72); the `409` for the caller's own account comes before it is checked. A missing or wrong password is `401` and counts against the re-check budget (`429` once spent); a caller with no local password is `409`."
       parameters:
         - $ref: "#/components/parameters/UserID"
         - $ref: "#/components/parameters/CSRFHeader"
@@ -2287,7 +2528,10 @@ paths:
       summary: The sign-in history (admin)
       description: |
         Every sign-in attempt the gate has seen, newest first: the password
-        step, the second-factor step, the SSO callback and every attempt the
+        step, the second-factor step, a passkey sign-in without a password,
+        the confirmation code or passkey an unusual sign-in owed, the
+        escape code, resuming a timed-out session (`POST
+        /api/auth/reauthenticate`), the SSO callback and every attempt the
         login limiter refused (#53). Kept in the application's third sealed
         document (`signins`, ADR-0006), the newest 10,000 rows by default
         (`gauntlet.DefaultMaxSignInRows`; the application may set up to
@@ -2331,7 +2575,7 @@ paths:
         - name: unusual
           in: query
           required: false
-          description: Only rows that raised at least one unusual-sign-in signal -- flagged sign-ins, ones sent a confirmation code and ones refused. Only `true` is accepted.
+          description: Only rows that raised at least one unusual-sign-in signal -- flagged sign-ins, ones sent a confirmation code or asked for a passkey, ones refused, held sign-ins past the account's confirmation-code send limit, and the escape codes issued with a hold or a refusal. Only `true` is accepted.
           schema:
             type: string
             enum: ["true"]
@@ -2396,7 +2640,7 @@ paths:
     post:
       operationId: createToken
       summary: Issue an API token (admin)
-      description: The raw value is in this response only; the server keeps its SHA-256 hash. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked once the name is known to be well formed. Only an admin signed in with a session reaches it; a bearer token never does.
+      description: "The raw value is in this response only; the server keeps its SHA-256 hash. Takes the calling admin's own password in the body (a rate-limited re-check, #72), checked once the name is non-empty and `expiresAt` parses; the other 400s (name too long or not plain text, kind, device, an `expiresAt` not in the future) are decided after it. A missing or wrong password is `401` and counts against the re-check budget (`429` once spent); a caller with no local password is `409`. Only an admin signed in with a session reaches it; a bearer token never does."
       parameters:
         - $ref: "#/components/parameters/CSRFHeader"
       requestBody:
@@ -2413,13 +2657,13 @@ paths:
                   description: The calling admin's own password.
                 name:
                   type: string
-                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 bytes of printable text (no control or formatting characters); otherwise a 400.
+                  description: Surrounding whitespace is trimmed; what is left must not be empty, and at most 64 characters of plain text (no control or format characters, no line or paragraph separators, no U+FFFD; letters of any script count one each); otherwise a 400.
                 kind:
                   type: string
                   description: "One of the kinds the application registered (TokenOptions.Kinds): `api` and `ingest` by default. Empty or absent means `api` (read-only), which is a 400 if the application did not register `api`."
                 device:
                   type: string
-                  description: Required for, and allowed only on, an `ingest` token.
+                  description: Required for, and allowed only on, an `ingest` token. Surrounding whitespace is trimmed; what is left is at most 64 characters of plain text (no control or format characters, no line or paragraph separators, no U+FFFD); otherwise a 400.
                 expiresAt:
                   type: string
                   description: |
@@ -2497,17 +2741,17 @@ components:
       type: apiKey
       in: cookie
       name: gate_pending_login
-      description: Set by `POST /api/auth/login` when a second factor is needed; sealed, short-lived, used by exactly one sign-in -- once a code, recovery code or passkey completes it, it is refused with 401 at login/factor and login/factor/begin.
+      description: Set by `POST /api/auth/login` when a second factor is needed; sealed, path `/api/auth/login`, five minutes, used by exactly one sign-in -- once a code, recovery code or passkey completes it, it is refused with 401 at login/factor and login/factor/begin.
     confirmLoginCookie:
       type: apiKey
       in: cookie
       name: gate_confirm_login
-      description: Set by `POST /api/auth/login`, `POST /api/auth/login/factor` or the SSO callback when an unusual sign-in owes a confirmation code (#55) or a passkey (#65); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in. A ticket owing a passkey is read only by `login/prove/begin` and `login/prove`, one owing a code only by `login/confirm`.
+      description: Set by `POST /api/auth/login`, `POST /api/auth/login/factor`, `POST /api/auth/login/passkey` or the SSO callback when an unusual sign-in owes a confirmation code (#55) or a passkey (#65); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in. A ticket owing a passkey is read only by `login/prove/begin` and `login/prove`, one owing a code only by `login/confirm`.
     escapeLoginCookie:
       type: apiKey
       in: cookie
       name: gate_escape_login
-      description: Set by the `403` `sign-in-refused` of `POST /api/auth/login` or `POST /api/auth/login/factor` when the refused account is an admin no other admin can act for (#66); sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in. Never set for a user, a viewer or an SSO sign-in.
+      description: May be set when a sign-in of an admin no other admin can act for is refused (the `403` `sign-in-refused`) or held for a confirmation code or passkey (the `confirm`/`prove` `200` answer), on the password, second-factor or passkey-alone path (#66) -- not when nothing can announce the code, `Config.OnEscapeCode` panics or does not return within three seconds, or the account's escape-code budget is spent; sealed, path `/api/auth/login`, 15 minutes, used by exactly one sign-in. Never set for a user, a viewer or an SSO sign-in.
     passkeyRegisterCookie:
       type: apiKey
       in: cookie
@@ -2527,7 +2771,7 @@ components:
       type: apiKey
       in: cookie
       name: gate_passkey_stepup
-      description: Set by `POST /api/auth/step-up/passkey/begin` (#82); sealed, path `/api/auth`, five minutes. Read only by the routes a passkey step-up finishes -- granting admin, creating an admin and the admin's own unlock -- never by a sign-in, and a sign-in's ceremony cookie is never read there.
+      description: Set by `POST /api/auth/step-up/passkey/begin` (#82); sealed, path `/api/auth`, five minutes. Read only by the routes a passkey step-up finishes -- granting admin, creating an admin, and the admin's own unlock and allow-sign-in -- never by a sign-in, and a sign-in's ceremony cookie is never read there.
     oidcFlowCookie:
       type: apiKey
       in: cookie
@@ -2539,7 +2783,7 @@ components:
       name: X-Requested-With
       in: header
       required: true
-      description: Must equal the application's `Config.CSRFHeaderValue`. Without it every POST, PUT, PATCH and DELETE is refused with 403.
+      description: Must equal the application's `Config.CSRFHeaderValue`. Without it every POST, PUT, PATCH and DELETE is refused with 403 (while no account exists, every route but register answers `503` `setup-required` first).
       schema:
         type: string
     UserID:
@@ -2575,7 +2819,7 @@ components:
     # job is only to pin the response shape, not to re-explain the
     # class.
     BadRequest:
-      description: The body is not one JSON object of the documented fields (unknown fields and trailing data are refused), or a field's value is refused. Class `invalid-request`.
+      description: The body is not one JSON object of the documented fields (unknown fields and trailing data are refused), or a value in the body, the query or the path is refused. Class `invalid-request`.
       content:
         application/problem+json:
           schema:
@@ -2601,7 +2845,7 @@ components:
                   type:
                     const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#sign-in-required
     InvalidCredentials:
-      description: The credential given was wrong -- the same body for an unknown username and a wrong password, or for any other pair this document's "Security" note names. Class `invalid-credentials`.
+      description: The credential given was wrong -- the same body for an unknown username and a wrong password, or for any other pair [errors.md](errors.md#invalid-credentials) lists under "Security pairs sharing this class and body" (an unknown admin username and a wrong unlock code at `unlock`, say). Class `invalid-credentials`.
       headers:
         WWW-Authenticate:
           required: true
@@ -2657,8 +2901,11 @@ components:
         account's unusual-sign-in policy refused the attempt (class
         `sign-in-refused`, #55). No session cookie is set and no
         `X-Auth-Gate` header is sent. For an admin no other admin can act
-        for, the escape cookie is set (#66); the code that goes with it is
-        in the server's log, never in the response.
+        for, the escape cookie may be set (#66) -- not when nothing can
+        announce the code, `Config.OnEscapeCode` panics or does not return
+        within three seconds, or the account's escape-code budget is spent;
+        the code goes to the application's `Config.OnEscapeCode`, or else
+        the server's log, never the response.
       content:
         application/problem+json:
           schema:
@@ -2683,13 +2930,13 @@ components:
       description: |
         The `X-Requested-With` header is missing or wrong (class
         `csrf-required`, checked first, before any of the rest, on every
-        `POST`, `PATCH` or `DELETE`); the account's role is not
+        `POST`, `PUT`, `PATCH` or `DELETE`); the account's role is not
         recognized, or (on an admin route) the caller is not an admin
-        (class `forbidden`); or the session is stopped at one of two
+        (class `forbidden`); or the session is stopped at one of three
         doors, named by both `type` and `X-Auth-Gate`
         (`must-change-password`, `must-enrol-factor`,
         `must-enrol-passkey`). Not every one of the five is reachable at every route this is used on (a `GET`
-        never reaches the CSRF check; each door exempts the one route it
+        never reaches the CSRF check; each door exempts the routes it
         lets through), but none is route-specific enough to be worth its
         own response here.
       headers:
@@ -2701,12 +2948,13 @@ components:
             else knows the password, or a sign-in found the password in a
             known breach, or, while the application requires admin
             passkeys, the account is an admin with no local password;
-            only `POST /api/auth/password` is reachable),
+            of the routes that need a session, only
+            `POST /api/auth/password` is reachable),
             `must-enrol-factor` (the account has no live second factor yet
-            -- every local-password account must hold one; only the TOTP
-            enrol and confirm routes, the passkey register begin and
-            finish routes and `POST /api/auth/recovery-codes/confirm` are
-            reachable) or `must-enrol-passkey` (#82: the application
+            -- every local-password account must hold one; of the routes
+            that need a session, only the TOTP enrol and confirm routes,
+            the passkey register begin and finish routes and
+            `POST /api/auth/recovery-codes/confirm` are reachable) or `must-enrol-passkey` (#82: the application
             requires every admin to hold a passkey, and this admin holds
             none usable at this address; the same routes as
             `must-enrol-factor` are reachable, and only a passkey opens
@@ -2730,9 +2978,8 @@ components:
     SignInRequiredOrInvalidCredentials:
       description: |
         No valid session (class `sign-in-required`); or, re-entering the
-        caller's own password (or, where the route takes a second factor
-        too, that code) to re-prove a session is enough to act on, it was
-        wrong (class `invalid-credentials`; counted against the
+        caller's own password to re-prove a session is enough to act on,
+        it was wrong (class `invalid-credentials`; counted against the
         account's password re-check budget, `429` once it is spent).
       headers:
         WWW-Authenticate:
@@ -2777,7 +3024,7 @@ components:
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#step-expired
     NotFound:
-      description: No account, token, session or passkey has this id or ref; the application has no passkeys, no single sign-on, or no sign-in history configured; or the path matches no route at all (`type` is then `about:blank`, with no `detail`; see the "Errors" note above). Class `not-found` otherwise.
+      description: No account, token, session or passkey has this id or ref; the application has no passkeys, no passkey sign-in, no single sign-on, or no sign-in history configured; the caller has no authenticator app to remove; or the path matches no route at all (`type` is then `about:blank`, with no `detail`; see the "Errors" note above). Class `not-found` otherwise.
       content:
         application/problem+json:
           schema:
@@ -2799,7 +3046,7 @@ components:
                   type:
                     const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#conflict
     ConflictOrLastAdmin:
-      description: The request is refused because of the account's or the deployment's current state (class `conflict`), because it would leave the deployment with no admin (class `last-admin`), or because the account's role is decided by the identity provider's groups (class `role-managed-by-sso`, #76; the role route only).
+      description: "The request is refused because of the account's or the deployment's current state (class `conflict`), because it would leave the deployment with no admin, or with no admin that can sign in without the identity provider (class `last-admin`), or because the account's role is decided by the identity provider's groups (class `role-managed-by-sso`, #76; the role route only)."
       content:
         application/problem+json:
           schema:
@@ -2812,7 +3059,7 @@ components:
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#last-admin
                       - https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#role-managed-by-sso
     TooManyRequests:
-      description: Too many failed attempts from this address or on this account; try again later. Class `rate-limited`.
+      description: Too many attempts from this address or on this account -- failed sign-ins, codes or re-checks, passkey ceremonies begun, or confirmation codes sent -- or the address is banned; try again later. Class `rate-limited`.
       content:
         application/problem+json:
           schema:
@@ -2890,7 +3137,7 @@ components:
           description: A permanent link into docs/api/errors.md naming the class, or `about:blank` for the one response this document cannot enumerate per-route (an unmatched path or method).
         title:
           type: string
-          description: Fixed per `type`; never read instead of it.
+          description: Fixed per `type`, except `about:blank`'s, which is the status's own text (`Not Found`, `Method Not Allowed`); never read instead of `type`.
         status:
           type: integer
           description: Repeats the HTTP status code. Fixed per `type`, except `about:blank`'s, which is the status of whichever unmatched-route answer it is.
@@ -2901,11 +3148,10 @@ components:
       description: |
         The `partially-completed` class (status 500, docs/api/errors.md):
         a request that changed something but failed before finishing
-        everything it meant to. Closed, unlike `Problem`, since its
-        extension members are part of the contract, not a per-call-site
-        afterthought -- a given response carries whichever one names
-        what still needs doing (never both; only `username` is still
-        sent).
+        everything it meant to. Closed, as `Problem` and
+        `UnknownCredentialProblem` are: its extension members are part of
+        the contract -- a given response carries whichever one names what
+        still needs doing (never both; only `username` is still sent).
       type: object
       additionalProperties: false
       required: [type, title, status]
@@ -2920,10 +3166,44 @@ components:
           type: string
         totpActive:
           const: true
-          description: No longer sent. 0.2.0's `POST /api/auth/totp/confirm` sent it (true) when the authenticator app went active but its recovery codes could not be generated; since #58 the app and its codes are saved in one write, so that half-done state cannot happen. Kept so the schema stays additive.
+          description: "No longer sent. 0.2.0's `POST /api/auth/totp/confirm` sent it (true) when the authenticator app went active but its recovery codes could not be generated; since #58 the app and its codes are saved in one write, so that half-done state cannot happen. Kept so the schema stays additive."
         username:
           type: string
           description: Present only from `DELETE /api/auth/users/{id}` -- the account named was deleted, but its API tokens could not be revoked.
+    UnknownCredentialProblem:
+      description: |
+        The `invalid-credentials` refusal of `POST /api/auth/login/passkey`
+        when the handle names one of this application's accounts and that
+        account holds the assertion's passkey in no form, and of
+        `POST /api/auth/reauthenticate` when the timed-out session's own
+        account does not (#92; docs/api/errors.md). Closed, as `PartiallyCompletedProblem` is:
+        its one extension member is part of the contract.
+      type: object
+      additionalProperties: false
+      required: [type, title, status, unknownCredential]
+      properties:
+        type:
+          const: https://github.com/tomlawesome/gauntlet/blob/main/docs/api/errors.md#invalid-credentials
+        title:
+          const: Invalid credentials
+        status:
+          const: 401
+        detail:
+          type: string
+        unknownCredential:
+          type: object
+          additionalProperties: false
+          required: [rpId, credentialId]
+          description: The argument of `PublicKeyCredential.signalUnknownCredential()` (W3C WebAuthn Level 3 section 5.1.10.2), unchanged.
+          properties:
+            rpId:
+              type: string
+              minLength: 1
+              description: The relying party's ID, the one `login/passkey/begin` gave.
+            credentialId:
+              type: string
+              pattern: "^[A-Za-z0-9_-]+$"
+              description: The assertion's credential ID, base64url with no padding.
     Role:
       type: string
       description: "`admin`, `user` or `viewer`. Any other value is an account gauntlet refuses on every session-gated route."
@@ -2995,7 +3275,7 @@ components:
       type: object
       additionalProperties: false
       required: [password]
-      description: The password, and exactly one of `code` and `assertion`.
+      description: The password, and exactly one of `code` and `assertion` -- except `allow-sign-in` for another account, which takes the password alone (#81).
       properties:
         password:
           type: string
@@ -3040,7 +3320,7 @@ components:
           description: True when the change was a downgrade, which ended every session the account held.
         heldForPasskey:
           type: boolean
-          description: True when the account is now an admin holding no passkey usable here while the application requires one (#82); it is held at the `must-enrol-passkey` door from its next request until it registers one.
+          description: True when the account is now an admin holding no passkey usable here while the application requires one (#82); it is held from its next request until it registers one -- at the `must-enrol-passkey` door, or first at `must-change-password` when it has no local password or owes a password change.
     PasswordRequest:
       type: object
       additionalProperties: false
@@ -3055,7 +3335,7 @@ components:
       properties:
         code:
           type: string
-          description: An authenticator-app code, or (at login) a recovery code.
+          description: A current code from the authenticator app being set up.
     ConfirmCodeRequest:
       type: object
       additionalProperties: false
@@ -3071,7 +3351,7 @@ components:
       properties:
         code:
           type: string
-          description: The escape code from the server's log, `xxxx-xxxx-xxxx-xxxx`; the dashes and surrounding whitespace are optional and either case is accepted.
+          description: The escape code (`xxxx-xxxx-xxxx-xxxx`) from the server's log, or wherever `Config.OnEscapeCode` sent it; dashes, spaces and tabs are optional (a line break is not), and either case is accepted.
     LoginFactorRequest:
       type: object
       additionalProperties: false
@@ -3112,22 +3392,23 @@ components:
         signedInAt:
           type: string
           format: date-time
+          description: When the sign-in began. A password change, a held first factor's recovery codes confirmed, an authenticator app confirmed beside a passkey and linking single sign-on start a fresh sign-in time (a passkey added beside a live factor does not); resuming the session and signing out everywhere keep it.
         lastUsedAt:
           type: string
           format: date-time
-          description: The last request the session made; its sign-in until then.
+          description: The last request the session made; until then, when it was issued (as for `address`).
         address:
           type: string
           maxLength: 64
-          description: The client address the application resolved at sign-in. Absent when none was recorded.
+          description: The client address the application resolved when the session was issued -- at sign-in, or at the request that last replaced it (resuming it, signing out everywhere, changing the password, confirming a held first factor's recovery codes or an authenticator app beside a passkey, linking single sign-on). Absent when none was recorded.
         userAgent:
           type: string
           maxLength: 256
-          description: The browser's `User-Agent` at sign-in, with control and formatting characters removed. Absent when none was sent.
+          description: The browser's `User-Agent` when the session was issued (as for `address`), with control and formatting characters and line and paragraph separators removed. Absent when none was sent.
         country:
           type: string
           pattern: "^[A-Z]{2}$"
-          description: The country `address` resolved to at sign-in, if a country lookup is configured and the address matched. Absent otherwise.
+          description: The country `address` resolved to when the session was issued (as for `address`), if a country lookup is configured and the address matched. Absent otherwise.
         unusual:
           $ref: "#/components/schemas/UnusualSignals"
         method:
@@ -3174,7 +3455,7 @@ components:
         lastUsedAt:
           type: string
           format: date-time
-          description: Absent until the passkey first signs in.
+          description: Absent until the passkey is first used -- to sign in, resume a session or confirm a step-up.
         transports:
           type: array
           description: How the authenticator said it can be reached (`usb`, `nfc`, `ble`, `internal`, `hybrid`, ...); absent when it said nothing.
@@ -3197,7 +3478,7 @@ components:
           description: The W3C `PublicKeyCredential` JSON `navigator.credentials.create()` produced. An open object -- see "Compatibility" above.
         name:
           type: string
-          description: A label for the list; blank becomes `Passkey n`, and it is cut at 64 characters.
+          description: A label for the list; blank becomes `Passkey n`, and it is cut at 64 characters. Plain text only -- a control or format character, a line or paragraph separator, or U+FFFD, is refused with `400` (letters of any script, accents and emoji are fine).
     PasskeyRegisterFinishResponse:
       type: object
       additionalProperties: false
@@ -3331,7 +3612,7 @@ components:
           description: True exactly when the session is stopped at the admin passkey door (#82) -- the application requires every admin to hold a passkey, and this admin holds none usable at this address (an authenticator app does not count). May be true beside `mustEnrolSecondFactor`.
         adminPasskeyRequired:
           type: boolean
-          description: Whether this application requires every admin to hold a passkey (`Config.AdminPasskey`, #82). Present only while authenticated.
+          description: "Whether this application requires every admin to hold a passkey (`Config.AdminPasskey`, #82). Present only while authenticated."
         hasTOTP:
           type: boolean
           description: A confirmed authenticator app, not a pending enrolment.
@@ -3347,7 +3628,7 @@ components:
             status:
               type: string
               enum: [ready, unset, ip, insecure]
-              description: Whether passkeys work here, and why not -- `unset` (no usable public URL), `ip` (it is an IP address), `insecure` (plain http on any host but localhost).
+              description: Whether passkeys work here, and why not -- `unset` (no usable public URL), `ip` (it is an IP address), `insecure` (not https, and not plain http on localhost).
             origin:
               type: string
               description: Present only when `status` is `ready`.
@@ -3363,8 +3644,9 @@ components:
           description: |
             Present, as `true`, only while `authenticated` is false and the
             request's session cookie names a session that timed out through
-            inactivity inside its 24-hour ceiling and can be resumed with the
-            password alone, or a user-verifying passkey when `passkeys.signIn`
+            inactivity inside its lifetime ceiling (at most 24 hours from the
+            sign-in) and can be resumed with the password alone, or a
+            user-verifying passkey when `passkeys.signIn`
             (`POST /api/auth/reauthenticate`, #71, #77). A frontend
             then asks for the password instead of showing the full sign-in
             form. Absent otherwise.
@@ -3424,10 +3706,10 @@ components:
         expiresAt:
           type: string
           format: date-time
-          description: When the token stops working; absent for a token that never expires, which includes every token issued before expiry existed. An expired token is refused like an unknown one and stays listed until it is revoked. A token unused for a year is removed, and the account that created it is told a week before it expires, through the application (`token-expiring`).
+          description: When the token stops working; absent for a token that never expires, which includes every token issued before expiry existed. An expired token is refused like an unknown one and stays listed until it is revoked. When the application runs `Gate.SweepTokens` (daily), a token unused for a year is removed, and the account that created it is told through `Config.Notices` once the token is within a week of expiring (`token-expiring`).
         value:
           type: string
-          description: The raw bearer token; only in the response that creates it. Starts `gnt_` when issued since #74; an older token has no prefix.
+          description: "The raw bearer token; only in the response that creates it. Starts `gnt_` when issued since #74; an older token has no prefix."
     SignInOutcome:
       type: string
       enum: [success, password_ok, no_such_user, wrong_password, factor_refused, locked, disabled, rate_limited, sso_refused, refused, confirm_sent, confirm_refused, escape_issued, escape_refused, unrecorded]
@@ -3436,15 +3718,20 @@ components:
         second factor still owed; `no_such_user` a name that matched no
         account (or, for method `passkey_alone`, a user handle or assertion
         that named none, with no username); `factor_refused` a wrong or used
-        code or a refused passkey; `locked`, `disabled` and `rate_limited` the login
-        limiter refusing it before any credential was checked; `refused`
+        code or a refused passkey; `locked` and `disabled` the login
+        limiter refusing it before any credential was checked;
+        `rate_limited` the same, or a held sign-in past the account's
+        confirmation-code send limit (#84), or a refused `passkey_alone`
+        finish past the address's limit (#96); `refused`
         every credential right but the attempt refused by the unusual
         sign-in policy; `confirm_sent` every credential right and a
         confirmation code sent -- or a passkey asked for (#65) -- no
         session yet; `confirm_refused` a wrong confirmation code or a
-        refused passkey assertion; `escape_issued` a refused lone admin's escape
-        code written to the server's log (#66), no session yet (a
-        `refused` row is recorded with it); `escape_refused` a wrong
+        refused passkey assertion; `escape_issued` an escape code issued
+        for a lone admin whose sign-in was refused or held (#66) -- handed
+        to `Config.OnEscapeCode`, else written to the server's log -- no
+        session yet (recorded beside the `refused` or `confirm_sent`
+        row); `escape_refused` a wrong
         escape code; `unrecorded` the failed attempts past a
         bucket's row budget. New values may be added.
     UnusualSignals:
@@ -3455,9 +3742,10 @@ components:
         type: string
         enum: [new-browser, new-country, impossible-travel]
       description: |
-        The unusual-sign-in signals the sign-in raised (#55), in this
-        order: `new-browser` (a browser the account does not remember),
-        `new-country` (a country it has not signed in from in 90 days),
+        The unusual-sign-in signals the sign-in raised and the policy
+        does not turn off (#55), in this order: `new-browser` (the account
+        remembers a browser, and not this one), `new-country` (the account
+        remembers a country from the last 90 days, and not this one),
         `impossible-travel` (too far from its last located sign-in for the
         time between them). Absent for an ordinary sign-in. New values may
         be added; ignore unknown ones.
@@ -3486,7 +3774,7 @@ components:
           $ref: "#/components/schemas/SignInOutcome"
         userId:
           type: string
-          description: The account the attempts were on. Absent when the name matched none.
+          description: The account the attempts were on. Absent when no account was found for them -- a name or passkey that matched none, a `passkey_alone` attempt refused before naming one, or any `sso_refused` row (refused before its account is looked up) -- and on an `unrecorded` row (which carries only `seq`, `at`, `until`, `count` and `outcome`).
         username:
           type: string
           description: The account's username, or the name typed, masked (see the operation). Absent on an `unrecorded` row, and for an empty name.
@@ -3501,7 +3789,7 @@ components:
         userAgent:
           type: string
           maxLength: 256
-          description: The first attempt's `User-Agent`, with control and formatting characters removed.
+          description: The first attempt's `User-Agent`, with control and formatting characters and line and paragraph separators removed.
         country:
           type: string
           pattern: "^[A-Z]{2}$"
@@ -3517,7 +3805,7 @@ components:
           $ref: "#/components/schemas/UnusualSignals"
         confirmed:
           type: boolean
-          description: True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`), a passkey proof (`POST /api/auth/login/prove`, #65) or an escape code (`POST /api/auth/login/escape`, #66). Absent when false.
+          description: "True on a `success` completed through a confirmation code (`POST /api/auth/login/confirm`), a passkey proof (`POST /api/auth/login/prove`, #65), an escape code (`POST /api/auth/login/escape`, #66) or an admin's allow-sign-in window (`POST /api/auth/users/{id}/allow-sign-in`, #81). Absent when false."
     SignInList:
       type: object
       additionalProperties: false
@@ -3546,7 +3834,7 @@ components:
         reason:
           type: string
           maxLength: 200
-          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters are refused with `400`.
+          description: Why, for the audit and the account owner's notice. At most 200 characters; control and format characters, the line and paragraph separators (U+2028, U+2029) and U+FFFD are refused with `400`.
     AdminLogoutAllResponse:
       type: object
       additionalProperties: false

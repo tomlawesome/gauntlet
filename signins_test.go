@@ -145,13 +145,29 @@ func TestSignInHistoryFoldsWithinTheSpanOnly(t *testing.T) {
 		t.Fatalf("an attempt a span after the row began should start a new row: %+v", rows)
 	}
 
-	// A different address, outcome or method is a different row.
-	h.Record(failedFrom("u1", "bob", "203.0.113.6"), signInBase.Add(10*time.Minute))
-	other := ev
-	other.Outcome = SignInFactorRefused
-	h.Record(other, signInBase.Add(10*time.Minute))
-	if total, _ := h.Summary(); total != 4 {
-		t.Errorf("total = %d, want 4", total)
+	// A different address, outcome or method is a different row: each
+	// variation of the same attempt, made alone, starts one of its own.
+	// The method is the one a password attempt and a passkey attempt
+	// from the same address at the same moment differ by.
+	want := 2
+	at := signInBase.Add(10 * time.Minute)
+	for name, vary := range map[string]func(SignInEvent) SignInEvent{
+		"address": func(e SignInEvent) SignInEvent { e.Client.Address = "203.0.113.6"; return e },
+		"outcome": func(e SignInEvent) SignInEvent { e.Outcome = SignInFactorRefused; return e },
+		"method":  func(e SignInEvent) SignInEvent { e.Method = SignInMethodPasskey; return e },
+	} {
+		h.Record(vary(ev), at)
+		want++
+		if total, _ := h.Summary(); total != want {
+			t.Fatalf("after an attempt differing only by %s: %d rows, want %d", name, total, want)
+		}
+	}
+	// And the same attempt as the method one folds into it.
+	passkey := ev
+	passkey.Method = SignInMethodPasskey
+	h.Record(passkey, at.Add(time.Minute))
+	if total, _ := h.Summary(); total != want {
+		t.Errorf("a repeat of the passkey attempt made %d rows, want it folded into the %d", total, want)
 	}
 }
 

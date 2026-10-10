@@ -295,6 +295,37 @@ func TestDefaultClientRefuses(t *testing.T) {
 	}
 }
 
+// TestDefaultClientStopsAfterFiveRedirects: a provider that redirects
+// forever is given up on once five requests have been made.
+func TestDefaultClientStopsAfterFiveRedirects(t *testing.T) {
+	var hits atomic.Int32
+	var outer *httptest.Server
+	outer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, outer.URL+r.URL.Path+"x", http.StatusFound)
+	}))
+	t.Cleanup(outer.Close)
+	outerAddr := outer.Listener.Addr().String()
+	e := newEnv(t, SourceIPinfo)
+	e.m.client = newClient(func(network, address string, rc syscall.RawConn) error {
+		if address == outerAddr {
+			return nil
+		}
+		return guardDial(network, address, rc)
+	})
+	e.m.client.Transport.(*http.Transport).TLSClientConfig = outer.Client().Transport.(*http.Transport).TLSClientConfig
+	e.m.endpoint = outer.URL + "/ipinfo"
+	e.m.refresh(context.Background())
+	if st := e.m.Status(); st.Loaded || st.LastError == "" {
+		t.Errorf("Status = %+v, want a refusal", st)
+	}
+	// net/http hands the check every request already made, so the first
+	// request plus four followed redirects is five; the next is refused.
+	if n := hits.Load(); n != 5 {
+		t.Errorf("server saw %d requests, want 5", n)
+	}
+}
+
 func TestGuardDial(t *testing.T) {
 	for _, a := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0",
 		"::1", "::", "fd00::1", "fe80::1", "192.0.2.5", "2001:db8::1", "::ffff:127.0.0.1", "224.0.0.1", "240.0.0.1"} {

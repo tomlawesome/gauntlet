@@ -337,6 +337,11 @@ func New(cfg Config, deps Deps) (*Gate, error) {
 			return nil, fmt.Errorf("gate: Deps.OIDCPolicy: %w (see docs/adr/0014-shared-issuers.md)", err)
 		}
 	}
+	// A blank allow-list entry (a trailing comma in an app's setting)
+	// must not widen access, so it is refused at startup (#91).
+	if err := deps.OIDCPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("gate: Deps.OIDCPolicy: %w", err)
+	}
 	// A group never gives admin (ADR-0013 decision 1): an identity
 	// provider that is misconfigured or compromised must not be able to
 	// mint an account that skips the local password and second factor

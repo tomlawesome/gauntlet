@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/tomlawesome/gauntlet/internal/browsertoken"
 )
 
 // Unusual sign-ins (#55, docs/design.md). A completed sign-in -- every
@@ -130,6 +132,10 @@ const MaxSeenCountries = 3
 // counts and is dropped at the next write that remembers a country.
 const SeenCountryLifetime = 90 * 24 * time.Hour
 
+// SignInAllowanceLifetime is how long an administrator's allowance of
+// an account's next sign-in (#81, Store.AllowNextSignIn) lasts.
+const SignInAllowanceLifetime = 10 * time.Minute
+
 // ImpossibleTravelSpeedKmh is the speed past which getting from the
 // account's last located sign-in to this one is judged impossible.
 const ImpossibleTravelSpeedKmh = 800.0
@@ -224,7 +230,7 @@ func impossibleTravel(prev LastPlace, next Location, now time.Time) bool {
 func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, loc *Location, now time.Time) SignInJudgement {
 	var hashes [][]byte
 	for _, t := range tokens {
-		if wellFormedKnownBrowserToken(t) {
+		if browsertoken.WellFormed(t) {
 			hashes = append(hashes, []byte(knownBrowserHash(t)))
 		}
 	}
@@ -291,6 +297,10 @@ func (s *Store) JudgeSignIn(accountID string, tokens []string, country string, l
 //     against the last located one, and the longer gap only lowers the
 //     speed.
 //
+// The same write spends an administrator's allowance of the account's
+// next sign-in (#81, User.SignInAllowedUntil), whatever browser the
+// sign-in came from and whether or not the policy would have stopped it.
+//
 // Called at every session issue, whatever gate's policy, so turning a
 // signal on later starts from a baseline. A failed write is the
 // caller's to log. Refused with ErrUserNotFound for an account that
@@ -348,12 +358,46 @@ func (s *Store) RememberSignIn(accountID, replacing, country string, loc *Locati
 		if loc != nil {
 			u.LastPlace = &LastPlace{Country: country, Location: *loc, At: now}
 		}
+		// The next completed sign-in is the one an allowance was for.
+		u.SignInAllowedUntil = time.Time{}
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// AllowNextSignIn records an administrator's allowance of accountID's
+// next sign-in (#81): User.SignInAllowedUntil becomes now plus
+// SignInAllowanceLifetime, replacing any earlier window. Until then a
+// sign-in gate's unusual-sign-in policy would hold or refuse completes
+// instead. It changes nothing else: no credential, session, lockout or
+// disable. The copy returned has its credentials blanked, as
+// IssueResetCode's has. Refused with ErrNotPersisted when the store has
+// no backend -- an allowance reported as made must survive a restart,
+// as a reset code must -- and with ErrUserNotFound for an account that
+// does not exist.
+func (s *Store) AllowNextSignIn(accountID string, now time.Time) (*User, error) {
+	if !s.Persisted() {
+		return nil, ErrNotPersisted
+	}
+	s.reloadIfStale()
+	var allowed User
+	err := s.mutate(func(st *storeState) error {
+		u, ok := st.byID[accountID]
+		if !ok {
+			return ErrUserNotFound
+		}
+		u.SignInAllowedUntil = now.Add(SignInAllowanceLifetime)
+		allowed = *u
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	allowed.blankCredentials()
+	return &allowed, nil
 }
 
 // rememberCountry is RememberSignIn's rule for the countries.

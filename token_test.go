@@ -356,7 +356,8 @@ func TestIngestTokenRequiresADevice(t *testing.T) {
 
 // TestValidDeviceID pins the device-scope check on its own: an IPv6
 // literal with a zone (the longest real discovered id) and non-ASCII
-// operator names pass; anything over MaxDeviceIDLen bytes, or carrying
+// operator names pass, up to MaxDeviceIDLen characters however many bytes they
+// take; anything over MaxDeviceIDLen characters, or carrying
 // a control or formatting character, or not valid UTF-8, does not.
 func TestValidDeviceID(t *testing.T) {
 	for _, ok := range []string{
@@ -366,19 +367,22 @@ func TestValidDeviceID(t *testing.T) {
 		"fe80::1ff:fe23:4567:890a%eth0",
 		"büro-gateway",
 		strings.Repeat("d", MaxDeviceIDLen),
+		strings.Repeat("ü", MaxDeviceIDLen),
 	} {
 		if !validDeviceID(ok) {
 			t.Errorf("validDeviceID(%q) = false, want true", ok)
 		}
 	}
 	for why, bad := range map[string]string{
-		"one byte over the limit":        strings.Repeat("d", MaxDeviceIDLen+1),
-		"multi-byte text over the limit": strings.Repeat("ü", MaxDeviceIDLen/2+1),
+		"one character over the limit":   strings.Repeat("d", MaxDeviceIDLen+1),
+		"multi-byte text over the limit": strings.Repeat("ü", MaxDeviceIDLen+1),
 		"an ANSI escape":                 "router\x1b[2K",
 		"a newline":                      "router-1\nrouter-2",
 		"a DEL":                          "router\x7f",
 		"a bidi override":                "router\u202e1",
 		"a zero-width space":             "router\u200b1",
+		"a line separator":               "router\u20281",
+		"a paragraph separator":          "router\u20291",
 		"invalid UTF-8":                  "router\xff",
 	} {
 		if validDeviceID(bad) {
@@ -410,6 +414,7 @@ func TestTokenNameIsBoundedLikeTheDevice(t *testing.T) {
 		"is too long":             longest + "n",
 		"has a control character": "ci\x1b[2Kadmin",
 		"has a bidi override":     "ci\u202egnp.exe",
+		"has a line separator":    "ci\u2028admin",
 	} {
 		if _, _, err := s.Create(bad, TokenKindAPI, "", nil, now); err != ErrTokenNameInvalid {
 			t.Errorf("Create with a name that %s: err = %v, want ErrTokenNameInvalid", why, err)

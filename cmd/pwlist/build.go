@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet/blocklist"
+	"github.com/tomlawesome/gauntlet/internal/atomicfile"
 )
 
 const (
@@ -160,7 +161,16 @@ func (b *builder) run(ctx context.Context) error {
 		_, _ = fmt.Fprintf(b.log, "pwlist: chunk %d/%d (prefixes %05X-%05X) done: %d hashes so far, %d kept, lowest kept count %d\n",
 			c+1, chunks, lo, hi-1, st.total, len(st.top.h), st.top.floor())
 	}
-	return b.emit(st)
+	if err := b.emit(st); err != nil {
+		if b.checkpoint == "" {
+			return err
+		}
+		// The checkpoint now holds every chunk, so a retry fetches
+		// nothing and meets the same result: say so, and how to start
+		// again (#80).
+		return fmt.Errorf("%w; the checkpoint %s is kept, so a retry checks this same result again without fetching -- delete it to fetch from the first chunk", err, b.checkpoint)
+	}
+	return nil
 }
 
 // runChunk fetches prefixes [lo, hi) with b.concurrency requests in
@@ -451,6 +461,10 @@ func (b *builder) resume() *state {
 	for _, e := range cp.Entries {
 		st.top.offer(e)
 	}
+	if chunks := (b.prefixes + b.chunkSize - 1) / b.chunkSize; cp.Next >= chunks {
+		_, _ = fmt.Fprintf(b.log, "pwlist: checkpoint %s: every chunk was already fetched; checking its result again without fetching (delete it to fetch from the first chunk)\n", b.checkpoint)
+		return st
+	}
 	_, _ = fmt.Fprintf(b.log, "pwlist: resuming from checkpoint %s at chunk %d\n", b.checkpoint, cp.Next+1)
 	return st
 }
@@ -469,7 +483,7 @@ func (b *builder) saveCheckpoint(st *state) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(b.checkpoint, data, 0o600); err != nil {
+	if err := atomicfile.WriteFile(b.checkpoint, data, 0o600); err != nil {
 		return fmt.Errorf("save checkpoint: %w", err)
 	}
 	return nil
@@ -511,10 +525,10 @@ func (b *builder) emit(st *state) error {
 			return fmt.Errorf("self-check: the list written would not parse: %w", err)
 		}
 	}
-	if err := writeFileAtomic(b.out, data, 0o644); err != nil {
+	if err := atomicfile.WriteFile(b.out, data, 0o644); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(b.out+".sha256", []byte(sha256Line(data, filepath.Base(b.out))), 0o644); err != nil {
+	if err := atomicfile.WriteFile(b.out+".sha256", []byte(sha256Line(data, filepath.Base(b.out))), 0o644); err != nil {
 		return err
 	}
 	if b.checkpoint != "" {
@@ -554,31 +568,4 @@ func formatList(hashes []string, built time.Time, minCount, total int64, sample 
 		b.WriteString(h + "\n")
 	}
 	return []byte(b.String())
-}
-
-// writeFileAtomic writes data to a temporary file beside path and
-// renames it into place, so a reader never sees half a file.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err = f.Chmod(mode); err == nil {
-		if _, err = f.Write(data); err == nil {
-			err = f.Sync()
-		}
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }

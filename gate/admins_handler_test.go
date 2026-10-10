@@ -32,6 +32,11 @@ type adminsFixture struct {
 	recovery []string
 	secret   []byte
 	counter  uint64
+	// bobSecret and bobCounter are bob's own authenticator app, for a
+	// test that signs him in again after his sessions were ended: a
+	// further code is generated at bobCounter+1.
+	bobSecret  []byte
+	bobCounter uint64
 }
 
 func newAdminsFixture(t *testing.T) *adminsFixture {
@@ -50,7 +55,7 @@ func newAdminsFixture(t *testing.T) *adminsFixture {
 		createUserRequest{Username: totpBobUsername, Password: totpBobPassword, Role: "user"}).Body.Close()
 	f.bobID = totpBobID(t, g)
 	f.bob = loggedInClient(t, ts, totpBobUsername, totpBobPassword)
-	totpEnrolAndConfirm(t, f.bob, ts)
+	f.bobSecret, _, f.bobCounter = totpEnrolAndConfirm(t, f.bob, ts)
 	return f
 }
 
@@ -295,13 +300,35 @@ func TestSetRoleUserViewerNeedsNoStepUp(t *testing.T) {
 	if status, body := f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "viewer"}); status != http.StatusOK {
 		t.Fatalf("user to viewer = %d %s", status, body)
 	}
-	bob := loggedInClient(t, f.ts, totpBobUsername, totpBobPassword)
-	_ = bob
-	if status, body := f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "user"}); status != http.StatusOK {
+	// The demotion ended bob's sessions. Sign him in again, through his
+	// authenticator app: this is the live session the promotion must leave
+	// alone. (A password-only sign-in would stop at the second-factor step
+	// and hold no session at all.)
+	bob := startTOTPLogin(t, f.ts, totpBobUsername, totpBobPassword)
+	resp := submitLoginFactor(t, bob, f.ts, gauntlet.GenerateTOTPCode(f.bobSecret, f.bobCounter+1))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bob's second-factor sign-in as a viewer = %d", resp.StatusCode)
+	}
+	requireSignedIn(t, f.ts, []*http.Client{bob}, true)
+	endedBefore, _ := f.g.deps.Users.Get(f.bobID)
+
+	status, body := f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "user"})
+	if status != http.StatusOK {
 		t.Fatalf("viewer to user = %d %s", status, body)
 	}
+	var promoted setRoleResponse
+	_ = json.Unmarshal([]byte(body), &promoted)
+	if promoted.SessionsEnded || promoted.From != "viewer" || promoted.To != "user" {
+		t.Errorf("response = %+v, want an upgrade that ends nothing", promoted)
+	}
+	requireSignedIn(t, f.ts, []*http.Client{bob}, true)
+	if u, _ := f.g.deps.Users.Get(f.bobID); !u.SessionsEndedAt.Equal(endedBefore.SessionsEndedAt) {
+		t.Errorf("SessionsEndedAt moved from %v to %v on an upgrade", endedBefore.SessionsEndedAt, u.SessionsEndedAt)
+	}
+
 	var out setRoleResponse
-	_, body := f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "viewer"})
+	_, body = f.setRole(t, f.admin, f.bobID, setRoleRequest{Role: "viewer"})
 	_ = json.Unmarshal([]byte(body), &out)
 	if out.From != "user" {
 		t.Errorf("from = %q, want user", out.From)

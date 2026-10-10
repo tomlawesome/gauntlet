@@ -88,3 +88,10 @@ not any one issue:
   above are superseded: `github.com/go-webauthn/webauthn` was approved
   on 2026-09-30 and the `passkey` package shipped in v0.2.0
   ([ADR-0004](0004-passkey-ceremony.md)).
+- Status note (v0.4.0 audit, 2026-10-10): the sign-in history's fold index
+  (`signins.go`, #90) also calls `evict.DownTo`.
+- Status note (v0.4.0 audit, 2026-10-10): decision 1's self-hosted-only
+  issuer policy is amended by [ADR-0014](0014-shared-issuers.md):
+  `accounts.google.com` is accepted when the policy requires an `hd` value;
+  Entra's shared endpoints, Apple and Microsoft personal accounts stay
+  refused.

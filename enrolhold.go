@@ -49,8 +49,15 @@ var (
 	// ErrSecondFactorExists is returned by HoldFirstPasskey and
 	// HoldFirstTOTP when the account already has a live second factor:
 	// only the first is held with recovery codes, and a later one is
-	// added live (AddPasskey, ConfirmTOTP) without codes.
+	// added live (AddLaterPasskey, ConfirmLaterTOTP) without codes.
 	ErrSecondFactorExists = errors.New("gauntlet: this account already has a second factor")
+	// ErrNoOtherSecondFactor is returned by AddLaterPasskey and
+	// ConfirmLaterTOTP when the account has no live second factor: the
+	// mirror of ErrSecondFactorExists. Going live without codes is only
+	// for a factor beside one whose codes stand; an account's first
+	// factor is held with its own (HoldFirstPasskey, HoldFirstTOTP), so
+	// the person has saved them before it goes live (#30, #80).
+	ErrNoOtherSecondFactor = errors.New("gauntlet: this would be the account's first second factor -- hold it with its recovery codes instead")
 	// ErrNoHeldEnrolment is returned by ConfirmHeldEnrolment when
 	// nothing is on hold.
 	ErrNoHeldEnrolment = errors.New("gauntlet: no second factor is waiting to be confirmed")
@@ -166,6 +173,31 @@ func mintRecoveryCodes() (clear []string, hashed []RecoveryCode, err error) {
 	return clear, hashed, nil
 }
 
+// holdRefusal is the refusal a hold for userID would meet at now,
+// decided from the account as this store holds it, without writing:
+// the refusals the hold's own write makes, asked first so a refused
+// hold mints no codes (ten Argon2id hashes, #80). The write decides
+// again against the document it saves; this only spares the hashing.
+// totpSecret is the secret HoldFirstTOTP checked a code against, or ""
+// for a passkey hold.
+func (s *Store) holdRefusal(userID, totpSecret string, now time.Time) error {
+	s.reloadIfStale()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u, ok := s.byID[userID]
+	switch {
+	case !ok:
+		return ErrUserNotFound
+	case u.EnrolmentHeld(now):
+		return ErrEnrolmentHeld
+	case u.HasSecondFactor():
+		return ErrSecondFactorExists
+	case totpSecret != "" && (!u.TOTPPending(now) || u.TOTPSecret != totpSecret):
+		return ErrNoPendingTOTP
+	}
+	return nil
+}
+
 // HoldFirstPasskey saves pk, userID's first second factor, on hold
 // together with ten new recovery codes for it, in one write, and
 // returns the stored passkey (its name normalised, as AddPasskey does)
@@ -176,12 +208,19 @@ func mintRecoveryCodes() (clear []string, hashed []RecoveryCode, err error) {
 // The codes are minted by this call, for this credential, so they can
 // belong to no other registration. Refused with ErrSecondFactorExists
 // when the account already has a live second factor (add the passkey
-// live with AddPasskey instead), and with ErrEnrolmentHeld while
-// another enrolment is on hold. The write deletes an expired hold
-// first.
+// live with AddLaterPasskey instead), and with ErrEnrolmentHeld while
+// another enrolment is on hold. Before either, a name that is not plain
+// text is refused with ErrPasskeyNameInvalid. The write deletes an
+// expired hold first.
 func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Passkey, []string, error) {
+	if err := checkPasskeyName(pk.Name); err != nil {
+		return Passkey{}, nil, err
+	}
 	if !s.Persisted() {
 		return Passkey{}, nil, ErrNotPersisted
+	}
+	if err := s.holdRefusal(userID, "", now); err != nil {
+		return Passkey{}, nil, err
 	}
 	// Hashed before the lock: see mintRecoveryCodes.
 	clear, hashed, err := mintRecoveryCodes()
@@ -208,8 +247,7 @@ func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Pass
 		if u.HasSecondFactor() {
 			return ErrSecondFactorExists
 		}
-		p := pk.clone()
-		p.Name = normalisePasskeyName(pk.Name, len(u.Passkeys)+1)
+		p := storedPasskey(pk, len(u.Passkeys)+1)
 		u.HeldEnrolment = &HeldEnrolment{
 			Kind:          HeldFactorPasskey,
 			Passkey:       &p,
@@ -237,11 +275,18 @@ func (s *Store) HoldFirstPasskey(userID string, pk Passkey, now time.Time) (Pass
 // it.
 //
 // Refused with ErrSecondFactorExists when the account already has a
-// live second factor (confirm the app live with ConfirmTOTP instead),
+// live second factor (confirm the app live with ConfirmLaterTOTP
+// instead),
 // and with ErrEnrolmentHeld while another enrolment is on hold.
 func (s *Store) HoldFirstTOTP(userID, encodedSecret string, matchedCounter uint64, now time.Time) ([]string, error) {
 	if !s.Persisted() {
 		return nil, ErrNotPersisted
+	}
+	if encodedSecret == "" {
+		return nil, ErrNoPendingTOTP
+	}
+	if err := s.holdRefusal(userID, encodedSecret, now); err != nil {
+		return nil, err
 	}
 	clear, hashed, err := mintRecoveryCodes()
 	if err != nil {

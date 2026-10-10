@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tomlawesome/gauntlet"
+	"github.com/tomlawesome/gauntlet/internal/expiry"
 )
 
 // loginReservation is what one login attempt holds against the
@@ -23,15 +24,6 @@ type loginReservation struct {
 	ipKey     string
 	accountID string // set when the name matched an account
 	nameKey   string // set when it did not
-	// afterReset is set when the address was at its limit and the
-	// attempt went ahead on the account's pass after a password reset
-	// (gauntlet.LoginLimiter.AllowAfterReset, #32): nothing is
-	// reserved on ipKey, so nothing is released from it either.
-	afterReset bool
-	// pendingAfterReset is set for a code step whose password step spent
-	// the pass (pendingLoginState.AfterReset): ipKey is skipped, and there
-	// is no pass left to hand back or use up.
-	pendingAfterReset bool
 	// knownBrowser is set when the ordinary path refused the attempt and
 	// it went ahead on the known browser's own allowance
 	// (gauntlet.LoginLimiter.ReserveKnownBrowser, #44): that is the one
@@ -64,20 +56,31 @@ type loginReservation struct {
 // a body may hold, and the limiter keeps thousands of keys; keyed on the
 // name, a credential-free flood of long made-up names would pin hundreds
 // of megabytes. The digest is the same size for every name, and one
-// name, in any case, is still one bucket.
+// name, in any case, is still one bucket. The fold is the root's
+// usernameKey (store.go), spelled out here because gate cannot call an
+// unexported root function: change one and the other must follow, so a
+// name the store treats as one account is one bucket here too.
 func unknownNameKey(username string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(username)))
 	return "user:" + hex.EncodeToString(sum[:])
+}
+
+// addressKey is the limiter key for a client address (Config.ClientIP):
+// the bucket every sign-in, passkey sign-in, setup-code and unlock-code
+// attempt from that address shares. Written once, so the four places
+// that reserve and release it cannot drift into four buckets, each
+// with its own budget (#90 item 13).
+func addressKey(address string) string {
+	return "ip:" + address
 }
 
 // reserveLogin reserves one attempt on both buckets, or neither, and
 // writes the 429 itself when it is neither. accountID is "" for a name
 // that matches no account.
 //
-// An account reset out of a lockout after its address reached the limit
-// gets past the address bucket, one attempt at a time, until its
-// sign-in finishes or a guess fails (AllowAfterReset, #32); its own
-// bucket still applies.
+// A password reset gets no way past the address bucket (#86, retiring
+// #32's pass): it clears the account's own count and lockout, and the
+// address's limit runs out as it does for everyone there.
 //
 // When that path refuses an attempt on a real account -- the account
 // locked out, or the address at its limit -- a browser the account
@@ -97,9 +100,9 @@ func unknownNameKey(username string) string {
 // the same 429 and rate_limited as the address limit, unless the browser
 // is a known one for the account (see below). Failed attempts are
 // counted toward the ban in recordSignIn, not here.
-func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, method gauntlet.SignInMethod, pendingAfterReset bool, now time.Time) (loginReservation, bool) {
+func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, username string, method gauntlet.SignInMethod, now time.Time) (loginReservation, bool) {
 	address := g.cfg.ClientIP(r)
-	res := loginReservation{ipKey: "ip:" + address, address: address, accountID: accountID, pendingAfterReset: pendingAfterReset}
+	res := loginReservation{ipKey: addressKey(address), address: address, accountID: accountID}
 	if accountID == "" {
 		res.nameKey = unknownNameKey(username)
 	}
@@ -114,10 +117,7 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 	if banned && accountID != "" && g.isKnownBrowser(r, accountID, now) {
 		banned = false
 	}
-	ok := !banned && (pendingAfterReset || g.deps.Limiter.Reserve(res.ipKey, now))
-	if !ok && !banned && accountID != "" && g.deps.Limiter.AllowAfterReset(res.ipKey, g.deps.Users, accountID, now) {
-		ok, res.afterReset = true, true
-	}
+	ok := !banned && g.deps.Limiter.Reserve(res.ipKey, now)
 	if ok {
 		if accountID != "" {
 			d := g.deps.Limiter.ReserveAccountDecision(g.deps.Users, accountID, now)
@@ -132,21 +132,18 @@ func (g *Gate) reserveLogin(w http.ResponseWriter, r *http.Request, accountID, u
 		} else {
 			ok = g.deps.Limiter.Reserve(res.nameKey, now)
 		}
-		if !ok && !res.afterReset && !pendingAfterReset {
+		if !ok {
 			g.deps.Limiter.Release(res.ipKey, now)
-		}
-		if !ok && res.afterReset {
-			g.deps.Limiter.ReleaseAfterReset(res.ipKey, accountID)
 		}
 	}
 	if !ok && !banned && accountID != "" && g.isKnownBrowser(r, accountID, now) {
 		if d := g.deps.Limiter.ReserveKnownBrowserDecision(g.deps.Users, accountID, now); d.Allowed {
 			// Whatever the ordinary path reserved has been handed back
-			// above, a reset pass included, so this is the only
+			// above, so this is the only
 			// reservation the attempt holds. A failure through it that
 			// disables sign-in is recorded as one on the ordinary path
 			// is (#45); filling the allowance is no lockout.
-			ok, res.afterReset, res.knownBrowser, res.refusal = true, false, true, ""
+			ok, res.knownBrowser, res.refusal = true, true, ""
 			res.lockoutStarted, res.lockedUntil = false, time.Time{}
 			res.disabledNow, res.lockouts = d.DisabledNow, d.Lockouts
 		}
@@ -172,9 +169,7 @@ func (g *Gate) releaseLogin(res loginReservation, now time.Time) {
 		g.deps.Limiter.ReleaseKnownBrowser(g.deps.Users, res.accountID, now)
 		return
 	}
-	if !res.afterReset && !res.pendingAfterReset {
-		g.deps.Limiter.Release(res.ipKey, now)
-	}
+	g.deps.Limiter.Release(res.ipKey, now)
 	if res.accountID != "" {
 		g.deps.Limiter.ReleaseAccount(g.deps.Users, res.accountID, now)
 	} else {
@@ -196,7 +191,7 @@ func (g *Gate) completeLogin(res loginReservation, now time.Time) {
 		g.releaseLogin(res, now)
 		return
 	}
-	if !res.afterReset && !res.pendingAfterReset && !res.knownBrowser {
+	if !res.knownBrowser {
 		g.deps.Limiter.Release(res.ipKey, now)
 	}
 	// SignedIn drops the known browser's allowance too.
@@ -210,26 +205,6 @@ func (g *Gate) completeLogin(res loginReservation, now time.Time) {
 // of them in a row require a new password at the next sign-in.
 func (g *Gate) secondFactorFailed(user *gauntlet.User, now time.Time) {
 	g.deps.Limiter.SecondFactorFailed(g.deps.Users, user.ID, now)
-}
-
-// endAfterReset uses up the account's pass past the address limit, if
-// this attempt used one: called when a session is issued, when the
-// password step hands over to the code step (the pending login carries
-// it from there), and on a wrong password.
-func (g *Gate) endAfterReset(res loginReservation) {
-	if res.afterReset {
-		g.deps.Limiter.EndAfterReset(res.ipKey, res.accountID)
-	}
-}
-
-// releaseAfterReset hands the pass back when the attempt holding it
-// returns, whichever way: deferred straight after reserveLogin, so a
-// concurrent attempt is refused only while this one runs. After
-// endAfterReset it changes nothing.
-func (g *Gate) releaseAfterReset(res loginReservation) {
-	if res.afterReset {
-		g.deps.Limiter.ReleaseAfterReset(res.ipKey, res.accountID)
-	}
 }
 
 // handleLogin is rate-limited independently by account and by source
@@ -253,11 +228,10 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// pass a plain check before any of them finishes verifying, and a
 	// threshold of N admits as many concurrent attempts as an attacker
 	// cares to send.
-	res, ok := g.reserveLogin(w, r, accountID, name, gauntlet.SignInMethodPassword, false, now)
+	res, ok := g.reserveLogin(w, r, accountID, name, gauntlet.SignInMethodPassword, now)
 	if !ok {
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	user, err := g.deps.Users.Authenticate(req.Username, req.Password, now)
 	if err != nil && !errors.Is(err, gauntlet.ErrInvalidCredentials) {
@@ -276,7 +250,6 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// a wrong password and a revoked/expired reset code alike (see
 		// gauntlet.Store.Authenticate's own doc comment): none of that
 		// distinction is safe to hand back to whoever is asking.
-		g.endAfterReset(res)
 		outcome := gauntlet.SignInWrongPassword
 		if matched == nil {
 			outcome = gauntlet.SignInNoSuchUser
@@ -319,11 +292,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if user.HasActiveTOTP() {
 			factors = append(factors, "totp")
 		}
-		// A pass is spent here, not held across the code step: the
-		// pending login carries the owner past the address limit
-		// instead, so a guess sent in between cannot take it.
-		g.endAfterReset(res)
-		if err := g.setPendingLoginCookie(w, user.ID, res.afterReset, now); err != nil {
+		if err := g.setPendingLoginCookie(w, user.ID, now); err != nil {
 			g.logError("sealing pending-login cookie for " + user.Username + ": " + err.Error())
 			writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 			return
@@ -346,7 +315,6 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// handed back rather than completed; nothing completed, so the
 		// account's count is not reset.
 		g.releaseLogin(res, now)
-		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
 		out, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
@@ -358,7 +326,6 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// on a login that just completed through the ordinary one-step path.
 	g.completeLogin(res, now)
 	g.clearPendingLoginCookie(w)
-	g.endAfterReset(res)
 	// The session this browser already held for the account ends here:
 	// the cookie below replaces it, and nothing else would (ASVS 7.2.4;
 	// see revokeReplacedSession).
@@ -387,11 +354,24 @@ type loginFactorRequest struct {
 // reserves against (the address and the account) -- a wrong code or a
 // refused assertion here is exactly as good a brute-force move as a
 // wrong password there, so all of them share one budget rather than each
-// getting their own.
+// getting their own. Every release here returns the reservation this
+// request took: login/factor/begin counts on a budget of its own
+// (ReserveFactorBegin, #85), so there is nothing of begin's to hand back.
 func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	var req loginFactorRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
+		return
+	}
+	// Exactly one of a code and an assertion, refused before anything
+	// is reserved or looked up: a malformed request is no guess, so it
+	// spends no attempts and leaves the pending login as it was. A JSON
+	// null is no assertion, as an absent one is.
+	if string(req.Assertion) == "null" {
+		req.Assertion = nil
+	}
+	if (req.Code == "") == (len(req.Assertion) == 0) {
+		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "send a code or an assertion, not both and not neither", nil)
 		return
 	}
 	// An assertion where the application has no passkeys is a request
@@ -429,24 +409,17 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	res, ok := g.reserveLogin(w, r, user.ID, user.Username, method, st.AfterReset, now)
+	res, ok := g.reserveLogin(w, r, user.ID, user.Username, method, now)
 	if !ok {
 		return
 	}
-	defer g.releaseAfterReset(res)
 
 	if len(req.Assertion) > 0 {
 		if g.verifyPasskeyAssertion(w, r, user, req.Assertion, res, now) {
-			// login/factor/begin reserved one attempt on each key for
-			// the challenge this assertion answered; a completed sign-in
-			// hands that back too, so a passkey sign-in costs none of
-			// the budget a wrong guess is limited by. completeLoginFactor
-			// releases this request's own; begin's goes back only once
-			// the sign-in has actually completed, so a replay refused
-			// there keeps both.
-			if g.completeLoginFactor(w, r, user, res, st, method, now) {
-				g.releaseLogin(res, now)
-			}
+			// completeLoginFactor hands back this request's reservation
+			// and nothing else: login/factor/begin counted its challenge
+			// on the account's begin budget, never on these buckets.
+			g.completeLoginFactor(w, r, user, res, st, method, now)
 		}
 		return
 	}
@@ -489,7 +462,6 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 	// regardless of whether the code looked like a TOTP guess or a
 	// recovery-code guess: which kind was tried is not information a
 	// caller needs back.
-	g.endAfterReset(res)
 	g.secondFactorFailed(user, now)
 	g.recordSignIn(r, loginEvent(user, "", gauntlet.SignInFactorRefused, gauntlet.SignInMethodCode), res, now)
 	writeUnauthorized(w, classInvalidCredentials, "invalid code")
@@ -498,9 +470,8 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // completeLoginFactor is handleLoginFactor's success path: spend the
 // pending login, release the reservations a wrong guess would have kept
 // and reset the account's count (completeLogin), drop the pending
-// cookie, and issue the real session handleLogin withheld. It reports
-// whether every credential was accepted. method is how the second
-// factor was presented.
+// cookie, and issue the real session handleLogin withheld. method is
+// how the second factor was presented.
 //
 // The pending login is claimed first, under spentPendingLogins' lock, so
 // of two completions racing on one cookie exactly one wins (ruling R2 on
@@ -510,16 +481,14 @@ func (g *Gate) handleLoginFactor(w http.ResponseWriter, r *http.Request) {
 // refuses the cookie at, so the claim and the decode share one expiry by
 // construction, on the same wall clock.
 //
-// It also reports true when the unusual-sign-in policy refused the
-// sign-in or held it for a confirmation code (#55): every credential
-// was right, so the passkey begin step's reservation is handed back as
-// for a success.
-func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) bool {
-	if !spentPendingLogins.Claim(st.ID, st.IssuedAt.Add(pendingLoginCookieMaxAge), now) {
-		g.endAfterReset(res)
+// When the unusual-sign-in policy refuses the sign-in or holds it (#55),
+// every credential was right, so this request's reservation goes back
+// as for a success.
+func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user *gauntlet.User, res loginReservation, st pendingLoginState, method gauntlet.SignInMethod, now time.Time) {
+	if !spentPendingLogins.Claim(st.ID, expiry.At(st.IssuedAt, pendingLoginCookieMaxAge), now) {
 		g.clearPendingLoginCookie(w)
 		writeUnauthorized(w, classStepExpired, "sign in again")
-		return false
+		return
 	}
 	// Every credential has passed: judge the sign-in (#55) before any
 	// session exists.
@@ -530,14 +499,12 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		// yields one refusal or one confirmation code, never that and
 		// then a session.
 		g.releaseLogin(res, now)
-		g.endAfterReset(res)
 		g.clearPendingLoginCookie(w)
 		out, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
-		return true
+		return
 	}
 	g.completeLogin(res, now)
-	g.endAfterReset(res)
 	g.clearPendingLoginCookie(w)
 	// As in handleLogin: the session this browser held for the account
 	// is replaced by the cookie below, so it ends here (ASVS 7.2.4). Only
@@ -545,5 +512,4 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	notice := g.completeSignIn(w, r, user, res, method, place, verdict, now)
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "role": user.Role})
 	g.notify(r.Context(), notice)
-	return true
 }

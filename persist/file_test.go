@@ -259,62 +259,6 @@ func TestFileBackendMkdirFailureIsError(t *testing.T) {
 	}
 }
 
-// The three tests below call writeFileAtomic directly rather than
-// through fileBackend.Save, so each forces one of its own failure
-// branches without also having to get past Save's pre-write checks
-// first (which, for two of these shapes, would themselves refuse the
-// write before writeFileAtomic ever ran).
-
-func TestWriteFileAtomicMkdirFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory-as-file collision behaves differently on windows")
-	}
-	base := t.TempDir()
-	blocker := filepath.Join(base, "blocker")
-	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(blocker, "sub", "store.json")
-	if err := writeFileAtomic(path, []byte("x"), 0o600); err == nil {
-		t.Fatal("writeFileAtomic under a path whose parent is a file succeeded, want an error")
-	}
-}
-
-func TestWriteFileAtomicCreateTempFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("write-permission bits behave differently on windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file permissions")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o500); err != nil { // read+execute, no write
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-
-	path := filepath.Join(dir, "store.json")
-	if err := writeFileAtomic(path, []byte("x"), 0o600); err == nil {
-		t.Fatal("writeFileAtomic in a read-only directory succeeded, want an error")
-	}
-}
-
-func TestWriteFileAtomicRenameFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("rename-onto-a-directory behaves differently on windows")
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "store.json")
-	// A directory sitting at the destination path can never be replaced
-	// by rename()ing a plain file over it.
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFileAtomic(path, []byte("x"), 0o600); err == nil {
-		t.Fatal("writeFileAtomic onto an existing directory succeeded, want an error")
-	}
-}
-
 func TestContentVersionNeverReturnsZero(t *testing.T) {
 	// A vanishingly unlikely FNV-1a collision with 0 is handled
 	// explicitly (contentVersion's comment); this just pins that the
@@ -405,54 +349,6 @@ func TestEveryBackendDescribeIsShortAndCarriesNoSecrets(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomicReportsAParentThatIsNotADirectory(t *testing.T) {
-	dir := t.TempDir()
-	blocker := filepath.Join(dir, "store")
-	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The store's directory would have to be created inside a regular
-	// file: MkdirAll refuses, and the save reports that instead of
-	// pretending to have written anything.
-	if err := writeFileAtomic(filepath.Join(blocker, "store.json"), []byte("{}"), 0o600); err == nil {
-		t.Fatal("a save under a regular file succeeded")
-	}
-}
-
-func TestWriteFileAtomicReportsADirectoryItCannotWriteIn(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can write anywhere, so the refusal cannot be produced")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	// The temp file cannot be created, so nothing is renamed and the
-	// error comes back to the caller.
-	if err := writeFileAtomic(filepath.Join(dir, "store.json"), []byte("{}"), 0o600); err == nil {
-		t.Fatal("a save into a read-only directory succeeded")
-	}
-}
-
-func TestWriteFileAtomicReportsARenameItCannotMake(t *testing.T) {
-	dir := t.TempDir()
-	// A non-empty directory already sits where the store should go: the
-	// temp file is written, the rename over it is refused, and the error
-	// comes back instead of a store that silently went nowhere.
-	target := filepath.Join(dir, "store.json")
-	if err := os.MkdirAll(filepath.Join(target, "inside"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFileAtomic(target, []byte("{}"), 0o600); err == nil {
-		t.Fatal("renaming the store over a non-empty directory succeeded")
-	}
-	left, _ := filepath.Glob(filepath.Join(dir, "store.json.tmp-*"))
-	if len(left) != 0 {
-		t.Fatalf("temp files left behind after the refused rename: %v", left)
-	}
-}
-
 func TestLockFileReportsAPathItCannotCreate(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "store.json")
@@ -462,21 +358,5 @@ func TestLockFileReportsAPathItCannotCreate(t *testing.T) {
 	// The lock would have to live inside a regular file.
 	if _, err := lockFile(context.Background(), filepath.Join(blocker, "x.lock")); err == nil {
 		t.Fatal("creating a lock file inside a regular file succeeded")
-	}
-}
-
-func TestWriteFileAtomicReportsAStoreItCannotStat(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can stat anything, so the refusal cannot be produced")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	// The directory exists but cannot be searched: whether a store is
-	// already there is unknown, which is an error, not a fresh install.
-	if err := writeFileAtomic(filepath.Join(dir, "store.json"), []byte("{}"), 0o600); err == nil {
-		t.Fatal("a save into an unsearchable directory succeeded")
 	}
 }

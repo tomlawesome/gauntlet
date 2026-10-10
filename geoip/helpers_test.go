@@ -77,6 +77,32 @@ func buildDB(t *testing.T, l layout, iso string) []byte {
 	return buf.Bytes()
 }
 
+// buildCoveringDB returns a database that answers for every address,
+// reserved and private ranges included, so a lookup of one of them can
+// only come back empty if the address was refused before the file was
+// read. Reserved ranges are not refused by the writer's default.
+func buildCoveringDB(t *testing.T, dbType string, rec func() mmdbtype.Map) []byte {
+	t.Helper()
+	w, err := mmdbwriter.New(mmdbwriter.Options{DatabaseType: dbType, IncludeReservedNetworks: true})
+	if err != nil {
+		t.Fatalf("mmdbwriter.New: %v", err)
+	}
+	for _, cidr := range []string{"0.0.0.0/0", "::/0"} {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Insert(network, rec()); err != nil {
+			t.Fatalf("Insert(%s): %v", cidr, err)
+		}
+	}
+	var buf bytes.Buffer
+	if _, err := w.WriteTo(&buf); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func gz(t *testing.T, b []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
