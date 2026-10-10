@@ -322,6 +322,10 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusNotFound, classNotFound, "this account has no authenticator app", nil)
 			return
 		}
+		if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since recheckPassword read it (#95, #100)
+			writeUnauthorized(w, classSignInRequired, "sign in first")
+			return
+		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)
 		return
 	}

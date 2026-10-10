@@ -310,7 +310,7 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// session exists.
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user, gauntlet.SignInMethodPassword, place, now)
-	if verdict.stopsSignIn() {
+	stop := func() {
 		// Confirm or block: the credential was right, so the attempt is
 		// handed back rather than completed; nothing completed, so the
 		// account's count is not reset.
@@ -318,6 +318,25 @@ func (g *Gate) handleLogin(w http.ResponseWriter, r *http.Request) {
 		g.clearPendingLoginCookie(w)
 		out, notice := g.stopSignIn(w, r, user, res, gauntlet.SignInMethodPassword, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
+	}
+	if verdict.stopsSignIn() {
+		stop()
+		return
+	}
+
+	switch g.spendAllowance(w, r, user, place, &verdict, now) {
+	case allowanceNotAllowed:
+		// Another sign-in used the allowance first (#103): the policy's
+		// own answer stands.
+		stop()
+		return
+	case allowanceFailed:
+		// The allowance this sign-in came through on could not be saved
+		// as spent: refused, as the backend's failure (#101). No 401,
+		// no lockout count, no session, and the allowance stays live.
+		g.releaseLogin(res, now)
+		g.clearPendingLoginCookie(w)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	}
 
@@ -494,7 +513,7 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 	// session exists.
 	place := g.placeOf(r, res.address)
 	verdict := g.judgeSignIn(r, user, method, place, now)
-	if verdict.stopsSignIn() {
+	stop := func() {
 		// The pending login is already spent above, so one correct code
 		// yields one refusal or one confirmation code, never that and
 		// then a session.
@@ -502,6 +521,23 @@ func (g *Gate) completeLoginFactor(w http.ResponseWriter, r *http.Request, user 
 		g.clearPendingLoginCookie(w)
 		out, notice := g.stopSignIn(w, r, user, res, method, place, verdict, now)
 		g.answerStopped(w, r, verdict, out, notice)
+	}
+	if verdict.stopsSignIn() {
+		stop()
+		return
+	}
+	switch g.spendAllowance(w, r, user, place, &verdict, now) {
+	case allowanceNotAllowed:
+		// As in handleLogin: the allowance was already used, so the
+		// policy's own answer stands (#103).
+		stop()
+		return
+	case allowanceFailed:
+		// As in handleLogin: the allowance could not be saved as spent,
+		// so no session (#101).
+		g.releaseLogin(res, now)
+		g.clearPendingLoginCookie(w)
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to complete sign-in", nil)
 		return
 	}
 	g.completeLogin(res, now)

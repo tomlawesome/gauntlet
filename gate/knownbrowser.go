@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -113,8 +114,31 @@ func (g *Gate) isKnownBrowser(r *http.Request, accountID string, now time.Time) 
 // A write that fails is logged and the sign-in goes on: the session is
 // what the caller asked for, and the browser keeps whatever token it
 // had. No cookie is set then, since its hash is on no record, and it
-// reports false, so the sign-in is flagged as nothing (#55).
+// reports false, so the sign-in is flagged as nothing (#55). A sign-in
+// let through by an admin's allowance is the exception: it is
+// remembered by rememberAllowedSignIn instead, and spendAllowance
+// refuses it when that write fails (#101).
 func (g *Gate) rememberSignIn(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, now time.Time) bool {
+	return g.rememberSignInWith(w, r, userID, place, now, g.deps.Users.RememberSignIn) == nil
+}
+
+// rememberAllowedSignIn is rememberSignIn for a sign-in let through by
+// an admin's allowance (gauntlet.Store.RememberAllowedSignIn, #103):
+// the same write and the same cookie, made only if the allowance is
+// still live, and spending it. It returns the store's error: nil when
+// remembered and spent, gauntlet.ErrSignInNotAllowed when the allowance
+// had already been used or had expired -- nothing written, no cookie
+// set, and not logged, since nothing failed -- and anything else when
+// the write failed, which is logged.
+func (g *Gate) rememberAllowedSignIn(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, now time.Time) error {
+	return g.rememberSignInWith(w, r, userID, place, now, g.deps.Users.RememberAllowedSignIn)
+}
+
+// rememberSignInWith is the body rememberSignIn and
+// rememberAllowedSignIn share; remember is the store write.
+func (g *Gate) rememberSignInWith(w http.ResponseWriter, r *http.Request, userID string, place signInPlace, now time.Time,
+	remember func(accountID, replacing, country string, loc *gauntlet.Location, now time.Time) (string, error),
+) error {
 	carried := knownBrowserTokens(r)
 	replacing := ""
 	for _, t := range carried {
@@ -123,13 +147,15 @@ func (g *Gate) rememberSignIn(w http.ResponseWriter, r *http.Request, userID str
 			break
 		}
 	}
-	token, err := g.deps.Users.RememberSignIn(userID, replacing, place.client.Country, place.loc, now)
+	token, err := remember(userID, replacing, place.client.Country, place.loc, now)
 	if err != nil {
-		g.logError("remembering the browser that signed in to account " + userID + ": " + err.Error())
-		return false
+		if !errors.Is(err, gauntlet.ErrSignInNotAllowed) {
+			g.logError("remembering the browser that signed in to account " + userID + ": " + err.Error())
+		}
+		return err
 	}
 	g.writeKnownBrowserCookie(w, token, carried, replacing)
-	return true
+	return nil
 }
 
 // writeKnownBrowserCookie sets the cookie to fresh followed by carried

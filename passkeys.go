@@ -72,7 +72,7 @@ var (
 	// pending), no passkey, no recovery codes and nothing on hold; and
 	// by RegenerateRecoveryCodes when it has no live second factor (#94).
 	// Nothing is written.
-	ErrNoSecondFactors = errors.New("gauntlet: this account has no second factor to clear")
+	ErrNoSecondFactors = errors.New("gauntlet: this account has no second factor")
 	// ErrPasskeyLimitReached is returned by AddPasskey once an account
 	// already holds maxPasskeysPerAccount credentials.
 	ErrPasskeyLimitReached = fmt.Errorf("gauntlet: an account may hold at most %d passkeys -- remove one before adding another", maxPasskeysPerAccount)
