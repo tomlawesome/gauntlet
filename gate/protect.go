@@ -172,17 +172,18 @@ func isSafeMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
 }
 
-// csrfOK requires the CSRF header on an unsafe method, writing the 403
-// itself when it is missing -- the one check Protect makes in both its
-// undecided and active states. A refusal leaves a rated Warn line
-// (#45, ASVS 16.3.3).
-func (g *Gate) csrfOK(w http.ResponseWriter, r *http.Request) bool {
+// csrfRefused is the refusal of an unsafe method without the CSRF
+// header, nil when the header is there or not needed -- the one check
+// decideAccess makes in both its undecided and active states. Protect's
+// refusal leaves a rated Warn line (#45, ASVS 16.3.3).
+func (g *Gate) csrfRefused(r *http.Request) *refusal {
 	if !isSafeMethod(r.Method) && r.Header.Get(csrfHeaderName) != g.cfg.CSRFHeaderValue {
-		g.warnRefused(r, "csrf", "gate: refused a request without the CSRF header")
-		writeProblem(w, http.StatusForbidden, classCSRFRequired, "missing required header", nil)
-		return false
+		return &refusal{
+			status: http.StatusForbidden, class: classCSRFRequired, detail: "missing required header",
+			warnKind: "csrf", warnMsg: "gate: refused a request without the CSRF header",
+		}
 	}
-	return true
+	return nil
 }
 
 const bearerPrefix = "Bearer "
@@ -210,12 +211,21 @@ func bearerToken(r *http.Request) (string, bool) {
 // gauntlet.User.SessionCutoff) live in exactly one place. A session that
 // fails that check is proactively revoked here rather than left to
 // expire naturally, since it is already known to be invalid.
-func (g *Gate) sessionUser(r *http.Request, now time.Time) (*gauntlet.User, bool) {
+//
+// touch is false only for StillSignedIn (#104): the session is read
+// with Peek, so its expiry does not slide, and one issued before the
+// cutoff is refused without being revoked -- the next real request
+// revokes it.
+func (g *Gate) sessionUser(r *http.Request, now time.Time, touch bool) (*gauntlet.User, bool) {
 	cookie, err := r.Cookie(g.sessionCookieName())
 	if err != nil {
 		return nil, false
 	}
-	sess, ok := g.deps.Sessions.Validate(cookie.Value, now)
+	read := g.deps.Sessions.Validate
+	if !touch {
+		read = g.deps.Sessions.Peek
+	}
+	sess, ok := read(cookie.Value, now)
 	if !ok {
 		return nil, false
 	}
@@ -224,7 +234,9 @@ func (g *Gate) sessionUser(r *http.Request, now time.Time) (*gauntlet.User, bool
 		return nil, false
 	}
 	if sess.IssuedAt.Before(user.SessionCutoff()) {
-		g.deps.Sessions.Revoke(sess.ID)
+		if touch {
+			g.deps.Sessions.Revoke(sess.ID)
+		}
 		return nil, false
 	}
 	return user, true
@@ -317,14 +329,50 @@ const (
 // independently-written parameter the two could drift apart from.
 func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 	w.Header().Set(authGateHeader, gateName)
-	class := classMustChangePassword
+	writeProblem(w, http.StatusForbidden, doorClass(gateName), msg, nil)
+}
+
+// doorClass is the problem class a forced door answers with.
+func doorClass(gateName string) problemClass {
 	switch gateName {
 	case authGateMustEnrolFactor:
-		class = classMustEnrolFactor
+		return classMustEnrolFactor
 	case authGateMustEnrolPasskey:
-		class = classMustEnrolPasskey
+		return classMustEnrolPasskey
 	}
-	writeProblem(w, http.StatusForbidden, class, msg, nil)
+	return classMustChangePassword
+}
+
+// verdict is who decideAccess admitted: the account behind a session,
+// or a bearer token and the kind it matched. Both are empty for a
+// request admitted without either -- the undecided state's bootstrap
+// paths and the Exempt ones.
+type verdict struct {
+	user  *gauntlet.User
+	token *gauntlet.Token
+	kind  gauntlet.TokenKind
+}
+
+// refusal is decideAccess's answer when the request is not admitted: what
+// Protect writes (status, class and detail; door, for the X-Auth-Gate
+// header) and the rated Warn line it leaves, if any (warnKind empty for
+// none). StillSignedIn reads only status and class.
+type refusal struct {
+	status   int
+	class    problemClass
+	detail   string
+	door     string
+	warnKind string
+	warnMsg  string
+}
+
+// doorRefusal is the refusal at one of the three forced doors, its
+// class following from the door as writeForcedAuthGate's does.
+func doorRefusal(user *gauntlet.User, door, detail string) *refusal {
+	return &refusal{
+		status: http.StatusForbidden, class: doorClass(door), detail: detail, door: door,
+		warnKind: "door", warnMsg: fmt.Sprintf("gate: refused account %q at the %s door", user.Username, door),
+	}
 }
 
 // Protect is mikroview's requireAuth, generalized over an application's
@@ -350,156 +398,193 @@ func writeForcedAuthGate(w http.ResponseWriter, gateName, msg string) {
 //     admin with no local password while the admin passkey rule is
 //     on), the admin passkey door (#82), then the second-factor door
 //     (always on, since #49), then next.
+//
+// The checks themselves are decideAccess's, shared with StillSignedIn
+// (#104, ADR-0016); Protect writes what it answers and dispatches.
 func (g *Gate) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		now := g.now()
-		// The ESCAPED path, not the decoded one: http.ServeMux's own
-		// pattern matching works on r.URL.EscapedPath() (a request for
-		// "/api/auth%2Fsession" matches a registered "/api/{resource}"
-		// pattern, never "/api/auth/session" -- %2F stays inside one
-		// path segment rather than splitting it in two). Every
-		// exempt/bootstrap/door comparison below has to use the same
-		// path the mux will actually dispatch on, or a path that is
-		// exempt only after decoding is treated as exempt here while
-		// dispatching somewhere this check never intended to admit
-		// (issue #13).
-		path := r.URL.EscapedPath()
-
-		if g.deps.Users.Count() == 0 {
-			if !bootstrapExemptPaths[path] {
-				writeProblem(w, http.StatusServiceUnavailable, classSetupRequired, "setup required", nil)
-				return
-			}
-			if !g.csrfOK(w, r) {
-				return
-			}
+		v, ref := g.decideAccess(r, g.now(), true)
+		switch {
+		case ref != nil:
+			g.writeRefusal(w, r, ref)
+		case v.token != nil:
+			g.kindHandlers[v.kind].ServeHTTP(w, r.WithContext(withToken(r.Context(), v.token)))
+		case v.user != nil:
+			next.ServeHTTP(w, r.WithContext(withUser(r.Context(), v.user)))
+		default:
 			next.ServeHTTP(w, r)
-			return
 		}
-
-		if raw, ok := bearerToken(r); ok {
-			for _, kind := range g.kindOrder {
-				if tok, valid := g.deps.Tokens.Authenticate(raw, kind, now); valid {
-					h := g.kindHandlers[kind]
-					h.ServeHTTP(w, r.WithContext(withToken(r.Context(), tok)))
-					return
-				}
-			}
-			writeUnauthorized(w, classInvalidCredentials, "invalid or revoked token")
-			return
-		}
-		// An Authorization header that is there but is not a
-		// well-formed "Bearer <token>" -- another scheme, a bare
-		// "Bearer", a tab for the space -- is refused the same way,
-		// not skipped: skipping it let the request through on its
-		// session cookie instead (#41). Only a request with no
-		// Authorization header at all goes on to the cookie.
-		if _, sent := r.Header["Authorization"]; sent {
-			g.warnRefused(r, "authorization", "gate: refused a malformed Authorization header")
-			writeUnauthorized(w, classInvalidCredentials, "invalid or revoked token")
-			return
-		}
-
-		if !g.csrfOK(w, r) {
-			return
-		}
-		if g.isExempt(path) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		user, ok := g.sessionUser(r, now)
-		if !ok {
-			writeUnauthorized(w, classSignInRequired, "unauthorized")
-			return
-		}
-		// docs/design.md §4's fail-closed list: "Unknown role → denied
-		// everything." Checked here, before either door below, because
-		// neither of them is what this is about -- a role no
-		// CreateUser/Register call could ever produce only reaches a
-		// live User via a document written outside this package (see
-		// Role.rank's own doc comment), and the right response to that
-		// is refusing the request outright, not routing it through
-		// checks that assume a real tier. Without this, an ordinary
-		// session-gated route with no RequireRole wrapper at all -- most
-		// of an application's own routes -- let such an account straight
-		// through; only a RequireRole-wrapped route ever consulted
-		// Role.AtLeast (issue #14).
-		if !isKnownRole(user.Role) {
-			g.warnRefused(r, "role", fmt.Sprintf("gate: refused account %q: its role is not recognized", user.Username))
-			writeProblem(w, http.StatusForbidden, classForbidden, "account role is not recognized", nil)
-			return
-		}
-		// Two things set MustChangePassword: an administrator's reset,
-		// and a run of failed second-factor steps that says someone else
-		// knows the password (gauntlet.LoginLimiter.SecondFactorFailed,
-		// #44). The account carries no record of which, so the message
-		// names neither.
-		//
-		// Only for an account with a local password: one that signs in
-		// through its identity provider has no password to change, and
-		// the one route this door admits refuses it, so the door would
-		// shut it out of everything. The store no longer sets the flag on
-		// such an account, but a document written before that may carry
-		// it.
-		if user.MustChangePassword && user.LocalPassword() && path != changePasswordPath {
-			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustChangePassword))
-			writeForcedAuthGate(w, authGateMustChangePassword, "this account's password must be changed -- set a new password before going any further")
-			return
-		}
-		// An admin with no local password -- an SSO-only account promoted
-		// to admin -- is held at the same door while the admin passkey
-		// rule is on (#82 decision 5): registering a passkey needs a local
-		// password (ADR-0004), so the chain is password, then passkey,
-		// then admin. The one route admitted sets the first password from
-		// a fresh SSO sign-in (handleChangePassword).
-		if g.adminPasskeyRuleOn() && user.Role == gauntlet.RoleAdmin && !user.LocalPassword() && path != changePasswordPath {
-			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustChangePassword))
-			writeForcedAuthGate(w, authGateMustChangePassword, "this admin account has no local password -- set one before going any further")
-			return
-		}
-		// The admin passkey door (#82, ADR-0015): while the rule is on, an
-		// admin account is held until it holds a passkey usable under the
-		// relying party's current RP ID -- an authenticator app alone
-		// never opens it. Checked before the any-factor door below, so an
-		// admin with no factor at all is told the one thing that opens
-		// this one; the same enrolment routes are admitted, and TOTP
-		// enrolment still works there. The !MustChangePassword guard keeps
-		// the no-deadlock property the door below documents.
-		if g.adminMustEnrolPasskey(user) && !secondFactorEnrolPaths[path] {
-			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustEnrolPasskey))
-			writeForcedAuthGate(w, authGateMustEnrolPasskey, "this admin account has no passkey -- register one before going any further")
-			return
-		}
-		// The forced-enrolment door (mikroview's #1253), always shut for
-		// every local-password account since #49 -- a second factor is
-		// mandatory, not an application's choice, so this no longer reads
-		// Config.RequireSecondFactor (deprecated; see that field's doc
-		// comment).
-		//
-		// The !user.MustChangePassword guard is what stops this door and
-		// the one above deadlocking each other: MustChangePassword's own
-		// gate lets exactly one path through while it is set --
-		// changePasswordPath -- and that path is not exempted from
-		// this one below. Without the guard, a reset-code account with
-		// no second factor would fall through to this gate on its one
-		// admitted path and be refused that too: 403 on the only route
-		// that could ever get it out of MustChangePassword, with no
-		// request from that account able to escape (mikroview's own fix
-		// for exactly this, gitlab/dev 683704c4).
-		//
-		// secondFactorEnrolPaths (TOTP enrol/confirm, passkey register
-		// begin/finish, the held factor's confirmation) stays reachable
-		// while this door holds -- without it, a newly created local
-		// account with no factor yet would have no route left to enrol
-		// one on.
-		if !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
-			g.warnRefused(r, "door", fmt.Sprintf("gate: refused account %q at the %s door", user.Username, authGateMustEnrolFactor))
-			writeForcedAuthGate(w, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+// writeRefusal is Protect's response to a refusal: its rated Warn line
+// first, if it has one, then the problem -- with WWW-Authenticate on a
+// 401 and X-Auth-Gate at a door.
+func (g *Gate) writeRefusal(w http.ResponseWriter, r *http.Request, ref *refusal) {
+	if ref.warnKind != "" {
+		g.warnRefused(r, ref.warnKind, ref.warnMsg)
+	}
+	switch {
+	case ref.door != "":
+		writeForcedAuthGate(w, ref.door, ref.detail)
+	case ref.status == http.StatusUnauthorized:
+		writeUnauthorized(w, ref.class, ref.detail)
+	default:
+		writeProblem(w, ref.status, ref.class, ref.detail, nil)
+	}
+}
+
+// bearerFor is the live token raw names for kind: Authenticate, which
+// records the use, when touch is set; Peek, which records nothing,
+// when it is not.
+func (g *Gate) bearerFor(raw string, kind gauntlet.TokenKind, now time.Time, touch bool) (*gauntlet.Token, bool) {
+	if touch {
+		return g.deps.Tokens.Authenticate(raw, kind, now)
+	}
+	return g.deps.Tokens.Peek(raw, kind, now)
+}
+
+// decideAccess is the one place a request is admitted or refused:
+// Protect (touch true) and StillSignedIn (touch false) both ask it, so a
+// refusal cannot exist in one and not the other (ADR-0016, which calls
+// it decide; Gate.decide is the unusual sign-in one). With touch false it
+// changes nothing -- the session is Peeked, not Validated; a token is
+// Peeked, not Authenticated; a session issued before the cutoff is
+// refused without being revoked -- and nothing else differs.
+//
+// It logs nothing: the refusal carries the Warn line, and Protect is
+// what writes it.
+func (g *Gate) decideAccess(r *http.Request, now time.Time, touch bool) (verdict, *refusal) {
+	// The ESCAPED path, not the decoded one: http.ServeMux's own
+	// pattern matching works on r.URL.EscapedPath() (a request for
+	// "/api/auth%2Fsession" matches a registered "/api/{resource}"
+	// pattern, never "/api/auth/session" -- %2F stays inside one
+	// path segment rather than splitting it in two). Every
+	// exempt/bootstrap/door comparison below has to use the same
+	// path the mux will actually dispatch on, or a path that is
+	// exempt only after decoding is treated as exempt here while
+	// dispatching somewhere this check never intended to admit
+	// (issue #13).
+	path := r.URL.EscapedPath()
+
+	if g.deps.Users.Count() == 0 {
+		if !bootstrapExemptPaths[path] {
+			return verdict{}, &refusal{status: http.StatusServiceUnavailable, class: classSetupRequired, detail: "setup required"}
+		}
+		return verdict{}, g.csrfRefused(r)
+	}
+
+	if raw, ok := bearerToken(r); ok {
+		for _, kind := range g.kindOrder {
+			if tok, valid := g.bearerFor(raw, kind, now, touch); valid {
+				return verdict{token: tok, kind: kind}, nil
+			}
+		}
+		return verdict{}, &refusal{status: http.StatusUnauthorized, class: classInvalidCredentials, detail: "invalid or revoked token"}
+	}
+	// An Authorization header that is there but is not a
+	// well-formed "Bearer <token>" -- another scheme, a bare
+	// "Bearer", a tab for the space -- is refused the same way,
+	// not skipped: skipping it let the request through on its
+	// session cookie instead (#41). Only a request with no
+	// Authorization header at all goes on to the cookie.
+	if _, sent := r.Header["Authorization"]; sent {
+		return verdict{}, &refusal{
+			status: http.StatusUnauthorized, class: classInvalidCredentials, detail: "invalid or revoked token",
+			warnKind: "authorization", warnMsg: "gate: refused a malformed Authorization header",
+		}
+	}
+
+	if ref := g.csrfRefused(r); ref != nil {
+		return verdict{}, ref
+	}
+	if g.isExempt(path) {
+		return verdict{}, nil
+	}
+
+	user, ok := g.sessionUser(r, now, touch)
+	if !ok {
+		return verdict{}, &refusal{status: http.StatusUnauthorized, class: classSignInRequired, detail: "unauthorized"}
+	}
+	// docs/design.md §4's fail-closed list: "Unknown role → denied
+	// everything." Checked here, before either door below, because
+	// neither of them is what this is about -- a role no
+	// CreateUser/Register call could ever produce only reaches a
+	// live User via a document written outside this package (see
+	// Role.rank's own doc comment), and the right response to that
+	// is refusing the request outright, not routing it through
+	// checks that assume a real tier. Without this, an ordinary
+	// session-gated route with no RequireRole wrapper at all -- most
+	// of an application's own routes -- let such an account straight
+	// through; only a RequireRole-wrapped route ever consulted
+	// Role.AtLeast (issue #14).
+	if !isKnownRole(user.Role) {
+		return verdict{}, &refusal{
+			status: http.StatusForbidden, class: classForbidden, detail: "account role is not recognized",
+			warnKind: "role", warnMsg: fmt.Sprintf("gate: refused account %q: its role is not recognized", user.Username),
+		}
+	}
+	// Two things set MustChangePassword: an administrator's reset,
+	// and a run of failed second-factor steps that says someone else
+	// knows the password (gauntlet.LoginLimiter.SecondFactorFailed,
+	// #44). The account carries no record of which, so the message
+	// names neither.
+	//
+	// Only for an account with a local password: one that signs in
+	// through its identity provider has no password to change, and
+	// the one route this door admits refuses it, so the door would
+	// shut it out of everything. The store no longer sets the flag on
+	// such an account, but a document written before that may carry
+	// it.
+	if user.MustChangePassword && user.LocalPassword() && path != changePasswordPath {
+		return verdict{}, doorRefusal(user, authGateMustChangePassword, "this account's password must be changed -- set a new password before going any further")
+	}
+	// An admin with no local password -- an SSO-only account promoted
+	// to admin -- is held at the same door while the admin passkey
+	// rule is on (#82 decision 5): registering a passkey needs a local
+	// password (ADR-0004), so the chain is password, then passkey,
+	// then admin. The one route admitted sets the first password from
+	// a fresh SSO sign-in (handleChangePassword).
+	if g.adminPasskeyRuleOn() && user.Role == gauntlet.RoleAdmin && !user.LocalPassword() && path != changePasswordPath {
+		return verdict{}, doorRefusal(user, authGateMustChangePassword, "this admin account has no local password -- set one before going any further")
+	}
+	// The admin passkey door (#82, ADR-0015): while the rule is on, an
+	// admin account is held until it holds a passkey usable under the
+	// relying party's current RP ID -- an authenticator app alone
+	// never opens it. Checked before the any-factor door below, so an
+	// admin with no factor at all is told the one thing that opens
+	// this one; the same enrolment routes are admitted, and TOTP
+	// enrolment still works there. The !MustChangePassword guard keeps
+	// the no-deadlock property the door below documents.
+	if g.adminMustEnrolPasskey(user) && !secondFactorEnrolPaths[path] {
+		return verdict{}, doorRefusal(user, authGateMustEnrolPasskey, "this admin account has no passkey -- register one before going any further")
+	}
+	// The forced-enrolment door (mikroview's #1253), always shut for
+	// every local-password account since #49 -- a second factor is
+	// mandatory, not an application's choice, so this no longer reads
+	// Config.RequireSecondFactor (deprecated; see that field's doc
+	// comment).
+	//
+	// The !user.MustChangePassword guard is what stops this door and
+	// the one above deadlocking each other: MustChangePassword's own
+	// gate lets exactly one path through while it is set --
+	// changePasswordPath -- and that path is not exempted from
+	// this one below. Without the guard, a reset-code account with
+	// no second factor would fall through to this gate on its one
+	// admitted path and be refused that too: 403 on the only route
+	// that could ever get it out of MustChangePassword, with no
+	// request from that account able to escape (mikroview's own fix
+	// for exactly this, gitlab/dev 683704c4).
+	//
+	// secondFactorEnrolPaths (TOTP enrol/confirm, passkey register
+	// begin/finish, the held factor's confirmation) stays reachable
+	// while this door holds -- without it, a newly created local
+	// account with no factor yet would have no route left to enrol
+	// one on.
+	if !user.MustChangePassword && user.LocalPassword() && !user.HasSecondFactor() && !secondFactorEnrolPaths[path] {
+		return verdict{}, doorRefusal(user, authGateMustEnrolFactor, "this account has no second factor -- enrol one before going any further")
+	}
+	return verdict{user: user}, nil
 }
 
 // adminPasskeyRuleOn reports whether every admin must hold a passkey

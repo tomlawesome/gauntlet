@@ -459,6 +459,30 @@ func (s *SessionStore) Validate(id string, now time.Time) (Session, bool) {
 	return sess, true
 }
 
+// Peek reports whether id is a live session, as Validate does,
+// without changing anything: the expiry does not slide, LastUsedAt
+// does not move, and nothing is evicted. It applies every rule
+// Validate applies -- unknown, past the lifetime ceiling, idle past
+// its expiry (whether or not still resumable), revoked -- and
+// returns the session as stored. It is the check for traffic the
+// application generates for itself: a stream re-checking the cookie
+// that opened it must not keep the session awake (NIST SP 800-63B
+// §7.2, #104).
+//
+// A session past its ceiling is left for Validate, Resumable or the
+// sweep to drop.
+func (s *SessionStore) Peek(id string, now time.Time) (Session, bool) {
+	s.mu.Lock()
+	sess, ok := s.sessions[id]
+	s.mu.Unlock()
+	// expired covers gone too: a session past its ceiling, or idle past
+	// its expiry with no ceiling, is past ExpiresAt or the deadline.
+	if !ok || s.expired(sess, now) {
+		return Session{}, false
+	}
+	return sess, true
+}
+
 // Resumable returns the session id names when it has timed out through
 // inactivity (MaxSessionIdle's job in gate) but is still inside its
 // lifetime ceiling, so its owner may resume it with a password

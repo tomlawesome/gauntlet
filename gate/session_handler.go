@@ -95,7 +95,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		SetupRequired: g.deps.Users.Count() == 0,
 		SSOAvailable:  g.deps.OIDC != nil,
 	}
-	if user, ok := g.sessionUser(r, now); ok {
+	if user, ok := g.sessionUser(r, now, true); ok {
 		resp.Authenticated = true
 		resp.Username = user.Username
 		resp.Role = string(user.Role)
@@ -118,9 +118,11 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 		// sessionUser already validated the cookie once; re-reading it
 		// here just for IssuedAt rather than widening sessionUser's own
-		// signature for a field only this handler needs.
+		// signature for a field only this handler needs. Peek, not
+		// Validate: the read above has already slid the session once
+		// (#104).
 		if cookie, err := r.Cookie(g.sessionCookieName()); err == nil {
-			if sess, ok := g.deps.Sessions.Validate(cookie.Value, now); ok {
+			if sess, ok := g.deps.Sessions.Peek(cookie.Value, now); ok {
 				resp.SignedInSince = sess.IssuedAt.Format(time.RFC3339)
 			}
 		}

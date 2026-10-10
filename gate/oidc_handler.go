@@ -225,7 +225,7 @@ func (g *Gate) handleOIDCLinkStart(w http.ResponseWriter, r *http.Request) {
 // flight -- without this check, that would attach the identity that just
 // authenticated to whichever account started the flow.
 func (g *Gate) completeOIDCLink(w http.ResponseWriter, r *http.Request, fs oidc.FlowState, identity *oidc.Identity, now time.Time) {
-	caller, ok := g.sessionUser(r, now)
+	caller, ok := g.sessionUser(r, now, true)
 	if !ok || caller.ID != fs.LinkUserID {
 		g.failSSO(w, r, "link_session_changed", identity, nil)
 		return
