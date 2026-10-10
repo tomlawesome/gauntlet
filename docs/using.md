@@ -35,10 +35,10 @@ limiter, err := gauntlet.NewLoginLimiter(5, time.Minute) // failed sign-ins per 
   refuses a backend that would store the document in the clear, because
   it holds every account's authenticator-app (TOTP) secret; `Options.AllowPlaintextAtRest`
   is the only way past that, and it is a decision, not a default.
-- The `Label` is not secret. It is stored inside the encrypted data, so
-  a document copied from one store into another will not open there
-  instead of being read as something else. Use the same label every
-  time the same store is opened.
+- The `Label` is not secret. It is not stored; it is checked every time
+  the document is opened, so a document copied from one store into
+  another will not open there instead of being read as something else.
+  Use the same label every time the same store is opened.
 - Two backends ship ready-made: `persist.NewEncryptedFileBackend(path,
   key)`, one sealed file, and `persist.NewMemory()` for tests.
 - **Sessions** live in memory only (`NewSessionStore`): a restart signs
@@ -62,9 +62,9 @@ first account is always the admin.
 Every new local password is checked before it is set, and refused if it
 is:
 
-- too short, or the username or product name (`Options.ProductName`),
-  even when disguised with different capitals, added digits or added
-  punctuation
+- too short, or the username or product name (`Options.ProductName`)
+  with different capitals, punctuation anywhere, or digits added at the
+  start or end
 - on the common-password list (`Options.PasswordBlocklist`; by default
   the one built into the release, `blocklist.Embedded()`)
 - in Have I Been Pwned (HIBP)'s list of passwords from data breaches,
@@ -77,9 +77,10 @@ store, err := gauntlet.OpenStore(accounts, gauntlet.Options{
 })
 ```
 
-If HIBP cannot be reached, the password is checked against the built-in
-list only, and is checked with HIBP again at the account's next
-sign-in; if it is found there, the person must choose a new password. See [design.md](design.md) §1.3 and
+If HIBP cannot be reached, the password is accepted, since it already
+passed the common-password list, and is checked with HIBP again at the
+account's next sign-in; if it is found there, the person must choose a
+new password. See [design.md](design.md) §1.3 and
 [ADR-0007](adr/0007-common-password-list.md) for how the list is kept
 fresh.
 
@@ -139,8 +140,8 @@ handler := g.Protect(mux) // serve this
 
 ### Audit and logs
 
-- gate sends each completed, failed or refused sign-in to
-  `Config.Audit` as one record: who acted, what happened (`user.login`,
+- gate sends each completed sign-in, each failed one, and each one the
+  unusual-sign-in rules refuse to `Config.Audit` as one record: who acted, what happened (`user.login`,
   `user.login_failed`, `user.login_refused`, `account.locked` and so
   on), which account it concerned, and a detail line that includes the
   client address. nil means no audit.
@@ -176,15 +177,15 @@ With passkey sign-in on, a browser keeps offering a passkey its owner
 has removed, and every try is refused. gauntlet can tell you when this
 has happened, so the frontend can tell the browser to stop.
 
-- **When it happens.** Someone signs in with a passkey that belongs to
-  an account of this application, but the account no longer holds that
-  passkey.
+- **When it happens.** Someone signs in with a passkey that names one of
+  this application's accounts, but that account holds no passkey with
+  that ID (usually because its owner removed it).
 - **What gauntlet does.** The `401` from `POST /api/auth/login/passkey`
   carries an `unknownCredential` field (#92,
   [errors.md](api/errors.md#invalid-credentials)). The same happens at
   `POST /api/auth/reauthenticate`, when the refused passkey names the
-  timed-out session's own account and that account no longer holds it,
-  so the resume prompt can drop it too.
+  timed-out session's own account and that account holds no passkey
+  with that ID, so the resume prompt can drop it too.
 - **What you do.** Pass the value of that field, unchanged, to
   `PublicKeyCredential.signalUnknownCredential()`, and the browser or
   password manager drops the passkey from its list.
@@ -197,8 +198,9 @@ has happened, so the frontend can tell the browser to stop.
   the passkey by hand in the browser's or password manager's settings,
   then signing in another way.
 - The browser deletes the passkey for good. So gauntlet reports a
-  passkey as unknown only when the account no longer holds it, never
-  when it still does, even if that passkey cannot sign in here today.
+  passkey as unknown only when the account holds no passkey with that
+  ID, never when it still holds it, even if that passkey cannot sign in
+  here today.
 
 Passkeys are scoped to the hostname, not the port or path. Two
 applications on one hostname, on two ports or two paths, or anything on
@@ -341,8 +343,9 @@ g, err := gate.New(cfg, gate.Deps{ /* ... */ SignIns: signIns})
 ## Record the sign-in country
 
 To record which country each sign-in came from, run a `geoip.Manager`
-using the country-data provider and access token that the person
-running your app has chosen, and pass its `Country`:
+using the country-data provider and key (an IPinfo access token, or a
+MaxMind account ID and licence key) that whoever runs your app has
+chosen, and pass its `Country`:
 
 ```go
 countries, err := geoip.New(geoip.Config{Source: geoip.SourceIPinfo, IPinfo: geoip.IPinfoKey{Token: token}, Dir: dataDir + "/geoip", Log: logger})

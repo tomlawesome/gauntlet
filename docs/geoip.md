@@ -14,8 +14,8 @@ file to your server, keeps it up to date, and looks up the sign-in's IP
 address in that file on your own server. **No address is ever sent to
 the provider**; the only request out is the daily check for a new file.
 
-Start it with `go m.Run(ctx)` (it downloads at once and then every
-`Interval`) and call `m.Close()` after `Run` has returned. Without
+Start it with `go m.Run(ctx)` (it checks for a new file at once and
+then every `Interval`) and call `m.Close()` after `Run` has returned. Without
 `Run`, only a file already in `Config.Dir` is used.
 
 The country is looked up once, when the sign-in happens, and stored
@@ -56,7 +56,8 @@ is wrong, correct it and restart the application.
 ## Where the file is kept
 
 Both providers ship their data as an `.mmdb` file: a file listing
-network address ranges and the country each belongs to. You name a folder in `Config.Dir`
+network address ranges and what the provider knows about each (the
+country, or for MaxMind's city file, an approximate location). You name a folder in `Config.Dir`
 (required), and the manager keeps there:
 
 - the last good file, as `maxmind.mmdb` or `ipinfo.mmdb` (or
@@ -146,8 +147,8 @@ What each provider asks for, as checked on 2026-10-04:
   https://www.maxmind.com'.)"
 - **IPinfo**, [IPinfo Lite](https://ipinfo.io/lite), licensed under
   Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0). The licence
-  asks you to credit IPinfo: place a link to IPinfo wherever the data is
-  shown. IPinfo's own words: "The
+  requires credit to IPinfo; IPinfo says a link to IPinfo on the website
+  or application that uses the data is enough. IPinfo's own words: "The
   attribution requirements can be met by giving our service credit as
   your data source. Simply place a link to IPinfo on the website,
   application, or social media account that uses our data."
