@@ -13,10 +13,11 @@ All notable changes to this project are documented in this file.
   `StillSignedIn` returns nil while it would, and otherwise a
   `*Refusal` with the status and class `Protect` would answer. It is
   `Protect`'s own decision, but it changes nothing: the session's expiry
-  does not slide, no `LastUsedAt` moves, nothing is revoked and nothing
-  is logged, so an open tab now idles out at the idle limit (an hour by
-  default) after the person's last real request instead of staying
-  signed in until the ceiling (a day). The two
+  does not slide, no `LastUsedAt` moves, nothing is revoked and none of
+  `Protect`'s refusals is logged, so an open tab now signs out at the
+  idle limit given to `NewSessionStore` (at most an hour) after the
+  person's last real request, instead of staying signed in until the
+  session's maximum lifetime (at most a day). The two
   `Peek` methods are the read-only checks beside `Validate` and
   `Authenticate` it is built on.
 

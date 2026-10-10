@@ -298,8 +298,9 @@ fixtures; `Config.Now` is the clock; a handler that calls
 - `gate/protect.go`: extract `decide(r, now, touch)` returning
   `(verdict{user, token, kind}, *refusal{status, class, detail, door,
   warnKind, warnMsg})`; `Protect` becomes decide-then-write-or-dispatch;
-  `sessionUser` gains the `touch` flag (its two other callers,
-  `handleSession` and `cookie.go`, keep `true`). Add `StillSignedIn`
+  `sessionUser` gains the `touch` flag (its other callers, in
+  `session_handler.go`, `logout_handler.go` and `oidc_handler.go`,
+  keep `true`). Add `StillSignedIn`
   and `Refusal` in a new `gate/stillsignedin.go`.
 - `docs/using.md`: "Long-lived responses" under "Build the HTTP layer",
   with the tick loop, the `errors.As` on `*gate.Refusal`, and the
