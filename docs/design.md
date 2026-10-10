@@ -190,7 +190,8 @@ compiles the library in.
   that only the app's own frontend sends defeats it.
 - **Eviction is not an interface.** `evict.DownTo` is a generic function
   with no state; the callers inside the module are `LoginLimiter` (the
-  attempts and address-ban maps) and `SignInHistory`'s fold index. An
+  attempts and address-ban maps) and `SignInHistory`'s fold index (the table that merges repeated
+  sign-ins from one source into a single history row). An
   interface over a plain function with no stored state would add code
   and no benefit. It is copied into
   `internal/evict` so the module owns one implementation; mikroview keeps
@@ -731,7 +732,8 @@ reset pass, the last reservation that spanned requests, is retired,
     sign-in that cannot complete; `login/factor`'s own count stays the
     authority. `LoginLimiter.UnlockLogin` empties both counts.
 - `login/prove/begin` does the same, on the same counts (#80). A
-  sign-in waiting for an extra step carries a short-lived sealed cookie
+  sign-in held by the unusual-sign-in check, which asks for a passkey,
+  carries a short-lived sealed cookie
   (the ticket) showing the password was right, but it must not be usable
   to start unlimited passkey prompts before it expires, nor to ask for a
   passkey once the account is locked or disabled. `login/prove`'s own
@@ -1222,8 +1224,10 @@ is one log line; the response's `notified` means asked, not delivered.
   - Starting a prompt does not use up the password re-check allowance.
     Each start is counted on its own per-account limit
     (`LoginLimiter.ReserveStepUpBegin`, in the account map, so no flood
-    of addresses can reset it) and not given back when the prompt is
-    abandoned (the rule above). It is 429 when the limit is full.
+    of addresses can reset it) and not given back, even when the prompt is
+    abandoned. So an abandoned prompt costs no re-check attempt (see the
+    `step-expired` case below), but it does use up one start. It is 429
+    when the limit is full.
   - The route then takes `password` and `assertion` (`adminAssertion`
     on create) in place of the code -- exactly one of the two, else
     400.
@@ -1241,7 +1245,9 @@ list carry `heldForPasskey`, and the audit detail says "held for a
 passkey". The last admin can be neither demoted nor deleted (409, class
 `last-admin`), and the same holds for the last admin with a local
 password while the others sign in only through SSO; an admin may demote
-themselves while another remains, and cannot delete their own account. A
+themselves while another admin remains (and, if they hold a local
+password, while another admin holds one too), and cannot delete their own
+account. A
 downgrade ends the account's sessions (the store writes
 `SessionsEndedAt`; the handler drops the in-memory ones). Audited as
 `user.role_changed` with actor, from and to; `Config.Notices` gets
@@ -1873,7 +1879,7 @@ once, which is the price of sharing and the reason fixes land once.
 
 | Pitfall | Mikroview today | Module keeps |
 |---|---|---|
-| Session fixation / predictable ids | 128 random bits from Go's secure random source (`crypto/rand`) as the id, new id per login, never reused | same; if that source fails, `newID` stops the program rather than make weaker ids |
+| Session fixation / predictable ids | 128 random bits from Go's secure random source (`crypto/rand`) as the id, new id per login, never reused | same; if that source fails, `newID` panics rather than make weaker ids |
 | Sessions that never expire | sliding 24h idle + 7-day ceiling from `IssuedAt` (#294) | both, enforced in `Validate`, not by readers of `ExpiresAt`; `gate.New` refuses an idle timeout above 1h or a ceiling above 24h (#51). Changed (#71): a session idle past 1h but inside the ceiling can be resumed with the password alone, under a new ID and the same ceiling (`POST /api/auth/reauthenticate`) |
 | Session survives a password reset from another process | `IssuedAt < PasswordChangedAt` → revoke, checked per request | kept in `gate.Protect` as `IssuedAt < SessionCutoff()`; the CLI in §2.5 depends on it. Changed (#28): a password change, a reset code and an SSO link record the end in `SessionsEndedAt`, and only the first two move `PasswordChangedAt`, which the login limiter reads as a password change |
 | CSRF | `SameSite=Lax` + `X-Requested-With` on unsafe methods; bearer requests bypass CSRF because cookies are not involved | kept; header value per app |
@@ -1941,7 +1947,7 @@ no entry in the OSV or Go vulnerability databases (re-checked
 | Pitfall | Module does |
 |---|---|
 | A flood of failed attempts becomes a flood of writes | attempts change memory only; one writer saves the whole document at most every 5 s while a new row is unsaved and every 60 s while only counts changed; `Flush`/`Close` at shutdown. A crash loses at most that much; the audit sink has every attempt |
-| A flood of attempts fills the history | repeated identical attempts within 10 minutes become one row with a count (`count`, `until`); at most 100 new rows for failures per 10 minutes, and any more are summed in one `unrecorded` row; successes and passed password steps are always recorded. So 100,000 made-up names in 10 minutes make 101 rows |
+| A flood of attempts fills the history | repeated identical attempts within 10 minutes become one row with a count (`count`, `until`); at most 100 new rows for failures in each 10-minute window (windows start on the clock: :00, :10, ...), and any more in that window are summed in one `unrecorded` row; successes and passed password steps are always recorded. So 100,000 made-up names inside one window make 101 rows |
 | The history grows without end | the newest `MaxRows` kept, 10,000 by default (owner, 2026-10-02), at most 50,000, oldest dropped; `total` and `since` show how full and how far back. ~340 B a row typically, ~645 B worst: 6.5 MB of JSON, 8.6 MB sealed in a text column, at the default |
 | A save holds up sign-ins | rows are copied under the lock; encode, seal and save run outside it (about 60 ms for a full worst-case history), one at a time |
 | A password typed into the username box is kept | a name matching no account is masked before it is stored, audited or logged (`MaskUnknownUsername`); probe names in full |
@@ -1994,7 +2000,8 @@ no entry in the OSV or Go vulnerability databases (re-checked
 
 ### Fail-closed list
 
-If the accounts file cannot be read, the server will not start. An
+If the stored accounts cannot be parsed (or were written by a newer
+version), the server will not start. An
 account with an unknown role gets no access at all. A token of an unknown
 kind never authenticates. A missing claim is refused. If a backend write
 fails, the in-memory change is rolled back and the error returned (every mutating `Store` method in mikroview does this;
@@ -2032,7 +2039,7 @@ replacing one.
   next request, undoing later changes and reviving revoked tokens, with
   nothing logged.
 - But a service that is stopped and restarted accepts an older copy
-  without warning: the counter is not remembered once the process
+  without warning: the save number is not remembered once the process
   exits. So restore only a copy you mean to go back to.
 
 ## 5. Build plan (history, complete for gauntlet)
