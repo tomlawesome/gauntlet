@@ -37,7 +37,8 @@ description or a commit message.
 - Where gauntlet's code is copied from mikroview (the application
   gauntlet's auth code was factored out of; see
   [ADR-0001](docs/adr/0001-shared-auth-module.md)), the copied code
-  keeps mikroview's original tests; we do not write new ones for it. See
+  keeps mikroview's original tests rather than being re-tested from
+  scratch; only behaviour that differs from mikroview gets a new test. See
   [docs/testing.md](docs/testing.md).
 
 ## Secrets

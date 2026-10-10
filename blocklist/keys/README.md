@@ -4,8 +4,8 @@ Each `*.pub` file here is the public half of a signing key (Ed25519, a
 standard signature method) that signs the common-password list (#52,
 [ADR-0007](../../docs/adr/0007-common-password-list.md)). The signing
 key is a pair: the private half makes a signature, the public half
-checks it. The file is in PEM, a standard text format for public keys
-that `openssl` and most tools can read, as `pwlist keygen` writes it.
+checks it. The file is a PEM `PUBLIC KEY` block (PEM is a standard text format for
+keys that `openssl` and most tools can read), as `pwlist keygen` writes it.
 
 A signature proves the list came from the holder of the private key and
 was not changed since. gauntlet is built with only these public keys

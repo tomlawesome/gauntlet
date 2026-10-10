@@ -2,9 +2,9 @@
 
 A shared Go authentication library for the applications that embed it:
 local accounts and roles, sessions, API tokens, single sign-on through
-OIDC (OpenID Connect), the second step every account must have when
-signing in -- a code from an authenticator app (TOTP) or a passkey, with
-recovery codes -- and the
+OIDC (OpenID Connect), the second factor every account with a password
+must hold -- an authenticator app (TOTP) or a passkey, with recovery
+codes -- and the
 HTTP layer that checks all of that in front of an application's own
 routes. One implementation, so a security fix lands once.
 
@@ -27,8 +27,8 @@ release added.
   provider's groups when the application asks for that.
 - Second factors: an authenticator app (TOTP) and passkeys, with
   recovery codes. A passkey (a sign-in key stored on your phone or
-  computer, unlocked by fingerprint or PIN) can also replace the
-  password entirely.
+  computer, unlocked by fingerprint or PIN) can also be used to sign in
+  without typing the password (the account still keeps its password).
 - Lockout after repeated failures, and a chosen response to an unusual
   sign-in: a new browser, a new country, or a place too far from the last
   sign-in to have travelled to in the time between.
@@ -45,18 +45,20 @@ gauntlet leaves three things to the application:
 
 - **Storage.** gauntlet keeps each store's data (accounts, tokens,
   sign-in history) in memory and saves it whole, as one block of JSON
-  text, after every change. It saves through a `persist.Backend` the
+  text. The accounts and token stores save after every change; the
+  sign-in history saves in the background within a minute. It saves through a `persist.Backend` the
   application writes over its own storage: a file, a database row.
   `persist.Encrypt` encrypts the data before the backend sees it;
-  `OpenStore` refuses a backend that would save it unencrypted. Two
+  `OpenStore` (accounts) and `OpenSignInHistory` refuse a backend that
+  would save their data unencrypted. Two
   backends ship:
   `persist.NewEncryptedFileBackend` for a single file, and
   `persist.NewMemory()` for tests.
 - **Logging.** Every store's options take a `*slog.Logger`; nil
   discards.
-- **The clock.** Every method that needs the current time takes it as an
-  argument (a `time.Time`), so the application supplies it and tests can
-  use a fixed time.
+- **The clock.** Most store methods that need the current time take it as
+  an argument (a `time.Time`), and gate reads it from `Config.Now`, so the
+  application supplies it and tests can use a fixed time.
 
 ## A minimal sketch
 

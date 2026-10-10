@@ -30,8 +30,8 @@ is in [docs/design.md](docs/design.md) section 4 and
   marked `SameSite=Lax`, so browsers do not send it with requests
   started by other websites, except when someone clicks a link to your
   app (a plain page load, a GET request). As a second guard, every
-  request that changes something must also carry a special header that
-  another website cannot add. Never make an application change data in
+  request other than a GET or HEAD must also carry a header
+  (`X-Requested-With`) that another website cannot add. Never make an application change data in
   response to a GET. Together these block cross-site request forgery (a
   hostile page making your browser act for you).
 - **Single sign-on (OIDC, OpenID Connect)**:
@@ -45,13 +45,14 @@ is in [docs/design.md](docs/design.md) section 4 and
   - An account is matched by the provider and its own user ID, never
     by email address.
   - A self-hosted sign-in provider or a single Entra tenant (one
-    organisation's Microsoft directory) is accepted. Known shared
-    providers, where anyone can make an account, are refused when the
-    app starts, so they cannot be switched on by a setting: Google
-    unless the policy restricts it to your own Google domain (the `hd`
-    setting, [ADR-0014](docs/adr/0014-shared-issuers.md)), plus Apple,
-    Microsoft personal accounts and Entra's common endpoints. Any other
-    public provider is not detected, so the policy must restrict it.
+    organisation's Microsoft directory) is accepted. Google is
+    accepted only when the policy pins your Google domain (the `hd`
+    claim, [ADR-0014](docs/adr/0014-shared-issuers.md)). Apple,
+    Microsoft personal accounts and Entra's shared endpoints (`common`,
+    `organizations`, `consumers`), where anyone can make an account, are
+    always refused when the app starts. Any other public provider is not
+    recognised as shared, so nothing stops it at start-up: the policy
+    must restrict who may sign in.
 - **API tokens**: stored only as a SHA-256 hash. A token is accepted
   only by the handler registered for its kind, so a read-only (API)
   token never reaches the ingest handler, and the other way round. A
@@ -64,7 +65,8 @@ is in [docs/design.md](docs/design.md) section 4 and
   failures is blocked for 24 hours.
 - **Unusual sign-ins**: a sign-in from a new browser, a new country, or
   a place too far from the last sign-in to have travelled to in the time
-  between can be allowed but noted in the history, asked for an extra
+  between can be allowed but marked on the session, the sign-in history and the
+  audit record, asked for an extra
   code or passkey, or blocked -- the application chooses. A lone
   admin refused this way can get back in with a one-time code written
   to the server's log.
