@@ -341,8 +341,10 @@ Low-severity findings from the v0.3.0 audit (#80):
   country file and its `state.json` (`geoip`) keep their owner and group
   when a refresh replaces them, as the account store's file has since
   #79: a refresh run as another user, such as a CLI with sudo, no
-  longer leaves files the server cannot read or replace. All three now
-  share one writer.
+  longer leaves files the server cannot read or replace. The list and
+  `state.json` use the module's shared crash-safe writer; the country
+  file streams to its own temp file and takes the old file's owner and
+  group through the same package (`atomicfile.KeepOwner`).
 - The Unicode line and paragraph separators (U+2028, U+2029), which a
   few mail and chat clients show as a new line, are now treated like
   control characters wherever those are: dropped from a session's and a
