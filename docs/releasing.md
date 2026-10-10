@@ -39,8 +39,8 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
    open a merge request from `dev` to `preview`. Its pipeline runs every
    lint and test job, and `preview`'s own pipeline runs them all again
    once it lands. `preview` is the last stop before a release.
-   It has no jobs of its own yet, so it runs the same code-style checks
-   (lint) and tests that `dev` runs. Nothing is ever pushed straight to `preview` or `main`.
+   It has no jobs of its own yet, so its pipeline runs the same full set
+   of lint and test jobs as `dev`'s. Nothing is ever pushed straight to `preview` or `main`.
 
 4. Once `preview`'s pipeline is green, open a merge request from
    `preview` to `main`. Merging it puts a merge commit on `main`, and
@@ -110,10 +110,11 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
    - a 404 means the tag hasn't reached GitHub yet -- give the sync job
      more time, or check that it ran.
 
-7. Bring `main` back into the other branches (a back-merge). Merging
-   into `main` created a merge commit that `preview` does not have, so
-   `preview` is now behind `main`, and GitLab would show the branches as
-   differing on the next promotion. Open a merge request from `main` to
+7. Bring `main` back into the other branches (a back-merge). Each
+   promotion's merge commit lands only on the branch that received it:
+   `main` now has one that `preview` lacks, and `preview` has one that
+   `dev` lacks, so GitLab would show the branches as differing on the
+   next promotion. Open a merge request from `main` to
    `preview` and merge it. Then do the same from `preview` to `dev` if
    GitLab shows `dev` as behind `preview`. Neither merge changes any
    files.
@@ -148,8 +149,8 @@ change them.
 
 `blocklist.Embedded()` and `blocklist.Refresher` provide the 10,000
 most common passwords in the Pwned Passwords list from Have I Been
-Pwned (HIBP), stored as SHA-1 hashes (fixed-length scrambled
-fingerprints, so the passwords themselves are not written out) (#52,
+Pwned (HIBP), stored as SHA-1 hashes (fixed-length one-way
+fingerprints, so the list does not contain the passwords themselves) (#52,
 [ADR-0007](adr/0007-common-password-list.md); an ADR is an
 architecture decision record, kept in docs/adr/). The monthly
 `blocklist` pipeline schedule rebuilds the list from HIBP, signs it,
@@ -335,9 +336,9 @@ is the first real list.
 ### Trying the build without publishing
 
 From any branch, [run a pipeline](https://gitlab.tomlawson.io/ai/gauntlet/-/pipelines/new)
-with the variable `BLOCKLIST_SAMPLE` = `true`. `blocklist:build` runs
-HIBP splits its hashes into 1,048,576 groups, each sharing the same
-first 5 characters. The sample run fetches only the first 2,048 groups.
+with the variable `BLOCKLIST_SAMPLE` = `true`. HIBP splits its hashes
+into 1,048,576 groups, each sharing the same first 5 characters. In a
+sample run `blocklist:build` fetches only the first 2,048 groups.
 That is 1/512 of a full run, so roughly 40-80 MB in all. Its output is
 stamped as a sample, which signing, publishing and every application
 refuse.
@@ -425,8 +426,8 @@ create a schedule: description `renovate`, target branch `dev`, cron
 variable `RENOVATE` = `true`. The time matters: `renovate.json` lets
 Renovate open merge requests only between 05:00 and 06:15 London time
 on a Monday, so a run at any other time finds nothing it may do. The
-variable switches on the `renovate` job. Without it, no job runs in a
-scheduled pipeline.
+variable switches on the `renovate` job, and it is the only job this
+schedule's pipeline runs.
 
 Then create the daily schedule for security fixes: description
 `renovate-security`, target branch `dev`, cron `37 6 * * *` with cron
@@ -452,5 +453,5 @@ merge requests.
 If the `renovate` job fails as soon as it starts, just after an update
 to Renovate's own image was merged, undo that merge. Then edit
 `renovate.json`: in the rule for `renovate/renovate`, add the bad
-version to the `allowedVersions` setting (the pattern that says which
-versions may be offered), so Renovate stops proposing it.
+version to the `allowedVersions` pattern. It starts with `!`, so every
+version it matches is skipped, and Renovate stops proposing it.
