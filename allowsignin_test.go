@@ -41,13 +41,13 @@ func TestAllowNextSignInRecordsTheWindow(t *testing.T) {
 	}
 
 	end := u.SignInAllowedUntil
-	if !u.SignInAllowed(end.Add(-time.Nanosecond)) {
+	if !u.SignInAllowanceLive(end.Add(-time.Nanosecond)) {
 		t.Error("SignInAllowed is false just before the window ends")
 	}
-	if u.SignInAllowed(end) {
+	if u.SignInAllowanceLive(end) {
 		t.Error("SignInAllowed is true at the instant the window ends")
 	}
-	if (&User{}).SignInAllowed(at) {
+	if (&User{}).SignInAllowanceLive(at) {
 		t.Error("an account with no allowance is allowed")
 	}
 

@@ -39,7 +39,7 @@ All notable changes to this project are documented in this file.
   holder is told through the new `NoticeSignInAllowed`
   (`AccountNotice.SignInAllowed`, `SignInAllowedDetail{Until}`). New
   `Store.AllowNextSignIn`, `User.SignInAllowedUntil`,
-  `User.SignInAllowed` and `SignInAllowanceLifetime`. Additive.
+  `User.SignInAllowanceLive` and `SignInAllowanceLifetime`. Additive.
 
 ### Security
 
@@ -209,6 +209,20 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **`docs/api/auth.yaml` re-checked line by line against the code**
+  (#97). About a hundred statements that were wrong, missing or
+  misleading are corrected: which routes set, read or clear each
+  cookie, when attempts are counted and given back, what each status
+  answers, and what the session, passkey and sign-in-history fields
+  hold. **Removed** from the document, as responses the code can never
+  send (a one-off before any application uses gauntlet; ADR-0002 is
+  otherwise additive): `500` on `POST /api/auth/login/confirm` and
+  `POST /api/auth/login/escape`, and `503` `not-persisted` on `PUT
+  /api/auth/users/{id}/role`, `POST /api/auth/users/{id}/reset-password`
+  and `POST /api/auth/users/{id}/allow-sign-in` (now `503`
+  `setup-required` only). Added: `404` on `POST /api/auth/users`, `409`
+  on `DELETE /api/auth/totp`.
+
 - **Token names and device IDs count characters, not bytes** (#90).
   `MaxTokenNameLen` and `MaxDeviceIDLen` (64) now count characters, as
   usernames, passkey names and the sign-out reason already did, and as
@@ -255,12 +269,32 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Ten `auth.yaml` descriptions were cut short** (#98). An unquoted
+  value holding a space then `#` (as in "`Config.AdminPasskey`, #82")
+  ends at the `#`, which YAML reads as a comment, so OpenAPI readers saw
+  half a sentence; v0.3.0 shipped nine. They are quoted, and a contract
+  test now fails on any new one.
+- **Four places where the code broke its own contract** (#99). An
+  account with no local password gets `409` "set a local password
+  first" at `DELETE /api/auth/totp`, `DELETE /api/auth/passkeys/{id}`
+  and `POST /api/auth/recovery-codes`, as at every other re-check route,
+  instead of a counted `401`. A country from `Config.Country` is kept
+  only as two letters, upper-cased, else dropped, matching the
+  documented pattern. `POST /api/auth/login/factor` answers `400` to
+  both `code` and `assertion` or neither, before counting anything.
+  An admin clearing the authenticator app or passkeys of an account
+  deleted mid-request gets `404`, not a `500` naming the internal error.
 - **An account deleted mid-request is told to sign in, not given a
   500** (#95). Passkey register-finish, authenticator-app confirm and
   recovery-code regenerate answered a store write that found the
   account gone with 500 `server-error`; they now give the same 401
   `sign-in-required` "sign in first" they give when it is gone at the
   start of the request.
+- **A sign-in an admin allowed is audited as an allowance, not a
+  proof** (#97). Its `user.login` line said "via confirmation code" or
+  "via passkey proof", and an SSO sign-in lost "via sso"; it now says
+  "via admin allowance", even when the session loses its signals to a
+  failed remember write.
 
 Low-severity findings from the v0.3.0 audit (#80):
 
@@ -307,8 +341,10 @@ Low-severity findings from the v0.3.0 audit (#80):
   country file and its `state.json` (`geoip`) keep their owner and group
   when a refresh replaces them, as the account store's file has since
   #79: a refresh run as another user, such as a CLI with sudo, no
-  longer leaves files the server cannot read or replace. All three now
-  share one writer.
+  longer leaves files the server cannot read or replace. The list and
+  `state.json` use the module's shared crash-safe writer; the country
+  file streams to its own temp file and takes the old file's owner and
+  group through the same package (`atomicfile.KeepOwner`).
 - The Unicode line and paragraph separators (U+2028, U+2029), which a
   few mail and chat clients show as a new line, are now treated like
   control characters wherever those are: dropped from a session's and a

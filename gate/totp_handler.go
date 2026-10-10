@@ -298,6 +298,9 @@ func (g *Gate) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refuseWithoutLocalPassword(w, user) {
+		return
+	}
 	var req totpDeleteRequest
 	if err := g.decodeJSONBody(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, "invalid request body", nil)
@@ -390,6 +393,10 @@ func (g *Gate) handleTOTPAdminClear(w http.ResponseWriter, r *http.Request) {
 		// of a removal that did not happen.
 		if errors.Is(err, gauntlet.ErrNoTOTP) {
 			writeJSON(w, http.StatusOK, map[string]any{"username": target.Username, "cleared": false})
+			return
+		}
+		if errors.Is(err, gauntlet.ErrUserNotFound) { // deleted since the read above
+			writeProblem(w, http.StatusNotFound, classNotFound, "this account was deleted before the request finished", nil)
 			return
 		}
 		g.writeAuthError(w, r, err, http.StatusInternalServerError, classServerError)

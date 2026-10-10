@@ -79,8 +79,8 @@ owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. For v0.2.0
 (owner 2026-09-30): `golang.org/x/exp/cmd/apidiff` in CI only and
 `github.com/getkin/kin-openapi` v0.149.0 (MIT) in tests only, both for
 #22 and ADR-0002; `github.com/go-webauthn/webauthn` v0.18.2 in `passkey/`
-for G8 (#20), and in its test fake (`internal/passkeytest`) and the
-contract module. For #54 (owner 2026-10-04):
+for G8 (#20), and in its test fake (`internal/passkeytest`), in gate's test
+files and in the contract module. For #54 (owner 2026-10-04):
 `github.com/oschwald/maxminddb-golang/v2` v2.6.0 (ISC) in `geoip/` only,
 to read MaxMind and IPinfo country files, and `github.com/maxmind/mmdbwriter`
 v1.2.0 (Apache-2.0 or MIT) in `geoip/` tests only, to build their fixture

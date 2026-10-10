@@ -481,7 +481,7 @@ func (g *Gate) judgeSignIn(r *http.Request, user *gauntlet.User, method gauntlet
 	if v.action == UnusualSignInProve {
 		v.action = g.resolveProve(user, method)
 	}
-	if v.stopsSignIn() && user.SignInAllowed(now) {
+	if v.stopsSignIn() && user.SignInAllowanceLive(now) {
 		v.allowed = true
 	}
 	return v
@@ -577,6 +577,11 @@ func (g *Gate) completeSignIn(w http.ResponseWriter, r *http.Request, user *gaun
 	if signals == 0 {
 		if v.escape {
 			g.recordSignInNote(r, ev, res, escapeUsedNote, now)
+			return nil
+		}
+		// Without the note the record would read as a proof the user gave.
+		if v.allowed {
+			g.recordSignInNote(r, ev, res, allowanceUsedNote, now)
 			return nil
 		}
 		g.recordSignIn(r, ev, res, now)

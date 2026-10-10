@@ -16,19 +16,19 @@ carries `Content-Type: application/problem+json`,
 ```
 
 - **`type`** is a permanent link into this file's anchors, one per
-  class below. A frontend branches on it -- never on `detail`'s text,
-  which may be reworded at any time, and never on the status code
-  alone, since more than one class shares a status.
+  class below. A frontend should decide what to do by checking `type`
+  -- never `detail`'s text, which may be reworded at any time, and
+  never the status code alone, since more than one class shares a
+  status.
 - **`title`** and **`status`** are fixed per class; `title` is never
   more useful than `type` and exists only because RFC 9457 requires it.
 - **`detail`** is free text giving the route's own reason. It is absent
   when a class has nothing more specific to say than its `title` (the
-  two `about:blank` cases below, and a handful of plain 404s).
+  two `about:blank` cases below, and a few plain 404s).
 - Two classes add an extra field beyond those four:
-  `partially-completed` adds `username` (it also sent `totpActive`
-  before #58), and `invalid-credentials` adds `unknownCredential` on two
-  routes (#92). Each class's own section says more. No other class has
-  any, and none is planned.
+  `partially-completed` adds `username`, and `invalid-credentials` adds
+  `unknownCredential` on two routes (#92). Each class's own section says
+  more. No other class has any, and none is planned.
 
 **`about:blank`.** A request whose path matches no route, or matches
 one only under a different method, gets this generic shape instead:
@@ -47,18 +47,57 @@ cached or hard-coded. A class that no longer applies is marked
 returned in; its anchor stays, and this file never moves to a
 different path.
 
-**Security: identical outcomes, identical bodies.** A handful of pairs
-of genuinely different causes -- an unknown username versus a wrong
+**Security: identical outcomes, identical bodies.** A few pairs of
+genuinely different causes -- an unknown username versus a wrong
 password, say -- answer with exactly the same class *and* the same
 `detail` text, on purpose: telling them apart would let an attacker
 find out which part of a guess was wrong, such as whether a username
 exists. Each pair is named under the class it shares, below.
 
+**Words used on this page.** Each has this meaning everywhere below.
+Short route names such as `login/factor` are under `/api/auth/`.
+
+- **Route that needs a session:** every route except the few that must
+  work without one: `GET /api/auth/session`, `register`, `login`,
+  `logout`, the other sign-in steps (`login/factor`,
+  `login/factor/begin`, `login/passkey/begin`, `login/passkey`,
+  `login/confirm`, `login/prove/begin`, `login/prove`, `login/escape`),
+  `unlock`, `reauthenticate`, the single sign-on redirects
+  `GET /api/auth/oidc/login` and `GET /api/auth/oidc/callback`, the
+  application's own `/api/healthz`, and any path the application adds
+  with `Gate.Exempt`.
+- **Door:** a hold `gate.Protect` puts on a signed-in session until the
+  account does one thing: set a new password, add a second factor, or,
+  for an admin, register a passkey. While a door holds, every route
+  that needs a session answers 403, except the few that do that one
+  thing. There are three: `must-change-password`, `must-enrol-passkey`
+  and `must-enrol-factor`. Each one's 403 carries an `X-Auth-Gate`
+  header naming it.
+- **Second factor:** something beside the password that proves the
+  person: a TOTP code or a passkey, with recovery codes as the backup.
+- **TOTP:** the six-digit codes an authenticator app shows.
+- **Re-check:** a signed-in person proving again who they are, on the
+  request itself, before a risky action. On most routes it is the
+  password alone. A **step-up** is the stricter re-check: the password
+  plus a second factor (a TOTP code, a recovery code or a passkey).
+- **Passkey ceremony:** the two-step exchange where the server sends a
+  challenge and the browser answers it with the passkey; the server
+  keeps its half in a short-lived cookie.
+- **User handle:** the account ID a passkey carries, a random 128-bit
+  value that only the passkey's holder has.
+- **Bearer token:** an API token, sent as `Authorization: Bearer
+  <token>`.
+- **Window:** the time period the login limiter counts attempts in. The
+  application sets it, with the number of attempts allowed, when it
+  creates the limiter (`gauntlet.NewLoginLimiter(threshold, window)`).
+- **Single sign-on (SSO):** signing in through an outside identity
+  provider instead of with a local password.
+
 ## invalid-credentials
 
 - **Status:** 401. **Title:** Invalid credentials.
 - A credential sent with the request -- a password, a one-time code, a
-  bearer token, a passkey -- was wrong, or has already been used.
+  bearer token or a passkey -- was wrong, or has already been used.
   Carries `WWW-Authenticate: Bearer realm="gate"` (RFC 6750 §3), as
   every 401 here does.
 - Returned by:
@@ -67,7 +106,7 @@ exists. Each pair is named under the class it shares, below.
   |---|---|---|
   | `POST /api/auth/register` | Wrong or missing setup code | "invalid setup code -- the current one is in the server's log" |
   | `POST /api/auth/login` | Wrong username or password | "invalid username or password" |
-  | `POST /api/auth/login/factor` | Wrong authenticator code or recovery code | "invalid code" |
+  | `POST /api/auth/login/factor` | Wrong TOTP code or recovery code | "invalid code" |
   | `POST /api/auth/login/factor` | Passkey refused | "that passkey couldn't be verified -- use another way in" |
   | `POST /api/auth/login/passkey` | Passkey refused, signing in with a passkey alone (#77) | the same passkey text |
   | `POST /api/auth/reauthenticate` | Wrong password, or passkey refused, for the timed-out session's account (#71, #77) | "incorrect password", or the passkey text |
@@ -76,74 +115,81 @@ exists. Each pair is named under the class it shares, below.
   | `POST /api/auth/login/escape` | Wrong escape code (#66) | "invalid escape code" |
   | `POST /api/auth/unlock` | Wrong admin username or unlock code | "invalid username or unlock code -- the current code, if any, is in the server's log" |
   | `POST /api/auth/password` | Wrong current password | "current password is incorrect" |
-  | `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST /api/auth/recovery-codes`, `POST /api/auth/passkeys/register/begin`, `DELETE /api/auth/passkeys/{id}`, `POST /api/auth/oidc/link`, `POST /api/auth/logout-all` (an account with a local password) | Wrong password at the re-check of the caller's own password | "incorrect password" |
-  | `POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`, `DELETE /api/auth/users/{id}`, `DELETE /api/auth/users/{id}/totp`, `DELETE /api/auth/users/{id}/passkeys` | Wrong password at the re-check of the calling admin's own password (#72) | "incorrect password" |
-  | `POST /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant the admin role (#67); `POST /api/auth/users/{id}/unlock` on the caller's own account | Wrong password, second-factor code or passkey (#82) at the caller's re-check | "incorrect password or code" |
-  | Any route, at `gate.Protect` | A bearer token that matches no registered kind, is revoked or expired, or an `Authorization` header that is not a well-formed `Bearer <token>` | "invalid or revoked token" |
+  | `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST /api/auth/recovery-codes`, `POST /api/auth/passkeys/register/begin`, `DELETE /api/auth/passkeys/{id}`, `POST /api/auth/oidc/link`, `POST /api/auth/logout-all` (an account with a local password) | Wrong password at the re-check | "incorrect password" |
+  | `POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`, `DELETE /api/auth/users/{id}`, `DELETE /api/auth/users/{id}/totp`, `DELETE /api/auth/users/{id}/passkeys`, and `POST /api/auth/users/{id}/allow-sign-in` on another account (#81) | Wrong password at the re-check of the calling admin's own password (#72) | "incorrect password" |
+  | `POST /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant the admin role (#67); `POST /api/auth/users/{id}/unlock` and `POST /api/auth/users/{id}/allow-sign-in` (#81) on the caller's own account | Wrong password, second-factor code or passkey (#82) at the step-up | "incorrect password or code" |
+  | Any route, at `gate.Protect` | A bearer token that matches no token type the application registered with `Gate.Handle`, or that was revoked or has expired; or an `Authorization` header that is not the word `Bearer` (in any capitalisation), one space and the token | "invalid or revoked token" |
 
 - `detail` differs between routes, but within one route it never
   says which of the security pairs below was the cause.
-- **`unknownCredential`** (#92): a refusal at `login/passkey` whose
-  user handle names one of this application's accounts, and that
-  account holds no passkey of that ID -- live, registered under an
-  earlier public URL or held for its recovery codes -- carries one more
-  field, the argument of the browser's
-  `PublicKeyCredential.signalUnknownCredential()` (W3C WebAuthn Level 3
-  section 5.1.10.2):
+- **`unknownCredential`** (#92) is one more field on some refused
+  passkeys. It lets the browser forget a passkey that can never work
+  here:
+  - At `login/passkey`, the browser sends the passkey with its user
+    handle. If the handle names an account here, and that account has
+    no passkey with this ID in any state (active, registered under an
+    earlier web address, or waiting for its recovery codes to be
+    confirmed), the error carries the field.
+  - Pass the field's value to the browser's
+    `PublicKeyCredential.signalUnknownCredential()` (W3C WebAuthn
+    Level 3 section 5.1.10.2), so the browser stops offering a passkey
+    that can never work here:
 
-  ```json
-  "unknownCredential": { "rpId": "home.example", "credentialId": "vI0qOggiE3OT01ZRWBYz5l4MEgU0c7PmAA" }
-  ```
+    ```json
+    "unknownCredential": { "rpId": "home.example", "credentialId": "vI0qOggiE3OT01ZRWBYz5l4MEgU0c7PmAA" }
+    ```
 
-  `rpId` is the relying party's ID, as `login/passkey/begin` gave it;
-  `credentialId` is the assertion's credential ID, base64url with no
-  padding. Hand it to that call so the browser stops offering a passkey
-  that can never work here. A refused `{assertion}` at `reauthenticate`
-  carries the same field under a narrower rule: only when the user
-  handle is the timed-out session's own account and that account holds
-  no passkey of that ID in any form; another account's handle, or one
-  naming no account, is never named there. A handle naming no account
-  here is never named at `login/passkey` either: another application on
-  the same hostname shares the browser's passkeys (an RP ID is a
-  hostname, with no port or path), and naming one of its passkeys would
-  make the browser hide or delete one that still works there. The
-  member shows that the handle named an account here; the handle is a
-  random 128-bit ID that only the passkey's holder has. Every other refusal, on
-  these routes or any other, has no such field. `detail`, `title` and
-  the status are unchanged.
+    `rpId` is the site's hostname (the relying party ID, or RP ID),
+    exactly as `login/passkey/begin` returned it; `credentialId` is the
+    passkey's credential ID, base64url with no padding.
+  - At `reauthenticate`, a refused `{assertion}` carries the field under
+    a narrower rule: only when the user handle is the timed-out
+    session's own account and that account has no passkey of that ID in
+    any state. Another account's handle, or one naming no account, never
+    gets it there.
+  - A handle naming no account here never gets it at `login/passkey`
+    either. Another application on the same hostname shares the
+    browser's passkeys (an RP ID is a hostname, with no port or path),
+    and naming one of its passkeys would make the browser hide or delete
+    a passkey that still works there.
+  - The field tells the caller only that the handle belongs to an
+    account here. That is safe because only the passkey's holder has
+    the handle.
+  - Every other refusal, on these routes or any other, has no such
+    field. `detail`, `title` and the status are the same with or
+    without it.
 - **Security pairs sharing this class and body:**
   - an unknown username and a wrong password at `login`;
-  - a wrong authenticator code and a wrong recovery code at
-    `login/factor`;
+  - a wrong TOTP code and a wrong recovery code at `login/factor`;
   - an unknown admin username and a wrong unlock code at `unlock`;
   - a wrong current setup code and an already-replaced one at
     `register`;
   - at `Protect`, a token of an unknown type, a revoked token, an
     expired token and a malformed `Authorization` header;
   - every refused passkey, at `login/factor`, `login/passkey`,
-    `login/prove`, `reauthenticate` and the step-up re-check (#82): a wrong signature, a clone
-    warning (the passkey's use counter went backwards or did not move,
-    which suggests a copied key; a counter that stays at 0 is normal
-    and accepted), or a passkey removed from the account
-    since the sign-in started. A use counter that could not be saved is
-    the server's failure, not the caller's, and answers `server-error`.
-    The one difference is at `login/passkey` and `reauthenticate`: a
-    passkey the account (at `reauthenticate`, the session's own account;
-    at `login/passkey`, an account here named by the handle) does not
-    hold carries `unknownCredential` and one it holds does not (#92).
-    Telling them apart needs the account's user handle and the
-    credential ID, which only the passkey's holder has, and tells them
-    only that it was removed.
+    `login/prove`, `reauthenticate` and the step-up (#82): a wrong
+    signature, a clone warning (the passkey's use counter went
+    backwards or did not move, which suggests a copied key; a counter
+    that stays at 0 is normal and accepted), or a passkey removed from
+    the account since the sign-in started. A use counter that could not
+    be saved is the server's failure, not the caller's, and answers
+    `server-error`. The one difference is at `login/passkey` and
+    `reauthenticate`: if the account (at `reauthenticate`, the session's
+    own; at `login/passkey`, an account here named by the user handle)
+    does not hold that passkey, the error carries `unknownCredential`;
+    if it does hold it, no (#92). Only the passkey's holder has the user
+    handle and credential ID needed to see this, and all it learns is
+    that the passkey was removed.
 
   None of these is ever split into a more specific class or a more
   specific message.
 
-  Not a pair: at `login/passkey`, an unknown user handle and a real
-  account that does not hold the passkey share the class and message,
-  but only the second carries `unknownCredential` (#92). A passkey is
-  named only for an account here, so a sibling application's on the same
-  hostname is never named; the handle is a random account ID only the
-  passkey's holder has.
+  One difference remains, and it is not a pair: at `login/passkey`, an
+  unknown user handle and a real account without that passkey get the
+  same class and message, but only the second carries
+  `unknownCredential` (#92). The first is left unnamed because it may
+  belong to another application on the same hostname, whose passkey
+  must not be hidden.
 
 ## sign-in-required
 
@@ -152,10 +198,9 @@ exists. Each pair is named under the class it shares, below.
   realm="gate"`.
 - Returned by `gate.Protect` for any route that needs a session, reached
   with no session, an expired one, or one ended since by a password
-  change, a reset, or linking the account to a single sign-on (SSO)
-  login. Every handler's own "sign in first" check answers the same
-  class when reached directly (normally unreachable once mounted under
-  `Protect`, which already refuses the request first).
+  change, a reset, or linking the account to SSO. Each handler also
+  checks for a session itself and gives the same class. You only see
+  that if you use a handler without `gate.Protect` in front of it.
 - `POST /api/auth/reauthenticate` (#71) answers it, with `detail` "sign
   in again", when there is no session it can resume, whatever the
   reason:
@@ -181,22 +226,19 @@ exists. Each pair is named under the class it shares, below.
   account is gone or has lost the factor it needed. Carries
   `WWW-Authenticate: Bearer realm="gate"`. The cookie the step depended
   on, if it had one, is cleared with the response.
-- A passkey *ceremony* is the two-step exchange where the server sends
-  a challenge and the browser answers it with the passkey; the server
-  keeps its half in a short-lived cookie.
 - Returned by:
 
   | Route | What is no longer valid |
   |---|---|
   | `POST /api/auth/login/factor`, `POST /api/auth/login/factor/begin` | The pending-login cookie: missing, expired, tampered with, already used by another request, or the account was deleted or lost every second factor since the password step |
-  | `POST /api/auth/login/factor` (passkey), `POST /api/auth/passkeys/register/finish` | The ceremony cookie: missing, expired, tampered with, already used, or issued for a different step, such as sign-in instead of registration |
+  | `POST /api/auth/login/factor` (passkey), `POST /api/auth/passkeys/register/finish` | The passkey ceremony cookie: missing, expired, tampered with, already used, or issued for a different step, such as sign-in instead of registration |
   | `POST /api/auth/login/passkey`, and the passkey branch of `POST /api/auth/reauthenticate` (#77) | The passkey sign-in ceremony cookie: missing, expired or already used |
   | `POST /api/auth/totp/confirm` | The scanned authenticator-app secret was set more than ten minutes ago |
   | `POST /api/auth/recovery-codes/confirm` | The first second factor waited more than ten minutes for its recovery codes to be confirmed, and has been deleted (#58) |
   | `POST /api/auth/login/confirm` | The confirm cookie: missing, expired, tampered with, already used, issued for a passkey instead of a code, or the account was deleted since (#55) |
-  | `POST /api/auth/login/prove/begin`, `POST /api/auth/login/prove` | The same, issued for a code instead of a passkey; and, at `prove`, an expired or used passkey ceremony (#65) |
+  | `POST /api/auth/login/prove/begin`, `POST /api/auth/login/prove` | The confirm cookie, for the same reasons, except that here the wrong kind is one issued for a code instead of a passkey; and, at `login/prove`, a passkey ceremony that has expired or already been used (#65) |
   | `POST /api/auth/login/escape` | The escape cookie, for the same reasons (#66) |
-  | `POST /api/auth/users`, `PUT /api/auth/users/{id}/role` and `POST /api/auth/users/{id}/unlock`, with a passkey in place of a code (#82) | The step-up ceremony cookie `POST /api/auth/step-up/passkey/begin` set: missing, expired, tampered with or already used. A sign-in's ceremony cookie is never read here |
+  | The step-up routes, with a passkey in place of a code (#82): `POST /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant the admin role; `POST /api/auth/users/{id}/unlock` and `POST /api/auth/users/{id}/allow-sign-in` (#81) on the caller's own account | The step-up ceremony cookie `POST /api/auth/step-up/passkey/begin` set: missing, expired, tampered with or already used. A sign-in's ceremony cookie is never read here |
 
 - A frontend restarts the flow from its first step -- there is nothing
   left for a retry at this step to complete.
@@ -211,10 +253,7 @@ exists. Each pair is named under the class it shares, below.
 - Checked on every method except `GET` and `HEAD` -- so `POST`, `PUT`,
   `PATCH` and `DELETE` -- before any session, role or door check, on
   every route including those that need no session (`register`,
-  `login`, `unlock`, ...). A *door* is a hold that keeps a session away
-  from everything except one required step, such as changing its
-  password; see `must-change-password`, `must-enrol-factor` and
-  `must-enrol-passkey` below.
+  `login`, `unlock`, ...).
 - `detail` is always "missing required header".
 
 ## forbidden
@@ -253,31 +292,33 @@ exists. Each pair is named under the class it shares, below.
   itself (#66, ADR-0011):
   - the response also sets the escape cookie `gate_escape_login`; the
     body is the same either way, so a stranger learns nothing;
-  - the server's log holds a one-time code, which
-    `POST /api/auth/login/escape` takes from the same browser.
+  - a one-time code goes to the server's log (or to the application's
+    `Config.OnEscapeCode` handler, if it set one), and
+    `POST /api/auth/login/escape` takes it from the same browser.
 
   A frontend can offer "have a code from the server log?" on every
-  refused screen. For anyone else, or where nothing could announce a
-  code, the cookie is absent and the form simply fails with
-  `step-expired`.
+  refused screen. For anyone else, or when the server had nowhere to
+  send a code (neither `Config.OnEscapeCode` nor `Config.Log` is set),
+  the cookie is not set and the form simply fails with `step-expired`.
 
 ## must-change-password
 
 - **Status:** 403. **Title:** Password change required.
 - The session is stopped at the forced-password-change door: an
   administrator reset the account, five second-factor steps in a row
-  failed, or a sign-in found the password breached. While the
-  application requires every admin to hold a passkey (#82), an admin
-  with no local password -- an account that signs in through single
-  sign-on and was made an admin -- is held here too, with `detail`
-  "this admin account has no local password -- set one before going
-  any further": a passkey can only be registered on an account with a
-  password, so it sets one first, from a fresh single sign-on. Carries
-  `X-Auth-Gate: must-change-password` -- a frontend matches this header,
-  never the `detail` text, to route the session straight to the one
-  door that gets it out: `POST /api/auth/password`.
-- Returned by `gate.Protect` for every route except `POST
-  /api/auth/password` while the door holds.
+  failed, or a sign-in found the password breached.
+- When the application requires every admin to hold a passkey (#82),
+  an admin with no local password -- one that signs in only through
+  SSO and was made an admin -- is held here too, with `detail` "this
+  admin account has no local password -- set one before going any
+  further". A passkey can only be registered on an account with a
+  password, so this admin must set one first. They do it straight after
+  signing in through SSO again.
+- Carries `X-Auth-Gate: must-change-password`. A frontend matches this
+  header, never the `detail` text, to send the person straight to the
+  one route that gets them out: `POST /api/auth/password`.
+- Returned by `gate.Protect` for every route that needs a session,
+  except `POST /api/auth/password`, while the door holds.
 
 ## must-enrol-factor
 
@@ -285,10 +326,11 @@ exists. Each pair is named under the class it shares, below.
 - The session's account has a local password and no second factor yet
   -- mandatory for every such account (#49). Carries `X-Auth-Gate:
   must-enrol-factor`; a frontend matches this header, never `detail`, to
-  route the session to TOTP enrolment or passkey registration.
-- Returned by `gate.Protect` for every route except the TOTP enrol and
-  confirm routes, the passkey register begin and finish routes and
-  `POST /api/auth/recovery-codes/confirm`, while the door holds.
+  send the person to set up TOTP or to register a passkey.
+- Returned by `gate.Protect` for every route that needs a session,
+  except the TOTP enrol and confirm routes, the passkey register begin
+  and finish routes and `POST /api/auth/recovery-codes/confirm`, while
+  the door holds.
 - A new first factor does not count until the user confirms they saved
   its recovery codes (#58). Until then the session stays at this door.
 - An admin held for a passkey sees `must-enrol-passkey` instead, even
@@ -299,16 +341,18 @@ exists. Each pair is named under the class it shares, below.
 - **Status:** 403. **Title:** Passkey registration required.
 - The application requires every admin to hold a passkey
   (`gate.Config.AdminPasskey` set to `gate.AdminPasskeyRequired`, #82),
-  and this admin account holds none that works at this site's address.
-  An authenticator app does not count, and nor does a passkey
-  registered under an earlier address. Carries `X-Auth-Gate:
-  must-enrol-passkey`; a frontend matches this header, never `detail`,
-  to route the session to passkey registration.
-- Returned by `gate.Protect` for every route except the same ones
-  `must-enrol-factor` admits (passkey register begin and finish, TOTP
-  enrol and confirm, `POST /api/auth/recovery-codes/confirm`), while
-  the door holds. It opens at the next request after a passkey is
-  registered and, for a first factor, its recovery codes confirmed.
+  and this admin has no passkey that works for the site's current web
+  address (passkeys are tied to the address they were made for). TOTP
+  does not count, and nor does a passkey registered under an earlier
+  address. Carries `X-Auth-Gate: must-enrol-passkey`; a frontend
+  matches this header, never `detail`, to send the person to passkey
+  registration.
+- Returned by `gate.Protect` for every route that needs a session,
+  except the same ones `must-enrol-factor` admits (passkey register
+  begin and finish, TOTP enrol and confirm,
+  `POST /api/auth/recovery-codes/confirm`), while the door holds. It
+  opens at the next request after a passkey is registered and, for a
+  first factor, its recovery codes confirmed.
 - Checked after `must-change-password` and before `must-enrol-factor`:
   an admin with no factor at all is told the one thing that opens this
   door. Users and viewers never see it.
@@ -325,8 +369,11 @@ exists. Each pair is named under the class it shares, below.
   parameter that must be present is empty, or a field's value fails a
   rule gauntlet enforces (password length or breach status, username
   shape, role name, a token's name, kind or device). `detail` names the
-  rule, except a handful of generic "invalid request body" sites where
-  only the shape, not the content, was wrong.
+  rule, except in a few places where `detail` is just "invalid request
+  body" because the request was not valid JSON of the right form.
+- `POST /api/auth/login/factor` also answers it when the body holds both
+  `code` and `assertion`, or neither (#99). A `null` assertion counts as
+  none. Nothing is counted, and the pending login still holds.
 - Returned across nearly every route that takes a body or a path
   parameter; see the OpenAPI document for which status a given field
   rule answers with on which route.
@@ -334,16 +381,23 @@ exists. Each pair is named under the class it shares, below.
 ## not-found
 
 - **Status:** 404. **Title:** Not found.
-- No account, token, session or passkey has the id or ref given; the
-  caller asked to remove an authenticator app their account does not
-  have; or the application does not offer this feature at all
-  (`Deps.Passkeys`, `Deps.OIDC` or `Deps.SignIns` is nil, or, for
-  signing in or resuming with a passkey alone, `Config.PasskeySignIn`
-  is off). `detail` is
-  absent for the feature-off cases and named for the rest ("no such
-  user", "no such session", "no such token", "no such passkey on this
-  account", "this account has no authenticator app", "sign-in history
-  is not configured").
+- One of:
+  - no account, token, session or passkey has the id given (for a
+    session, the `ref`);
+  - the caller asked to remove an authenticator app their account does
+    not have;
+  - an admin clearing another account's authenticator app or passkeys
+    (`DELETE /api/auth/users/{id}/totp` or `.../passkeys`) found that
+    the account was deleted while the request was in flight (#99);
+  - the application does not offer this feature at all
+    (`Deps.Passkeys`, `Deps.OIDC` or `Deps.SignIns` is nil, or, for
+    signing in or resuming with a passkey alone,
+    `Config.PasskeySignIn` is off).
+- `detail` is absent when the feature is switched off, and gives the
+  reason for the others ("no such user", "no such session", "no such
+  token", "no such passkey on this account", "this account has no
+  authenticator app", "this account was deleted before the request
+  finished", "sign-in history is not configured").
 - Not the same as `about:blank`: this class is for a *route that exists*
   answering "nothing here has that id"; `about:blank` is for a path or
   method the route table never registered at all.
@@ -353,18 +407,24 @@ exists. Each pair is named under the class it shares, below.
 - **Status:** 409. **Title:** Conflicting state.
 - The request is refused because of the account's or the deployment's
   current state, not because of anything wrong with the request itself:
-  - the account is already in the shape the route would put it in:
+  - the account is already in the state the request would create:
     already registered, already linked to SSO, already has an active
     factor, already holds ten passkeys, already has a first factor
     waiting for its recovery codes to be confirmed, or has nothing
     waiting to confirm;
   - the route refuses to act on this account: the caller's own, or one
     that already holds the role asked for;
+  - the caller has no local password, so there is no password to
+    re-check: at every route that re-checks the caller's password or
+    takes a step-up (since #99 also `DELETE /api/auth/totp`,
+    `DELETE /api/auth/passkeys/{id}` and
+    `POST /api/auth/recovery-codes`). The refusal comes before any
+    password is checked, and nothing is counted;
   - an admin removing their own last passkey that works at this
     address, while the application requires admin passkeys (#82):
     "register another passkey first";
   - passkeys are not yet set up for this site's address, or the
-    account's single sign-on link cannot be used.
+    account's SSO link cannot be used.
 
   `detail` names which.
 - Returned across most routes with a notion of "already done" or "not
@@ -378,10 +438,10 @@ exists. Each pair is named under the class it shares, below.
 - The request would leave the deployment with no admin account (#67):
   deleting the last admin, or demoting them to `user` or `viewer`. Make
   another account an admin first, then retry. Nothing was changed.
-  The same class refuses deleting or demoting the last admin that has a
-  local password while other admins remain (#79): they would all depend
-  on the identity provider (the single sign-on service the deployment
-  uses). Give another admin a local password first.
+- It also refuses to delete or demote the last admin who has a local
+  password, even if other admins exist (#79). Without that admin, every
+  remaining admin would depend on the identity provider to get in. Give
+  another admin a local password first.
 - Returned by `DELETE /api/auth/users/{id}` (the last admin; deleting
   the caller's own account while other admins exist is `conflict`
   instead) and `PUT /api/auth/users/{id}/role`. Before #67 deleting the
@@ -398,10 +458,11 @@ exists. Each pair is named under the class it shares, below.
 
 - **Status:** 409. **Title:** Role managed by single sign-on.
 - The request would change to `user` or `viewer` the role of an account
-  linked to single sign-on, on a deployment that maps identity-provider
-  groups to roles (#76, ADR-0013). The provider's groups decide that role
-  at every sign-in and would overwrite the change, so nothing was
-  changed: change the group at the identity provider instead.
+  linked to SSO, on a deployment set up to take each person's role from
+  their group at the identity provider (#76, ADR-0013). The provider's
+  groups decide that role at every sign-in and would overwrite the
+  change, so nothing was changed: change the group at the identity
+  provider instead.
 - Returned by `PUT /api/auth/users/{id}/role` only. Granting `admin` to
   such an account, and demoting an admin, are not refused: the group map
   never touches an admin. An account that already holds the role asked
@@ -413,29 +474,38 @@ exists. Each pair is named under the class it shares, below.
 
 - **Status:** 429. **Title:** Too many attempts.
 - One of:
-  - too many attempts from this client address, or against this
-    account, in the current window;
+  - too many attempts from this address, or against this account,
+    within the window;
   - the address is banned for 24 hours after 100 failed sign-ins
     (#70);
   - for a sign-in that would be held for a confirmation code, too many
-    codes were already sent to the account in the window (#84).
+    codes were already sent to the account in the window (#84). A
+    second code waits 30 seconds after the first, each further one in
+    the hour twice as long, and a sixth in an hour is refused; a
+    sign-in inside those limits is `429` with no code sent (#83);
+  - at `login/factor/begin` and `login/prove/begin`, the account is
+    locked out after repeated failures (unless the browser is one the
+    account remembers) or disabled (always). The server refuses
+    early, so nobody is asked to touch a passkey for a sign-in that
+    could not complete.
 - `detail` is always "too many attempts, try again later". A banned
   address gets the same answer as one that hit the normal limit, so a
   client cannot tell the difference.
 - Returned by:
   - every sign-in step: `POST /api/auth/login`, `login/factor`,
-    `login/confirm` (#55), `login/prove` (#65), `login/escape` (#66),
-    `login/passkey/begin` and `login/passkey` (#77), and
+    `login/factor/begin` (#85), `login/confirm` (#55),
+    `login/prove/begin` (#80), `login/prove` (#65), `login/escape`
+    (#66), `login/passkey/begin` and `login/passkey` (#77), and
     `POST /api/auth/reauthenticate`, which resumes a timed-out session
     (#71);
   - `POST /api/auth/register` (setup-code guesses) and
     `POST /api/auth/unlock` (unlock-code guesses);
-  - every re-check of the caller's own password or second factor, on
-    the routes listed under `invalid-credentials` above, and
-    `POST /api/auth/totp/confirm`;
+  - every re-check and step-up, on the routes listed under
+    `invalid-credentials` above, and `POST /api/auth/totp/confirm`;
   - `POST /api/auth/step-up/passkey/begin` (#82), once the account has
-    started its limit of passkey step-ups in the window; these are
-    counted on their own and never handed back.
+    used up its allowed number of passkey step-ups in the window. These
+    are counted separately, and the count is not given back when a
+    step-up succeeds.
 
 ## setup-required
 
@@ -452,12 +522,14 @@ exists. Each pair is named under the class it shares, below.
 
 - **Status:** 503. **Title:** No persistent storage.
 - The deployment has no persistent storage backend configured, so the
-  change -- a new account, a token, a reset or a role change -- would
-  not survive a restart.
+  change -- a new account, a token, a reset, a role change or an
+  allowed sign-in -- would not survive a restart.
 - Returned by `POST /api/auth/register`, `POST /api/auth/users`,
   `POST /api/auth/users/{id}/reset-password`,
-  `PUT /api/auth/users/{id}/role` and `POST /api/tokens`. `detail`
-  names what an administrator needs to do about it.
+  `PUT /api/auth/users/{id}/role`,
+  `POST /api/auth/users/{id}/allow-sign-in` (#81) and
+  `POST /api/tokens`. `detail` names what an administrator needs to do
+  about it.
 
 ## server-error
 

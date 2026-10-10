@@ -38,10 +38,9 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
 3. Once that merge request lands on `dev`, promote it to `preview`:
    open a merge request from `dev` to `preview`. Its pipeline runs every
    lint and test job, and `preview`'s own pipeline runs them all again
-   once it lands. `preview` is the pre-release stage, the last stop
-   before a release. Gauntlet has no jobs that run only on `preview`
-   yet, so its bar is the same full set of lint and test jobs `dev`
-   runs. Nothing is ever pushed straight to `preview` or `main`.
+   once it lands. `preview` is the last stop before a release.
+   It has no jobs of its own yet, so its pipeline runs the same full set
+   of lint and test jobs as `dev`'s. Nothing is ever pushed straight to `preview` or `main`.
 
 4. Once `preview`'s pipeline is green, open a merge request from
    `preview` to `main`. Merging it puts a merge commit on `main`, and
@@ -59,7 +58,7 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
    - `VERSION` isn't a plain three-part version, or doesn't sort above
      the newest tag already cut -- fix the `VERSION` file and merge
      again
-   - the commit isn't the current tip of `main` -- you opened an old
+   - the commit is not the newest commit on `main` -- you opened an old
      pipeline; open the pipeline for the newest commit on `main`
      instead
    - the common-password list in `blocklist/embedded/` is still the
@@ -88,12 +87,14 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
      all.
    - `GITHUB_MIRROR_SSH_KEY`: the private SSH key that may push to the
      mirror. Create it with type **File**, not the default Variable:
-     the job reads the key from a file, so a plain Variable stops the
-     job with `GITHUB_MIRROR_SSH_KEY must be a File-type CI/CD variable`
-     before the key can reach the log. If the variable is missing, or the tag is not protected (a
-     protected variable reaches only protected tags and branches), the
-     job fails with
-     `GITHUB_MIRROR_SSH_KEY is not set -- is v<VERSION> protected?`.
+     the job reads the key from a file, so a plain Variable makes the
+     job stop with
+     `GITHUB_MIRROR_SSH_KEY must be a File-type CI/CD variable` before
+     the key can reach the log. A different failure,
+     `GITHUB_MIRROR_SSH_KEY is not set -- is v<VERSION> protected?`,
+     means the variable is missing or the tag is not protected
+     (protected variables are only given to protected tags and
+     branches).
 
    Check the tag arrived:
    ```
@@ -101,20 +102,22 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
    ```
    - `tag` means it arrived correctly. GitLab makes release tags as
      annotated tags, which store their own message and author.
-   - `commit` means only a bare pointer to the commit arrived, without
-     the release message: the push went wrong. Do not announce the
-     version yet -- once anyone fetches a tag through the public Go
-     module proxy, the proxy records it for good. Read the
+   - `commit` means the tag arrived without its release message: the
+     push went wrong. Do not announce the version yet. Go's public
+     module download service (the Go module proxy) remembers any tag it
+     has fetched permanently, so a wrong tag cannot be taken back. Read the
      sync:mirror-to-github job's log to see what was pushed.
    - a 404 means the tag hasn't reached GitHub yet -- give the sync job
      more time, or check that it ran.
 
-7. Back-merge. Each promotion's merge commit lands only on the branch
-   that received it, so `preview` is now behind `main`, and the next
-   promotion would report the branches as out of step. Open a merge
-   request from `main` to `preview` and merge it. Then do the same from
-   `preview` to `dev` if GitLab shows `dev` as behind `preview`.
-   Neither merge changes any files.
+7. Bring `main` back into the other branches (a back-merge). Each
+   promotion's merge commit lands only on the branch that received it:
+   `main` now has one that `preview` lacks, and `preview` has one that
+   `dev` lacks, so GitLab would show the branches as differing on the
+   next promotion. Open a merge request from `main` to
+   `preview` and merge it. Then do the same from `preview` to `dev` if
+   GitLab shows `dev` as behind `preview`. Neither merge changes any
+   files.
 
 Apps then take it with `go get github.com/tomlawesome/gauntlet@v<VERSION>`.
 
@@ -144,9 +147,10 @@ change them.
 
 ## The common-password list
 
-`blocklist.Embedded()` and `blocklist.Refresher` serve the SHA-1
-hashes of the 10,000 most prevalent passwords in the Pwned Passwords
-list from Have I Been Pwned (HIBP) (#52,
+`blocklist.Embedded()` and `blocklist.Refresher` provide the 10,000
+most common passwords in the Pwned Passwords list from Have I Been
+Pwned (HIBP), stored as SHA-1 hashes (fixed-length one-way
+fingerprints, so the list does not contain the passwords themselves) (#52,
 [ADR-0007](adr/0007-common-password-list.md); an ADR is an
 architecture decision record, kept in docs/adr/). The monthly
 `blocklist` pipeline schedule rebuilds the list from HIBP, signs it,
@@ -297,10 +301,10 @@ What the lines do:
 - `volumes` shares the secret's folder into the job read-only (`ro`),
   so a job can read the secret but never change it.
 - `environment` tells the publish job where the token file is. It
-  holds a path, never the token. It must sit above the first
-  `[runners.…]` heading in that entry (`[runners.cache]` or
-  `[runners.docker]`): below one, TOML files it under that section and
-  the job never sees it.
+  holds a path, never the token. Put it before any `[runners.…]`
+  heading in that entry (`[runners.cache]` or `[runners.docker]`). If
+  it comes after one, TOML reads it as part of that section instead and
+  the job does not get it.
 
 `gitlab-runner` notices the edited file by itself within a few seconds.
 Each job fails at once if its secret file is not there.
@@ -313,11 +317,12 @@ create a schedule: description `blocklist`, target branch `dev`, a
 monthly interval (for example `17 3 2 * *`, 03:17 UTC on the 2nd), and
 a variable `BLOCKLIST_BUILD` = `true`.
 
-Leave duplicate generic packages allowed under
-[Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries):
-each run uploads the list again to the `current` version, which is
-overwritten every month by design, so refusing duplicates would fail
-the second month's publish.
+Leave the setting that allows uploading a file with the same name again
+(duplicate generic packages) switched on, under
+[Settings > Packages and registries](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/packages_and_registries).
+Each month's run replaces the previous list under the version name
+`current`, by design, so blocking re-uploads would make the second
+month's publish fail.
 
 **6. The first run.** Press the schedule's play button. The pipeline
 has three jobs: `blocklist:build`, `blocklist:sign` and
@@ -331,9 +336,9 @@ is the first real list.
 ### Trying the build without publishing
 
 From any branch, [run a pipeline](https://gitlab.tomlawson.io/ai/gauntlet/-/pipelines/new)
-with the variable `BLOCKLIST_SAMPLE` = `true`. `blocklist:build` runs
-over only the first 2,048 of the 1,048,576 groups HIBP serves its
-hashes in (each group is the hashes sharing one 5-character start).
+with the variable `BLOCKLIST_SAMPLE` = `true`. HIBP splits its hashes
+into 1,048,576 groups, each sharing the same first 5 characters. In a
+sample run `blocklist:build` fetches only the first 2,048 groups.
 That is 1/512 of a full run, so roughly 40-80 MB in all. Its output is
 stamped as a sample, which signing, publishing and every application
 refuse.
@@ -361,12 +366,14 @@ with the newest release, and opens a merge request to `dev` for
 whatever is behind. It watches:
 
 - Go libraries, in `go.mod` and `gate/contracttest/go.mod`;
-- Docker images in `.gitlab-ci.yml`: Go, Alpine, and Renovate's own;
+- Docker images in `.gitlab-ci.yml`: Go, Alpine, Renovate's own and
+  release-cli;
 - the tools CI installs at a fixed version: golangci-lint,
   govulncheck, gitleaks and go-licenses.
 
-Every non-major update arrives together in one merge request; a major
-one arrives on its own.
+Updates that keep the same first version number (for example 1.4 to
+1.5) arrive together in one merge request; an update that changes it
+(1.x to 2.0) arrives on its own.
 
 A security fix from the OSV advisory database (a public list of known
 flaws) does not wait for Monday: a second schedule runs Renovate every
@@ -419,8 +426,8 @@ create a schedule: description `renovate`, target branch `dev`, cron
 variable `RENOVATE` = `true`. The time matters: `renovate.json` lets
 Renovate open merge requests only between 05:00 and 06:15 London time
 on a Monday, so a run at any other time finds nothing it may do. The
-variable is what picks the `renovate` job: every other job stays out of
-scheduled pipelines.
+variable switches on the `renovate` job, and it is the only job this
+schedule's pipeline runs.
 
 Then create the daily schedule for security fixes: description
 `renovate-security`, target branch `dev`, cron `37 6 * * *` with cron
@@ -428,11 +435,12 @@ timezone **London** (06:37 every day), and two variables, `RENOVATE` =
 `true` and `RENOVATE_SECURITY_ONLY` = `true`. The second variable makes
 the job add `renovate-security.json`, so this run opens a merge request
 only for a security fix, which Renovate allows at any hour. It also
-leaves Monday's merge requests open: by default Renovate closes any of
-its merge requests the current run did not produce, and this run
-produces none of the ordinary ones. 06:37 is
-after the Monday run's one-hour limit, so the two do not normally
-overlap.
+keeps Monday's merge requests open. Normally Renovate closes any of its
+merge requests that the run in progress did not recreate, and this
+daily run would recreate none of the Monday ones. 06:37 is after the
+Monday run's one-hour time limit (the `renovate` job stops after one
+hour, so a run started at 05:07 is over by about 06:07), so the two do
+not normally overlap.
 
 For the first run, give the schedule a second variable
 `RENOVATE_DRY_RUN` = `full`. That Monday's `renovate` job then reports
@@ -443,7 +451,7 @@ look up. Then delete `RENOVATE_DRY_RUN`; the next Monday's run opens
 merge requests.
 
 If the `renovate` job fails as soon as it starts, just after an update
-to Renovate's own image was merged, undo that merge. Then, in
-`renovate.json`, add the bad version to the `allowedVersions` pattern
-of the `renovate/renovate` rule, which lists the versions to skip, so
-it is not offered again.
+to Renovate's own image was merged, undo that merge. Then edit
+`renovate.json`: in the rule for `renovate/renovate`, add the bad
+version to the `allowedVersions` pattern. It starts with `!`, so every
+version it matches is skipped, and Renovate stops proposing it.

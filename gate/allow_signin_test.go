@@ -66,8 +66,8 @@ func TestAllowedSignInCompletesUnderBlock(t *testing.T) {
 		t.Errorf("history row = %+v, want a confirmed success with new-browser", row)
 	}
 	entry, ok := e.lastAudit("user.login")
-	if !ok || !strings.HasPrefix(entry.Detail, "unusual=new-browser; action=block; allowed=used; ") {
-		t.Errorf("user.login detail = %q", entry.Detail)
+	if want := `unusual=new-browser; action=block; allowed=used; notify=quiet; via admin allowance; from="` + addrLondon + `"`; !ok || entry.Detail != want {
+		t.Errorf("user.login detail = %q, want %q", entry.Detail, want)
 	}
 	if u, _ := e.g.deps.Users.Get(e.bobID); !u.SignInAllowedUntil.IsZero() {
 		t.Errorf("the allowance is still set after the sign-in it was for: %v", u.SignInAllowedUntil)
@@ -109,12 +109,14 @@ func TestAllowedSignInNeedsNoCodeOrPasskey(t *testing.T) {
 		if status != http.StatusOK || !strings.Contains(body, `"username"`) {
 			t.Fatalf("the allowed sign-in under confirm = %d %s, want 200 with the account", status, body)
 		}
-		if entry, _ := e.lastAudit("user.login"); !strings.HasPrefix(entry.Detail, "unusual=new-browser; action=confirm; allowed=used; ") {
-			t.Errorf("user.login detail = %q", entry.Detail)
+		entry, _ := e.lastAudit("user.login")
+		if want := `unusual=new-browser; action=confirm; allowed=used; via admin allowance; from="` + addrLondon + `"`; entry.Detail != want {
+			t.Errorf("user.login detail = %q, want %q", entry.Detail, want)
 		}
 	})
 	t.Run("prove", func(t *testing.T) {
 		e := newProveEnv(t)
+		e.g.cfg.ClientIP = func(*http.Request) string { return addrLondon }
 		if _, err := e.g.deps.Users.AllowNextSignIn(e.id, e.clock.now()); err != nil {
 			t.Fatal(err)
 		}
@@ -125,8 +127,9 @@ func TestAllowedSignInNeedsNoCodeOrPasskey(t *testing.T) {
 		if codes := e.notices.allCodes(); len(codes) != 0 {
 			t.Errorf("codes sent for an allowed sign-in: %+v", codes)
 		}
-		if entry := findAuditEntry(t, e.g, "user.login"); !strings.HasPrefix(entry.Detail, "unusual=new-browser; action=prove; allowed=used; ") {
-			t.Errorf("user.login detail = %q", entry.Detail)
+		entry := findAuditEntry(t, e.g, "user.login")
+		if want := `unusual=new-browser; action=prove; allowed=used; notify=asked; via admin allowance; from="` + addrLondon + `"`; entry.Detail != want {
+			t.Errorf("user.login detail = %q, want %q", entry.Detail, want)
 		}
 	})
 }
@@ -134,6 +137,7 @@ func TestAllowedSignInNeedsNoCodeOrPasskey(t *testing.T) {
 func TestAllowanceLetsAnSSOOnlyAccountIn(t *testing.T) {
 	g, ts, fp := newOIDCTestGate(t, oidc.Policy{})
 	g.cfg.Audit = &auditRecorder{}
+	g.cfg.ClientIP = func(*http.Request) string { return addrLondon }
 	g.cfg.UnusualSignIns = UnusualSignInPolicy{NewBrowser: UnusualSignInBlock}
 	callback := func() *http.Response {
 		t.Helper()
@@ -177,8 +181,9 @@ func TestAllowanceLetsAnSSOOnlyAccountIn(t *testing.T) {
 	if c := cookieNamed(resp, testCookieName); c == nil || c.MaxAge < 0 {
 		t.Error("the allowed SSO sign-in set no session cookie")
 	}
-	if entry := findAuditEntry(t, g, "user.login"); !strings.HasPrefix(entry.Detail, "unusual=new-browser; action=block; allowed=used; ") {
-		t.Errorf("user.login detail = %q", entry.Detail)
+	entry := findAuditEntry(t, g, "user.login")
+	if want := `unusual=new-browser; action=block; allowed=used; via admin allowance; from="` + addrLondon + `"`; entry.Detail != want {
+		t.Errorf("user.login detail = %q, want %q", entry.Detail, want)
 	}
 }
 
@@ -230,7 +235,7 @@ func TestAdminAllowsAnotherAccountsNextSignIn(t *testing.T) {
 	if out.Username != totpBobUsername || !out.AllowedUntil.Equal(until) {
 		t.Errorf("answer = %+v, want bob until %v", out, until)
 	}
-	if u, _ := e.g.deps.Users.Get(e.bobID); !u.SignInAllowed(now) || !u.SignInAllowedUntil.Equal(until) {
+	if u, _ := e.g.deps.Users.Get(e.bobID); !u.SignInAllowanceLive(now) || !u.SignInAllowedUntil.Equal(until) {
 		t.Errorf("stored allowance ends %v, want %v", u.SignInAllowedUntil, until)
 	}
 

@@ -275,3 +275,6 @@ remembers, and let the application decide what happens next.
   [ADR-0012](0012-passkey-alone-sign-in.md)). The other session issues
   still never judge.
 - Status note: the accounts document is version 10 (#81).
+- Status note (v0.4.0 audit, 2026-10-10): "§17a of the design note" is now
+  `docs/design.md` §2.4 (Configuration) and the §4 "Unusual sign-ins"
+  pitfalls table.

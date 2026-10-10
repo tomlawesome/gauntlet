@@ -190,7 +190,7 @@ type User struct {
 	// the write that remembers the next completed sign-in -- whatever browser
 	// it came from, and whether or not the policy would have stopped it --
 	// and wherever known browsers are cleared (ClearKnownBrowsers,
-	// IssueResetCode). Read with SignInAllowed, never as non-zero. Never shown
+	// IssueResetCode). Read with SignInAllowanceLive, never as non-zero. Never shown
 	// by any route. Gauntlet's own field: older documents lack it and read it
 	// as none.
 	SignInAllowedUntil time.Time `json:"signInAllowedUntil,omitzero"`
@@ -348,9 +348,10 @@ func (u *User) SessionCutoff() time.Time {
 // it.
 func (u *User) LoginDisabled(now time.Time) bool { return loginDisabledAt(u.LoginDisabledAt, now) }
 
-// SignInAllowed reports whether an administrator's allowance of this
-// account's next sign-in (#81, SignInAllowedUntil) is live at now.
-func (u *User) SignInAllowed(now time.Time) bool {
+// SignInAllowanceLive reports whether an administrator's one-off allowance
+// of this account's next sign-in (#81, SignInAllowedUntil) is still open at
+// now. It does not say whether the user may sign in in general.
+func (u *User) SignInAllowanceLive(now time.Time) bool {
 	return !u.SignInAllowedUntil.IsZero() && now.Before(u.SignInAllowedUntil)
 }
 
