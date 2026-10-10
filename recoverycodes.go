@@ -97,7 +97,7 @@ func (s *Store) GenerateRecoveryCodes(userID string, now time.Time) ([]string, e
 // replaces the set (check-and-set, as AddLaterPasskey is), so a last
 // factor removed after the caller looked -- which cleared the codes --
 // cannot leave a new set on an account with no factor (#94).
-func (s *Store) RegenerateRecoveryCodes(userID string, now time.Time) ([]string, error) {
+func (s *Store) RegenerateRecoveryCodes(userID string) ([]string, error) {
 	return s.generateRecoveryCodes(userID, true)
 }
 

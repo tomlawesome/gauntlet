@@ -75,7 +75,7 @@ func (g *Gate) handleRecoveryCodesRegenerate(w http.ResponseWriter, r *http.Requ
 
 	// The store checks again under its lock: a last factor removed since
 	// the check above is refused the same way, never given codes (#94).
-	codes, err := g.deps.Users.RegenerateRecoveryCodes(user.ID, now)
+	codes, err := g.deps.Users.RegenerateRecoveryCodes(user.ID)
 	if errors.Is(err, gauntlet.ErrNoSecondFactors) {
 		writeProblem(w, http.StatusConflict, classConflict, noSecondFactorForCodesMessage, nil)
 		return
