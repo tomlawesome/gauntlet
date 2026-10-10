@@ -145,8 +145,9 @@ func (g *Gate) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 // sessions. Sign out everywhere (POST /api/auth/logout-all) ends them
 // too, behind a password re-check for an account with a local password
 // and none for one signed in only through SSO, which has no password to
-// give; this route ends one at a time and asks for nothing. It ends the gauntlet session only: the identity provider's
-// own session is not touched (owner, 2026-10-02).
+// give; this route ends one at a time and asks for nothing. It ends the
+// gauntlet session only: the identity provider's own session is not
+// touched (owner, 2026-10-02).
 //
 // Any ref that does not name one of the caller's live sessions answers
 // 404 -- malformed, unknown, expired, issued before the account's
