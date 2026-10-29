@@ -137,6 +137,20 @@ lint:go:
     - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
     - golangci-lint run ./...
 
+# The flake log rule (#109): docs/flakes.md must parse, and a flake with
+# three sightings needs an issue linked from its heading and a line in
+# scripts/quarantine.txt, the same list test:go skips. Reads only; no
+# Docker, no Go.
+lint:flake-check:
+  stage: lint
+  image: $ALPINE_IMAGE
+  <<: *gate
+  tags: [light]
+  timeout: 5m
+  cache: []
+  script:
+    - sh scripts/ci/flake-check.sh --quarantined scripts/quarantine.txt docs/flakes.md
+
 # Two checks in one script: go-licenses holds every linked package's
 # licence to the allow-list, then licence-check-bundled.py looks inside
 # the same modules for vendored code with no licence of its own and for
@@ -209,6 +223,9 @@ test:go:
   # keeps it; tester writes the profile to its own directory, and root
   # copies it back for the artifact.
   #
+  # -skip leaves out the tests in scripts/quarantine.txt (#109), the list
+  # lint:flake-check also reads; empty, it skips nothing.
+  #
   # The copy sits in the same script item as `go test` and runs whatever
   # the tests returned: a later item never runs once one fails, and
   # `artifacts.when: always` cannot upload a coverage.out that was never
@@ -230,7 +247,8 @@ test:go:
         GOCACHE='$GOCACHE' \
         GOMODCACHE='$GOMODCACHE' \
         GOFLAGS='$GOFLAGS' \
-        go test ./... -race -coverprofile=/tmp/gotest/coverage.out" || rc=$?
+        go test ./... -race -skip \"\$(scripts/quarantine-skip.sh)\" \
+          -coverprofile=/tmp/gotest/coverage.out" || rc=$?
       if [ -f /tmp/gotest/coverage.out ]; then
         cp /tmp/gotest/coverage.out coverage.out
       fi

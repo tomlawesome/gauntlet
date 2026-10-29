@@ -104,5 +104,6 @@ scripts/licence-check.sh
 scripts/apidiff.sh             # exported API vs the last v* tag
 GOTOOLCHAIN=go1.27.2 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # the Go in CI's image
 gitleaks detect --no-banner
+sh scripts/ci/flake-check.sh --quarantined scripts/quarantine.txt docs/flakes.md  # flake log (#109)
 python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"
 ```
