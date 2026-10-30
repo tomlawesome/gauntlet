@@ -90,7 +90,7 @@ licence need an owner-recorded `go-bundled-assets:` review (#64).
 
 ## Checks
 
-Run them under CI's Go: `export GOTOOLCHAIN=go1.27.2`. Go 1.27.0 and
+Run them under CI's Go: `export GOTOOLCHAIN=go1.27.3`. Go 1.27.0 and
 1.27.1 over-count coverage statements, so their figures miss the floors
 (re-measured under 1.27.2, !51).
 
@@ -102,7 +102,7 @@ python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
 scripts/licence-check.sh
 scripts/apidiff.sh             # exported API vs the last v* tag
-GOTOOLCHAIN=go1.27.2 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # the Go in CI's image
+GOTOOLCHAIN=go1.27.3 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # the Go in CI's image
 gitleaks detect --no-banner
 sh scripts/ci/flake-check.sh --quarantined scripts/quarantine.txt docs/flakes.md  # flake log (#109)
 python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"
