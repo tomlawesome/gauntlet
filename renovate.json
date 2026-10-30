@@ -39,13 +39,13 @@
   },
   "customManagers": [
     {
-      "description": "The pipeline pins its job images in the top-level variables block -- GOLANG_IMAGE and ALPINE_IMAGE -- and the jobs reference them as $GOLANG_IMAGE. The gitlabci manager reads image: keys, so it sees the references and never the pins. This reads the pins. The dependency-proxy prefix is skipped, so the lookup is the Docker Hub name (library/golang) the proxy fronts.",
+      "description": "The pipeline pins its job images in the top-level variables block -- GOLANG_IMAGE and ALPINE_IMAGE -- and the jobs reference them as $GOLANG_IMAGE. The gitlabci manager reads image: keys, so it sees the references and never the pins. This reads the pins. The pins are plain Docker Hub names (golang, alpine), which the runner image cache serves, so the name is looked up as written.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^\\.gitlab-ci\\.yml$/"
       ],
       "matchStrings": [
-        "_IMAGE:\\s+(?:\\$\\{CI_DEPENDENCY_PROXY_(?:DIRECT_)?GROUP_IMAGE_PREFIX\\}/)?(?<depName>[^\\s:@]+):(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+        "_IMAGE:\\s+(?<depName>[^\\s:@]+):(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
       ],
       "datasourceTemplate": "docker"
     },
