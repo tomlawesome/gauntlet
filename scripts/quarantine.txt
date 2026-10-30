@@ -1,0 +1,9 @@
+# Quarantined Go tests, one name per line (#109). This one file is both the
+# skip list and the flake check's list, so the two cannot drift:
+#   - test:go passes scripts/quarantine-skip.sh's pattern to `go test -skip`;
+#   - lint:flake-check passes this file to --quarantined.
+# A test goes here on its third logged sighting (docs/flakes.md), with an
+# issue linked from its heading. A listed name must appear in that heading.
+# When the first name is added, also add a non-blocking job that runs only
+# the listed tests (`go test -run "$(scripts/quarantine-skip.sh)"`), or they
+# stop running at all.
