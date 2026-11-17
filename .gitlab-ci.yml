@@ -1,0 +1,817 @@
+# GitLab is where gauntlet is developed and released (AGENTS.md); this
+# file is the CI that gates every merge request and every push to the
+# three long-lived branches, `dev` (the default), `preview` and `main`.
+# Modelled on birdcage's `.gitlab-ci.yml`, but far smaller: gauntlet
+# ships a tag, not an image, so there is no build, image or live-stack
+# e2e stage here -- see docs/testing.md. The `release` stage is a button
+# on a green `main` pipeline that creates the annotated `v<VERSION>` tag
+# and its GitLab release (#88, docs/releasing.md): a release is cut on
+# `main` only, never on `dev` or `preview` (owner, 2026-10-08).
+#
+# GitHub `tomlawesome/gauntlet` is a public snapshot, not a mirror
+# (ai/agent-infra#147, #118): the `publish` stage's `publish-gate` job
+# runs only for a protected `v*` tag, scans every file for personal
+# details and secrets, and pushes one snapshot commit
+# and an annotated tag per release there, so apps can `go get` a tag by the module path.
+# None of this repository's branches or history reaches GitHub: GitHub's
+# `main` holds only the snapshot commits, one per release. The
+# owner's one-time settings, including the deploy key
+# PUBLISH_GATE_SSH_KEY, are in docs/releasing.md.
+#
+# Renovate (#63) runs in the `maintenance` stage, only in the pipelines the
+# weekly `renovate` and daily `renovate-security` schedules start; see the
+# job at the end of the file.
+#
+# Runner lane (ai/agent-infra#3): `light` is 4 CPU / 6 GB, which is ample
+# for a dependency-free Go module. `big` is not needed here. The three
+# exceptions each hold one secret: the common-password list's
+# blocklist:sign, on the `gauntlet-signing` runner that holds the signing
+# key, blocklist:publish, on the `gauntlet-publish` runner that holds the
+# GitHub release token (#52, ADR-0005), and publish-gate, on the
+# `gauntlet-publish-gate` runner that holds the GitHub deploy key (#118).
+
+# Batch train (ai/agent-infra#114, decision 60a): a merge request into
+# batch-a or batch-b runs the static lint jobs only, and a chore/catchup-*
+# merge request into a batch runs catchup-check alone. The snippets are
+# pinned by tag; each sets a variable in workflow:rules that the job rules
+# below test.
+include:
+  - project: ai/agent-infra
+    ref: 063b5b95a96b139b0a858bb009466456a19e5674  # batch-intake/v1
+    file: scripts/batch-intake/ci-template.yml
+  - project: ai/agent-infra
+    ref: 03499313d89b421212af02db3735662397eebfb3  # catchup-check/v2
+    file: scripts/catchup-check/ci-template.yml
+  # A push to dev runs only the fast checks (ai/agent-infra#113, owner
+  # 2026-11-05: "Secrets scanning and similar very fast checks should happen
+  # on merge to dev. Five minutes. Max."): lint:secrets and lint:flake-check
+  # extend .dev-landing-check; every other job starts with its job_rule.
+  - project: ai/agent-infra
+    ref: 1dca70057bd93f68ded22c6b159f315c987c1663  # dev-landing/v1
+    file: scripts/dev-landing/ci-template.yml
+  # The shared check for personal details (ai/agent-infra#32, #111): the
+  # owner's surname, real host logins in home paths, private network
+  # addresses and AI credit, in every commit's added lines, message,
+  # author and committer. The rules live on the runner host, mounted
+  # read-only into the job; no project keeps a copy. The job is defined
+  # by the template and set up at the `private-details` job below. Pinned to
+  # the commit the tag names, not the tag, because a Maintainer of
+  # ai/agent-infra can move a tag: adopt a new tag by moving this ref, its
+  # comment and PRIVATE_DETAILS_SHA below together.
+  - project: ai/agent-infra
+    ref: b14e613643ece48b682106abd1964dc0e5417646  # after private-details/v4: adds private-network (ai/agent-infra#148)
+    file: scripts/private-details/ci-template.yml
+  # The publish gate (ai/agent-infra#147, #118): publishes one scanned
+  # snapshot commit per release tag. Defined by the template and set up
+  # at the `publish-gate` job below. Pinned by commit, as above; move this
+  # ref and PUBLISH_GATE_SHA below together.
+  - project: ai/agent-infra
+    ref: b14e613643ece48b682106abd1964dc0e5417646
+    file: scripts/publish-gate/ci-template.yml
+
+# The snippets need a workflow: block for their !reference lines. Before
+# it, gauntlet had none, so GitLab's default applied: any source creates a
+# pipeline when at least one job's rules select a job. The last rule
+# restates that default, so every pipeline that exists today still
+# exists, from the same sources, with the same jobs. The catch-up rule
+# must come before batch-intake: the first matching rule wins, and a
+# catch-up MR targets a batch too.
+workflow:
+  rules:
+    - !reference [.dev-landing, workflow_rules]
+    - !reference [.catchup-check, workflow_rules]
+    - !reference [.batch-intake, workflow_rules]
+    - when: always
+
+stages:
+  - lint
+  - test
+  - blocklist
+  - release
+  - publish
+  - maintenance
+
+default:
+  tags: [light]
+  interruptible: true
+  # Every job starts in a fresh container, and five of the six build a
+  # pinned tool from source on top of fetching the module graph. Both
+  # caches live under the project dir (GOMODCACHE/GOCACHE below) so one
+  # cache entry carries them between pipelines; the key turns over when
+  # a dependency or a tool version changes.
+  # Each job gets its own entry (CI_JOB_NAME_SLUG in the prefix). The
+  # lint jobs run at the same time and each builds a different tool, so
+  # with one shared entry the last job to finish overwrote the others'
+  # work and the cache took several pipelines to settle after every key
+  # change (refs #24). Per job, each entry holds exactly what that job
+  # builds and is warm from the next pipeline on.
+  # Protected refs get their own cache. A merge-request pipeline can
+  # write anything into .gocache/, and a push pipeline on dev, preview or
+  # main carries the protected variables in every job's environment, so
+  # the two must never share a cache entry.
+  cache:
+    key:
+      prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+      files:
+        - go.sum
+        - .gitlab-ci.yml
+    paths:
+      - .gocache/
+  # Infra-only retry: a job that fails because the runner died or hung
+  # gets one automatic second try; a job that fails because the code is
+  # wrong does not, and never silently passes on a retry.
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+      - api_failure
+      - scheduler_failure
+
+variables:
+  GOFLAGS: "-mod=readonly"
+  GOMODCACHE: $CI_PROJECT_DIR/.gocache/mod
+  GOCACHE: $CI_PROJECT_DIR/.gocache/build
+  # Same image, same tag, as birdcage's GOLANG_IMAGE. Docker Hub images are
+  # named plainly: the runner hosts' Docker daemons mirror Docker Hub through
+  # the runner image cache (ai/agent-infra#14, #65), which replaced the
+  # group Dependency Proxy, so no prefix or login is needed and digests are
+  # the same through the cache. Pinned by digest as release:gitlab's image
+  # is: the same image runs blocklist:sign and blocklist:publish beside the
+  # signing key and the GitHub token, and a tag alone follows whatever
+  # the registry serves for it. Move the digest with the tag when
+  # bumping Go (docker buildx imagetools inspect golang:<tag>).
+  GOLANG_IMAGE: golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d
+  ALPINE_IMAGE: alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+
+# Avoids the duplicate branch+MR pipeline birdcage's own `.gate` anchor
+# avoids: a merge request always gets a pipeline, and so does a push to
+# `dev`, `preview` or `main` itself (in practice, a merge or promotion
+# landing); a push to any other branch does not, because that same commit
+# already has -- or is about to get -- an MR pipeline covering it.
+# `preview` and `main` are listed as birdcage lists them (#88): the
+# release button on `main` waits for every lint and test job in that
+# same pipeline, so `main` must run them all -- without these two lines
+# a `main` pipeline would hold only the release and publish jobs, and the
+# button would be playable with no test run at all. Gauntlet has no
+# preview-only jobs yet, so the bar at both hops is this full gate.
+#
+# The first rule skips the job in a catch-up MR (catchup-check runs
+# alone there). `.gate_heavy` is the same list for the test jobs, with
+# the batch-intake rule added: an MR into a batch skips them and keeps
+# the lint jobs, which are the cheap static checks (secret scan, lint).
+.gate: &gate
+  rules:
+    - !reference [.dev-landing, job_rule]
+    - !reference [.catchup-check, job_rule]
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH == "preview"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+.gate_heavy: &gate_heavy
+  rules:
+    - !reference [.dev-landing, job_rule]
+    - !reference [.catchup-check, job_rule]
+    - !reference [.batch-intake, job_rule]
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH == "preview"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+.git_safe: &git_safe
+  before_script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+# ---------------------------------------------------------------------------
+# LINT
+# ---------------------------------------------------------------------------
+lint:go:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  script:
+    - go build ./...
+    - go vet ./...
+    # Leaf packages (AGENTS.md): gate and the root package must not link
+    # the WebAuthn library (passkey/) or the country-file reader (geoip/).
+    - |
+      leaked=$(go list -deps ./gate ./ | grep -i -E 'webauthn|maxminddb' || true)
+      [ -z "$leaked" ] || { echo "gate or the root package imports a leaf's library:"; echo "$leaked"; exit 1; }
+    - |
+      files=$(git ls-files '*.go')
+      [ -n "$files" ] || { echo "git ls-files returned no Go files"; exit 1; }
+      unformatted=$(gofmt -l $files)
+      [ -z "$unformatted" ] || { echo "Not gofmt-clean:"; echo "$unformatted"; gofmt -d $files; exit 1; }
+    # Built from source with the image's Go, matching birdcage's own
+    # lint:go: a prebuilt binary built with an older Go refuses go.mod's
+    # `go 1.27.0` directive.
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+    - golangci-lint run ./...
+
+# The flake log rule (#109): docs/flakes.md must parse, and a flake with
+# three sightings needs an issue linked from its heading and a line in
+# scripts/quarantine.txt, the same list test:go skips. Reads only; no
+# Docker, no Go.
+lint:flake-check:
+  extends: .dev-landing-check
+  stage: lint
+  image: $ALPINE_IMAGE
+  rules:
+    - !reference [.dev-landing-check, rules]
+    - !reference [.gate, rules]
+  tags: [light]
+  cache: []
+  script:
+    - sh scripts/ci/flake-check.sh --quarantined scripts/quarantine.txt docs/flakes.md
+
+# The shared personal-details check (include above). The template defines
+# the job; this sets its stage, rules and image. It is a fast check and
+# runs wherever lint:secrets does, a push to dev and a merge request into
+# a batch. The image is pinned by digest, like every other image in this
+# file (the template names a tag only).
+private-details:
+  extends: .dev-landing-check
+  stage: lint
+  rules:
+    - !reference [.dev-landing-check, rules]
+    - !reference [.gate, rules]
+  needs: []
+  cache: []
+  image:
+    name: $CI_IMAGE_CACHE_GHCR/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    entrypoint: [""]
+  variables:
+    # The job fetches the scan script at exactly this commit, the one the
+    # include above is pinned to.
+    PRIVATE_DETAILS_SHA: b14e613643ece48b682106abd1964dc0e5417646
+    # The scan starts after this commit, the last on dev before the check
+    # was adopted (#111). Older history has the owner's surname in a test
+    # fixture and AI credit lines in five design records (#108); rewriting
+    # it is the owner's call, and a path entry could only allow those
+    # rules for good, so the start point is used instead.
+    PRIVATE_DETAILS_SINCE: aee3fd073da6bd1f97c41dbdec7eb8abc8d74433
+
+# Two checks in one script: go-licenses holds every linked package's
+# licence to the allow-list, then licence-check-bundled.py looks inside
+# the same modules for vendored code with no licence of its own and for
+# embedded files, each of which needs a recorded review (#64).
+lint:licences:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  script:
+    - scripts/licence-check.sh
+
+lint:vulncheck:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+    - govulncheck ./...
+
+# The exported Go API against the last release tag (ADR-0002, #22):
+# fails on a removed or renamed identifier, passes on additions. The
+# script installs apidiff at a pinned pseudo-version into a temporary
+# directory, so it never enters go.mod or go.sum, and fails if either
+# file changed during the run (#62); it runs the same check locally.
+# Full history and the tags are fetched so the base tag is there to diff.
+lint:apidiff:
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: [*gate, *git_safe]
+  timeout: 10m
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - git fetch --tags --force --quiet origin
+    - scripts/apidiff.sh
+
+# gitleaks is a Go module, so it installs the same way golangci-lint and
+# govulncheck do above -- no separate image or Docker Hub pull needed.
+# `--redact` keeps a matched secret's own bytes out of the job log even
+# when the job is red.
+lint:secrets:
+  extends: .dev-landing-check
+  stage: lint
+  image: $GOLANG_IMAGE
+  <<: *git_safe
+  rules:
+    - !reference [.dev-landing-check, rules]
+    - !reference [.gate, rules]
+  variables:
+    GIT_DEPTH: 0 # gitleaks scans git history; a shallow clone would miss all but the newest commit.
+  script:
+    - go install github.com/zricethezav/gitleaks/v8@v8.30.1
+    - gitleaks detect --no-banner --redact
+
+# ---------------------------------------------------------------------------
+# TEST
+# ---------------------------------------------------------------------------
+test:go:
+  stage: test
+  image: $GOLANG_IMAGE
+  <<: [*gate_heavy, *git_safe]
+  timeout: 15m
+  # Run the suite as a NON-ROOT user, as birdcage#93 does. persist's
+  # permission tests (unreadable or unwritable store files) skip
+  # themselves as uid 0 -- correctly, because root ignores the mode bits
+  # they set -- and this image runs as root, so until 2026-09-30 those
+  # error paths ran only on workstations and CI read persist 2.3 points
+  # below the local figure, under its floor (refs #16).
+  #
+  # The shared cache is handed to tester rather than moved, so the job
+  # keeps it; tester writes the profile to its own directory, and root
+  # copies it back for the artifact.
+  #
+  # -skip leaves out the tests in scripts/quarantine.txt (#109), the list
+  # lint:flake-check also reads; empty, it skips nothing.
+  #
+  # The copy sits in the same script item as `go test` and runs whatever
+  # the tests returned: a later item never runs once one fails, and
+  # `artifacts.when: always` cannot upload a coverage.out that was never
+  # copied out (refs #24). `|| rc=$?` keeps a failure from ending the
+  # shell under `set -e` before the copy; the item then fails with the
+  # tests' own exit code. It must not `exit 0` on success -- all items
+  # share one shell, so that would skip the coverage lines below.
+  script:
+    - |
+      set -eu
+      useradd --create-home --uid 1001 tester
+      mkdir -p .gocache
+      chown -R tester:tester .gocache
+      install -d -o tester -g tester /tmp/gotest
+    - |
+      rc=0
+      su tester -c "cd '$CI_PROJECT_DIR' && \
+        HOME=/home/tester \
+        GOCACHE='$GOCACHE' \
+        GOMODCACHE='$GOMODCACHE' \
+        GOFLAGS='$GOFLAGS' \
+        go test ./... -race -skip \"\$(scripts/quarantine-skip.sh)\" \
+          -coverprofile=/tmp/gotest/coverage.out" || rc=$?
+      if [ -f /tmp/gotest/coverage.out ]; then
+        cp /tmp/gotest/coverage.out coverage.out
+      fi
+      [ "$rc" -eq 0 ] || exit "$rc"
+    - go tool cover -func=coverage.out | tail -1
+    - python3 scripts/coverage-floor.py coverage.out
+  coverage: '/total:\s+\(statements\)\s+([\d.]+)%/'
+  artifacts:
+    expire_in: 1 day
+    when: always
+    paths:
+      - coverage.out
+
+# The OpenAPI contract tests (ADR-0002) live in their own Go module,
+# gate/contracttest, so their validator, kin-openapi, stays out of the
+# library's go.mod and out of every app that imports gauntlet (#30).
+# Commands run from the repository root never enter a nested module, so
+# none of the jobs above reach it; this one vets, lints and runs it. The
+# coverage floor, apidiff and the licence check are about the library
+# itself and do not look here.
+test:contract:
+  stage: test
+  image: $GOLANG_IMAGE
+  <<: [*gate_heavy, *git_safe]
+  timeout: 15m
+  cache:
+    key:
+      prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+      files:
+        - gate/contracttest/go.sum
+        - .gitlab-ci.yml
+    paths:
+      - .gocache/
+  script:
+    - cd gate/contracttest
+    - go vet ./...
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+    - golangci-lint run ./...
+    - go test ./... -race
+
+# ---------------------------------------------------------------------------
+# BLOCKLIST
+# ---------------------------------------------------------------------------
+# The common-password list (#52, ADR-0005): the SHA-1 hashes of the
+# 10,000 most prevalent Pwned Passwords, rebuilt from HIBP's range API,
+# signed, and published -- first to this project's generic package
+# registry, then, because this project is private, to releases on the
+# public GitHub repository, which is where blocklist.Refresher and
+# scripts/update-blocklist.sh fetch it (owner, 2026-10-02).
+#
+# These jobs run only in the pipeline the `blocklist` pipeline schedule
+# starts: a monthly schedule on `dev` (owner, 2026-10-02) carrying the
+# variable BLOCKLIST_BUILD=true. Every other job above is `.gate`d off
+# for schedules, and the release and publish jobs need a push, so that
+# pipeline holds these three and nothing else.
+#
+# Three jobs on three runners, so no one job or runner holds two of:
+# the network path to HIBP, the signing key, the publishing
+# credentials. build talks to HIBP and holds nothing; sign holds the
+# key and reaches only its Go module proxy and container registry, to
+# build pwlist from this commit's source -- never HIBP or GitHub;
+# publish holds the job token and the GitHub token and checks the
+# signature against the committed keys before uploading.
+#
+# The sample path: a pipeline run by hand from any branch with
+# BLOCKLIST_SAMPLE=true runs blocklist:build alone over the first 2,048
+# prefixes (roughly 40-80 MB from HIBP instead of 20-40 GB). Its output is
+# marked `# sample:`, which `pwlist sign`, `pwlist verify` and every
+# Refresher refuse, and sign and publish never run for it.
+.blocklist_full: &blocklist_full
+  rules:
+    - !reference [.dev-landing, job_rule]
+    - if: $BLOCKLIST_SAMPLE == "true"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $BLOCKLIST_BUILD == "true" && $CI_COMMIT_REF_PROTECTED == "true"
+
+blocklist:build:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  <<: *git_safe
+  needs: []
+  # A four-hour run must not be cancelled by an unrelated merge to dev.
+  interruptible: false
+  # About a million requests, 32 at a time; HIBP's CDN answers most
+  # from cache. The checkpoint lets a retried job pick up after the
+  # last finished chunk instead of starting again.
+  timeout: 4h
+  rules:
+    - !reference [.dev-landing, job_rule]
+    - if: $BLOCKLIST_SAMPLE == "true"
+      variables:
+        PWLIST_PREFIXES: "2048"
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $BLOCKLIST_BUILD == "true" && $CI_COMMIT_REF_PROTECTED == "true"
+      variables:
+        PWLIST_PREFIXES: "1048576"
+  # The usual Go cache, plus the run's checkpoint. The checkpoint's key
+  # carries the pipeline id, so a retry of this job resumes but the next
+  # scheduled run starts clean: nothing from HIBP is kept between runs.
+  cache:
+    - key:
+        prefix: $CI_COMMIT_REF_PROTECTED-$CI_JOB_NAME_SLUG
+        files:
+          - go.sum
+          - .gitlab-ci.yml
+      paths:
+        - .gocache/
+    # Prefixed like every other cache key: a pipeline on an unprotected
+    # branch must never seed the checkpoint the protected monthly build
+    # resumes from, whatever the project's cache-separation setting.
+    - key: $CI_COMMIT_REF_PROTECTED-blocklist-checkpoint-$CI_PIPELINE_ID
+      paths:
+        - .blocklist/
+      when: always
+  script:
+    - go build -trimpath -ldflags "-X main.version=$(tr -d '[:space:]' < VERSION)" -o pwlist ./cmd/pwlist
+    - mkdir -p .blocklist out
+    - ./pwlist build --prefixes "$PWLIST_PREFIXES" --checkpoint .blocklist/checkpoint.json --out out/top10k.txt
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - out/top10k.txt
+      - out/top10k.txt.sha256
+
+# Runs on the `gauntlet-signing` runner only: protected, locked to this
+# project, with /etc/gauntlet-signing mounted read-only (docs/releasing.md,
+# "The common-password list"). It builds pwlist from this commit's
+# source rather than taking a binary from the build job, so nothing made
+# on the shared lane ever runs next to the key. `sign` refuses a list
+# whose checksum does not match or that does not parse; the verify after
+# it fails the job if the key that signed is not one of the committed
+# blocklist/keys/*.pub.
+blocklist:sign:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  tags: [gauntlet-signing]
+  interruptible: false
+  timeout: 5m
+  <<: [*blocklist_full, *git_safe]
+  needs:
+    - job: blocklist:build
+      artifacts: true
+  cache: []
+  script:
+    - test -d /etc/gauntlet-signing || { echo "/etc/gauntlet-signing is not mounted -- is this the gauntlet-signing runner?"; exit 1; }
+    - go build -trimpath -o pwlist ./cmd/pwlist
+    - ./pwlist sign --keys /etc/gauntlet-signing --in out/top10k.txt
+    - ./pwlist verify --keys blocklist/keys --in out/top10k.txt
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - out/top10k.txt
+      - out/top10k.txt.sha256
+      - out/top10k.txt.sig
+
+# Uploads the signed list to the GitLab package registry, then copies
+# the same files to the GitHub repository's releases. Each host gets it
+# twice: under a version named for its build date, which is never
+# written again, and under `current`, which is replaced. GitHub's
+# `pwned-top10k-current` release is what blocklist.DefaultURL reads.
+# Within each version the checksum goes last: a Refresher fetches the
+# checksum first and stops if it is unchanged, so it never pairs the
+# new list with the old checksum.
+#
+# It runs on the `gauntlet-publish` runner -- protected, locked to this
+# project -- because that runner mounts the GitHub token file read-only;
+# the shared `light` lane must never see it. The token is never a CI
+# variable: GAUNTLET_GITHUB_RELEASE_TOKEN_FILE holds only the path of
+# the mounted file. The GitLab job token is written to a 0600 header
+# file by a shell builtin rather than passed on curl's command line,
+# where the process list would show it; the GitHub token is read from
+# its file by pwlist itself and sent only as a header.
+blocklist:publish:
+  stage: blocklist
+  image: $GOLANG_IMAGE
+  tags: [gauntlet-publish]
+  interruptible: false
+  timeout: 10m
+  <<: [*blocklist_full, *git_safe]
+  needs:
+    - job: blocklist:sign
+      artifacts: true
+  cache: []
+  script:
+    - test -n "${GAUNTLET_GITHUB_RELEASE_TOKEN_FILE:-}" || { echo "GAUNTLET_GITHUB_RELEASE_TOKEN_FILE is not set -- the gauntlet-publish runner's [[runners]] entry needs its environment line, above its first [runners.*] heading (docs/releasing.md step 4)"; exit 1; }
+    - test -r "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" || { echo "cannot read $GAUNTLET_GITHUB_RELEASE_TOKEN_FILE -- check the runner's volume mount, the file's owner, and that the runner user's Docker was restarted after the directory was created (docs/releasing.md steps 3-4)"; exit 1; }
+    - go build -trimpath -ldflags "-X main.version=$(tr -d '[:space:]' < VERSION)" -o pwlist ./cmd/pwlist
+    - ./pwlist verify --keys blocklist/keys --in out/top10k.txt
+    - |
+      set -eu
+      built="$(sed -n 's/^# built: //p' out/top10k.txt | head -n 1)"
+      dated="$(printf '%s' "$built" | cut -c1-10 | tr - .)"
+      case "$dated" in
+        [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
+        *) echo "cannot read the build date from out/top10k.txt: '$built'"; exit 1 ;;
+      esac
+      headers="$(mktemp)"
+      chmod 600 "$headers"
+      printf 'JOB-TOKEN: %s\n' "$CI_JOB_TOKEN" > "$headers"
+      base="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/pwned-top10k"
+      for version in "$dated" current; do
+        for f in top10k.txt top10k.txt.sig top10k.txt.sha256; do
+          echo "uploading $version/$f to the GitLab package registry"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            --header "@$headers" --upload-file "out/$f" "$base/$version/$f"
+          echo
+        done
+      done
+      rm -f "$headers"
+      ./pwlist publish-github --repo tomlawesome/gauntlet --target main \
+        --token-file "$GAUNTLET_GITHUB_RELEASE_TOKEN_FILE" \
+        --in out/top10k.txt \
+        --dated-tag "pwned-top10k-$dated" --current-tag pwned-top10k-current
+      echo "published the list built $built as $dated and current, on GitLab and GitHub"
+
+# ---------------------------------------------------------------------------
+# RELEASE
+# ---------------------------------------------------------------------------
+# Birdcage's release:promote / release:gitlab pair, cut down: there are no
+# images, so the whole cut is "tag this commit". Like birdcage's, both
+# jobs exist only in `main` push pipelines (#88, owner 2026-10-08:
+# "release is on main, dev and preview are not a release"), so a version
+# reaches `dev`, then `preview` (by merge request), then `main` (by merge
+# request) before anyone can tag it. release:version is the button; it
+# reads the tracked VERSION file and refuses a tag that already exists,
+# so a forgotten bump fails closed. release:gitlab then creates the
+# annotated tag and the release. release-cli acts with the rights of
+# whoever pressed the button, and `v*` tags are protected, so only the
+# owner can actually cut one (#17). The tag's own pipeline runs the
+# publish-gate job below, which publishes the release to GitHub.
+#
+# release:version also rejects a VERSION that isn't a strict semantic
+# version, one that doesn't sort above every tag already cut, and a
+# commit that isn't the current tip of main -- an old pipeline's button
+# must not tag a commit main has moved past (refs #26). The checks are in
+# scripts/release-version-check.sh so they can be tested offline.
+release:version:
+  stage: release
+  image: $ALPINE_IMAGE
+  interruptible: false
+  rules:
+    - !reference [.dev-landing, job_rule]
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      when: manual
+      # A manual job is allow_failure by default; forcing it false would
+      # leave every main pipeline reading "blocked" for a release nobody
+      # intends to cut yet. A human is watching the job they pressed.
+      allow_failure: true
+  # No `needs:` on purpose: without one the button is not playable until
+  # every job in every earlier stage of this `main` pipeline has passed,
+  # which is the bar. `.gate` above is what puts those jobs in a `main`
+  # pipeline at all.
+  cache: []
+  script:
+    - apk add --no-cache git bash >/dev/null  # release-version-check.sh is bash (#56)
+    # The release carries the common-password list, so refuse to tag
+    # while it is the placeholder or more than 90 days old (#52).
+    - scripts/blocklist-age-check.sh
+    - |
+      set -eu
+      version="$(tr -d '[:space:]' < VERSION)"
+      remote_tags="$(git ls-remote --tags origin)"
+      main_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+      scripts/release-version-check.sh "$version" "$remote_tags" "$main_sha" "$CI_COMMIT_SHA" > release.env
+      cat release.env
+  artifacts:
+    reports:
+      dotenv: release.env
+    expire_in: 90 days
+
+release:gitlab:
+  stage: release
+  # Pinned by tag and digest, not :latest, because this job creates the
+  # protected tag. v0.24.0 is release-cli's newest release (checked
+  # 2026-10-02). It is not a Docker Hub image like the ones above, so the
+  # runner's Docker Hub mirror does not apply: release-cli is published only
+  # on GitLab's own registry.
+  image: registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
+  interruptible: false
+  rules:
+    - !reference [.dev-landing, job_rule]
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+  needs:
+    - job: release:version
+      artifacts: true
+  cache: []
+  script:
+    # release:version is allow_failure, and a failed allow_failure job
+    # still satisfies `needs:`; without this an empty tag name would
+    # reach release-cli (birdcage #171).
+    - 'test -n "${RELEASE_TAG:-}" || { echo "no RELEASE_TAG: release:version did not finish"; exit 1; }'
+    - echo "tagging $CI_COMMIT_SHA as $RELEASE_TAG"
+  release:
+    tag_name: $RELEASE_TAG
+    tag_message: gauntlet $RELEASE_TAG
+    ref: $CI_COMMIT_SHA
+    name: $RELEASE_TAG
+    description: |
+      gauntlet $RELEASE_TAG -- see CHANGELOG.md for what changed.
+
+      Apps take it with `go get github.com/tomlawesome/gauntlet@$RELEASE_TAG`
+      (the public GitHub repository carries the tag) or by the GitLab path.
+
+# ---------------------------------------------------------------------------
+# PUBLISH
+# ---------------------------------------------------------------------------
+# The shared publish gate (include above) replaces the old branch mirror:
+# for a protected `v*` tag it scans the tagged tree and pushes one snapshot
+# commit and an annotated tag to GitHub; nothing else is sent. The template
+# supplies the rules (protected `v*` tag only), the environment `publish`
+# (on this Community Edition GitLab it only records deployments: there are
+# no protected environments), the resource group, `cache: []` and
+# `retry: 0`; this block adds the stage, the runner, the pinned image and
+# the project's settings. The deploy key is not a CI/CD variable, which on
+# CE would reach every job in every protected pipeline: it is a file on the
+# `gauntlet-publish-gate` runner, protected and locked to this project,
+# whose config sets PUBLISH_GATE_SSH_KEY to its path, sets the image-cache
+# addresses the image name below needs, and mounts the private-details
+# rules the template reads (docs/releasing.md step 6,
+# ADR-0007's one secret per runner). The image is pinned by digest, as
+# private-details' is. A tag pipeline holds this job alone: every other
+# job's rules need a branch, a merge request or a schedule.
+publish-gate:
+  stage: publish
+  tags: [gauntlet-publish-gate]
+  needs: []
+  # A PUBLISH_GATE_SSH_KEY CI/CD variable would win over the runner's
+  # path and put the key back where every protected pipeline can read
+  # it; refuse rather than publish with it.
+  before_script:
+    - '[ "${PUBLISH_GATE_SSH_KEY:-}" = /etc/gauntlet-publish-gate/key ] || { echo "publish-gate: PUBLISH_GATE_SSH_KEY is not the runner path /etc/gauntlet-publish-gate/key: delete any PUBLISH_GATE_SSH_KEY CI/CD variable, check the runner environment line (docs/releasing.md step 6)" >&2; exit 1; }'
+  image:
+    name: $CI_IMAGE_CACHE_GHCR/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    entrypoint: [""]
+  variables:
+    # The script is fetched at exactly this commit, the one the include
+    # above is pinned to.
+    PUBLISH_GATE_SHA: b14e613643ece48b682106abd1964dc0e5417646
+    PUBLISH_REMOTE: git@github.com:tomlawesome/gauntlet.git
+    # A public release identity (a GitHub no-reply address).
+    PUBLISH_AUTHOR_NAME: tomlawesome
+    PUBLISH_AUTHOR_EMAIL: 76453276+tomlawesome@users.noreply.github.com
+
+# ---------------------------------------------------------------------------
+# MAINTENANCE
+# ---------------------------------------------------------------------------
+# Renovate (#63), copied from orbit's `renovate` job: once a week it compares
+# every pinned dependency with its newest release and opens merge requests
+# for the ones that are behind. What it watches, how it groups and why is in
+# renovate.json at the repo root: both go.mod files, the images in this file,
+# and the Go tools this file and scripts/ install at fixed versions.
+#
+# The shared `light` lane, like every job here but the three that hold a
+# secret (AGENTS.md "Runner tags"). Orbit runs Renovate on `big` because
+# an npm lockfile update runs pnpm over its whole monorepo; here the
+# heaviest step is `go mod tidy` on a small module.
+#
+# Two CI/CD variables the owner creates under Settings > CI/CD > Variables
+# (docs/releasing.md, "Dependency updates"). Mask both. Protect both: the
+# schedule runs on `dev`, which is protected, so a protected variable reaches
+# this job and never reaches a merge request pipeline.
+#
+#   RENOVATE_TOKEN     A project access token on ai/gauntlet with the `api`
+#                      scope and the Developer role. `api` is what lets
+#                      Renovate read the repository, push branches and open
+#                      merge requests; a `read_api` token can look and never
+#                      write.
+#   GITHUB_COM_TOKEN   A github.com fine-grained personal access token with no
+#                      permissions granted at all -- public read only. Renovate
+#                      uses it to read release tags and release notes on
+#                      github.com, where most of gauntlet's modules and tools
+#                      live. Without it the unauthenticated GitHub API
+#                      rate-limits partway through a run.
+#
+# Neither value is ever printed: nothing below dumps an environment, and
+# LOG_LEVEL stays at info. `debug` logs the resolved configuration and would.
+#
+# One optional schedule variable picks the mode. RENOVATE_DRY_RUN=full makes a
+# run that reports what it would do and creates nothing, which is what the
+# first run should be. Delete the variable and the next run opens merge
+# requests. Renovate reads that name itself; the job only has to make an empty
+# value mean "unset", because Renovate accepts extract, lookup or full and
+# nothing else.
+#
+# A second schedule runs this job daily with RENOVATE_SECURITY_ONLY=true
+# (#79): docs/releasing.md promises a security fix opens a merge request
+# without waiting for Monday, and nothing else runs between Mondays. That
+# run adds renovate-security.json on top of renovate.json, through
+# Renovate's RENOVATE_ADDITIONAL_CONFIG_FILE, which turns every ordinary
+# update off and leaves vulnerability fixes on; everything else still
+# comes from renovate.json, so the two runs never drift apart.
+#
+# There is no `RENOVATE_ALLOWED_COMMANDS`: nothing needs a postUpgradeTask.
+# `go mod tidy` after a Go module bump is Renovate's own gomodTidy option.
+renovate:
+  stage: maintenance
+  # Pinned by digest, the way every other image here is: the same release
+  # and digest orbit's renovate job uses (44.83.2), so the two projects run
+  # one proven Renovate. renovate.json excludes 44.63.0 and 44.64.0, which do
+  # not start; Renovate offers its own next release in the weekly merge
+  # request, and that bump is only proven by the following scheduled run.
+  #
+  # The default image rather than `-full`: it carries Node only and installs
+  # the Go toolchain a run needs as it goes, for `go mod tidy`. `-full`
+  # preinstalls every ecosystem's tools and costs several gigabytes of pull on
+  # a shared runner every week.
+  image:
+    name: renovate/renovate:44.83.2@sha256:c1cb952b2e14a112d0d0c61987a10f60a2626fe9b9c1504436be46a17bd123bc
+    pull_policy: if-not-present
+  timeout: 1h
+  # A weekly maintenance run has nothing that could supersede it, and being
+  # cancelled part-way leaves half-written branches behind.
+  interruptible: false
+  rules:
+    - !reference [.dev-landing, job_rule]
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $RENOVATE == "true"
+  # Renovate keeps nothing here between runs; the Go module cache the other
+  # jobs share is no use to it.
+  cache: []
+  variables:
+    # The checkout exists only so RENOVATE_CONFIG_FILE below has a file to
+    # read. Renovate clones the repository it updates itself, elsewhere.
+    GIT_DEPTH: 1
+    RENOVATE_PLATFORM: gitlab
+    RENOVATE_ENDPOINT: $CI_API_V4_URL
+    RENOVATE_AUTODISCOVER: "false"
+    RENOVATE_REPOSITORIES: $CI_PROJECT_PATH
+    # Orbit hands Renovate its checkout's copy as global config because its
+    # default branch did not yet carry renovate.json. Gauntlet's default
+    # branch is `dev`, so the repository copy is found anyway and is the same
+    # file; this only keeps the job identical to orbit's.
+    RENOVATE_CONFIG_FILE: $CI_PROJECT_DIR/renovate.json
+    RENOVATE_ONBOARDING: "false"
+    RENOVATE_REQUIRE_CONFIG: "optional"
+    LOG_LEVEL: info
+    # Go module versions come from each module's own Git host, never from
+    # proxy.golang.org (#63, global rules): the first lookup of a version
+    # through the public proxy records it permanently. GOPRIVATE keeps the
+    # owner's own modules away from the proxy and the checksum database even
+    # for `go mod tidy`. Renovate's Go lookups read GOPROXY, and it hands
+    # both on to the `go mod tidy` it runs. The first dry run shows whether
+    # every lookup went to a Git host (docs/releasing.md).
+    GOPROXY: direct
+    GOPRIVATE: github.com/tomlawesome/*
+  script:
+    - |
+      set -eu
+      if [ -z "${RENOVATE_DRY_RUN:-}" ]; then
+        unset RENOVATE_DRY_RUN
+        echo "renovate: live run, merge requests will be created"
+      else
+        echo "renovate: dry run (${RENOVATE_DRY_RUN}), nothing will be created"
+      fi
+      if [ "${RENOVATE_SECURITY_ONLY:-}" = "true" ]; then
+        export RENOVATE_ADDITIONAL_CONFIG_FILE="$CI_PROJECT_DIR/renovate-security.json"
+        echo "renovate: security fixes only ($RENOVATE_ADDITIONAL_CONFIG_FILE)"
+      fi
+      renovate

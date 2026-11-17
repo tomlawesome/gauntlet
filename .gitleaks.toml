@@ -1,0 +1,15 @@
+# Extends gitleaks' default rules (the config gitleaks uses when none is
+# given) with the shape of this module's own API tokens (#74): the
+# gnt_ prefix (TokenPrefix in token.go) and the 128-bit hex value newID
+# produces. A leaked one then matches a scanner; the prefix alone, in
+# prose or code, does not.
+title = "gauntlet gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "gauntlet-api-token"
+description = "A gauntlet API token (gnt_ and 32 hex digits)"
+regex = '''\bgnt_[0-9a-f]{32}\b'''
+keywords = ["gnt_"]

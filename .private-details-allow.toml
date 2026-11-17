@@ -1,0 +1,54 @@
+# The public release identity's GitHub no-reply address, which the
+# publish-gate job uses as the author of the public snapshot (#118).
+# Allowed in the CI file only, and for the email rule only.
+
+[[allowlists]]
+description = "public release identity (GitHub no-reply address)"
+targetRules = ["email-address"]
+paths = ['''^\.gitlab-ci\.yml$''']
+
+# Found by a publish-gate rehearsal over every file (#118). None is a real
+# address: document section numbers that read as addresses, reserved and
+# special-purpose ranges the location code tests against, public resolvers
+# and invented test values. Each entry relaxes only the named rules on the
+# named files.
+[[allowlists]]
+description = "section and version numbers, reserved ranges and public resolvers in docs, comments and tests"
+targetRules = ["ip-address"]
+paths = [
+  '''^CHANGELOG\.md$''',
+  '''^docs/adr/0005-encryption-at-rest-on-every-backend\.md$''',
+  '''^docs/adr/0015-every-admin-holds-a-passkey\.md$''',
+  '''^docs/api/auth\.yaml$''',
+  '''^docs/api/errors\.md$''',
+  '''^docs/design\.md$''',
+  '''^docs/security-by-design\.md$''',
+  '''^gate/config\.go$''',
+  '''^gate/config_test\.go$''',
+  '''^gate/login_passkey_handler\.go$''',
+  '''^gate/passkey_unknown_credential_test\.go$''',
+  '''^gate/recoverycodes_handler\.go$''',
+  '''^gate/unusual_test\.go$''',
+  '''^geoip/fetch\.go$''',
+  '''^internal/plaintext/plaintext\.go$''',
+  '''^passwordcheck\.go$''',
+  '''^ratelimit\.go$''',
+  '''^scripts/release-version-check\.sh$''',
+  '''^scripts/release-version-check_test\.sh$''',
+  '''^store\.go$''',
+]
+
+[[allowlists]]
+description = "reserved, special-purpose and invented addresses in the location tests"
+targetRules = ["ip-address", "ipv6-address"]
+paths = [
+  '''^geoip/geoip_test\.go$''',
+  '''^geoip/helpers_test\.go$''',
+  '''^geoip/locate_test\.go$''',
+  '''^geoip/refresh_test\.go$''',
+]
+
+[[allowlists]]
+description = "reserved and link-local IPv6 addresses in tests"
+targetRules = ["ipv6-address"]
+paths = ['''^addressban_test\.go$''', '''^token_test\.go$''']

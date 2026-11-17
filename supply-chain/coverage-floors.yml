@@ -1,0 +1,112 @@
+# Go test-coverage floors, one per package. Read by
+# scripts/coverage-floor.py, which runs against
+# `go test ./... -race -coverprofile=...` in the `test:go` job in
+# .gitlab-ci.yml. Shape and script copied from birdcage's
+# supply-chain/coverage-floors.yml; see that file for the full rationale
+# (STATEMENT coverage, not branch; ratchet, not a fixed target).
+#
+# - each floor below is set at the value measured on this checkout,
+#   rounded DOWN to a whole percent -- so introducing this file does not
+#   turn the build red over coverage nobody has touched.
+# - a floor only ever goes UP, when a package's coverage genuinely
+#   improves. Never lower one to make a change pass.
+# - scripts/coverage-floor.py also fails a package sitting more than 5
+#   points ABOVE its floor (RATCHET_SLACK) -- raise the floor here to
+#   lock the gain in rather than leaving the headroom.
+# - scripts/coverage-floor.py also fails on any package present in the
+#   coverage profile but missing from this file: a new package must get
+#   a floor added here as a reviewed change, not slip in unmeasured.
+#
+# Measured 2026-09-26 from `go test ./... -race -coverprofile=...` on
+# this checkout: persist at 90.9%. Re-measured on G2 (issue #3): the
+# root `gauntlet` package (accounts, passwords, roles, username
+# validation, ids) at 91.2%. That package's key here is the empty
+# string, quoted: the coverage profile's package key is the directory
+# holding each source file relative to the module root, and the root
+# package's files (store.go, etc.) have no directory component --
+# os.path.dirname("store.go") is "", not ".". coverage-floor.py strips
+# a double-quoted key the same way real YAML would. G5 (issue #6): oidc at
+# 86.98%; internal/testutil at 0.0% -- the fake OIDC provider, exercised
+# through oidc's own tests but carrying none of its own, the "known debt
+# ... packages with no test files" case this script already expects.
+# Re-measured on G3 (issue #4), which adds sessions, tokens and the login
+# limiter to the root package: still 91.8%, rounding down to the same
+# 91 floor. internal/evict is new in G3, at 100.0%.
+# Re-measured on G4 (issue #5, second-factor data and stdlib flows): the
+# root package at 95.4%; 95.0% once merged with G3, still at the 95 floor.
+# G6 stage 1 (issue #7): gate is new, at 91.2%.
+# internal/hashcost is new with #24, at 75.0%: the one statement no
+# test can reach is its refusal outside a test binary.
+# G8 (issue #20): passkey is new, at 39.9% from its relying-party and
+# sealing tests alone, then 90.8% once its ceremony tests could drive
+# the fake authenticator; internal/passkeytest (that fake) is new at
+# 91.6%. What neither reaches is a failing crypto/rand or JSON encoder.
+# gate re-measured with the passkey routes and their tests: 92.0%.
+# internal/spent (the one-time-key set, #20 R2) is new at 100.0%.
+# passkey re-measured once its spent set moved to internal/spent and
+# its credential conversion got a round-trip test: 92.8%.
+# #52: blocklist is new at 95.5%, internal/listsig at 97.8% and
+# cmd/pwlist at 90.7%. What they leave uncovered is mostly a failing
+# disk or JSON encoder, and pwlist's main() itself.
+# #54: geoip is new at 92.1%. What it leaves uncovered is mostly a
+# failing disk, and a file that opens but whose lookups fail.
+# #61: persist/persisttest is new at 94.3%, from running it against
+# Memory and against fakes broken on purpose. What it leaves uncovered
+# is the skip for a backend without VersionReader (covered from persist's
+# own tests, which this per-package figure does not count) and failures
+# no fake produces, such as a Load that errors or a Save returning
+# version 0.
+# #80: internal/atomicfile is new at 72.0%, persist's crash-safe writer
+# moved out so blocklist and geoip share it. What it leaves uncovered is
+# a chmod, chown, write, sync or close of a just-created temp file
+# failing, which no test here can cause.
+# #89: internal/plaintext is new at 100.0%, the shared plain-text rule.
+# #90: internal/seal is new at 78.1%, the AES-GCM codec oidc, gate and
+# passkey now share. What it leaves uncovered is crypto/rand or the
+# cipher failing, MustNew's panic, and a value JSON cannot encode. oidc
+# re-measured once its
+# codec's own copies of those failure paths moved there: 91.0%.
+# #90: internal/fetch is new at 100.0%, the redirect rule and refresh
+# jitter blocklist and geoip now share.
+# #90: internal/expiry (the one ticket-expiry rule) is new at 100.0%.
+# #90: internal/browsertoken is new at 87.5%, the known-browser token's
+# shape the root store and gate now share. What it leaves uncovered is
+# New's panic when crypto/rand fails.
+# #90: internal/groupname is new at 100.0%, the SSO group-name rule
+# oidc and gate now share.
+
+# Re-measured 2026-10-09 under Go 1.27.2 (owner, !51): every floor is
+# the new figure rounded down. Go 1.27.2 fixed cmd/cover over-counting
+# the statements in some covered blocks ("preserve statement counts when
+# splitting coverage blocks", ce0ff94df); 1.27.0 and 1.27.1 counted, for
+# example, 8 statements in a one-line const block. The same tests run
+# the same lines, but five packages measured lower than the older
+# figures: gate 91.4, internal/atomicfile 70.8, internal/passkeytest
+# 83.6, oidc 90.6, persist/persisttest 92.6. Four went up: blocklist
+# 97.3, internal/seal 81.8, passkey 93.9, persist 93.8. The others are
+# unchanged. Figures in the notes above were measured with the older
+# count.
+
+floors:
+  persist: 93
+  "": 95 # the root `gauntlet` package -- see the note above on the empty key
+  oidc: 90
+  internal/testutil: 0
+  internal/evict: 100
+  gate: 91
+  internal/hashcost: 75
+  passkey: 93
+  internal/passkeytest: 83
+  internal/spent: 100
+  blocklist: 97
+  internal/listsig: 97
+  cmd/pwlist: 90
+  geoip: 92
+  persist/persisttest: 92
+  internal/atomicfile: 70
+  internal/plaintext: 100
+  internal/seal: 81
+  internal/fetch: 100
+  internal/expiry: 100
+  internal/browsertoken: 87
+  internal/groupname: 100
