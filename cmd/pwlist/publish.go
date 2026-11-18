@@ -22,7 +22,7 @@ import (
 
 // The GitHub release copy (owner, 2026-10-02, on #52): the GitLab
 // project is private, so applications fetch the list from releases on
-// the public mirror, github.com/tomlawesome/gauntlet. GitLab stays the
+// the public snapshot, github.com/tomlawesome/gauntlet. GitLab stays the
 // first home -- blocklist:publish uploads to its package registry first
 // and only then copies the same signed files here.
 //

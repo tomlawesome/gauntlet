@@ -116,7 +116,7 @@ is about 410 KB.
   shared lane for a list that rarely changes. The owner chose monthly.
 - **Applications reading the GitLab registry**: it would mean opening
   the private project's package registry to anyone. The owner chose the
-  public mirror's releases instead.
+  public snapshot's releases instead.
 - **Signing with cosign or a CI variable**: cosign means third-party
   verification code in every application; a variable means the key
   reaches every protected job.

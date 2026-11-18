@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/boombuler/barcode v1.1.0 // indirect
 	github.com/coreos/go-oidc/v3 v3.21.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect

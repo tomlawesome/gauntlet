@@ -59,7 +59,8 @@ secret (#52, ADR-0007): `blocklist:sign` on `gauntlet-signing`
 and `publish-gate` on `gauntlet-publish-gate` (GitHub deploy key at
 `/etc/gauntlet-publish-gate/`, #118). All three are protected, locked
 to this project, and set up by the owner (docs/releasing.md); no other
-job may use those tags. This GitLab is Community Edition: no protected
+job may use those tags; `scripts/ci/config-check.sh tags`, run by
+`lint:flake-check`, enforces it (#121). This GitLab is Community Edition: no protected
 environments, so no secret is a CI/CD variable.
 
 ## Dependency updates
@@ -107,7 +108,7 @@ python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
 scripts/licence-check.sh
 scripts/apidiff.sh             # exported API vs the last v* tag
-GOTOOLCHAIN=go1.27.4 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # the Go in CI's image
+GOTOOLCHAIN=go1.27.4 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...  # the Go in CI's image
 gitleaks detect --no-banner
 sh scripts/ci/flake-check.sh --quarantined scripts/quarantine.txt docs/flakes.md  # flake log (#109)
 python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"

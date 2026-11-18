@@ -35,6 +35,11 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
    than 90 days ago. "Nothing to commit" just means the embedded list
    is already the newest.
 
+   The same merge request also carries the release record,
+   `docs/releases/v<version>.md`, which the readiness check (R1) requires
+   before the first promotion. See "Before a promotion" and "The release
+   record" below.
+
 3. Once that merge request lands on `dev`, promote it to `preview`:
    open a merge request from `dev` to `preview`. Its pipeline runs every
    lint and test job, and `preview`'s own pipeline runs them all again
@@ -95,7 +100,7 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
    project" list assumes protected environments, which this GitLab
    (Community Edition) does not have: there a protected variable reaches
    every job in every protected pipeline. For this project, its steps 1
-   to 4 and 6 are replaced by the four below, step 7 is already done in
+   to 4 and 6 are replaced by the five below, step 7 is already done in
    `.gitlab-ci.yml`, and steps 5 and 8 still apply: after the first run,
    set the `publish-gate` resource group to oldest first, and keep
    GitLab's own push mirror to GitHub switched off. The key is held the
@@ -137,6 +142,34 @@ button exists only in `main`'s pipelines. A version that is on `dev` or
    4. Let this project's jobs fetch the gate script: in ai/agent-infra,
       [Settings > CI/CD > Job token permissions](https://gitlab.tomlawson.io/ai/agent-infra/-/settings/ci_cd),
       add `ai/gauntlet`.
+   5. Fence `main` and the `v*` tags on GitHub, after step 2 so the
+      deploy key exists. The blocklist token needs Contents write for
+      releases, which would also let it move `main` or a `v*` tag
+      outside the publish gate. Two rulesets stop that, and the
+      publish-gate deploy key (held only by that runner) is the one
+      actor allowed past them. Open
+      [Settings > Rules > Rulesets](https://github.com/tomlawesome/gauntlet/settings/rules),
+      then for each ruleset below click **New ruleset**:
+      1. **New branch ruleset**, named `protect main`. Set
+         *Enforcement status* to **Active**. Under *Target branches*
+         click **Add target > Include by pattern** and enter `main`.
+         Under *Rules* tick **Restrict updates**, **Restrict
+         deletions** and **Block force pushes**. Under *Bypass list*
+         click **Add bypass**, choose **Deploy keys** and set it to
+         **Always allow**. Click **Create**.
+      2. **New tag ruleset**, named `protect release tags`. Set
+         *Enforcement status* to **Active**. Under *Target tags* click
+         **Add target > Include by pattern** and enter `v*`. Under
+         *Rules* tick **Restrict creations**, **Restrict updates**,
+         **Restrict deletions** and **Block force pushes**. Add the
+         same bypass (**Add bypass > Deploy keys**, **Always allow**).
+         Click **Create**.
+
+      The `pwned-top10k-*` tags stay outside both rulesets, so the
+      blocklist token still creates and replaces its releases. To
+      check: with the blocklist token, try to push a `v*` tag; GitHub
+      should refuse it. Then confirm the next publish-gate run still
+      succeeds.
 
    No CI/CD variable holds the key, and no protected environment is
    needed; the job's `publish` environment only records deployments. If
@@ -193,6 +226,72 @@ v0.3.0 was tagged on a `dev` commit (e8b0009), before this order
 existed. Its tag stays where it is -- a published tag is never moved.
 It counts as released once `main` has that commit, through the usual
 `dev` -> `preview` -> `main` merge requests.
+
+## Before a promotion (#122)
+
+Every promotion, `dev` -> `preview` and `preview` -> `main`, starts with the
+release-readiness check. The `release_readiness` job runs it first in the
+merge request's pipeline and nothing else starts until it ends; there is no
+way to skip it. Run the same script before opening the merge request, from a
+checkout of the source branch with the target fetched:
+
+```
+scripts/release-readiness.sh preview   # dev -> preview
+scripts/release-readiness.sh main      # preview -> main
+```
+
+It runs every check and ends with the full list. Each failure is a
+`FAIL R<n>` line followed by a `do this:` line. Exit 1 means something
+failed. Checks: R1 the release record, R2 `VERSION` is a new semantic
+version above every tag, R3 `docs/api/auth.yaml`, R4 the CHANGELOG
+section, R5 no `go.mod` `retract` covers the version, R6 the embedded
+common-password list is fresh, R7 the target is an ancestor of the source
+(otherwise: back-merge first), R8 the Go version of `GOLANG_IMAGE` equals
+`go.mod`'s. A changed image digest is only a `WARN R8`. With a personal
+`GITLAB_TOKEN` and `glab` it also checks the audit issue; in CI it says
+"not checked here".
+
+### The release record
+
+Before each promotion the agent commits `docs/releases/v<VERSION>.md`: one
+line per numbered step 1..N at the top of this guide, in order, and no
+more. Read the whole guide first; the record names the guide it read. Copy
+this template, replace every placeholder, and commit it as yourself with
+`git commit --trailer "Signed-off-by: <Name>"`, so the `Signed-off-by:` line
+is the commit's author name and its trailer. Never use `git commit -s`: it
+adds an email, which the commit check refuses; the line is a name only:
+
+```
+# Release v<VERSION>
+
+version: <VERSION>
+guide-blob: <output of: git rev-parse HEAD:docs/releasing.md>
+guide-commit: <output of: git log -1 --format=%H -- docs/releasing.md>
+step 1: done: <issue or commit that shows it, e.g. #123 closed>
+step 2: not-needed: <the owner's decision, with its date>
+step 3: after-merge
+Signed-off-by: <Name>
+```
+
+Each step line is `done: <evidence>`, `not-needed: <owner decision>` or
+`after-merge`. An empty value, `TODO`, `TBD`, `n/a` or text left in angle
+brackets fails R1. The `guide-commit:` line is required but informational:
+its value is not compared. If the guide changes after the record is
+written, `guide-blob` is stale and R1 fails: read the guide again and update
+the record. The guide's own top-level steps must be numbered 1..N in order
+with none missing (R1 fails otherwise), and a missing `docs/releasing.md`
+on the source fails R1. This is a
+checklist with a sign-off, not a signature: it stops a skipped or
+part-read guide, a stale record and an anonymous one. False evidence it
+cannot stop; the owner reads the record when approving.
+
+### What the script does not check
+
+| Step | Who | How |
+| --- | --- | --- |
+| Audit issue closed (step 1) | The agent cites the issue as #N in the record; the owner confirms | Checked only locally with a personal token; CI prints "not checked here" |
+| Secret-holding runners online; `publish-gate` first switch-over | The owner | See "What the owner checks once" below and the publish-gate notes |
+| Approval of the promotion merge request | The owner | A green job never replaces it |
 
 ## What the owner checks once (#88)
 
@@ -267,6 +366,10 @@ an ordinary merge request.
 with *Repository access: Only select repositories* →
 `tomlawesome/gauntlet`, and *Repository permissions → Contents: Read
 and write* (releases need it; nothing else is needed).
+
+This token can also move `main` and `v*` tags, so the owner fences
+them with GitHub rulesets: see release step 6 (the sub-step "Fence
+`main` and the `v*` tags on GitHub").
 
 Give it an
 expiry and a calendar reminder: when it expires, the GitHub copy stops
@@ -381,9 +484,12 @@ Each job fails at once if its secret file is not there.
 takes about four hours, so check the host's bandwidth and runner
 capacity first. Then, in
 [Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules),
-create a schedule: description `blocklist`, target branch `dev`, a
+create a schedule: description `blocklist`, target branch `main`, a
 monthly interval (for example `17 3 2 * *`, 03:17 UTC on the 2nd), and
-a variable `BLOCKLIST_BUILD` = `true`.
+a variable `BLOCKLIST_BUILD` = `true`. The target is `main`, not `dev`,
+so that only promoted code runs beside the GitHub token. A change to
+`pwlist` therefore reaches the monthly build only after the next
+promotion to `main`.
 
 Leave the setting that allows uploading a file with the same name again
 (duplicate generic packages) switched on, under

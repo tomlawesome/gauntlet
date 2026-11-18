@@ -1,4 +1,5 @@
-# Quarantined Go tests, one name per line (#109). This one file is both the
+# Quarantined Go tests, one top-level name per line (#109); a subtest line
+# is refused (#124), so quarantine its parent. This one file is both the
 # skip list and the flake check's list, so the two cannot drift:
 #   - test:go passes scripts/quarantine-skip.sh's pattern to `go test -skip`;
 #   - lint:flake-check passes this file to --quarantined.

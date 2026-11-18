@@ -6,6 +6,7 @@ go 1.27.0
 retract [v0.1.0, v0.4.2]
 
 require (
+	github.com/boombuler/barcode v1.1.0
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/maxmind/mmdbwriter v1.2.0

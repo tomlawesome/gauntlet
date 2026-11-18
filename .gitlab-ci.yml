@@ -32,8 +32,9 @@
 
 # Batch train (ai/agent-infra#114, decision 60a): a merge request into
 # batch-a or batch-b runs the static lint jobs only, and a chore/catchup-*
-# merge request into a batch runs catchup-check alone. The snippets are
-# pinned by tag; each sets a variable in workflow:rules that the job rules
+# merge request into a batch runs catchup-check and the three fast scans
+# (#121, at .gate_scan below). The snippets are
+# pinned by commit; each sets a variable in workflow:rules that the job rules
 # below test.
 include:
   - project: ai/agent-infra
@@ -84,6 +85,7 @@ workflow:
     - when: always
 
 stages:
+  - readiness
   - lint
   - test
   - blocklist
@@ -156,20 +158,32 @@ variables:
 # button would be playable with no test run at all. Gauntlet has no
 # preview-only jobs yet, so the bar at both hops is this full gate.
 #
-# The first rule skips the job in a catch-up MR (catchup-check runs
-# alone there). `.gate_heavy` is the same list for the test jobs, with
+# `.gate_scan` is that list for the three fast scan jobs, lint:secrets,
+# private-details and lint:flake-check. It has no catch-up rule, so they
+# run in a catch-up MR beside catchup-check (#121): catchup-check proves
+# only that dev's tip is in the carrier branch, not that the carrier
+# carries nothing else, and a secret or private address pushed there would
+# otherwise land in a protected batch unscanned, found only when removing
+# it means rewriting that batch. This narrows decision 60a's
+# "catchup-check alone" for these jobs; they take under a minute.
+# `.gate` adds the catch-up rule for every other lint job, which a
+# catch-up MR skips. `.gate_heavy` is that list for the test jobs, with
 # the batch-intake rule added: an MR into a batch skips them and keeps
 # the lint jobs, which are the cheap static checks (secret scan, lint).
-.gate: &gate
+.gate_scan:
   rules:
     - !reference [.dev-landing, job_rule]
-    - !reference [.catchup-check, job_rule]
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "dev"
     - if: $CI_COMMIT_BRANCH == "preview"
     - if: $CI_COMMIT_BRANCH == "main"
+
+.gate: &gate
+  rules:
+    - !reference [.catchup-check, job_rule]
+    - !reference [.gate_scan, rules]
 
 .gate_heavy: &gate_heavy
   rules:
@@ -186,6 +200,46 @@ variables:
 .git_safe: &git_safe
   before_script:
     - git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+# ---------------------------------------------------------------------------
+# READINESS
+# ---------------------------------------------------------------------------
+# The release-readiness check (#122) runs first on every promotion, a merge
+# request into `preview` or `main`, and nothing else in that pipeline starts
+# until it has finished: it is the only job in the first stage, and
+# private-details, the one job that names `needs:`, lists it. It runs
+# scripts/release-readiness.sh, every check in one pass, so a promotion that
+# would fail on a missing change log section or a stale record fails in
+# seconds instead of after the long pipeline. There is no variable that
+# skips it, and a green run never replaces the owner's approval of the
+# promotion. Full history, because it reads the target branch and the tags;
+# the target is fetched here, and the script is handed both refs inline on
+# its command line, from the merge request's own variables: the source is the
+# branch's own sha (CI_MERGE_REQUEST_SOURCE_BRANCH_SHA), not the merge
+# commit, and being inline, no project or pipeline variable can override
+# either ref. The image digest is the one this job runs
+# on (CI_JOB_IMAGE): it is compared with the pin in the source branch's
+# file, so an override of GOLANG_IMAGE shows as drift. Offline apart from
+# the fetch; the audit issue is not checked in CI (job tokens cannot read
+# issues), the script says so.
+release_readiness:
+  stage: readiness
+  image: $GOLANG_IMAGE
+  <<: *git_safe
+  timeout: 5m
+  cache: []
+  variables:
+    GIT_DEPTH: 0
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "preview" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main")
+  script:
+    - git fetch --quiet --force origin "+refs/heads/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:refs/remotes/origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - git fetch --quiet --force --tags origin
+    - |
+      case "$CI_JOB_IMAGE" in
+        *@sha256:*) export READINESS_IMAGE_DIGEST="${CI_JOB_IMAGE#*@}" ;;
+      esac
+    - READINESS_SOURCE_REF="${CI_MERGE_REQUEST_SOURCE_BRANCH_SHA:-$CI_COMMIT_SHA}" READINESS_TARGET_REF="origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" bash scripts/release-readiness.sh "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
 
 # ---------------------------------------------------------------------------
 # LINT
@@ -216,33 +270,79 @@ lint:go:
 
 # The flake log rule (#109): docs/flakes.md must parse, and a flake with
 # three sightings needs an issue linked from its heading and a line in
-# scripts/quarantine.txt, the same list test:go skips. Reads only; no
-# Docker, no Go.
+# scripts/quarantine.txt, the same list test:go skips. Also runs
+# config-check.sh (#121): each pinned include ref equals its job's SHA
+# variable, and each secret-holding runner tag is used by its own job
+# alone. Reads only; no Docker, no Go.
 lint:flake-check:
   extends: .dev-landing-check
   stage: lint
   image: $ALPINE_IMAGE
   rules:
     - !reference [.dev-landing-check, rules]
-    - !reference [.gate, rules]
+    - !reference [.gate_scan, rules]
   tags: [light]
   cache: []
   script:
     - sh scripts/ci/flake-check.sh --quarantined scripts/quarantine.txt docs/flakes.md
+    - sh scripts/ci/config-check.sh pins
+    - sh scripts/ci/config-check.sh tags
+
+# The scripts' own tests (#123): scripts/ci/run-script-tests.sh runs every
+# scripts/**/*_test.sh (a new one is picked up with no edit here; its
+# header lists the one exclusion and why) and then job-rules_test.py, which
+# pins each pipeline type's job set. That test reads the ai/agent-infra
+# templates at the refs this file pins, so the job clones the project over
+# HTTPS with the job token. The token reaches git through an environment
+# header (GIT_CONFIG_*), never the command line, and is not echoed. Runs as
+# root: none of these tests checks file permissions. Go image because the
+# apidiff and licence-check tests `go install` their pinned tools, as the
+# lint jobs already do; the default per-job cache holds them. Runs wherever
+# lint:flake-check does (same rules).
+lint:script-tests:
+  extends: .dev-landing-check
+  stage: lint
+  image: $GOLANG_IMAGE
+  rules:
+    - !reference [.dev-landing-check, rules]
+    - !reference [.gate_scan, rules]
+  <<: *git_safe
+  timeout: 10m
+  script:
+    - apt-get update -qq >/dev/null
+    - apt-get install -y -qq --no-install-recommends python3-yaml >/dev/null
+    - |
+      set -eu
+      infra=$(mktemp -d)
+      auth=$(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 -w0)
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
+        GIT_CONFIG_VALUE_0="Authorization: Basic $auth" \
+        git clone --quiet "$CI_SERVER_URL/ai/agent-infra.git" "$infra"
+      unset auth
+      AGENT_INFRA_DIR=$infra sh scripts/ci/run-script-tests.sh
 
 # The shared personal-details check (include above). The template defines
 # the job; this sets its stage, rules and image. It is a fast check and
-# runs wherever lint:secrets does, a push to dev and a merge request into
-# a batch. The image is pinned by digest, like every other image in this
-# file (the template names a tag only).
+# runs wherever lint:secrets does: a push to dev, and every merge request,
+# a catch-up MR included. The image is pinned by digest, like every
+# other image in this file (the template names a tag only).
 private-details:
   extends: .dev-landing-check
   stage: lint
   rules:
     - !reference [.dev-landing-check, rules]
-    - !reference [.gate, rules]
-  needs: []
+    - !reference [.gate_scan, rules]
+  # Optional: the job exists only in promotion pipelines (#122), where
+  # everything waits for it; elsewhere `needs` lets this one start at once.
+  needs:
+    - job: release_readiness
+      optional: true
   cache: []
+  # A pipeline variable could move the scan's start, rules or script; the
+  # committed values win or the job fails (#121). The template defines
+  # script only, so this before_script replaces nothing.
+  before_script:
+    - sh scripts/ci/config-check.sh env private-details
   image:
     name: $CI_IMAGE_CACHE_GHCR/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
     entrypoint: [""]
@@ -275,7 +375,7 @@ lint:vulncheck:
   <<: [*gate, *git_safe]
   timeout: 10m
   script:
-    - go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
     - govulncheck ./...
 
 # The exported Go API against the last release tag (ADR-0002, #22):
@@ -306,7 +406,7 @@ lint:secrets:
   <<: *git_safe
   rules:
     - !reference [.dev-landing-check, rules]
-    - !reference [.gate, rules]
+    - !reference [.gate_scan, rules]
   variables:
     GIT_DEPTH: 0 # gitleaks scans git history; a shallow clone would miss all but the newest commit.
   script:
@@ -350,13 +450,18 @@ test:go:
       chown -R tester:tester .gocache
       install -d -o tester -g tester /tmp/gotest
     - |
+      # Written out first, under the first item's `set -e`, not inside `$(...)`
+      # on the go test line: there a
+      # refusal (exit 1 on a line that is not a test name) would be lost
+      # and go test would run with nothing skipped (#121).
+      scripts/quarantine-skip.sh > /tmp/gotest/skip
       rc=0
       su tester -c "cd '$CI_PROJECT_DIR' && \
         HOME=/home/tester \
         GOCACHE='$GOCACHE' \
         GOMODCACHE='$GOMODCACHE' \
         GOFLAGS='$GOFLAGS' \
-        go test ./... -race -skip \"\$(scripts/quarantine-skip.sh)\" \
+        go test ./... -race -skip \"\$(cat /tmp/gotest/skip)\" \
           -coverprofile=/tmp/gotest/coverage.out" || rc=$?
       if [ -f /tmp/gotest/coverage.out ]; then
         cp /tmp/gotest/coverage.out coverage.out
@@ -409,8 +514,9 @@ test:contract:
 # scripts/update-blocklist.sh fetch it (owner, 2026-10-02).
 #
 # These jobs run only in the pipeline the `blocklist` pipeline schedule
-# starts: a monthly schedule on `dev` (owner, 2026-10-02) carrying the
-# variable BLOCKLIST_BUILD=true. Every other job above is `.gate`d off
+# starts: a monthly schedule on `main` (owner, 2026-10-02; moved from `dev`,
+# 2026-11-17, so only promoted code runs beside the GitHub token) carrying
+# the variable BLOCKLIST_BUILD=true. Every other job above is `.gate`d off
 # for schedules, and the release and publish jobs need a push, so that
 # pipeline holds these three and nothing else.
 #
@@ -685,9 +791,11 @@ publish-gate:
   needs: []
   # A PUBLISH_GATE_SSH_KEY CI/CD variable would win over the runner's
   # path and put the key back where every protected pipeline can read
-  # it; refuse rather than publish with it.
+  # it, and a pipeline variable could move the pinned script, remote,
+  # identity or rules; refuse rather than publish with any of them
+  # (#121). The template defines script only.
   before_script:
-    - '[ "${PUBLISH_GATE_SSH_KEY:-}" = /etc/gauntlet-publish-gate/key ] || { echo "publish-gate: PUBLISH_GATE_SSH_KEY is not the runner path /etc/gauntlet-publish-gate/key: delete any PUBLISH_GATE_SSH_KEY CI/CD variable, check the runner environment line (docs/releasing.md step 6)" >&2; exit 1; }'
+    - sh scripts/ci/config-check.sh env publish-gate
   image:
     name: $CI_IMAGE_CACHE_GHCR/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
     entrypoint: [""]

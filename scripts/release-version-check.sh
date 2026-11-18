@@ -10,7 +10,8 @@ set -euo pipefail
 #      too low can never be published (the proxy can't un-publish).
 #   3. The commit being tagged is the current tip of main, the release
 #      branch (#88; it was dev before), so an old pipeline's release
-#      button can't tag a commit main has moved past.
+#      button can't tag a commit main has moved past. MAIN_SHA "-"
+#      skips this one (#122).
 # Pure string logic, no network calls, so release-version-check_test.sh
 # can feed it canned input offline.
 #
@@ -20,7 +21,9 @@ set -euo pipefail
 #   VERSION      contents of the VERSION file, e.g. "0.2.1"
 #   REMOTE_TAGS  output of `git ls-remote --tags origin` (may be empty)
 #   MAIN_SHA     sha of origin/main, e.g. from
-#                `git ls-remote origin refs/heads/main | cut -f1`
+#                `git ls-remote origin refs/heads/main | cut -f1`;
+#                "-" skips the tip check (release-readiness.sh, #122:
+#                before a promotion there is no main tip to compare with)
 #   COMMIT_SHA   the commit being tagged, e.g. $CI_COMMIT_SHA
 #
 # On success prints "RELEASE_TAG=v<VERSION>" and exits 0.
@@ -64,7 +67,7 @@ if [ -n "$existing_versions" ]; then
 fi
 
 # 3. The commit being tagged must be the current tip of main.
-if [ "$commit_sha" != "$main_sha" ]; then
+if [ "$main_sha" != "-" ] && [ "$commit_sha" != "$main_sha" ]; then
   echo "commit $commit_sha is not the current tip of main ($main_sha) -- use the pipeline of the newest commit on main." >&2
   exit 1
 fi

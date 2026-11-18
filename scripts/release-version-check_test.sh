@@ -10,6 +10,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$ROOT/scripts/release-version-check.sh"
 
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
 MAIN_SHA="aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
 # A commit dev has but main does not yet: what an old dev pipeline
 # would offer.
@@ -18,9 +21,9 @@ TAGS_V020="deadbeef00000000000000000000000000000000	refs/tags/v0.2.0"
 
 assert_fail() {
   local desc="$1"; shift
-  if "$SCRIPT" "$@" >/tmp/rvc_out 2>/tmp/rvc_err; then
+  if "$SCRIPT" "$@" >"$TMP/out" 2>"$TMP/err"; then
     echo "FAIL: $desc -- expected failure, got success" >&2
-    cat /tmp/rvc_out /tmp/rvc_err >&2
+    cat "$TMP/out" "$TMP/err" >&2
     exit 1
   fi
   echo "ok: $desc"
@@ -29,14 +32,14 @@ assert_fail() {
 # Like assert_fail, and the error must contain the given text.
 assert_fail_says() {
   local desc="$1" want="$2"; shift 2
-  if "$SCRIPT" "$@" >/tmp/rvc_out 2>/tmp/rvc_err; then
+  if "$SCRIPT" "$@" >"$TMP/out" 2>"$TMP/err"; then
     echo "FAIL: $desc -- expected failure, got success" >&2
-    cat /tmp/rvc_out /tmp/rvc_err >&2
+    cat "$TMP/out" "$TMP/err" >&2
     exit 1
   fi
-  if ! grep -qF "$want" /tmp/rvc_err; then
+  if ! grep -qF "$want" "$TMP/err"; then
     echo "FAIL: $desc -- error does not say '$want':" >&2
-    cat /tmp/rvc_err >&2
+    cat "$TMP/err" >&2
     exit 1
   fi
   echo "ok: $desc"
@@ -45,9 +48,9 @@ assert_fail_says() {
 assert_pass() {
   local desc="$1" want="$2"; shift 2
   local got
-  if ! got="$("$SCRIPT" "$@" 2>/tmp/rvc_err)"; then
+  if ! got="$("$SCRIPT" "$@" 2>"$TMP/err")"; then
     echo "FAIL: $desc -- expected success, got failure" >&2
-    cat /tmp/rvc_err >&2
+    cat "$TMP/err" >&2
     exit 1
   fi
   if [ "$got" != "$want" ]; then
@@ -85,5 +88,23 @@ assert_fail_says "dev-only commit refused, pointing at main" "not the current ti
 # A VERSION above the existing tag, at the tip of main, passes.
 assert_pass "good case accepted" "RELEASE_TAG=v0.2.1" \
   "0.2.1" "$TAGS_V020" "$MAIN_SHA" "$MAIN_SHA"
+
+# release-readiness (#122) passes "-" as MAIN_SHA to skip the tip check:
+# there is no main tip to compare with before a promotion. Every other check
+# still applies, and the four-argument contract stays.
+assert_pass "'-' as MAIN_SHA skips the tip check" "RELEASE_TAG=v0.2.1" \
+  "0.2.1" "$TAGS_V020" "-" "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"
+assert_pass "'-' as MAIN_SHA with no tags at all" "RELEASE_TAG=v0.1.0" \
+  "0.1.0" "" "-" "$MAIN_SHA"
+assert_fail "'-' as MAIN_SHA still rejects a non-semantic VERSION" \
+  "1.2.beta" "$TAGS_V020" "-" "$MAIN_SHA"
+assert_fail "'-' as MAIN_SHA still rejects an out-of-order VERSION" \
+  "0.1.1" "$TAGS_V020" "-" "$MAIN_SHA"
+assert_fail "'-' as MAIN_SHA still rejects an existing tag" \
+  "0.2.0" "$TAGS_V020" "-" "$MAIN_SHA"
+assert_fail "three arguments are still a usage error" \
+  "0.2.1" "$TAGS_V020" "$MAIN_SHA"
+assert_fail "five arguments are still a usage error" \
+  "0.2.1" "$TAGS_V020" "$MAIN_SHA" "$MAIN_SHA" "-"
 
 echo "release-version-check_test.sh: all cases passed"

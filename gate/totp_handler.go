@@ -26,12 +26,16 @@ import (
 // session check is never new enough to check a code against.
 
 type totpEnrolResponse struct {
-	// URI is the otpauth:// URI the frontend renders as a QR code.
+	// URI is the otpauth:// URI the QR code encodes; QR below is that
+	// code ready-made.
 	URI string `json:"uri"`
 	// Secret is the same value URI carries, base32, for typing in by
 	// hand -- not every authenticator app's camera flow is reliable, so
 	// the text secret is always shown beside the code.
 	Secret string `json:"secret"`
+	// QR is the module matrix of URI (gauntlet.TOTPEnrollmentQR), so the
+	// frontend draws the code without a QR library.
+	QR []string `json:"qr"`
 }
 
 // handleTOTPEnrol starts authenticator-app enrolment for the signed-in
@@ -80,6 +84,15 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	encoded := gauntlet.EncodeTOTPSecret(secret)
+	uri := gauntlet.TOTPEnrollmentURI(g.cfg.ProductName, user.Username, secret)
+	// Encoded before the secret is stored: a URI too long for a QR code
+	// (an absurd Config.ProductName) must leave no pending secret behind.
+	qr, err := gauntlet.TOTPEnrollmentQR(uri)
+	if err != nil {
+		g.logError("encoding enrolment QR for " + user.Username + ": " + err.Error())
+		writeProblem(w, http.StatusInternalServerError, classServerError, "unable to start enrolment", nil)
+		return
+	}
 	if err := g.deps.Users.SetPendingTOTPSecretAt(user.ID, encoded, now); err != nil {
 		status, class := http.StatusInternalServerError, classServerError
 		if errors.Is(err, gauntlet.ErrTOTPAlreadyActive) || errors.Is(err, gauntlet.ErrEnrolmentHeld) {
@@ -90,8 +103,9 @@ func (g *Gate) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, totpEnrolResponse{
-		URI:    gauntlet.TOTPEnrollmentURI(g.cfg.ProductName, user.Username, secret),
+		URI:    uri,
 		Secret: encoded,
+		QR:     qr,
 	})
 }
 

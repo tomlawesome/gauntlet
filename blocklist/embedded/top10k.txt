@@ -1,6 +1,6 @@
 # format: gauntlet-pwned-top10k/1
 # source: Have I Been Pwned Pwned Passwords range API (SHA-1)
-# built: 2026-10-03T15:26:22Z
+# built: 2026-11-02T03:45:13Z
 # count: 10000
 # min-count: 96186
 # total-hashes: 2068408781

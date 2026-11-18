@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -829,5 +830,205 @@ func TestVerifyAndRecordTOTPIgnoresAPendingSecret(t *testing.T) {
 	stored, _ := s.Get(u.ID)
 	if stored.TOTPLastCounter != 0 {
 		t.Errorf("TOTPLastCounter = %d after a refused code, want 0", stored.TOTPLastCounter)
+	}
+}
+
+// ---- The QR pattern of the enrolment URI (#120) ----------------------
+
+// qrTestURI is the enrolment URI for a fixed product, username and
+// secret, so every case below reads the same code.
+func qrTestURI() string {
+	return TOTPEnrollmentURI("Gate Test Suite", "bob", []byte("12345678901234567890"))
+}
+
+func mustTOTPEnrollmentQR(t *testing.T, uri string) []string {
+	t.Helper()
+	rows, err := TOTPEnrollmentQR(uri)
+	if err != nil {
+		t.Fatalf("TOTPEnrollmentQR(%q): %v", uri, err)
+	}
+	return rows
+}
+
+// TestTOTPEnrollmentQRIsASquareOfZerosAndOnes: one string per row, as
+// many rows as columns, a side the standard allows (21 to 177, in steps
+// of 4), and no character but 0 and 1.
+func TestTOTPEnrollmentQRIsASquareOfZerosAndOnes(t *testing.T) {
+	rows := mustTOTPEnrollmentQR(t, qrTestURI())
+	n := len(rows)
+	if n < 21 || n > 177 || (n-17)%4 != 0 {
+		t.Fatalf("side = %d, want 21 to 177 with (side-17) divisible by 4", n)
+	}
+	for r, row := range rows {
+		if len(row) != n {
+			t.Errorf("row %d has %d modules, want %d", r, len(row), n)
+		}
+		if strings.Trim(row, "01") != "" {
+			t.Errorf("row %d = %q holds a character other than 0 and 1", r, row)
+		}
+	}
+}
+
+// TestTOTPEnrollmentQRHasTheFixedPatterns pins what ISO/IEC 18004 fixes
+// whatever the data: three finder patterns with light separators, the
+// timing lines between them, and the one dark module. The dark module
+// at row n-8, column 8 is what a transposed matrix fails.
+func TestTOTPEnrollmentQRHasTheFixedPatterns(t *testing.T) {
+	rows := mustTOTPEnrollmentQR(t, qrTestURI())
+	n := len(rows)
+	finder := []string{"1111111", "1000001", "1011101", "1011101", "1011101", "1000001", "1111111"}
+
+	for _, origin := range []struct {
+		name       string
+		row, col   int
+		sepRowSide int // which side of the finder the separator rows lie on
+		sepColSide int
+	}{
+		{"top left", 0, 0, 1, 1},
+		{"top right", 0, n - 7, 1, -1},
+		{"bottom left", n - 7, 0, -1, 1},
+	} {
+		for i, want := range finder {
+			if got := rows[origin.row+i][origin.col : origin.col+7]; got != want {
+				t.Errorf("%s finder row %d = %s, want %s", origin.name, i, got, want)
+			}
+		}
+		// The separator: a light line along the two sides facing the
+		// rest of the symbol, corner included.
+		sepRow := origin.row + 7
+		if origin.sepRowSide < 0 {
+			sepRow = origin.row - 1
+		}
+		sepCol := origin.col + 7
+		if origin.sepColSide < 0 {
+			sepCol = origin.col - 1
+		}
+		for i := -1; i <= 7; i++ {
+			for _, rc := range [][2]int{{sepRow, origin.col + i}, {origin.row + i, sepCol}} {
+				r, c := rc[0], rc[1]
+				if r < 0 || c < 0 || r >= n || c >= n {
+					continue
+				}
+				if rows[r][c] != '0' {
+					t.Errorf("%s separator module (%d,%d) is dark", origin.name, r, c)
+				}
+			}
+		}
+	}
+
+	for i := 8; i <= n-9; i++ {
+		want := byte('0')
+		if i%2 == 0 {
+			want = '1'
+		}
+		if rows[6][i] != want {
+			t.Errorf("timing row 6, column %d = %c, want %c", i, rows[6][i], want)
+		}
+		if rows[i][6] != want {
+			t.Errorf("timing column 6, row %d = %c, want %c", i, rows[i][6], want)
+		}
+	}
+
+	if rows[n-8][8] != '1' {
+		t.Errorf("the dark module at row %d, column 8 is light; a transposed matrix does this", n-8)
+	}
+}
+
+// TestTOTPEnrollmentQRFormatSaysLevelM reads the 15 format bits the way
+// the design names them (row 8, columns 0-5, 7, 8, then column 8, rows
+// 7, 5, 4, 3, 2, 1, 0, most significant first), undoes the mask
+// 101010000010010, and checks the level bits are 00 (M) and that the
+// BCH(15,5) remainder is the right one.
+func TestTOTPEnrollmentQRFormatSaysLevelM(t *testing.T) {
+	rows := mustTOTPEnrollmentQR(t, qrTestURI())
+	cells := [][2]int{{8, 0}, {8, 1}, {8, 2}, {8, 3}, {8, 4}, {8, 5}, {8, 7}, {8, 8},
+		{7, 8}, {5, 8}, {4, 8}, {3, 8}, {2, 8}, {1, 8}, {0, 8}}
+	word := 0
+	for _, rc := range cells {
+		word <<= 1
+		if rows[rc[0]][rc[1]] == '1' {
+			word |= 1
+		}
+	}
+	word ^= 0b101010000010010
+	if level := word >> 13; level != 0b00 {
+		t.Errorf("level bits = %02b, want 00 (M)", level)
+	}
+	// BCH(15,5), generator x^10+x^8+x^5+x^4+x^2+x+1 (0x537).
+	data := word >> 10
+	rem := data << 10
+	for i := 14; i >= 10; i-- {
+		if rem>>i&1 == 1 {
+			rem ^= 0x537 << (i - 10)
+		}
+	}
+	if word&0x3FF != rem {
+		t.Errorf("BCH bits = %010b, want %010b for data %05b", word&0x3FF, rem, data)
+	}
+}
+
+func TestTOTPEnrollmentQRIsDeterministicAndFollowsTheSecret(t *testing.T) {
+	uri := qrTestURI()
+	a, b := mustTOTPEnrollmentQR(t, uri), mustTOTPEnrollmentQR(t, uri)
+	if !slices.Equal(a, b) {
+		t.Error("the same URI gave two different matrices")
+	}
+	other := TOTPEnrollmentURI("Gate Test Suite", "bob", []byte("ABCDEFGHIJKLMNOPQRST"))
+	if slices.Equal(a, mustTOTPEnrollmentQR(t, other)) {
+		t.Error("two different secrets gave the same matrix")
+	}
+}
+
+// TestTOTPEnrollmentQRReadsBackAsTheURI is the one invariant that
+// proves the matrix is what it claims: read with the test-only reader
+// (qrread_test.go), it is a byte-mode, level-M code holding the URI,
+// byte for byte -- including a 64-rune username of 4-byte runes, the
+// longest the form allows, and a product name that needs escaping.
+func TestTOTPEnrollmentQRReadsBackAsTheURI(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	tests := []struct {
+		name string
+		uri  string
+	}{
+		{"plain", TOTPEnrollmentURI("Gate Test Suite", "bob", secret)},
+		{"escaped product and username", TOTPEnrollmentURI("Home Router: Lab", "bob smith", secret)},
+		{"non-ASCII", TOTPEnrollmentURI("Gäte", "ünïcode", secret)},
+		{"64 runes of 4 bytes", TOTPEnrollmentURI("Gate Test Suite", strings.Repeat("\U00020000", 64), secret)},
+		{"long product name", TOTPEnrollmentURI(strings.Repeat("P", 400), "bob", secret)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := mustTOTPEnrollmentQR(t, tc.uri)
+			got, err := qrRead(rows)
+			if err != nil {
+				t.Fatalf("reading the matrix: %v", err)
+			}
+			if got.Level != 'M' {
+				t.Errorf("level = %c, want M", got.Level)
+			}
+			if got.Version != (len(rows)-17)/4 {
+				t.Errorf("version %d does not match side %d", got.Version, len(rows))
+			}
+			if string(got.Payload) != tc.uri {
+				t.Errorf("matrix reads as %q, want %q", got.Payload, tc.uri)
+			}
+		})
+	}
+}
+
+// TestTOTPEnrollmentQRRefusesAURITooLongForTheCode: byte mode at level M
+// holds 2,331 bytes; beyond that the encoder has no symbol to offer and
+// the call errors, with a message naming what failed.
+func TestTOTPEnrollmentQRRefusesAURITooLongForTheCode(t *testing.T) {
+	uri := TOTPEnrollmentURI(strings.Repeat("P", 3000), "bob", []byte("12345678901234567890"))
+	rows, err := TOTPEnrollmentQR(uri)
+	if err == nil {
+		t.Fatalf("a %d-byte URI gave a %d-module code, want an error", len(uri), len(rows))
+	}
+	if rows != nil {
+		t.Errorf("rows = %d strings alongside an error, want nil", len(rows))
+	}
+	if !strings.Contains(err.Error(), "QR") {
+		t.Errorf("error %q does not say it is about the QR code", err)
 	}
 }

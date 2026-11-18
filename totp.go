@@ -42,6 +42,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/boombuler/barcode/qr"
 )
 
 const (
@@ -180,6 +182,36 @@ func TOTPEnrollmentURI(productName, username string, secret []byte) string {
 	issuer := totpLabelEscape(productName)
 	label := issuer + ":" + totpLabelEscape(username)
 	return "otpauth://totp/" + label + "?secret=" + EncodeTOTPSecret(secret) + "&issuer=" + issuer
+}
+
+// TOTPEnrollmentQR returns the QR code of uri (as TOTPEnrollmentURI
+// builds it) as a module matrix a client can draw with no QR library:
+// one string per row, top to bottom; one character per module, left to
+// right, '1' dark and '0' light. Error correction level M, byte mode,
+// no quiet zone (the drawer keeps at least four modules of background
+// around it). An error means uri is too long for any QR version.
+func TOTPEnrollmentQR(uri string) ([]string, error) {
+	code, err := qr.Encode(uri, qr.M, qr.Unicode)
+	if err != nil {
+		return nil, fmt.Errorf("gauntlet: QR for enrolment URI: %w", err)
+	}
+	b := code.Bounds()
+	rows := make([]string, 0, b.Dy())
+	var sb strings.Builder
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		sb.Reset()
+		for x := b.Min.X; x < b.Max.X; x++ {
+			// At takes the column (x) first.
+			r, g, bl, _ := code.At(x, y).RGBA()
+			if r == 0 && g == 0 && bl == 0 {
+				sb.WriteByte('1')
+			} else {
+				sb.WriteByte('0')
+			}
+		}
+		rows = append(rows, sb.String())
+	}
+	return rows, nil
 }
 
 // totpCounter returns the RFC 6238 time-step counter for t: the number

@@ -3,7 +3,7 @@ info:
   title: gauntlet gate HTTP API
   # Always the VERSION file's value; the release merge request bumps
   # both, and gate/contracttest fails if they differ.
-  version: 0.4.3
+  version: 0.4.4
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -1336,13 +1336,13 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          description: The pending secret, as an otpauth URI for a QR code and as base32 text.
+          description: The pending secret, as an otpauth URI, its QR code, and base32 text.
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: false
-                required: [uri, secret]
+                required: [uri, secret, qr]
                 properties:
                   uri:
                     type: string
@@ -1350,6 +1350,19 @@ paths:
                   secret:
                     type: string
                     description: The same secret, base32, for typing in by hand.
+                  qr:
+                    type: array
+                    description: |
+                      The QR code of `uri`, ready to draw with no library: one string
+                      per row, top to bottom; one character per module, left to right,
+                      `1` dark, `0` light. Square, 21 to 177 modules a side, error
+                      correction M, no quiet zone -- keep at least four modules of
+                      background around it. Every app chooses its own colours and size.
+                    minItems: 21
+                    maxItems: 177
+                    items:
+                      type: string
+                      pattern: "^[01]+$"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":

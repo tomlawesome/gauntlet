@@ -11,14 +11,15 @@ The last column gives the job's name in `.gitlab-ci.yml`.
 | --- | --- | --- |
 | Go unit and package tests | `go test ./... -race` | `test:go` |
 | Static checks | `go vet`, `gofmt`, `golangci-lint` | `lint:go` |
-| Licence gate | Checks that every library linked into the shipped code has an allowed licence, and that any copied (vendored) code or embedded file inside one has a recorded licence review: `go-licenses` against `supply-chain/licence-policy.yml`, then `scripts/licence-check-bundled.py` for vendored code and embedded files in the same modules (its own cases: `scripts/licence-check_test.sh`, run by hand) | `lint:licences` |
+| Licence gate | Checks that every library linked into the shipped code has an allowed licence, and that any copied (vendored) code or embedded file inside one has a recorded licence review: `go-licenses` against `supply-chain/licence-policy.yml`, then `scripts/licence-check-bundled.py` for vendored code and embedded files in the same modules (its own cases: `scripts/licence-check_test.sh`, run by `lint:script-tests`) | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
 | Personal-details scan | The shared check from ai/agent-infra (#111): the owner's surname, real host logins in home paths, private network addresses and AI credit in each commit's added lines, message and identity, from `aee3fd0` on. The rules live on the runner host, not here | `private-details` |
 | HTTP contract | `gate/contracttest` (its own Go module) checks the real behaviour against `docs/api/auth.yaml`, the written description of the web routes | `test:contract` |
-| Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag (its own cases: `scripts/apidiff_test.sh`, run by hand) | `lint:apidiff` |
+| Go API compatibility | `scripts/apidiff.sh` against the last `v*` tag (its own cases: `scripts/apidiff_test.sh`, run by `lint:script-tests`) | `lint:apidiff` |
 | Publish gate | Not a test: on a protected `v*` tag, scans every file for personal details and secrets and pushes one snapshot commit and tag to GitHub (ai/agent-infra#147); refuses on a finding or an unreviewed binary file (`.publish-reviewed-files`) | `publish-gate` |
-| Common-password list age | `scripts/blocklist-age-check.sh` (its own cases: `scripts/blocklist-age-check_test.sh`, run by hand) | `release:version` |
+| Common-password list age | `scripts/blocklist-age-check.sh` (its own cases: `scripts/blocklist-age-check_test.sh`, run by `lint:script-tests`) | `release:version` |
+| Scripts' own tests | every `scripts/**/*_test.sh` and `scripts/ci/job-rules_test.py`, via `scripts/ci/run-script-tests.sh` (#123); `allowlist-scan_test.sh` stays a by-hand run on the host | `lint:script-tests` |
 
 There is no frontend, no shipped image and no end-to-end stage here (a
 stage that starts the whole running application and tests it from

@@ -1,54 +1,311 @@
+# Exceptions to the shared personal-details check (#118, #121).
+#
+# Every table excuses exact values in named files and nothing else: gitleaks
+# drops a finding only when its rule is in targetRules, its file matches
+# paths and its matched text matches one of regexes (condition = "AND").
+# One anchored regex per literal, dots escaped, so a new address in any of
+# these files is still a finding, and a listed value in any other file is
+# too. Files that hold the same values share a table. IPv6 values escape
+# their colons as well (\: is a literal colon): spelled plainly, they would
+# be ipv6-address findings in this file.
+#
+# Values the shared rules already allow everywhere (the documentation
+# ranges, loopback, the unspecified address, limited broadcast) need no
+# entry. None of the values below is a real address: document section and
+# version numbers that read as addresses, reserved and special-purpose
+# ranges the location code tests against, public resolvers, MaxMind's
+# test-database addresses and invented test values. To add one, list the
+# exact value under the file that holds it; never add a table without
+# regexes, and never widen a regex to a range a host could own.
+
 # The public release identity's GitHub no-reply address, which the
 # publish-gate job uses as the author of the public snapshot (#118).
-# Allowed in the CI file only, and for the email rule only.
-
 [[allowlists]]
 description = "public release identity (GitHub no-reply address)"
 targetRules = ["email-address"]
+condition = "AND"
 paths = ['''^\.gitlab-ci\.yml$''']
+regexes = ['''^76453276\+tomlawesome@users\.noreply\.github\.com$''']
 
-# Found by a publish-gate rehearsal over every file (#118). None is a real
-# address: document section numbers that read as addresses, reserved and
-# special-purpose ranges the location code tests against, public resolvers
-# and invented test values. Each entry relaxes only the named rules on the
-# named files.
 [[allowlists]]
-description = "section and version numbers, reserved ranges and public resolvers in docs, comments and tests"
+description = "document section number cited in comments and the changelog"
 targetRules = ["ip-address"]
+condition = "AND"
 paths = [
   '''^CHANGELOG\.md$''',
-  '''^docs/adr/0005-encryption-at-rest-on-every-backend\.md$''',
-  '''^docs/adr/0015-every-admin-holds-a-passkey\.md$''',
-  '''^docs/api/auth\.yaml$''',
-  '''^docs/api/errors\.md$''',
-  '''^docs/design\.md$''',
-  '''^docs/security-by-design\.md$''',
   '''^gate/config\.go$''',
-  '''^gate/config_test\.go$''',
-  '''^gate/login_passkey_handler\.go$''',
-  '''^gate/passkey_unknown_credential_test\.go$''',
-  '''^gate/recoverycodes_handler\.go$''',
-  '''^gate/unusual_test\.go$''',
-  '''^geoip/fetch\.go$''',
   '''^internal/plaintext/plaintext\.go$''',
   '''^passwordcheck\.go$''',
-  '''^ratelimit\.go$''',
-  '''^scripts/release-version-check\.sh$''',
-  '''^scripts/release-version-check_test\.sh$''',
   '''^store\.go$''',
 ]
-
-[[allowlists]]
-description = "reserved, special-purpose and invented addresses in the location tests"
-targetRules = ["ip-address", "ipv6-address"]
-paths = [
-  '''^geoip/geoip_test\.go$''',
-  '''^geoip/helpers_test\.go$''',
-  '''^geoip/locate_test\.go$''',
-  '''^geoip/refresh_test\.go$''',
+regexes = [
+  '''^3\.1\.1\.2$''',
 ]
 
 [[allowlists]]
-description = "reserved and link-local IPv6 addresses in tests"
+description = "document section number"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^docs/adr/0005-encryption-at-rest-on-every-backend\.md$''',
+]
+regexes = [
+  '''^3\.1\.4\.2$''',
+]
+
+[[allowlists]]
+description = "document section number"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^docs/adr/0015-every-admin-holds-a-passkey\.md$''',
+]
+regexes = [
+  '''^3\.2\.5\.2$''',
+]
+
+[[allowlists]]
+description = "WebAuthn specification section number"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^docs/api/auth\.yaml$''',
+  '''^docs/api/errors\.md$''',
+  '''^gate/login_passkey_handler\.go$''',
+  '''^gate/passkey_unknown_credential_test\.go$''',
+]
+regexes = [
+  '''^5\.1\.10\.2$''',
+]
+
+[[allowlists]]
+description = "document section numbers"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^docs/design\.md$''',
+]
+regexes = [
+  '''^3\.1\.1\.2$''',
+  '''^3\.1\.3\.2$''',
+  '''^4\.2\.1\.1$''',
+]
+
+[[allowlists]]
+description = "document section numbers"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^docs/security-by-design\.md$''',
+]
+regexes = [
+  '''^3\.1\.1\.1$''',
+  '''^3\.1\.1\.2$''',
+  '''^3\.1\.2\.2$''',
+  '''^3\.1\.3\.2$''',
+  '''^3\.1\.4\.2$''',
+  '''^3\.2\.5\.2$''',
+  '''^4\.1\.2\.1$''',
+  '''^4\.2\.1\.1$''',
+  '''^4\.2\.1\.2$''',
+  '''^4\.2\.2\.2$''',
+]
+
+[[allowlists]]
+description = "invented test address"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^gate/config_test\.go$''',
+]
+regexes = [
+  '''^1\.2\.3\.4$''',
+]
+
+[[allowlists]]
+description = "document section number"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^gate/recoverycodes_handler\.go$''',
+]
+regexes = [
+  '''^4\.2\.1\.1$''',
+]
+
+[[allowlists]]
+description = "invented private test address"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^gate/unusual_test\.go$''',
+]
+regexes = [
+  '''^10\.0\.0\.5$''',
+]
+
+[[allowlists]]
+description = "network addresses of the reserved and special-purpose ranges"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^geoip/fetch\.go$''',
+]
+regexes = [
+  '''^10\.0\.0\.0$''',
+  '''^100\.64\.0\.0$''',
+  '''^169\.254\.0\.0$''',
+  '''^172\.16\.0\.0$''',
+  '''^192\.0\.0\.0$''',
+  '''^192\.168\.0\.0$''',
+  '''^198\.18\.0\.0$''',
+  '''^224\.0\.0\.0$''',
+  '''^240\.0\.0\.0$''',
+]
+
+[[allowlists]]
+description = "reserved and special-purpose test addresses"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^geoip/geoip_test\.go$''',
+]
+regexes = [
+  '''^10\.0\.0\.1$''',
+  '''^100\.64\.0\.1$''',
+  '''^169\.254\.169\.254$''',
+  '''^172\.16\.5\.4$''',
+  '''^192\.168\.1\.1$''',
+  '''^224\.0\.0\.1$''',
+]
+
+[[allowlists]]
+description = "test-database addresses and a public resolver"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^geoip/helpers_test\.go$''',
+]
+regexes = [
+  '''^8\.8\.8\.8$''',
+  '''^81\.2\.69\.0$''',
+  '''^81\.2\.69\.5$''',
+]
+
+[[allowlists]]
+description = "reserved and special-purpose test addresses and a test-database address"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^geoip/locate_test\.go$''',
+]
+regexes = [
+  '''^10\.0\.0\.1$''',
+  '''^81\.2\.69\.0$''',
+  '''^100\.64\.0\.1$''',
+  '''^169\.254\.169\.254$''',
+  '''^172\.16\.5\.4$''',
+  '''^192\.168\.1\.1$''',
+  '''^224\.0\.0\.1$''',
+]
+
+[[allowlists]]
+description = "reserved and special-purpose test addresses and public resolvers"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^geoip/refresh_test\.go$''',
+]
+regexes = [
+  '''^1\.1\.1\.1$''',
+  '''^8\.8\.8\.8$''',
+  '''^10\.0\.0\.1$''',
+  '''^81\.2\.69\.0$''',
+  '''^100\.64\.0\.1$''',
+  '''^169\.254\.169\.254$''',
+  '''^192\.168\.1\.1$''',
+  '''^224\.0\.0\.1$''',
+  '''^240\.0\.0\.1$''',
+]
+
+[[allowlists]]
+description = "document section number"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^ratelimit\.go$''',
+]
+regexes = [
+  '''^3\.1\.3\.2$''',
+]
+
+[[allowlists]]
+description = "four-part version number that reads as an address"
+targetRules = ["ip-address"]
+condition = "AND"
+paths = [
+  '''^scripts/release-version-check\.sh$''',
+  '''^scripts/release-version-check_test\.sh$''',
+]
+regexes = [
+  '''^0\.2\.0\.1$''',
+]
+
+[[allowlists]]
+description = "link-local test address"
 targetRules = ["ipv6-address"]
-paths = ['''^addressban_test\.go$''', '''^token_test\.go$''']
+condition = "AND"
+paths = [
+  '''^addressban_test\.go$''',
+]
+regexes = [
+  '''^fe80\:\:1$''',
+]
+
+[[allowlists]]
+description = "link-local and unique-local test addresses"
+targetRules = ["ipv6-address"]
+condition = "AND"
+paths = [
+  '''^geoip/geoip_test\.go$''',
+  '''^geoip/locate_test\.go$''',
+]
+regexes = [
+  '''^fd00\:\:1$''',
+  '''^fe80\:\:1$''',
+]
+
+[[allowlists]]
+description = "test-database address"
+targetRules = ["ipv6-address"]
+condition = "AND"
+paths = [
+  '''^geoip/helpers_test\.go$''',
+]
+regexes = [
+  '''^2a02\:ff0\:\:1$''',
+]
+
+[[allowlists]]
+description = "link-local and unique-local test addresses and a public resolver"
+targetRules = ["ipv6-address"]
+condition = "AND"
+paths = [
+  '''^geoip/refresh_test\.go$''',
+]
+regexes = [
+  '''^2606\:4700\:4700\:\:1111$''',
+  '''^fd00\:\:1$''',
+  '''^fe80\:\:1$''',
+]
+
+[[allowlists]]
+description = "link-local test address"
+targetRules = ["ipv6-address"]
+condition = "AND"
+paths = [
+  '''^token_test\.go$''',
+]
+regexes = [
+  '''^fe80\:\:1ff\:fe23\:4567\:890a$''',
+]

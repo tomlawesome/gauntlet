@@ -424,7 +424,9 @@ type userSummary struct {
 }
 
 type totpEnrolResponse struct {
-	Secret string `json:"secret"`
+	URI    string   `json:"uri"`
+	Secret string   `json:"secret"`
+	QR     []string `json:"qr"`
 }
 
 type totpConfirmResponse struct {

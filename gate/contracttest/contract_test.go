@@ -882,6 +882,7 @@ func contractLocalAccounts(t *testing.T, c *contractChecker) {
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: "wrong"}}, 401, nil)
 	var enrolled totpEnrolResponse
 	c.do(bob, u, call{method: "POST", path: "/api/auth/totp/enrol", body: totpEnrolRequest{Password: bobPass}}, 200, &enrolled)
+	requireEnrolQR(t, enrolled)
 	secret, err := gauntlet.DecodeTOTPSecret(enrolled.Secret)
 	if err != nil {
 		t.Fatal(err)

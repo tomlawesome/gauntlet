@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-18
+
+### Added
+
+- **A release-readiness check runs first on every promotion** (#122):
+  `scripts/release-readiness.sh preview|main` and the `release_readiness` CI
+  job check the release record, version, API spec, CHANGELOG, `retract`,
+  blocklist age, back-merge state and image Go version in one pass; every
+  other job in a promotion pipeline waits for it. See "Before a promotion"
+  in docs/releasing.md.
+- **The enrol reply carries the QR pattern** (#120): `POST
+  /api/auth/totp/enrol` answers a `qr` field, the code's module matrix as
+  one string of `0`/`1` per row, so apps need no QR library. The Go API
+  gains `TOTPEnrollmentQR`. New dependency `github.com/boombuler/barcode`
+  v1.1.0 (MIT, no dependencies of its own).
+
+### Fixed
+
+- **The release record's sign-off is a name only** (#132): R1 of the
+  readiness check wants exactly one `Signed-off-by: <Name>` line, with no
+  email, matching the author and trailer of the commit that last changed
+  the record. Commit it with `git commit --trailer "Signed-off-by: <Name>"`,
+  not `-s`, whose email the commit check refuses.
+
 ## [0.4.3] - 2026-11-15
 
 No change to the library's behaviour: the code is v0.4.2's. Apps on any

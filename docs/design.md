@@ -484,6 +484,7 @@ func GenerateTOTPSecret() ([]byte, error)
 func EncodeTOTPSecret(secret []byte) string
 func DecodeTOTPSecret(s string) ([]byte, error)
 func TOTPEnrollmentURI(productName, username string, secret []byte) string
+func TOTPEnrollmentQR(uri string) ([]string, error)  // the URI as a QR module matrix, one "0"/"1" string per row
 func GenerateTOTPCode(secret []byte, counter uint64) string
 func VerifyTOTP(encodedSecret, code string, now time.Time, lastUsedCounter uint64) (matchedCounter uint64, ok bool)
 func FormatRecoveryCode(code string) string; func NormaliseRecoveryCode(typed string) string
