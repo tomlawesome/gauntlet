@@ -3,7 +3,7 @@ info:
   title: gauntlet gate HTTP API
   # Always the VERSION file's value; the release merge request bumps
   # both, and gate/contracttest fails if they differ.
-  version: 0.4.4
+  version: 0.4.5
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -714,13 +714,17 @@ paths:
       summary: Start a passkey step-up
       description: |
         For a signed-in caller about to grant admin, create an admin,
-        unlock their own account or allow their own next sign-in (#82): answers the W3C request options
+        unlock their own account or allow their own next sign-in (#82),
+        or take an application's own action on a route that calls
+        `gate.StepUp` (#133): answers the W3C request options
         for `navigator.credentials.get()`, allowing only the caller's
         passkeys registered for the current relying party, and sets the
         step-up ceremony cookie (`gate_passkey_stepup`, sealed, path
-        `/api/auth`, five minutes; each challenge is usable once). The
+        `/`, five minutes; each challenge is usable once). The
         browser's answer goes in that route's `assertion` (or
-        `adminAssertion`) field, beside the password, in place of a code.
+        `adminAssertion`) field, beside the password, in place of a
+        code. An application route that calls `gate.StepUp` may finish
+        the ceremony too, the same way.
         Takes no body.
 
         Takes nothing from the account's password re-check budget, so a
@@ -2784,7 +2788,7 @@ components:
       type: apiKey
       in: cookie
       name: gate_passkey_stepup
-      description: Set by `POST /api/auth/step-up/passkey/begin` (#82); sealed, path `/api/auth`, five minutes. Read only by the routes a passkey step-up finishes -- granting admin, creating an admin, and the admin's own unlock and allow-sign-in -- never by a sign-in, and a sign-in's ceremony cookie is never read there.
+      description: Set by `POST /api/auth/step-up/passkey/begin` (#82); sealed, path `/` (so an application route can finish it, since 0.4.5), five minutes. Read only by the routes a passkey step-up finishes -- granting admin, creating an admin, the admin's own unlock and allow-sign-in, and any application route that calls `gate.StepUp` -- never by a sign-in, and a sign-in's ceremony cookie is never read there.
     oidcFlowCookie:
       type: apiKey
       in: cookie

@@ -43,11 +43,15 @@ const (
 
 	// passkeyStepUpCookieName/Path carry a signed-in caller's passkey
 	// step-up from step-up/passkey/begin to the route that finishes it
-	// (#82): the role route, create-admin and the admin's own unlock,
-	// all under /api/auth. Its own name, so a second-step login's
-	// ceremony cookie is never finished here, nor this one at a login.
+	// (#82): the role route, create-admin, the admin's own unlock and,
+	// since #133, any application route that calls StepUp -- which can
+	// live anywhere, so the path is "/" like the session cookie's. The
+	// value is sealed, HttpOnly, SameSite=Lax, single-use, five minutes
+	// and bound to the caller's account at finish (ADR-0017). Its own
+	// name, so a second-step login's ceremony cookie is never finished
+	// here, nor this one at a login.
 	passkeyStepUpCookieName = "gate_passkey_stepup"
-	passkeyStepUpCookiePath = "/api/auth"
+	passkeyStepUpCookiePath = "/"
 
 	// passkeyCeremonyCookieMaxAge is five minutes, matching the expiry
 	// gauntlet/passkey seals into the ceremony state itself (its

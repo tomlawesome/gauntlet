@@ -125,7 +125,7 @@ func (g *Gate) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			g.writeCreateUserError(w, r, err)
 			return
 		}
-		if !g.recheckStepUp(w, r, caller, req.AdminPassword, req.AdminCode, req.AdminAssertion, now,
+		if !g.recheckStepUp(w, r, caller, StepUpProof{Password: req.AdminPassword, Code: req.AdminCode, Assertion: req.AdminAssertion}, now,
 			"creating an admin needs your own password and either a code from your authenticator app or a recovery code, or your passkey (adminPassword, adminCode or adminAssertion)") {
 			return
 		}
@@ -485,7 +485,7 @@ func (g *Gate) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 // The one-time unlock code in the server's log (POST /api/auth/unlock)
 // remains the way back for an admin with no session left.
 func (g *Gate) recheckUnlockSelf(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, req unlockSelfRequest, now time.Time) bool {
-	return g.recheckStepUp(w, r, caller, req.Password, req.Code, req.Assertion, now,
+	return g.recheckStepUp(w, r, caller, StepUpProof(req), now,
 		"unlocking your own account needs your password and either a code from your authenticator app or a recovery code, or your passkey (password, code or assertion)")
 }
 
@@ -512,11 +512,13 @@ func writeLastLocalAdmin(w http.ResponseWriter) {
 // recheckPasskey), a wrong one 401 with one message for all so a caller
 // learns nothing about which was wrong. A caller with no local password
 // is 409 before any of that (refuseWithoutLocalPassword). Writes every
-// refusal itself.
-func (g *Gate) recheckStepUp(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, password, code string, assertion json.RawMessage, now time.Time, missing string) bool {
+// refusal itself. Applications reach it through the exported StepUp
+// (#133).
+func (g *Gate) recheckStepUp(w http.ResponseWriter, r *http.Request, caller *gauntlet.User, proof StepUpProof, now time.Time, missing string) bool {
 	if refuseWithoutLocalPassword(w, caller) {
 		return false
 	}
+	password, code, assertion := proof.Password, proof.Code, proof.Assertion
 	if password == "" || (code == "") == (len(assertion) == 0) {
 		writeProblem(w, http.StatusBadRequest, classInvalidRequest, missing, nil)
 		return false
@@ -632,7 +634,7 @@ func (g *Gate) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	}
 	now := g.now()
 	if role == gauntlet.RoleAdmin &&
-		!g.recheckStepUp(w, r, caller, req.Password, req.Code, req.Assertion, now,
+		!g.recheckStepUp(w, r, caller, StepUpProof{Password: req.Password, Code: req.Code, Assertion: req.Assertion}, now,
 			"granting the admin role needs your own password and either a code from your authenticator app or a recovery code, or your passkey (password, code or assertion)") {
 		return
 	}

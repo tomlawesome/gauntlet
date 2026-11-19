@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-19
+
+### Added
+
+- **Applications can step up their own routes** (#133, ADR-0017):
+  `gate.StepUp` and `gate.StepUpProof` run gauntlet's own per-request
+  re-check of the caller's password and a current second factor (a code
+  or a passkey), as granting admin does, from an application handler
+  under `Protect`. No stored proof, no freshness window, no new error
+  class. See "Step-up on your own routes" in `docs/using.md`.
+
+### Changed
+
+- **The `gate_passkey_stepup` cookie is sent on every path** (#133): its
+  path is `/` instead of `/api/auth`, so an application route can finish
+  a passkey step-up.
+
 ## [0.4.4] - 2026-11-18
 
 ### Added

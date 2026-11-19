@@ -107,7 +107,7 @@ github.com/tomlawesome/gauntlet
 ├── oidc/                       Config, Client, Identity, Policy, FlowState, StateCodec,
 │                               AllowIssuer, IsMultiTenantIssuer
 ├── gate/                       Config, Deps, Gate, Protect, Routes, RequireRole,
-│                               UserFromContext, TokenFromContext
+│                               UserFromContext, TokenFromContext, StepUp, StepUpProof
 │   └── contracttest/           tests that the handlers match docs/api/auth.yaml
 │                               (its own go.mod, so the OpenAPI library stays out of gauntlet's)
 ├── passkey/                    Config, New, RelyingParty, ErrNotReady, ErrNoUsablePasskey
@@ -1032,6 +1032,12 @@ func UserFromContext(r *http.Request) *gauntlet.User
 func TokenFromContext(r *http.Request) *gauntlet.Token
 func RequireRole(min gauntlet.Role, next http.Handler) http.Handler // 403 below min
 
+// Step-up on an application's own routes (#133, ADR-0017): the same
+// per-request re-check of the caller's password and a current second
+// factor (code or passkey) as granting admin. No stored proof, no window.
+type StepUpProof struct { Password string; Code string; Assertion json.RawMessage } // json: password, code, assertion
+func (g *Gate) StepUp(w http.ResponseWriter, r *http.Request, proof StepUpProof) bool // writes every refusal itself
+
 // Unusual sign-ins (#55): Config.UnusualSignIns says what each signal
 // does; Decide, if set, can overrule the settings' answer once per
 // judged sign-in, fixed-timeout, fail-closed to block.
@@ -1456,7 +1462,7 @@ The cookies:
 | `gate_passkey_register` | `/api/auth/passkeys` | 5 minutes | a passkey registration, begin to finish |
 | `gate_passkey_assert` | `/api/auth/login` | 5 minutes | a passkey as the second factor, or a passkey proving an unusual sign-in (`login/prove`), begin to finish |
 | `gate_passkey_signin` (#77) | `/api/auth` | 5 minutes | a passkey sign-in on its own, or a passkey resuming a timed-out session |
-| `gate_passkey_stepup` (#82) | `/api/auth` | 5 minutes | a signed-in caller's passkey standing in for a code at a step-up (granting admin, creating an admin, the admin's own unlock), begin to finish |
+| `gate_passkey_stepup` (#82) | `/` (#133) | 5 minutes | a signed-in caller's passkey standing in for a code at a step-up (granting admin, creating an admin, the admin's own unlock, or an application route that calls `Gate.StepUp`), begin to finish |
 
 Notes on the table:
 

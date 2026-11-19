@@ -304,6 +304,55 @@ the block; use another. The one-time setup code and the other emergency
 codes (unlock and escape) that the server writes to its log still work
 as before.
 
+### Step-up on your own routes
+
+An application's own sensitive action can demand what granting the
+admin role demands: the caller's password and a current second factor
+on the request itself (#133,
+[ADR-0017](adr/0017-application-step-up.md)). Embed `gate.StepUpProof`
+in the route's body and call `Gate.StepUp`:
+
+```go
+type certRequest struct {
+    gate.StepUpProof // password, plus exactly one of code or assertion
+    // the route's own fields, if any
+}
+
+func (s *server) mintCertificate(w http.ResponseWriter, r *http.Request) {
+    var req certRequest
+    if err := decodeStrict(r, &req); err != nil { /* 400 */ return }
+    // validate the route's own fields first
+    if !s.gate.StepUp(w, r, req.StepUpProof) {
+        return // refusal already written
+    }
+    // act, and audit naming gate.UserFromContext(r).Username
+}
+
+mux.Handle("POST /api/admin/crowdsec/certificate",
+    gate.RequireRole(gauntlet.RoleAdmin, http.HandlerFunc(s.mintCertificate)))
+```
+
+- The proof is this request: there is no stored proof and no window to
+  set. Each TOTP code is accepted once, a recovery code is burnt, and a
+  passkey ceremony is single-use.
+- Step up last. Validate your own fields before `StepUp`, so a recovery
+  code is never spent on a request you then refuse.
+- For a passkey, the frontend calls `POST
+  /api/auth/step-up/passkey/begin`, passes the options to
+  `navigator.credentials.get()`, and puts the credential JSON in
+  `assertion`. The ceremony cookie `gate_passkey_stepup` is sent on
+  every path, so your route receives it.
+- Refusals use the existing classes ([errors](api/errors.md)): 401
+  `sign-in-required` with no session (a bearer-token or `Exempt`
+  request), 409 `conflict` for an account with no local password, 400
+  `invalid-request` for an incomplete proof, 401 `invalid-credentials`
+  for a wrong answer, 401 `step-expired` for a dead passkey ceremony
+  (begin again), and 429 `rate-limited` once the account's re-check
+  budget, shared with gauntlet's own routes, is spent.
+- Gauntlet audits the failures; the action that follows is yours to
+  audit. The body carries the password, so never log request bodies or
+  headers on these routes.
+
 ## Recovery codes
 
 Each account with a second factor holds ten single-use recovery codes.

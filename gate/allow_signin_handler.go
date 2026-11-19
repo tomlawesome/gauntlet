@@ -67,7 +67,7 @@ func (g *Gate) handleAllowSignIn(w http.ResponseWriter, r *http.Request) {
 	caller := UserFromContext(r)
 	own := caller != nil && caller.ID == id
 	if own {
-		if !g.recheckStepUp(w, r, caller, req.Password, req.Code, req.Assertion, now,
+		if !g.recheckStepUp(w, r, caller, StepUpProof(req), now,
 			"allowing your own next sign-in needs your password and either a code from your authenticator app or a recovery code, or your passkey (password, code or assertion)") {
 			return
 		}

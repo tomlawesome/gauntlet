@@ -118,6 +118,7 @@ Short route names such as `login/factor` are under `/api/auth/`.
   | `POST /api/auth/totp/enrol`, `DELETE /api/auth/totp`, `POST /api/auth/recovery-codes`, `POST /api/auth/passkeys/register/begin`, `DELETE /api/auth/passkeys/{id}`, `POST /api/auth/oidc/link`, `POST /api/auth/logout-all` (an account with a local password) | Wrong password at the re-check | "incorrect password" |
   | `POST /api/auth/users/{id}/reset-password`, `POST /api/tokens`, `DELETE /api/auth/users/{id}`, `DELETE /api/auth/users/{id}/totp`, `DELETE /api/auth/users/{id}/passkeys`, and `POST /api/auth/users/{id}/allow-sign-in` on another account (#81) | Wrong password at the re-check of the calling admin's own password (#72) | "incorrect password" |
   | `POST /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant the admin role (#67); `POST /api/auth/users/{id}/unlock` and `POST /api/auth/users/{id}/allow-sign-in` (#81) on the caller's own account | Wrong password, second-factor code or passkey (#82) at the step-up | "incorrect password or code" |
+  | Any application route that calls `Gate.StepUp` (#133) | Wrong password, second-factor code or passkey at the step-up | "incorrect password or code" |
   | Any route, at `gate.Protect` | A bearer token that matches no token type the application registered with `Gate.Handle`, or that was revoked or has expired; or an `Authorization` header that is not the word `Bearer` (in any capitalisation), one space and the token | "invalid or revoked token" |
 
 - `detail` differs between routes, but within one route it never
@@ -201,6 +202,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
   change, a reset, or linking the account to SSO. Each handler also
   checks for a session itself and gives the same class. You only see
   that if you use a handler without `gate.Protect` in front of it.
+- `Gate.StepUp` (#133) answers it, with `detail` "sign in first", when
+  the request carries no session user: a bearer-token request, an
+  `Exempt` path, or a handler with no `gate.Protect` in front of it.
 - `DELETE /api/auth/totp`, `DELETE /api/auth/passkeys/{id}` and
   `POST /api/auth/recovery-codes` also answer it, with `detail` "sign in
   first", when the caller's account is deleted after its password was
@@ -244,6 +248,7 @@ Short route names such as `login/factor` are under `/api/auth/`.
   | `POST /api/auth/login/prove/begin`, `POST /api/auth/login/prove` | The confirm cookie, for the same reasons, except that here the wrong kind is one issued for a code instead of a passkey; and, at `login/prove`, a passkey ceremony that has expired or already been used (#65) |
   | `POST /api/auth/login/escape` | The escape cookie, for the same reasons (#66) |
   | The step-up routes, with a passkey in place of a code (#82): `POST /api/auth/users` and `PUT /api/auth/users/{id}/role` when they grant the admin role; `POST /api/auth/users/{id}/unlock` and `POST /api/auth/users/{id}/allow-sign-in` (#81) on the caller's own account | The step-up ceremony cookie `POST /api/auth/step-up/passkey/begin` set: missing, expired, tampered with or already used. A sign-in's ceremony cookie is never read here |
+  | Any application route that calls `Gate.StepUp` (#133), with a passkey in place of a code | The same step-up ceremony cookie, for the same reasons |
 
 - A frontend restarts the flow from its first step -- there is nothing
   left for a retry at this step to complete.
@@ -380,6 +385,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
 - `POST /api/auth/login/factor` also answers it when the body holds both
   `code` and `assertion`, or neither (#99). A `null` assertion counts as
   none. Nothing is counted, and the pending login still holds.
+- An application route that calls `Gate.StepUp` (#133) answers it when
+  the proof has no `password`, or carries both `code` and `assertion`,
+  or neither. Nothing is checked or counted.
 - Returned across nearly every route that takes a body or a path
   parameter; see the OpenAPI document for which status a given field
   rule answers with on which route.
@@ -424,7 +432,8 @@ Short route names such as `login/factor` are under `/api/auth/`.
     re-check: at every route that re-checks the caller's password or
     takes a step-up (since #99 also `DELETE /api/auth/totp`,
     `DELETE /api/auth/passkeys/{id}` and
-    `POST /api/auth/recovery-codes`). The refusal comes before any
+    `POST /api/auth/recovery-codes`, and since #133 any application
+    route that calls `Gate.StepUp`). The refusal comes before any
     password is checked, and nothing is counted;
   - an admin removing their own last passkey that works at this
     address, while the application requires admin passkeys (#82):
@@ -507,7 +516,9 @@ Short route names such as `login/factor` are under `/api/auth/`.
   - `POST /api/auth/register` (setup-code guesses) and
     `POST /api/auth/unlock` (unlock-code guesses);
   - every re-check and step-up, on the routes listed under
-    `invalid-credentials` above, and `POST /api/auth/totp/confirm`;
+    `invalid-credentials` above (including any application route that
+    calls `Gate.StepUp`, #133, on the same per-account budget), and
+    `POST /api/auth/totp/confirm`;
   - `POST /api/auth/step-up/passkey/begin` (#82), once the account has
     used up its allowed number of passkey step-ups in the window. These
     are counted separately, and the count is not given back when a

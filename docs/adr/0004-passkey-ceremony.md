@@ -221,3 +221,6 @@ mikroview's fake authenticator copies and this module reuses.
 - Status note (v0.4.0 audit, 2026-10-10): the v0.3.0 note above that
   says the **Status** line "was never moved from Proposed" describes it
   before that audit; the same audit moved it to Accepted.
+- Status note (#133, 2026-11-18): `gate_passkey_stepup` is now on path
+  `/`, not `/api/auth`, so an application route that calls `gate.StepUp`
+  receives it ([ADR-0017](0017-application-step-up.md)).
