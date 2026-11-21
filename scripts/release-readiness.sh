@@ -116,7 +116,9 @@ check_r1() {
     case "$st" in
       done | not-needed)
         if [ -z "$rest" ] || [[ "${rest^^}" == TODO* || "${rest^^}" == TBD* || "${rest^^}" == N/A* ]] || [[ "$rest" =~ \<[^\>]+\> ]]; then
-          problems+=("step $num: $st has no real ${st/done/evidence}${st/not-needed/owner decision}")
+          local want=evidence
+          [ "$st" = not-needed ] && want="owner decision"
+          problems+=("step $num: $st has no real $want")
         fi ;;
       after-merge) ;;
       *) problems+=("step $num: unknown status '$st'") ;;

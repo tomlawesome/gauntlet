@@ -48,7 +48,7 @@ const (
 	// request, so By is empty. The sweep waits for AccountEvent rather
 	// than running it in the background, and an error from it means the
 	// notice is offered again at the next sweep.
-	NoticeTokenExpiring NoticeKind = "token-expiring"
+	NoticeTokenExpiring NoticeKind = "token-expiring" //nolint:gosec // a notice kind's name, not a credential
 	// NoticeSignInAllowed (#81): an admin allowed the account's next
 	// sign-in from any browser or place, until SignInAllowedDetail.Until.
 	// By is the admin, who may be the account's own holder.

@@ -303,7 +303,7 @@ CATCHUP = {"catchup-check", "lint:secrets", "private-details", "lint:flake-check
 
 # Today's sets (base 9f4f784), computed from the file before #121 and fixed here.
 PLAIN_MR_DEV = {
-    "lint:go", "lint:licences", "lint:vulncheck", "lint:apidiff", "lint:secrets",
+    "lint:go", "lint:licences", "lint:vulncheck", "lint:trivy", "lint:shellcheck", "lint:apidiff", "lint:secrets",
     "lint:flake-check", "lint:script-tests", "private-details", "test:go",
     "test:contract",
 }
@@ -313,7 +313,7 @@ PUSH_DEV = {"lint:secrets", "lint:flake-check", "lint:script-tests", "private-de
 # the .gitlab-ci.yml of this change, not judged right or wrong); every set
 # that holds lint:flake-check also holds lint:script-tests (#123).
 MR_BATCH = {
-    "lint:go", "lint:licences", "lint:vulncheck", "lint:apidiff", "lint:secrets",
+    "lint:go", "lint:licences", "lint:vulncheck", "lint:trivy", "lint:shellcheck", "lint:apidiff", "lint:secrets",
     "lint:flake-check", "lint:script-tests", "private-details",
 }
 FULL_GATE = PLAIN_MR_DEV  # lint jobs plus test:go and test:contract
@@ -343,8 +343,8 @@ CASES = [
      {"CI_PIPELINE_SOURCE": "merge_request_event",
       "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME": "feature/x",
       "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "batch-b"}, MR_BATCH),
-    ("(g) push to preview creates the full gate",
-     {"CI_PIPELINE_SOURCE": "push", "CI_COMMIT_BRANCH": "preview"}, FULL_GATE),
+    ("(g) push to preview creates the full gate plus release_readiness (#134)",
+     {"CI_PIPELINE_SOURCE": "push", "CI_COMMIT_BRANCH": "preview"}, PROMOTION),
     ("(h) push to main creates the full gate plus the release jobs",
      {"CI_PIPELINE_SOURCE": "push", "CI_COMMIT_BRANCH": "main"}, MAIN_PUSH),
     ("(i) scheduled pipeline creates no jobs",
@@ -353,6 +353,8 @@ CASES = [
      {"CI_PIPELINE_SOURCE": "push", "CI_COMMIT_TAG": "v1.0.0"}, set()),
     ("(k) web pipeline on main creates the full gate, no release jobs",
      {"CI_PIPELINE_SOURCE": "web", "CI_COMMIT_BRANCH": "main"}, FULL_GATE),
+    ("(k2) web pipeline on preview creates the full gate, no release_readiness (#134)",
+     {"CI_PIPELINE_SOURCE": "web", "CI_COMMIT_BRANCH": "preview"}, FULL_GATE),
     ("(l) MR dev -> preview creates the full gate plus release_readiness (#122)",
      {"CI_PIPELINE_SOURCE": "merge_request_event",
       "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME": "dev",
@@ -361,9 +363,23 @@ CASES = [
      {"CI_PIPELINE_SOURCE": "merge_request_event",
       "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME": "preview",
       "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "main"}, PROMOTION),
+    # P-RS1: RENOVATE=true only matters in a schedule pipeline; in any other
+    # source it must not create the renovate job (the sets are today's).
+    ("(p) schedule on dev with RENOVATE=true creates exactly renovate (P-RS1)",
+     {"CI_PIPELINE_SOURCE": "schedule", "CI_COMMIT_BRANCH": "dev",
+      "RENOVATE": "true"}, {"renovate"}),
+    ("(q) web pipeline on dev with RENOVATE=true creates the full gate, no renovate (P-RS1)",
+     {"CI_PIPELINE_SOURCE": "web", "CI_COMMIT_BRANCH": "dev",
+      "RENOVATE": "true"}, FULL_GATE),
+    ("(q2) api pipeline on dev with RENOVATE=true creates the full gate, no renovate (P-RS1)",
+     {"CI_PIPELINE_SOURCE": "api", "CI_COMMIT_BRANCH": "dev",
+      "RENOVATE": "true"}, FULL_GATE),
+    ("(r) push to dev with RENOVATE=true creates today's push set, no renovate (P-RS1)",
+     {"CI_PIPELINE_SOURCE": "push", "CI_COMMIT_BRANCH": "dev",
+      "RENOVATE": "true"}, PUSH_DEV),
 ]
 
-# (n) In both promotion pipelines every job other than release_readiness must
+# (n) In every promotion pipeline (both MRs and the push to preview, #134) every job other than release_readiness must
 # be unable to start before it: in a later stage than release_readiness, and,
 # if it names `needs:`, listing release_readiness (a needs list without it
 # would let the job start at once). release_readiness itself is in the first
@@ -375,6 +391,7 @@ PROMOTION_CTXS = [
     ("MR preview -> main", {"CI_PIPELINE_SOURCE": "merge_request_event",
                             "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME": "preview",
                             "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "main"}),
+    ("push to preview", {"CI_PIPELINE_SOURCE": "push", "CI_COMMIT_BRANCH": "preview"}),
 ]
 
 
@@ -416,7 +433,13 @@ def source_ref_problems(doc):
     if not any("CI_MERGE_REQUEST_SOURCE_BRANCH_SHA" in l for l in lines):
         problems.append("script never mentions CI_MERGE_REQUEST_SOURCE_BRANCH_SHA")
     want = ('READINESS_SOURCE_REF="${CI_MERGE_REQUEST_SOURCE_BRANCH_SHA:-$CI_COMMIT_SHA}"',
-            'READINESS_TARGET_REF="origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"')
+            'READINESS_TARGET_REF="origin/$target"')
+    # #134: $target is the MR's target, or main in preview's push pipeline,
+    # set in the script itself, never from a variables: entry.
+    if 'target="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}"' not in lines:
+        problems.append('script does not set target="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}" on its own line')
+    if not any('target=main' in l for l in lines) or not any('unset CI_MERGE_REQUEST_SOURCE_BRANCH_SHA' in l for l in lines):
+        problems.append("a push pipeline does not pin target=main and drop CI_MERGE_REQUEST_SOURCE_BRANCH_SHA")
     cmd = [l for l in lines if "scripts/release-readiness.sh" in l and not l.lstrip().startswith("#")]
     if not cmd or not all(w in cmd[-1] and cmd[-1].index(w) < cmd[-1].index("scripts/release-readiness.sh") for w in want):
         problems.append("the release-readiness.sh command line lacks the inline %s and %s" % want)

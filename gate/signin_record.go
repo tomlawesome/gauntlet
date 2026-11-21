@@ -64,7 +64,7 @@ const proveActionNote = "action=" + string(UnusualSignInProve) + "; "
 // resumedWithPasskeyNote is the note finishResume passes for a session
 // resumed with a passkey rather than the password, so its
 // user.reauthenticated says so. It is not written into the detail.
-const resumedWithPasskeyNote = "credential=passkey; "
+const resumedWithPasskeyNote = "credential=passkey; " //nolint:gosec // an audit note's text, not a credential
 
 // signInClient is the address, browser and country (#54) r came from,
 // as the application resolves the address (Config.ClientIP) and the

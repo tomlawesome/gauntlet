@@ -28,6 +28,11 @@ const stepUpMissing = "this action needs your password and either a code from yo
 // changed, so a recovery code is never spent on a request that is then
 // refused for another reason.
 //
+// The caller needs an enrolled second factor (an authenticator app, recovery
+// codes or a passkey). An account with a password and none of those can
+// never pass: every try is a 401 invalid-credentials that counts against
+// the re-check budget, so send such a caller to enrol a factor first.
+//
 // There is no stored proof and no freshness window: the proof is this
 // request. Refusals use gauntlet's existing classes: 401
 // sign-in-required with no session (a bearer-token or Exempt request),

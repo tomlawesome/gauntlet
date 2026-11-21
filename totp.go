@@ -34,7 +34,7 @@ package gauntlet
 import (
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // RFC 6238 TOTP is HMAC-SHA1, what authenticator apps use; SHA-1 collisions do not break HMAC
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
@@ -229,7 +229,7 @@ func totpCounter(t time.Time, step time.Duration) uint64 {
 	if secs < 0 {
 		secs = 0
 	}
-	return uint64(secs) / uint64(step/time.Second)
+	return uint64(secs) / uint64(step/time.Second) //nolint:gosec // secs is clamped at zero above; the only step is totpStep, 30s
 }
 
 // GenerateTOTPCode returns the totpDigits-digit decimal code for secret

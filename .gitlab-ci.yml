@@ -143,8 +143,8 @@ variables:
   # signing key and the GitHub token, and a tag alone follows whatever
   # the registry serves for it. Move the digest with the tag when
   # bumping Go (docker buildx imagetools inspect golang:<tag>).
-  GOLANG_IMAGE: golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d
-  ALPINE_IMAGE: alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+  GOLANG_IMAGE: golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf
+  ALPINE_IMAGE: alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 # Avoids the duplicate branch+MR pipeline birdcage's own `.gate` anchor
 # avoids: a merge request always gets a pipeline, and so does a push to
@@ -205,8 +205,8 @@ variables:
 # READINESS
 # ---------------------------------------------------------------------------
 # The release-readiness check (#122) runs first on every promotion, a merge
-# request into `preview` or `main`, and nothing else in that pipeline starts
-# until it has finished: it is the only job in the first stage, and
+# request into `preview` or `main` and preview's own push pipeline (#134),
+# and nothing else in that pipeline starts until it has finished: it is the only job in the first stage, and
 # private-details, the one job that names `needs:`, lists it. It runs
 # scripts/release-readiness.sh, every check in one pass, so a promotion that
 # would fail on a missing change log section or a stale record fails in
@@ -232,14 +232,35 @@ release_readiness:
     GIT_DEPTH: 0
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "preview" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main")
+    # #134: a merge request gets its own pipeline only if its author may
+    # merge into the source branch, and only the owner may merge into
+    # preview, so an agent-opened preview -> main MR gets none. preview's
+    # push pipeline is the one that gates that MR, so the main leg runs
+    # there too, against main.
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "preview"
   script:
-    - git fetch --quiet --force origin "+refs/heads/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:refs/remotes/origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - target="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}"
+    # In preview's push pipeline nothing may steer the check: a variable
+    # named like an MR one must not move the target or the source.
+    - |
+      if [ "$CI_PIPELINE_SOURCE" = push ]; then
+        target=main
+        unset CI_MERGE_REQUEST_SOURCE_BRANCH_SHA
+      fi
+    - git fetch --quiet --force origin "+refs/heads/$target:refs/remotes/origin/$target"
     - git fetch --quiet --force --tags origin
+    # A push of main's own commits back into preview (the back-merge after
+    # a release) promotes nothing.
+    - |
+      if [ "$CI_PIPELINE_SOURCE" = push ] && git merge-base --is-ancestor "$CI_COMMIT_SHA" "origin/$target"; then
+        echo "release_readiness: $CI_COMMIT_SHA is already in $target, nothing to promote"
+        exit 0
+      fi
     - |
       case "$CI_JOB_IMAGE" in
         *@sha256:*) export READINESS_IMAGE_DIGEST="${CI_JOB_IMAGE#*@}" ;;
       esac
-    - READINESS_SOURCE_REF="${CI_MERGE_REQUEST_SOURCE_BRANCH_SHA:-$CI_COMMIT_SHA}" READINESS_TARGET_REF="origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" bash scripts/release-readiness.sh "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - READINESS_SOURCE_REF="${CI_MERGE_REQUEST_SOURCE_BRANCH_SHA:-$CI_COMMIT_SHA}" READINESS_TARGET_REF="origin/$target" bash scripts/release-readiness.sh "$target"
 
 # ---------------------------------------------------------------------------
 # LINT
@@ -265,7 +286,10 @@ lint:go:
     # Built from source with the image's Go, matching birdcage's own
     # lint:go: a prebuilt binary built with an older Go refuses go.mod's
     # `go 1.27.0` directive.
-    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+    # .golangci.yml adds gosec, the security linter (#113), and dupl,
+    # duplicated code (#114), to the default set; gosec's exemptions there
+    # and in `//nolint:gosec` comments each give a reason.
     - golangci-lint run ./...
 
 # The flake log rule (#109): docs/flakes.md must parse, and a flake with
@@ -332,7 +356,7 @@ private-details:
   rules:
     - !reference [.dev-landing-check, rules]
     - !reference [.gate_scan, rules]
-  # Optional: the job exists only in promotion pipelines (#122), where
+  # Optional: the job exists only in promotion pipelines (#122, #134), where
   # everything waits for it; elsewhere `needs` lets this one start at once.
   needs:
     - job: release_readiness
@@ -375,8 +399,55 @@ lint:vulncheck:
   <<: [*gate, *git_safe]
   timeout: 10m
   script:
-    - go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
     - govulncheck ./...
+
+# shellcheck (#113) on every shell script, failing at warning level and
+# above (notes and style are not checked). Installed from Alpine's signed
+# package repository for the pinned ALPINE_IMAGE release, not from the
+# author's own download (owner, 2026-11-19): Alpine's packagers build it
+# from source. A false alarm gets a `# shellcheck disable=` line with a
+# reason.
+lint:shellcheck:
+  stage: lint
+  image: $ALPINE_IMAGE
+  <<: *gate
+  timeout: 10m
+  cache: []
+  script:
+    - apk add --no-cache 'shellcheck~0.11'
+    - shellcheck --version
+    - find . -name '*.sh' -not -path './.git/*' -exec shellcheck -S warning {} +
+
+# Trivy (#113): a second source of known vulnerabilities beside
+# govulncheck, and a licence check, over both modules' go.mod files.
+# govulncheck reports only flaws in code that is called; Trivy reports
+# every affected version (it found #137, which govulncheck missed). Its
+# vulnerability database is downloaded at run time and cached, never
+# committed. The image is pinned by digest; its signature was checked
+# against Aqua's release workflow when pinned (Trivy's release channels
+# were hijacked in March 2026, CVE-2026-33634). Fails on a High or
+# Critical finding; a false alarm goes in .trivyignore with a reason and
+# an expiry date. The JSON report is kept either way.
+lint:trivy:
+  stage: lint
+  image:
+    name: $CI_IMAGE_CACHE_GHCR/aquasecurity/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+    entrypoint: [""]
+  <<: *gate
+  timeout: 10m
+  cache:
+    key: $CI_COMMIT_REF_PROTECTED-trivy-db
+    paths:
+      - .trivycache/
+  script:
+    - trivy fs --cache-dir .trivycache --scanners vuln,license --severity HIGH,CRITICAL --exit-code 1 --format json --output trivy.json . || { trivy convert --scanners vuln,license --format table trivy.json; exit 1; }
+    - trivy convert --scanners vuln,license --format table trivy.json
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - trivy.json
 
 # The exported Go API against the last release tag (ADR-0002, #22):
 # fails on a removed or renamed identifier, passes on additions. The
@@ -499,7 +570,7 @@ test:contract:
   script:
     - cd gate/contracttest
     - go vet ./...
-    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
     - golangci-lint run ./...
     - go test ./... -race
 
@@ -817,27 +888,33 @@ publish-gate:
 # renovate.json at the repo root: both go.mod files, the images in this file,
 # and the Go tools this file and scripts/ install at fixed versions.
 #
-# The shared `light` lane, like every job here but the three that hold a
-# secret (AGENTS.md "Runner tags"). Orbit runs Renovate on `big` because
-# an npm lockfile update runs pnpm over its whole monorepo; here the
-# heaviest step is `go mod tidy` on a small module.
+# Its own `gauntlet-renovate` runner, protected and locked to this project
+# (AGENTS.md "Runner tags", docs/releasing.md "Dependency updates"). The
+# two tokens are not CI/CD variables, which on this Community Edition GitLab
+# would reach every job in every protected pipeline: they are files on that
+# runner, mounted read-only under /etc/gauntlet-renovate (ADR-0007's one
+# secret per runner), and the script below reads them into the environment:
 #
-# Two CI/CD variables the owner creates under Settings > CI/CD > Variables
-# (docs/releasing.md, "Dependency updates"). Mask both. Protect both: the
-# schedule runs on `dev`, which is protected, so a protected variable reaches
-# this job and never reaches a merge request pipeline.
+#   gitlab-token   RENOVATE_TOKEN: A project access token on ai/gauntlet with
+#                  the `api` scope and the Developer role. `api` is what lets
+#                  Renovate read the repository, push branches and open
+#                  merge requests; a `read_api` token can look and never
+#                  write.
+#   github-token   GITHUB_COM_TOKEN: A github.com fine-grained personal access
+#                  token with no permissions granted at all -- public read
+#                  only. Renovate uses it to read release tags and release
+#                  notes on github.com, where most of gauntlet's modules and
+#                  tools live. Without it the unauthenticated GitHub API
+#                  rate-limits partway through a run.
 #
-#   RENOVATE_TOKEN     A project access token on ai/gauntlet with the `api`
-#                      scope and the Developer role. `api` is what lets
-#                      Renovate read the repository, push branches and open
-#                      merge requests; a `read_api` token can look and never
-#                      write.
-#   GITHUB_COM_TOKEN   A github.com fine-grained personal access token with no
-#                      permissions granted at all -- public read only. Renovate
-#                      uses it to read release tags and release notes on
-#                      github.com, where most of gauntlet's modules and tools
-#                      live. Without it the unauthenticated GitHub API
-#                      rate-limits partway through a run.
+# The job refuses to run if either name already arrives as a variable: a
+# leftover CI/CD variable would be a copy every protected job could read.
+# Before it reads either file, `config-check.sh env renovate` pins the job's
+# variables and refuses any other RENOVATE_, proxy or Node variable. That is
+# a tripwire for a mistaken owner variable, not the control: the control is
+# the project setting "Minimum role to use pipeline variables" = Owner (#138,
+# docs/releasing.md "Dependency updates"). No script can be, because the
+# runner's own git fetch and the image's BASH_ENV read variables first.
 #
 # Neither value is ever printed: nothing below dumps an environment, and
 # LOG_LEVEL stays at info. `debug` logs the resolved configuration and would.
@@ -861,18 +938,19 @@ publish-gate:
 # `go mod tidy` after a Go module bump is Renovate's own gomodTidy option.
 renovate:
   stage: maintenance
-  # Pinned by digest, the way every other image here is: the same release
-  # and digest orbit's renovate job uses (44.83.2), so the two projects run
-  # one proven Renovate. renovate.json excludes 44.63.0 and 44.64.0, which do
-  # not start; Renovate offers its own next release in the weekly merge
-  # request, and that bump is only proven by the following scheduled run.
+  tags: [gauntlet-renovate]
+  # Pinned by digest, the way every other image here is, at the newest
+  # release at least 3 days old. renovate.json excludes 44.63.0 and
+  # 44.64.0, which do not start; Renovate offers its own next release in
+  # the weekly merge request, and that bump is only proven by the
+  # following scheduled run.
   #
   # The default image rather than `-full`: it carries Node only and installs
   # the Go toolchain a run needs as it goes, for `go mod tidy`. `-full`
   # preinstalls every ecosystem's tools and costs several gigabytes of pull on
   # a shared runner every week.
   image:
-    name: renovate/renovate:44.83.2@sha256:c1cb952b2e14a112d0d0c61987a10f60a2626fe9b9c1504436be46a17bd123bc
+    name: renovate/renovate:44.247.1@sha256:f7bad0becd5f97275e0b1161a60b5dd25dfb0576f4d8c7701c8b60bfd63f3ee2
     pull_policy: if-not-present
   timeout: 1h
   # A weekly maintenance run has nothing that could supersede it, and being
@@ -912,6 +990,16 @@ renovate:
   script:
     - |
       set -eu
+      sh scripts/ci/config-check.sh env renovate
+      for f in gitlab-token github-token; do
+        if [ ! -r "/etc/gauntlet-renovate/$f" ]; then
+          echo "renovate: /etc/gauntlet-renovate/$f is missing or unreadable by this job's user (12021); check the runner's mount and the file's owner (docs/releasing.md, Dependency updates, step 3)" >&2
+          exit 1
+        fi
+      done
+      RENOVATE_TOKEN="$(cat /etc/gauntlet-renovate/gitlab-token)"
+      GITHUB_COM_TOKEN="$(cat /etc/gauntlet-renovate/github-token)"
+      export RENOVATE_TOKEN GITHUB_COM_TOKEN
       if [ -z "${RENOVATE_DRY_RUN:-}" ]; then
         unset RENOVATE_DRY_RUN
         echo "renovate: live run, merge requests will be created"

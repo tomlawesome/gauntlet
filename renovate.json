@@ -90,6 +90,18 @@
       "datasourceTemplate": "github-releases"
     },
     {
+      "description": "Trivy's image in lint:trivy (#113), pinned by tag and digest behind the runner's GHCR cache prefix, $CI_IMAGE_CACHE_GHCR, which the gitlabci manager cannot resolve. This reads the pin and looks it up on ghcr.io. Re-check the new digest's signature by hand before merging a bump (the comment above lint:trivy says why).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitlab-ci\\.yml$/"
+      ],
+      "matchStrings": [
+        "\\$CI_IMAGE_CACHE_GHCR/aquasecurity/trivy:(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "depNameTemplate": "ghcr.io/aquasecurity/trivy",
+      "datasourceTemplate": "docker"
+    },
+    {
       "description": "go-licenses, the licence gate's scanner, pinned as GO_LICENSES_VERSION's default in scripts/licence-check.sh.",
       "customType": "regex",
       "managerFilePatterns": [

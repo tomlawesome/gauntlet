@@ -17,7 +17,7 @@ const csrfHeaderName = "X-Requested-With"
 // MustChangePassword may still reach (mikroview's #1251) -- named once
 // here rather than written as a literal in Protect, so the gate and the
 // route table (routes.go) cannot drift apart silently.
-const changePasswordPath = "/api/auth/password"
+const changePasswordPath = "/api/auth/password" //nolint:gosec // a route path, not a credential
 
 // The rest of the /api/auth/* paths the exempt lists and
 // secondFactorEnrolPaths below name, held as constants for the same
@@ -51,22 +51,22 @@ const (
 	// recovery codes are confirmed (#58; recoverycodes_handler.go).
 	enrolmentConfirmPath = "/api/auth/recovery-codes/confirm"
 
-	passkeysPath              = "/api/auth/passkeys"
-	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"
-	passkeyRegisterFinishPath = "/api/auth/passkeys/register/finish"
+	passkeysPath              = "/api/auth/passkeys"                 //nolint:gosec // a route path, not a credential
+	passkeyRegisterBeginPath  = "/api/auth/passkeys/register/begin"  //nolint:gosec // a route path, not a credential
+	passkeyRegisterFinishPath = "/api/auth/passkeys/register/finish" //nolint:gosec // a route path, not a credential
 	loginFactorBeginPath      = "/api/auth/login/factor/begin"
 
 	// loginPasskeyBeginPath and loginPasskeyPath are signing in with a
 	// passkey alone (#77, ADR-0012; login_passkey_handler.go). Both
 	// answer 404 unless Config.PasskeySignIn is set and the relying
 	// party can do it.
-	loginPasskeyBeginPath = "/api/auth/login/passkey/begin"
-	loginPasskeyPath      = "/api/auth/login/passkey"
+	loginPasskeyBeginPath = "/api/auth/login/passkey/begin" //nolint:gosec // a route path, not a credential
+	loginPasskeyPath      = "/api/auth/login/passkey"       //nolint:gosec // a route path, not a credential
 
 	// stepUpPasskeyBeginPath starts a passkey step-up for a signed-in
 	// caller (#82; stepup_passkey_handler.go): the assertion it asks for
 	// is the alternative to a code on every recheckStepUp route.
-	stepUpPasskeyBeginPath = "/api/auth/step-up/passkey/begin"
+	stepUpPasskeyBeginPath = "/api/auth/step-up/passkey/begin" //nolint:gosec // a route path, not a credential
 )
 
 // exemptPaths lists routes reachable without a session once an account
@@ -316,7 +316,7 @@ const (
 	// authGateMustEnrolPasskey is the admin passkey door (#82,
 	// ADR-0015): an admin account with no passkey usable here, while
 	// Config.AdminPasskey is AdminPasskeyRequired.
-	authGateMustEnrolPasskey = "must-enrol-passkey"
+	authGateMustEnrolPasskey = "must-enrol-passkey" //nolint:gosec // a reason code shown to the client, not a credential
 )
 
 // writeForcedAuthGate is writeUnauthorized's sibling for these three

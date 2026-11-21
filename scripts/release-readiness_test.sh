@@ -226,7 +226,7 @@ RC=0
 run() {
   local leg="$1"; shift
   RC=0
-  ( cd "$FX" && env -u GITLAB_TOKEN -u CI_JOB_TOKEN \
+  ( cd "${FX:?}" && env -u GITLAB_TOKEN -u CI_JOB_TOKEN \
       READINESS_TARGET_REF=preview READINESS_IMAGE_DIGEST="$DIGEST" "$@" \
       "$SCRIPT" "$leg" ) >"$TMP/out" 2>&1 || RC=$?
 }
@@ -273,9 +273,9 @@ done
 ok "good run reports ok for R1..R8"
 run main
 expect_only "good fixture passes on leg main" ""
-RC=0; ( cd "$FX" && "$SCRIPT" ) >"$TMP/out" 2>&1 || RC=$?
+RC=0; ( cd "${FX:?}" && "$SCRIPT" ) >"$TMP/out" 2>&1 || RC=$?
 [ "$RC" -eq 2 ] && grep -qi usage "$TMP/out" || fail "no argument: want exit 2 and a usage line, got $RC"
-RC=0; ( cd "$FX" && "$SCRIPT" dev ) >"$TMP/out" 2>&1 || RC=$?
+RC=0; ( cd "${FX:?}" && "$SCRIPT" dev ) >"$TMP/out" 2>&1 || RC=$?
 [ "$RC" -eq 2 ] && grep -qi usage "$TMP/out" || fail "unknown leg: want exit 2 and a usage line, got $RC"
 ok "bad or missing leg exits 2 with usage"
 
@@ -296,6 +296,12 @@ F_GUIDE_STEPS=4 case_ "R1 fails when the guide has more steps than the record" p
 F_STEPS="step 1: done: TODO
 step 2: not-needed: owner decision 2026-11-18
 step 3: after-merge" case_ "R1 fails on placeholder evidence (TODO)" preview "R1"
+F_STEPS="step 1: done: TODO
+step 2: not-needed: <decision>
+step 3: after-merge" case_ "R1 placeholder refusal reads as clean English (no doubled substitution)" preview "R1"
+grep -qE '^FAIL R1: .*step 1: done has no real evidence(;|$)' "$TMP/out" || { cat "$TMP/out" >&2; fail "R1 done-placeholder message is not 'step 1: done has no real evidence'"; }
+grep -qE '^FAIL R1: .*step 2: not-needed has no real owner decision(;|$)' "$TMP/out" || { cat "$TMP/out" >&2; fail "R1 not-needed-placeholder message is not 'step 2: not-needed has no real owner decision'"; }
+ok "R1 placeholder message is clean: 'done has no real evidence', 'not-needed has no real owner decision'"
 F_STEPS="step 1: done: <ref>
 step 2: not-needed: owner decision 2026-11-18
 step 3: after-merge" case_ "R1 fails on placeholder evidence (<ref>)" preview "R1"
@@ -314,6 +320,10 @@ F_TRAILER="Someone Else" case_ "R1 fails when Signed-off-by differs from the com
 F_SOB=none case_ "R1 fails when there is no Signed-off-by line" preview "R1"
 F_SOB="$IDENT" case_ "R1 fails when the Signed-off-by line carries an email (correct name plus email)" preview "R1"
 F_SOB="$IDENT" F_TRAILER="$IDENT" case_ "R1 fails on a name-plus-email line even with a matching email trailer" preview "R1"
+F_SOB="Someone Else <someone@example.invalid>" F_TRAILER="Someone Else <someone@example.invalid>" \
+  case_ "R1 fails on a Signed-off-by email even when the name is not the author's" preview "R1"
+grep -qE '^FAIL R1:.*carries an email' "$TMP/out" || { cat "$TMP/out" >&2; fail "email-only R1 refusal does not mention the email"; }
+ok "R1 email refusal message mentions the email (name differs from author)"
 F_SOB2="$NAME" case_ "R1 fails on more than one Signed-off-by line" preview "R1"
 F_TRAILER=none case_ "R1 fails when the commit has no Signed-off-by trailer" preview "R1"
 
@@ -385,7 +395,7 @@ ok "CI run says the audit issue is 'not checked here'"
 # work tree differs in every file a check reads, so any one read from HEAD
 # fails (go.mod: R8's go line and R5's retract both differ, #131).
 build
-( cd "$FX" && git checkout -q -b other && echo 9.9.9 > VERSION \
+( cd "${FX:?}" && git checkout -q -b other && echo 9.9.9 > VERSION \
   && printf '# Changelog\n\n## [Unreleased]\n' > CHANGELOG.md \
   && printf 'openapi: 3.0.3\ninfo:\n  title: Auth\n  version: 9.9.9\n' > docs/api/auth.yaml \
   && printf 'module example.invalid/auth\n\ngo 1.99.0\nretract v0.2.0\n' > go.mod \
@@ -415,9 +425,9 @@ no_out() { # no_out DESC REGEX
 # 1. The source ref is the branch, not a merge commit of the target into it.
 t_src_branch_vs_merge() {
   F_DIVERGE=1 build
-  ( cd "$FX" && git checkout -q -b mr preview && git merge -q --no-edit feature )
+  ( cd "${FX:?}" && git checkout -q -b mr preview && git merge -q --no-edit feature )
   local branch merge
-  branch="$(git -C "$FX" rev-parse feature)"; merge="$(git -C "$FX" rev-parse mr)"
+  branch="$(git -C "${FX:?}" rev-parse feature)"; merge="$(git -C "${FX:?}" rev-parse mr)"
   run preview READINESS_SOURCE_REF="$branch"
   expect_only "R7 fails when the branch sha lacks the target's tip" "R7"
   run preview READINESS_SOURCE_REF="$merge"

@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-21
+
+### Security
+
+- **go-jose v4.1.9** (#137): the indirect JOSE library used to check
+  OIDC sign-in tokens moves from v4.1.4, which a crafted key from the
+  sign-in provider could tie up (CVE-2026-116587, High).
+
+### Changed
+
+- **StepUp's documentation says it needs an enrolled second factor**
+  (#136): a caller with no second factor is refused, and docs/using.md
+  now says so and how an application should send them to enrol first.
+
+- **Renovate's tokens live on its own runner** (#138): the `renovate`
+  job reads its GitLab and GitHub tokens from files on a protected
+  `gauntlet-renovate` runner instead of CI/CD variables, which on
+  GitLab Community Edition every protected job can read. It refuses
+  to run if either token still arrives as a variable. Only the project
+  owner may start a pipeline with variables (docs/releasing.md,
+  "Dependency updates", step 4).
+
+- **Libraries at their latest releases**: golang.org/x/crypto 0.59.0,
+  x/oauth2 0.38.0, x/sys 0.50.0, x/text 0.44.0, fxamacker/cbor 2.10.0,
+  go-webauthn/x 0.4.1, maxminddb-golang 2.9.1, netipx, msgp and fwd.
+
+- **CI runs Trivy and gosec** (#113): Trivy checks both modules'
+  libraries for known flaws and their licences; gosec, the Go security
+  linter, joins `golangci-lint` (now v2.15.0); govulncheck is v1.10.0. Trivy fails the pipeline
+  at High and above; gosec on any finding not exempted with a reason.
+  shellcheck checks the shell scripts at warning level and above.
+  golangci-lint also runs dupl, so new duplicated code fails CI (#114).
+
 ## [0.4.5] - 2026-11-19
 
 ### Added

@@ -70,6 +70,7 @@ module="$(go list -m)"
 work="$(mktemp -d)"
 # The check runs on every exit, so a run that fails part-way still
 # reports a changed go.sum.
+# shellcheck disable=SC2154 # rc is set inside the trap's own string
 trap 'rc=$?; rm -rf "$work"; untouched || rc=1; exit "$rc"' EXIT
 
 # Same reason as licence-check.sh: build the tool with the toolchain

@@ -20,7 +20,7 @@ import (
 // PwnedChecker appends the first five hex characters of a password's
 // SHA-1 to it. The API needs no key and places no licence terms on its
 // data (#43).
-const DefaultPwnedURL = "https://api.pwnedpasswords.com/range/"
+const DefaultPwnedURL = "https://api.pwnedpasswords.com/range/" //nolint:gosec // a public API address, not a credential
 
 // maxRangeBody bounds a range response. A padded range holds 800 to
 // 1,000 lines of about 40 bytes; anything near this is not one.

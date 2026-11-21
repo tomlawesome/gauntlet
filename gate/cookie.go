@@ -63,7 +63,7 @@ func (g *Gate) sessionCookieMaxAge() time.Duration {
 // has to survive the provider's top-level cross-site redirect back to
 // the callback route, and the session cookie is happy either way.
 func (g *Gate) writeCookie(w http.ResponseWriter, name, value, path string, maxAge int) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure follows Config.SecureCookie, off only for plain-HTTP development
 		Name:     name,
 		Value:    value,
 		Path:     path,

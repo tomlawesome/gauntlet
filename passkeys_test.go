@@ -1059,7 +1059,15 @@ func TestAddPasskeyStillDefaultsABlankNameAndCutsALongOneToSixtyFourRunes(t *tes
 }
 
 func TestRenamePasskeyRefusesAnUnprintableName(t *testing.T) {
-	for _, tc := range unprintablePasskeyNames {
+	checkRenamePasskeyRefused(t, unprintablePasskeyNames)
+}
+
+// checkRenamePasskeyRefused renames a stored passkey to each name and
+// checks the rename is refused with ErrPasskeyNameInvalid, the stored
+// name is unchanged and nothing is written to the backend.
+func checkRenamePasskeyRefused(t *testing.T, names []struct{ label, name string }) {
+	t.Helper()
+	for _, tc := range names {
 		t.Run(tc.label, func(t *testing.T) {
 			s, b, id := openHoldStore(t)
 			if _, err := s.AddPasskey(id, testPasskey(1, "original")); err != nil {
@@ -1073,7 +1081,7 @@ func TestRenamePasskeyRefusesAnUnprintableName(t *testing.T) {
 			}
 			u, _ := s.Get(id)
 			if len(u.Passkeys) != 1 || u.Passkeys[0].Name != "original" {
-				t.Errorf("a refused rename changed the passkeys to %+v", u.Passkeys)
+				t.Errorf("passkeys after a refused rename = %+v, want the name unchanged", u.Passkeys)
 			}
 			if got := b.saves.Load(); got != saves {
 				t.Errorf("a refused rename wrote to the backend (%d saves, was %d)", got, saves)

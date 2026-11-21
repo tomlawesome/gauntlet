@@ -52,12 +52,14 @@ holds no issues or pull requests.
 
 ## Runner tags
 
-Every job runs on the shared `light` lane except three that hold a
+Every job runs on the shared `light` lane except four that hold a
 secret (#52, ADR-0007): `blocklist:sign` on `gauntlet-signing`
 (signing key at `/etc/gauntlet-signing/`), `blocklist:publish` on
 `gauntlet-publish` (GitHub release token at `/etc/gauntlet-github/`),
 and `publish-gate` on `gauntlet-publish-gate` (GitHub deploy key at
-`/etc/gauntlet-publish-gate/`, #118). All three are protected, locked
+`/etc/gauntlet-publish-gate/`, #118), and `renovate` on
+`gauntlet-renovate` (GitLab and GitHub tokens at
+`/etc/gauntlet-renovate/`, #138). All four are protected, locked
 to this project, and set up by the owner (docs/releasing.md); no other
 job may use those tags; `scripts/ci/config-check.sh tags`, run by
 `lint:flake-check`, enforces it (#121). This GitLab is Community Edition: no protected
@@ -66,7 +68,8 @@ environments, so no secret is a CI/CD variable.
 ## Dependency updates
 
 Renovate (#63): `renovate.json`, the `renovate` job and a weekly schedule
-on `dev` with `RENOVATE=true` (owner setup: docs/releasing.md). Go
+on `dev` with `RENOVATE=true` (owner setup: docs/releasing.md). Its
+tokens are files on its own runner, never CI/CD variables (#138). Go
 versions are looked up from Git hosts (`GOPROXY=direct`), never the proxy.
 
 ## Closing issues from commits
@@ -83,14 +86,19 @@ None in G1-G4. `golang.org/x/crypto/argon2`, `github.com/coreos/go-oidc/v3`
 and `golang.org/x/oauth2` are approved for G2/G5 (birdcage #8,
 owner 2026-09-26) -- see docs/adr/0001-shared-auth-module.md. For v0.2.0
 (owner 2026-09-30): `golang.org/x/exp/cmd/apidiff` in CI only and
-`github.com/getkin/kin-openapi` v0.149.0 (MIT) in tests only, both for
+`github.com/getkin/kin-openapi` v0.153.0 (MIT) in tests only, both for
 #22 and ADR-0002; `github.com/go-webauthn/webauthn` v0.18.2 in `passkey/`
 for G8 (#20), and in its test fake (`internal/passkeytest`), in gate's test
 files and in the contract module. For #54 (owner 2026-10-04):
-`github.com/oschwald/maxminddb-golang/v2` v2.6.0 (ISC) in `geoip/` only,
+`github.com/oschwald/maxminddb-golang/v2` v2.9.1 (ISC) in `geoip/` only,
 to read MaxMind and IPinfo country files, and `github.com/maxmind/mmdbwriter`
 v1.2.0 (Apache-2.0 or MIT) in `geoip/` tests only, to build their fixture
-files (it brings `go4.org/netipx`). Anything else goes to the owner first.
+files (it brings `go4.org/netipx`). For #120 (owner 2026-11-17):
+`github.com/boombuler/barcode` v1.1.0 (MIT, no dependencies) in `totp.go`
+only, to encode the enrolment QR pattern. For kin-openapi v0.153.0 (owner
+2026-11-20): `go.yaml.in/yaml/v4` v4.0.0 (Apache-2.0, with MIT parts from
+libyaml; the YAML Project's own module, no dependencies), which it brings
+into the contract module's tests only. Anything else goes to the owner first.
 A linked module's embedded files and vendored code without its own
 licence need an owner-recorded `go-bundled-assets:` review (#64).
 
@@ -108,8 +116,10 @@ python3 scripts/coverage-floor.py coverage.out
 golangci-lint run ./...
 scripts/licence-check.sh
 scripts/apidiff.sh             # exported API vs the last v* tag
-GOTOOLCHAIN=go1.27.4 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...  # the Go in CI's image
+GOTOOLCHAIN=go1.27.4 go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...  # the Go in CI's image
 gitleaks detect --no-banner
+shellcheck -S warning $(git ls-files '*.sh')  # as lint:shellcheck
+trivy fs --scanners vuln,license --severity HIGH,CRITICAL --exit-code 1 .  # Trivy 0.76.2, as lint:trivy
 sh scripts/ci/flake-check.sh --quarantined scripts/quarantine.txt docs/flakes.md  # flake log (#109)
 python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"
 ```

@@ -39,7 +39,7 @@ type fileLock struct {
 // an app's CLI run with sudo, it could never be opened again by the
 // server sharing the store, and every save there would fail.
 func lockFile(ctx context.Context, path string) (*fileLock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600) //nolint:gosec // the store's own lock file, named by the app, never by a request
 	switch {
 	case err == nil:
 		if err := ownLikeStore(f, strings.TrimSuffix(path, ".lock")); err != nil {
@@ -47,7 +47,7 @@ func lockFile(ctx context.Context, path string) (*fileLock, error) {
 			return nil, err
 		}
 	case errors.Is(err, fs.ErrExist):
-		f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // the store's own lock file, named by the app, never by a request
 		if errors.Is(err, fs.ErrPermission) {
 			// A lock made before this check existed, by a CLI run with
 			// sudo, belongs to root and nothing this process can do
@@ -73,7 +73,7 @@ func lockFile(ctx context.Context, path string) (*fileLock, error) {
 		return &fileLock{f: f}, nil
 	case <-ctx.Done():
 		go func() {
-			<-acquired // locked or failed, the handle is no longer needed
+			<-acquired //nolint:errcheck // locked or failed, the handle is no longer needed
 			_ = f.Close()
 		}()
 		return nil, ctx.Err()

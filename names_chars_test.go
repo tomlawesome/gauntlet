@@ -208,27 +208,7 @@ func TestAddPasskeyRefusesTheReplacementCharacter(t *testing.T) {
 }
 
 func TestRenamePasskeyRefusesTheReplacementCharacter(t *testing.T) {
-	for _, tc := range replacementPasskeyNames {
-		t.Run(tc.label, func(t *testing.T) {
-			s, b, id := openHoldStore(t)
-			if _, err := s.AddPasskey(id, testPasskey(1, "original")); err != nil {
-				t.Fatal(err)
-			}
-			saves := b.saves.Load()
-
-			_, err := s.RenamePasskey(id, []byte{1}, tc.name)
-			if !errors.Is(err, ErrPasskeyNameInvalid) {
-				t.Fatalf("RenamePasskey(%q) = %v, want ErrPasskeyNameInvalid", tc.name, err)
-			}
-			u, _ := s.Get(id)
-			if len(u.Passkeys) != 1 || u.Passkeys[0].Name != "original" {
-				t.Errorf("passkeys after a refused rename = %+v, want the name unchanged", u.Passkeys)
-			}
-			if got := b.saves.Load(); got != saves {
-				t.Errorf("a refused rename wrote to the backend (%d saves, was %d)", got, saves)
-			}
-		})
-	}
+	checkRenamePasskeyRefused(t, replacementPasskeyNames)
 }
 
 // Guard: non-Latin names stay accepted by the store.

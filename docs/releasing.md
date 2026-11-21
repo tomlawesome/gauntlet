@@ -232,7 +232,12 @@ It counts as released once `main` has that commit, through the usual
 Every promotion, `dev` -> `preview` and `preview` -> `main`, starts with the
 release-readiness check. The `release_readiness` job runs it first in the
 merge request's pipeline and nothing else starts until it ends; there is no
-way to skip it. Run the same script before opening the merge request, from a
+way to skip it. A `preview` -> `main` merge request opened by an agent gets
+no pipeline of its own (GitLab runs one only for an author who may merge
+into `preview`), so `preview`'s own pipeline runs the `main` check too, and
+that pipeline is the one the merge request waits on (#134). A push of
+`main`'s own commits back into `preview` passes it at once: there is
+nothing to promote. Run the same script before opening the merge request, from a
 checkout of the source branch with the target fetched:
 
 ```
@@ -311,6 +316,16 @@ change them.
   **Allowed to create**. That has not changed, but release:gitlab
   creates the tag as the person who pressed the button, so the two
   lists must agree.
+
+Two more keep the Renovate tokens safe ("Dependency updates", "Setup
+the owner does once" step 4):
+
+- In
+  [Settings > CI/CD > Variables](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/ci_cd),
+  **Minimum role to use pipeline variables** reads **Owner**.
+- Every entry in
+  [Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules)
+  is owned by you.
 
 ## The common-password list
 
@@ -540,8 +555,9 @@ with the newest release, and opens a merge request to `dev` for
 whatever is behind. It watches:
 
 - Go libraries, in `go.mod` and `gate/contracttest/go.mod`;
-- Docker images in `.gitlab-ci.yml`: Go, Alpine, Renovate's own and
-  release-cli;
+- Docker images in `.gitlab-ci.yml`: Go, Alpine, Renovate's own,
+  release-cli and Trivy (check a new Trivy digest's signature by hand
+  before merging it; `.gitlab-ci.yml` says why);
 - the tools CI installs at a fixed version: golangci-lint,
   govulncheck, gitleaks and go-licenses.
 
@@ -564,7 +580,7 @@ it does not watch: `renovate.json` says why.
 
 ### Setup the owner does once
 
-Nothing runs until these four steps are done, and an assistant cannot
+Nothing runs until these five steps are done, and an assistant cannot
 do any of them: they create credentials and change project settings.
 
 **1. A GitLab token for Renovate.** In
@@ -585,15 +601,76 @@ Renovate reads their tags and release notes there. GitHub allows only
 partway through; with no permissions the token can read only what
 anyone can.
 
-**3. The two tokens as CI/CD variables.** In
-[Settings > CI/CD > Variables](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/ci_cd),
-add `RENOVATE_TOKEN` (the GitLab token) and `GITHUB_COM_TOKEN` (the
-GitHub token), each with **Masked** and **Protected** ticked. Masked
-keeps the value out of job logs. Protected hands it only to pipelines
-on protected branches: the schedule below runs on `dev`, which is
-protected, and no merge request pipeline ever sees either token.
+**3. The tokens on their own runner.** On this GitLab (Community
+Edition) a protected CI/CD variable reaches every job in every
+protected pipeline, so the tokens are held the way the publish gate's
+key is in step 6 of the release steps at the top of this page,
+sub-steps 2 and 3 (one secret per runner, ADR-0007):
 
-**4. The schedules.** In
+1. On the runner host, from a root shell (`sudo -i`: `/etc` is
+   writable only by root), put the two tokens in files, straight from
+   the token pages, never through chat or a command line. Renovate's image
+   runs as user 12021, not root, and on the runner's rootless Docker
+   that user is a different host user from `gitlab-runner`: the first
+   number in `gitlab-runner`'s line of `/etc/subuid`, plus 12020. The
+   folder and files belong to that user, or the job cannot read them:
+   ```
+   u=$(( $(awk -F: '$1 == "gitlab-runner" { print $2 }' /etc/subuid) + 12020 ))
+   install -d -m 0700 -o "$u" -g "$u" /etc/gauntlet-renovate
+   ```
+   Then, in the same root shell, create `gitlab-token` holding the GitLab token and
+   `github-token` holding the GitHub token in that folder (an editor,
+   paste, save), and lock them:
+   ```
+   chown "$u:$u" /etc/gauntlet-renovate/gitlab-token /etc/gauntlet-renovate/github-token
+   chmod 0400 /etc/gauntlet-renovate/gitlab-token /etc/gauntlet-renovate/github-token
+   ```
+   The job checks both files are readable before it starts Renovate.
+   Restart the `gitlab-runner` user's Docker once, as in "The
+   common-password list", "Setup the owner does once" step 3, so jobs
+   can see the new folder. **This stops any job running on the host**,
+   so do it when nothing important is running.
+2. Register a project runner, `gauntlet-renovate`, made like the
+   others in that section's step 4: that tag, run untagged jobs off,
+   protected on, locked to this project. In its `[[runners]]` entry in
+   the runner config, `/etc/gitlab-runner/config.toml`:
+   ```toml
+   [runners.docker]
+     host = "unix:///run/user/988/docker.sock"
+     volumes = ["/etc/gauntlet-renovate:/etc/gauntlet-renovate:ro", "/cache"]
+   ```
+   Replace `988` with `id -u gitlab-runner`'s number, as in that step.
+   Copy the `light` runner's three `CI_IMAGE_CACHE_*` environment
+   entries too, if the `renovate` image is pulled through the host's
+   image cache there. The mount holds the files, never the tokens in
+   `config.toml`.
+3. Delete any `RENOVATE_TOKEN` and `GITHUB_COM_TOKEN` CI/CD variables
+   if they exist
+   ([Settings > CI/CD > Variables](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/ci_cd)).
+   The `renovate` job refuses to run while either one is present.
+
+**4. Pipeline variables for the owner only.** In
+[Settings > CI/CD > Variables](https://gitlab.tomlawson.io/ai/gauntlet/-/settings/ci_cd),
+set **Minimum role to use pipeline variables** to **Owner** and save.
+(The same from a shell, run by the owner:
+`glab api -X PUT projects/56 -f ci_pipeline_variables_minimum_override_role=owner`.)
+This is what keeps the tokens safe (#138). A schedule's or a manual
+run's variables reach the runner's own git fetch and the image's
+startup before any job script runs, so no check in the `renovate`
+job can stop a hostile one; the job's own check only catches a
+mistaken variable of yours. Then open
+[Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules),
+confirm every schedule there is yours, and delete any other: GitLab
+does not re-check schedules that already exist against the new
+setting.
+
+From then on only you can start a gauntlet pipeline with variables:
+the common-password list's sample runs (`BLOCKLIST_SAMPLE`),
+publish-gate dry runs, and any agent run that passes `KEY=VALUE`.
+Anyone else gets "Insufficient permissions to set pipeline
+variables"; agents hand those runs to you.
+
+**5. The schedules.** In
 [Build > Pipeline schedules](https://gitlab.tomlawson.io/ai/gauntlet/-/pipeline_schedules),
 create a schedule: description `renovate`, target branch `dev`, cron
 `7 5 * * 1` with cron timezone **London** (05:07 every Monday), and a

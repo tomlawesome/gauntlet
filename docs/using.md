@@ -335,6 +335,10 @@ mux.Handle("POST /api/admin/crowdsec/certificate",
 - The proof is this request: there is no stored proof and no window to
   set. Each TOTP code is accepted once, a recovery code is burnt, and a
   passkey ceremony is single-use.
+- The caller needs an enrolled second factor: an authenticator app,
+  recovery codes or a passkey. With a password and none of those, every
+  try is a 401 `invalid-credentials` that uses up the re-check budget, so
+  send such a caller to enrol a factor before offering the action.
 - Step up last. Validate your own fields before `StepUp`, so a recovery
   code is never spent on a request you then refuse.
 - For a passkey, the frontend calls `POST

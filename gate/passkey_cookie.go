@@ -20,7 +20,7 @@ const (
 	// prefix rather than the two routes, for the same reason
 	// pendingLoginCookiePath is a prefix: one Path value covers both
 	// without widening to the whole API.
-	passkeyRegisterCookieName = "gate_passkey_register"
+	passkeyRegisterCookieName = "gate_passkey_register" //nolint:gosec // a cookie's name or path, not a credential
 	passkeyRegisterCookiePath = passkeysPath
 
 	// passkeyAssertCookieName/Path carry a login ceremony from
@@ -38,8 +38,8 @@ const (
 	// the /api/auth prefix, as knownBrowserCookiePath is, rather than
 	// /api/auth/login/passkey: the one begin route serves both finishes,
 	// and a browser sends a cookie only to the paths under its own.
-	passkeySignInCookieName = "gate_passkey_signin"
-	passkeySignInCookiePath = "/api/auth"
+	passkeySignInCookieName = "gate_passkey_signin" //nolint:gosec // a cookie's name or path, not a credential
+	passkeySignInCookiePath = "/api/auth"           //nolint:gosec // a cookie's name or path, not a credential
 
 	// passkeyStepUpCookieName/Path carry a signed-in caller's passkey
 	// step-up from step-up/passkey/begin to the route that finishes it
@@ -50,7 +50,7 @@ const (
 	// and bound to the caller's account at finish (ADR-0017). Its own
 	// name, so a second-step login's ceremony cookie is never finished
 	// here, nor this one at a login.
-	passkeyStepUpCookieName = "gate_passkey_stepup"
+	passkeyStepUpCookieName = "gate_passkey_stepup" //nolint:gosec // a cookie's name or path, not a credential
 	passkeyStepUpCookiePath = "/"
 
 	// passkeyCeremonyCookieMaxAge is five minutes, matching the expiry

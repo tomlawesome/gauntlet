@@ -11,7 +11,16 @@
 #     JOB's pinned inputs in the process environment equal the committed
 #     values, the runner paths are the fixed ones, and the template's
 #     undeclared inputs are unset or empty. A pipeline variable that
-#     disagrees fails the job closed.
+#     disagrees fails the job closed. JOB is publish-gate, private-details
+#     or renovate. For renovate, any RENOVATE_ name the file does not set
+#     fails except RENOVATE_DRY_RUN (extract, lookup or full) and
+#     RENOVATE_SECURITY_ONLY (true), each of which may also be empty. That
+#     is a tripwire for a mistaken owner variable, not the control. The
+#     control is the project setting (Settings > CI/CD > Variables)
+#     "Minimum role to use pipeline variables" = Owner (#138). No
+#     script-level check can be the control, because the runner's own git
+#     fetch and the image's BASH_ENV read the variables before this script
+#     runs.
 #   config-check.sh tags [FILE]
 #     Each secret-holding runner tag appears on exactly one `tags:` line,
 #     `  tags: [<tag>]` in its intended job, and no `tags:` line uses a
@@ -139,8 +148,11 @@ do_env() {
     private-details)
       from_file="PRIVATE_DETAILS_SHA PRIVATE_DETAILS_SINCE"
       forbid="PRIVATE_DETAILS_ALLOWLIST PRIVATE_DETAILS_ALLOWLIST_ONLY GITLEAKS" ;;
-    '') die2 "env: missing JOB (publish-gate or private-details)" ;;
-    *) die2 "env: unknown JOB (want publish-gate or private-details)" ;;
+    renovate)
+      from_file="RENOVATE_PLATFORM RENOVATE_AUTODISCOVER RENOVATE_ONBOARDING RENOVATE_REQUIRE_CONFIG LOG_LEVEL GOPROXY GOPRIVATE"
+      forbid="RENOVATE_TOKEN GITHUB_COM_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY NODE_OPTIONS NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED RENOVATE_ADDITIONAL_CONFIG_FILE" ;;
+    '') die2 "env: missing JOB (publish-gate, private-details or renovate)" ;;
+    *) die2 "env: unknown JOB (want publish-gate, private-details or renovate)" ;;
   esac
   readable "$file"
   vars="$(job_vars "$job" "$file")"
@@ -152,8 +164,24 @@ do_env() {
     env_val "$name"
     if [ -z "$ENV_SET" ] || [ "$ENV_VAL" != "$want" ]; then bad="$bad $name"; fi
   done
-  env_val PRIVATE_DETAILS_RULES
-  if [ -z "$ENV_SET" ] || [ "$ENV_VAL" != "$RULES_PATH" ]; then bad="$bad PRIVATE_DETAILS_RULES"; fi
+  if [ "$job" = renovate ]; then
+    env_val RENOVATE_DRY_RUN
+    case $ENV_VAL in ''|extract|lookup|full) ;; *) bad="$bad RENOVATE_DRY_RUN" ;; esac
+    env_val RENOVATE_SECURITY_ONLY
+    case $ENV_VAL in ''|true) ;; *) bad="$bad RENOVATE_SECURITY_ONLY" ;; esac
+    # Every other RENOVATE_ name is a setting a stray variable could add.
+    # ENDPOINT, REPOSITORIES and CONFIG_FILE come from $CI_ values a
+    # pipeline variable can override too, so comparing them proves nothing;
+    # the project setting covers them. awk's ENVIRON gives names only, so a
+    # value with a newline cannot fake one.
+    known=" $from_file RENOVATE_ENDPOINT RENOVATE_REPOSITORIES RENOVATE_CONFIG_FILE $forbid RENOVATE_DRY_RUN RENOVATE_SECURITY_ONLY "
+    for name in $(awk 'BEGIN { for (k in ENVIRON) if (k ~ /^RENOVATE_[A-Za-z0-9_]*$/) print k }'); do
+      case $known in *" $name "*) ;; *) bad="$bad $name"; forbid="$forbid $name" ;; esac
+    done
+  else
+    env_val PRIVATE_DETAILS_RULES
+    if [ -z "$ENV_SET" ] || [ "$ENV_VAL" != "$RULES_PATH" ]; then bad="$bad PRIVATE_DETAILS_RULES"; fi
+  fi
   if [ "$job" = publish-gate ]; then
     env_val PUBLISH_GATE_SSH_KEY
     if [ -z "$ENV_SET" ] || [ "$ENV_VAL" != "$KEY_PATH" ]; then bad="$bad PUBLISH_GATE_SSH_KEY"; fi
@@ -172,6 +200,12 @@ do_env() {
         echo "$PROG: env $job: $name is not the runner's key path: delete any CI/CD variable of that name, check the runner environment line (docs/releasing.md step 6)" >&2 ;;
       PRIVATE_DETAILS_RULES)
         echo "$PROG: env $job: $name is not the runner's mounted rules path" >&2 ;;
+      RENOVATE_TOKEN|GITHUB_COM_TOKEN)
+        echo "$PROG: env $job: $name arrives as a variable; delete that CI/CD variable (docs/releasing.md, Dependency updates, step 3)" >&2 ;;
+      RENOVATE_DRY_RUN)
+        echo "$PROG: env $job: $name is not extract, lookup, full or empty" >&2 ;;
+      RENOVATE_SECURITY_ONLY)
+        echo "$PROG: env $job: $name is not true or empty" >&2 ;;
       *)
         case " $forbid " in
           *" $name "*) echo "$PROG: env $job: $name is set; it must be unset or empty" >&2 ;;
@@ -188,10 +222,11 @@ do_tags() {
   readable "$file"
   awk -v prog="$PROG" '
     BEGIN {
-      n = split("gauntlet-signing gauntlet-publish gauntlet-publish-gate", tag, " ")
+      n = split("gauntlet-signing gauntlet-publish gauntlet-publish-gate gauntlet-renovate", tag, " ")
       want["gauntlet-signing"] = "blocklist:sign"
       want["gauntlet-publish"] = "blocklist:publish"
       want["gauntlet-publish-gate"] = "publish-gate"
+      want["gauntlet-renovate"] = "renovate"
       for (i = 1; i <= n; i++) good[tag[i]] = 0
       bad = 0
     }
@@ -268,5 +303,5 @@ case $mode in
   pins) [ $# -le 1 ] || die2 "usage: config-check.sh pins [FILE]"; do_pins "$@" ;;
   env) [ $# -ge 1 ] && [ $# -le 2 ] || die2 "usage: config-check.sh env JOB [FILE]"; do_env "$@" ;;
   tags) [ $# -le 1 ] || die2 "usage: config-check.sh tags [FILE]"; do_tags "$@" ;;
-  *) die2 "usage: config-check.sh pins|env JOB|tags [FILE]" ;;
+  *) die2 "usage: config-check.sh pins|env JOB|tags [FILE] (JOB: publish-gate, private-details or renovate)" ;;
 esac

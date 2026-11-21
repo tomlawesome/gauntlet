@@ -10,9 +10,11 @@ The last column gives the job's name in `.gitlab-ci.yml`.
 | Layer | What runs | CI job |
 | --- | --- | --- |
 | Go unit and package tests | `go test ./... -race` | `test:go` |
-| Static checks | `go vet`, `gofmt`, `golangci-lint` | `lint:go` |
+| Static checks | `go vet`, `gofmt`, `golangci-lint` with the default linters (`unused` finds dead code) plus `gosec`, the security linter, and `dupl`, which finds duplicated code (`.golangci.yml`) | `lint:go` |
 | Licence gate | Checks that every library linked into the shipped code has an allowed licence, and that any copied (vendored) code or embedded file inside one has a recorded licence review: `go-licenses` against `supply-chain/licence-policy.yml`, then `scripts/licence-check-bundled.py` for vendored code and embedded files in the same modules (its own cases: `scripts/licence-check_test.sh`, run by `lint:script-tests`) | `lint:licences` |
 | Vulnerability scan | `govulncheck` | `lint:vulncheck` |
+| Dependency scan | `trivy fs --scanners vuln,license`: known flaws in any version of a library both modules use, called or not, and licences; fails at High and above (false alarms go in `.trivyignore` with a reason and an expiry date) | `lint:trivy` |
+| Shell script check | `shellcheck` at warning level and above on every `*.sh`, installed from Alpine's signed package repository | `lint:shellcheck` |
 | Secret scan | `gitleaks` | `lint:secrets` |
 | Personal-details scan | The shared check from ai/agent-infra (#111): the owner's surname, real host logins in home paths, private network addresses and AI credit in each commit's added lines, message and identity, from `aee3fd0` on. The rules live on the runner host, not here | `private-details` |
 | HTTP contract | `gate/contracttest` (its own Go module) checks the real behaviour against `docs/api/auth.yaml`, the written description of the web routes | `test:contract` |

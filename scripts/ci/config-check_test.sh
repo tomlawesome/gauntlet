@@ -285,6 +285,115 @@ run_env publish-gate "$TMP/does-not-exist.yml"
 expect_rc "env: unreadable FILE -> 2" 2
 
 # ---------------------------------------------------------------------------
+# env renovate (P-RS1)
+# ---------------------------------------------------------------------------
+
+CI_API="https://gitlab.example.test/api/v4"
+CI_PATH="example-group/example-project"
+CI_DIR="/builds/example-group/example-project"
+
+# run_renovate [NAME=VALUE | -NAME]...: runs `env renovate FILE` in a clean
+# environment built from the renovate job's variables: (quotes stripped, the
+# $CI_... references expanded to the fixed values above), then the overrides.
+run_renovate() {
+  rfile="$REAL"
+  rargs="$TMP/renargs"
+  job_vars renovate "$REAL" | sed -e 's/="\(.*\)"$/=\1/' \
+    -e "s|\$CI_API_V4_URL|$CI_API|g" -e "s|\$CI_PROJECT_PATH|$CI_PATH|g" \
+    -e "s|\$CI_PROJECT_DIR|$CI_DIR|g" >"$rargs"
+  {
+    printf 'CI_API_V4_URL=%s\nCI_PROJECT_PATH=%s\nCI_PROJECT_DIR=%s\n' "$CI_API" "$CI_PATH" "$CI_DIR"
+    printf 'PRIVATE_DETAILS_RULES=%s\n' "$RULES_PATH"
+  } >>"$rargs"
+  for o in "$@"; do
+    case "$o" in
+      -*) grep -v "^${o#-}=" "$rargs" >"$rargs.n"; mv "$rargs.n" "$rargs" ;;
+      *) grep -v "^${o%%=*}=" "$rargs" >"$rargs.n"; mv "$rargs.n" "$rargs"
+         printf '%s\n' "$o" >>"$rargs" ;;
+    esac
+  done
+  set --
+  while IFS= read -r line; do set -- "$@" "$line"; done <"$rargs"
+  OUT="$(env -i PATH="$PATH" "$@" sh "$SCRIPT" env renovate "$rfile" 2>&1)"
+  RC=$?
+}
+
+REN_FILE="RENOVATE_PLATFORM RENOVATE_AUTODISCOVER RENOVATE_ONBOARDING RENOVATE_REQUIRE_CONFIG LOG_LEVEL GOPROXY GOPRIVATE"
+REN_FORBID="RENOVATE_TOKEN GITHUB_COM_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY NODE_OPTIONS NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED RENOVATE_ADDITIONAL_CONFIG_FILE"
+
+run_renovate
+expect_rc "env renovate: environment built from the file passes" 0
+
+# Each name the file sets (literally or via a $CI_ reference): changed -> 1,
+# named, neither the actual nor the expected value printed; unset -> 1, named.
+for v in $REN_FILE; do
+  expected="$(job_vars renovate "$REAL" | sed -n "s/^$v=//p" | sed -e 's/^"\(.*\)"$/\1/')"
+  run_renovate "$v=$BAD"
+  expect_rc "env renovate: $v changed -> 1" 1
+  out_has_word "env renovate: $v changed, named" "$v"
+  out_lacks "env renovate: $v changed, actual value not printed" "$BAD"
+  [ -n "$expected" ] && out_lacks "env renovate: $v changed, expected value not printed" "$expected"
+  run_renovate "-$v"
+  expect_rc "env renovate: $v unset -> 1" 1
+  out_has_word "env renovate: $v unset, named" "$v"
+done
+
+# The control is the project setting, not this check: ENDPOINT, REPOSITORIES
+# and CONFIG_FILE are no longer compared, so any value (or none) passes.
+for v in RENOVATE_ENDPOINT RENOVATE_REPOSITORIES RENOVATE_CONFIG_FILE; do
+  run_renovate "$v=https://example.invalid/api/v4"
+  expect_rc "env renovate: passes with $v set" 0
+  run_renovate "-$v"
+  expect_rc "env renovate: passes with $v unset" 0
+done
+
+# Forbidden names fail when set to a value, pass when empty.
+for v in $REN_FORBID; do
+  run_renovate "$v=$BAD"
+  expect_rc "env renovate: $v set -> 1" 1
+  out_has_word "env renovate: $v set, named" "$v"
+  out_lacks "env renovate: $v set, value not printed" "$BAD"
+  run_renovate "$v="
+  expect_rc "env renovate: $v set to empty passes" 0
+done
+
+# Prefix sweep: any other RENOVATE_ name fails.
+for v in RENOVATE_HOST_RULES RENOVATE_CONFIG RENOVATE_X_FOO; do
+  run_renovate "$v=$BAD"
+  expect_rc "env renovate: $v set -> 1" 1
+  out_has_word "env renovate: $v set, named" "$v"
+  out_lacks "env renovate: $v set, value not printed" "$BAD"
+done
+
+# The two documented switches.
+for val in extract lookup full ""; do
+  run_renovate "RENOVATE_DRY_RUN=$val"
+  expect_rc "env renovate: RENOVATE_DRY_RUN='$val' passes" 0
+done
+run_renovate RENOVATE_DRY_RUN=bogus
+expect_rc "env renovate: RENOVATE_DRY_RUN=bogus -> 1" 1
+out_has_word "env renovate: names RENOVATE_DRY_RUN" RENOVATE_DRY_RUN
+out_lacks "env renovate: bogus value not printed" bogus
+run_renovate RENOVATE_SECURITY_ONLY=true
+expect_rc "env renovate: RENOVATE_SECURITY_ONLY=true passes" 0
+run_renovate RENOVATE_SECURITY_ONLY=
+expect_rc "env renovate: RENOVATE_SECURITY_ONLY empty passes" 0
+run_renovate RENOVATE_SECURITY_ONLY=bogus
+expect_rc "env renovate: RENOVATE_SECURITY_ONLY=bogus -> 1" 1
+out_has_word "env renovate: names RENOVATE_SECURITY_ONLY" RENOVATE_SECURITY_ONLY
+
+# The script's own text names the setting that is the real control.
+if grep -qF "Minimum role to use pipeline variables" "$SCRIPT"; then
+  pass "config-check.sh names the setting 'Minimum role to use pipeline variables'"
+else
+  fail "config-check.sh names the setting 'Minimum role to use pipeline variables'"
+fi
+
+# Usage text names the mode.
+run_cmd
+out_has "usage: names renovate" "renovate"
+
+# ---------------------------------------------------------------------------
 # tags
 # ---------------------------------------------------------------------------
 
@@ -362,6 +471,13 @@ else
   run_cmd tags "$TMP/t-gate.yml"
   expect_rc "tags: gauntlet-publish-gate on blocklist:publish -> 1" 1
   out_has "tags: names the tag" "gauntlet-publish-gate"
+
+  # The renovate tag is held to its one job like the others.
+  awk '{ print } /^lint:go:/ { print "  tags: [gauntlet-renovate]" }' "$REAL" >"$TMP/t-renovate.yml"
+  run_cmd tags "$TMP/t-renovate.yml"
+  expect_rc "tags: gauntlet-renovate added to lint:go -> 1" 1
+  out_has "tags: names the tag" "gauntlet-renovate"
+  out_has_word "tags: names the line" "$((LINT_HDR + 1))"
 
   # Dodges: a YAML anchor, a flow map, and the tag string on other lines.
   cp "$REAL" "$TMP/t-anchor.yml"

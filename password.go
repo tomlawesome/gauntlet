@@ -156,9 +156,10 @@ func VerifyPassword(password, encodedHash string) bool {
 	if err != nil || len(want) == 0 {
 		return false
 	}
+	keyLen := uint32(len(want)) //nolint:gosec // a decoded hash's length, far below 2^32
 	release := acquireHashSlot()
 	defer release() // a panic inside argon2 must not keep the slot
-	got := argon2.IDKey([]byte(password), salt, iterations, memory, threads, uint32(len(want)))
+	got := argon2.IDKey([]byte(password), salt, iterations, memory, threads, keyLen)
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 

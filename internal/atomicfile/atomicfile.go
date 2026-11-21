@@ -69,7 +69,7 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if d, err := os.Open(dir); err == nil {
+	if d, err := os.Open(dir); err == nil { //nolint:gosec // the directory of the caller's own file, never taken from a request
 		// Best effort: some filesystems refuse to sync a directory, and
 		// a failure here costs durability of the rename, not
 		// correctness of the bytes.

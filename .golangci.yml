@@ -1,0 +1,23 @@
+version: "2"
+linters:
+  # The default set (errcheck, govet, ineffassign, staticcheck, unused)
+  # plus gosec, the security linter (#113), and dupl, which finds
+  # duplicated blocks of code (#114; dead code is the default `unused`).
+  enable:
+    - dupl
+    - gosec
+  exclusions:
+    rules:
+      # gosec is for code an app runs. Tests and the test-only fakes
+      # write temporary files, use loose permissions and build bytes from
+      # small loop counters on purpose; none of their first findings was
+      # a flaw.
+      - path: '(_test\.go$|^internal/passkeytest/|^internal/testutil/|^persist/persisttest/)'
+        linters:
+          - gosec
+      # pwlist is the operator's build tool: it reads and writes the
+      # files named on its command line, which is what G304 flags.
+      - path: '^cmd/pwlist/'
+        text: 'G304'
+        linters:
+          - gosec
