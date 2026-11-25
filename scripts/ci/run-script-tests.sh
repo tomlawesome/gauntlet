@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs every scripts/*_test.sh and scripts/**/*_test.sh, each with the
 # interpreter its shebang names, keeps going after a failure, prints one
-# pass/fail line per file, then runs scripts/ci/job-rules_test.py. Exit 1 if
+# pass/fail line per file, then runs scripts/ci/job-rules_test.py and
+# scripts/ci/renovate-config_test.py (python3, stdlib only). Exit 1 if
 # anything failed. A new *_test.sh is picked up with no edit here (#123).
 #
 # Excluded, each with its reason:
@@ -46,6 +47,14 @@ if python3 -I scripts/ci/job-rules_test.py > /dev/null 2>&1; then
 else
   echo "FAIL scripts/ci/job-rules_test.py"
   python3 -I scripts/ci/job-rules_test.py 2>&1 | tail -n 40 | sed 's/^/    /'
+  fail=1
+fi
+
+if python3 -I scripts/ci/renovate-config_test.py > /dev/null 2>&1; then
+  echo "PASS scripts/ci/renovate-config_test.py"
+else
+  echo "FAIL scripts/ci/renovate-config_test.py"
+  python3 -I scripts/ci/renovate-config_test.py 2>&1 | tail -n 40 | sed 's/^/    /'
   fail=1
 fi
 

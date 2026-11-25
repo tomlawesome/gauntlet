@@ -402,8 +402,25 @@ func doorRefusal(user *gauntlet.User, door, detail string) *refusal {
 // The checks themselves are decideAccess's, shared with StillSignedIn
 // (#104, ADR-0016); Protect writes what it answers and dispatches.
 func (g *Gate) Protect(next http.Handler) http.Handler {
+	return g.protect(next, true)
+}
+
+// ProtectBackground is Protect for a request the application makes for
+// itself -- a poll, a refresh, a heartbeat -- rather than one the person
+// made (#126, ADR-0018). Same rules, same refusals, same dispatch; it
+// counts as no activity: the session's ExpiresAt and LastUsedAt do not
+// move, a bearer token's last use is not recorded, and nothing is
+// written. The application chooses the routes; gate reads no header for
+// it.
+func (g *Gate) ProtectBackground(next http.Handler) http.Handler {
+	return g.protect(next, false)
+}
+
+// protect is the body Protect and ProtectBackground share; touch is
+// whether the request counts as activity.
+func (g *Gate) protect(next http.Handler, touch bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		v, ref := g.decideAccess(r, g.now(), true)
+		v, ref := g.decideAccess(r, g.now(), touch)
 		switch {
 		case ref != nil:
 			g.writeRefusal(w, r, ref)
@@ -445,15 +462,15 @@ func (g *Gate) bearerFor(raw string, kind gauntlet.TokenKind, now time.Time, tou
 }
 
 // decideAccess is the one place a request is admitted or refused:
-// Protect (touch true) and StillSignedIn (touch false) both ask it, so a
-// refusal cannot exist in one and not the other (ADR-0016, which calls
+// Protect (touch true), ProtectBackground and StillSignedIn (touch
+// false) all ask it, so a refusal cannot exist in one and not the others (ADR-0016, which calls
 // it decide; Gate.decide is the unusual sign-in one). With touch false it
 // changes nothing -- the session is Peeked, not Validated; a token is
 // Peeked, not Authenticated; a session issued before the cutoff is
 // refused without being revoked -- and nothing else differs.
 //
 // It writes no log line of its own: the refusal carries the Warn line,
-// and Protect is what writes it.
+// and Protect or ProtectBackground writes it.
 func (g *Gate) decideAccess(r *http.Request, now time.Time, touch bool) (verdict, *refusal) {
 	// The ESCAPED path, not the decoded one: http.ServeMux's own
 	// pattern matching works on r.URL.EscapedPath() (a request for

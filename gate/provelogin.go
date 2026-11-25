@@ -44,6 +44,7 @@ func (g *Gate) startProve(w http.ResponseWriter, r *http.Request, user *gauntlet
 	ev := loginEvent(user, "", gauntlet.SignInConfirmSent, method)
 	ev.Client.Unusual = signals
 	g.recordSignIn(r, ev, res, now)
+	g.holdSignIn(r, user, res, gauntlet.SignInConfirmSent, now)
 	return true
 }
 

@@ -38,6 +38,10 @@ release added.
   live check against Have I Been Pwned.
 - The HTTP layer, `gauntlet/gate`: a `net/http` middleware and the
   `/api/auth/*` and `/api/tokens` routes.
+  `Protect` guards a route and counts the request as the person's
+  activity; `ProtectBackground` guards a route the application polls for
+  itself, with the same rules, without keeping the session awake; and
+  `StillSignedIn` re-checks an already-open response.
 
 ## What stays with the application
 

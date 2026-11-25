@@ -3,7 +3,7 @@ info:
   title: gauntlet gate HTTP API
   # Always the VERSION file's value; the release merge request bumps
   # both, and gate/contracttest fails if they differ.
-  version: 0.4.6
+  version: 0.4.7
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -3698,6 +3698,37 @@ components:
         heldForPasskey:
           type: boolean
           description: True when the application requires every admin to hold a passkey (#82) and this admin holds none usable here, so it is held at a door until it registers one.
+        lockedUntil:
+          type: string
+          format: date-time
+          description: Present while the account is locked after repeated failed sign-ins (#107); the lockout ends then. Absent once it has lapsed.
+        disabledUntil:
+          type: string
+          format: date-time
+          description: Present while sign-in is disabled after the long run of failures (#107); the disable lifts then.
+        heldSignIn:
+          type: object
+          additionalProperties: false
+          required: [at, outcome]
+          description: The latest sign-in the unusual-sign-in policy held for this account and that has not been answered (#107). Cleared when the account completes a sign-in or an admin allows the next one; it has no expiry. Never present together with `allowedUntil`.
+          properties:
+            at:
+              type: string
+              format: date-time
+            outcome:
+              type: string
+              enum: [refused, confirm_sent, escape_issued]
+              description: As in `SignInOutcome`.
+            userAgent:
+              type: string
+              description: The browser's user agent, cleaned, as on a sign-in row.
+            country:
+              type: string
+              description: Two-letter country code, when known.
+        allowedUntil:
+          type: string
+          format: date-time
+          description: Present while an admin's allowance of the account's next sign-in is live (#107).
     Token:
       type: object
       additionalProperties: false

@@ -719,6 +719,11 @@ func (g *Gate) refuseSignIn(w http.ResponseWriter, r *http.Request, user *gauntl
 		note += "notify=" + notify + "; "
 	}
 	g.recordSignInNote(r, ev, res, note, now)
+	held := gauntlet.SignInRefused
+	if escape {
+		held = gauntlet.SignInEscapeIssued
+	}
+	g.holdSignIn(r, user, res, held, now)
 	if notify != "asked" {
 		return nil
 	}

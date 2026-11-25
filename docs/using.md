@@ -188,6 +188,14 @@ func events(w http.ResponseWriter, r *http.Request) {
 - An `Exempt` path is admitted whatever its cookie says, as `Protect`
   admits it, so a stream that must be re-checked must not be exempt.
 
+For an ordinary request the application makes on its own, such as a
+dashboard polling every 30 seconds, wrap the route in
+`g.ProtectBackground(handler)` instead of `g.Protect(handler)`. It
+refuses exactly what `Protect` refuses and serves the rest, but it does
+not slide the session's expiry or move a token's last-used time, so an
+untouched tab still signs out at the idle limit (#126, ADR-0018). The
+application decides which routes are background; gate does not guess.
+
 ### Audit and logs
 
 - gate sends each completed sign-in, each failed one, and each one the

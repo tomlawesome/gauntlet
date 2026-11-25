@@ -150,7 +150,7 @@ do_env() {
       forbid="PRIVATE_DETAILS_ALLOWLIST PRIVATE_DETAILS_ALLOWLIST_ONLY GITLEAKS" ;;
     renovate)
       from_file="RENOVATE_PLATFORM RENOVATE_AUTODISCOVER RENOVATE_ONBOARDING RENOVATE_REQUIRE_CONFIG LOG_LEVEL GOPROXY GOPRIVATE"
-      forbid="RENOVATE_TOKEN GITHUB_COM_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY NODE_OPTIONS NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED RENOVATE_ADDITIONAL_CONFIG_FILE" ;;
+      forbid="RENOVATE_TOKEN GITHUB_COM_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY NODE_OPTIONS NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED RENOVATE_ADDITIONAL_CONFIG_FILE RENOVATE_CONFIG_FILE" ;;
     '') die2 "env: missing JOB (publish-gate, private-details or renovate)" ;;
     *) die2 "env: unknown JOB (want publish-gate, private-details or renovate)" ;;
   esac
@@ -170,11 +170,11 @@ do_env() {
     env_val RENOVATE_SECURITY_ONLY
     case $ENV_VAL in ''|true) ;; *) bad="$bad RENOVATE_SECURITY_ONLY" ;; esac
     # Every other RENOVATE_ name is a setting a stray variable could add.
-    # ENDPOINT, REPOSITORIES and CONFIG_FILE come from $CI_ values a
+    # ENDPOINT and REPOSITORIES come from $CI_ values a
     # pipeline variable can override too, so comparing them proves nothing;
     # the project setting covers them. awk's ENVIRON gives names only, so a
     # value with a newline cannot fake one.
-    known=" $from_file RENOVATE_ENDPOINT RENOVATE_REPOSITORIES RENOVATE_CONFIG_FILE $forbid RENOVATE_DRY_RUN RENOVATE_SECURITY_ONLY "
+    known=" $from_file RENOVATE_ENDPOINT RENOVATE_REPOSITORIES $forbid RENOVATE_DRY_RUN RENOVATE_SECURITY_ONLY "
     for name in $(awk 'BEGIN { for (k in ENVIRON) if (k ~ /^RENOVATE_[A-Za-z0-9_]*$/) print k }'); do
       case $known in *" $name "*) ;; *) bad="$bad $name"; forbid="$forbid $name" ;; esac
     done

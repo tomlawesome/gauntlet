@@ -8,12 +8,14 @@
     "Go module versions are looked up from each module's own Git host, never through proxy.golang.org: the renovate job sets GOPROXY=direct, and GOPRIVATE for the owner's own modules. A first lookup through the public proxy records a version permanently, so the global rule is never to let one happen by accident.",
     "Not watched, on purpose: golang.org/x/exp/cmd/apidiff, pinned by pseudo-version in scripts/apidiff.sh (CI-only, approved at that pin, owner 2026-09-30, AGENTS.md). golang.org/x/exp has no releases, only commits, and no manager here can rewrite a Go pseudo-version, so this file names it instead of pretending to cover it. It never ships: it only reads gauntlet's exported API in lint:apidiff. Bump it by hand when lint:apidiff fails to load the module under a new Go release, and look at it in each version's release audit.",
     "The dependency dashboard is off, as on orbit (owner, 2026-09-08): a bot-written issue that never reaches a done state and is stale between runs.",
-    "This file is read two ways: as the repository config Renovate finds on dev, the default branch, and as the global config the renovate job points RENOVATE_CONFIG_FILE at. Both are the same file."
+    "This file is repository config only: Renovate finds it on dev, the default branch. The renovate job does not read it as global config, so options only global config may set, such as allowedCommands, have no effect here (#141).",
+    "Releases wait 3 days (minimumReleaseAge): the owner's rule is the newest release at least 3 days old, so a bad or hijacked release has time to be caught and pulled first (owner, 2026-11-19; #141). Security fixes do not wait: Renovate's vulnerability updates clear the wait by default, and nothing here sets one for them."
   ],
   "timezone": "Europe/London",
   "schedule": [
     "after 5:00am and before 6:15am on monday"
   ],
+  "minimumReleaseAge": "3 days",
   "baseBranchPatterns": [
     "dev"
   ],
@@ -21,7 +23,9 @@
     "dependencies"
   ],
   "semanticCommits": "disabled",
-  "dependencyDashboard": false,
+  "dependencyDashboard": {
+    "enabled": false
+  },
   "pinDigests": true,
   "prConcurrentLimit": 13,
   "prHourlyLimit": 0,
@@ -158,6 +162,13 @@
         "renovate/renovate"
       ],
       "allowedVersions": "!/^44\\.6[34]\\.0$/"
+    },
+    {
+      "description": "Trivy's image comes from ghcr.io, which gives no release time, so minimumReleaseAge alone would hold every Trivy update for good. timestamp-optional lets an update without a release time through; its digest is still re-checked by hand before merging (see the Trivy custom manager above).",
+      "matchPackageNames": [
+        "ghcr.io/aquasecurity/trivy"
+      ],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
     }
   ]
 }

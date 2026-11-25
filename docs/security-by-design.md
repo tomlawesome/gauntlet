@@ -440,7 +440,10 @@ store, keep and protect:
   - the limiter tracking more addresses and unknown names than its cap and
     dropping the least recently active (`ratelimit.go:440`)
   - a lockout whose save failed (`ratelimit.go:1255-1256`)
-  - a refused setup code (`gate/register_handler.go:57`), a refused unlock
+  - a throttled registration and one after the first admin exists, each
+    rated per address (`register-refused`, `register-closed`,
+    `gate/register_handler.go`)
+  - a refused setup code (`gate/register_handler.go:61`), a refused unlock
     code (`gate/unlock_handler.go:56`) and an SSO policy denial
     (`gate/oidc_handler.go:358`)
   - the setup code, the lone admin's unlock code and escape code, each
@@ -483,6 +486,7 @@ store, keep and protect:
   | Second factor | `user.totp_cleared`, `user.passkeys_cleared` | An admin removed another account's authenticator app or passkeys |
   | Second factor | `account.recovery_codes_regenerated` | The owner asked for a new set of recovery codes |
   | Accounts and roles | `user.register` | The first admin was created with the setup code |
+  | Accounts and roles | `user.register_failed` | A first-run registration was refused: `reason=` `setup_code` (wrong code), `password`, `username`, or `closed` (the code was right but another registration created the first admin a moment before), with the typed name masked as for an unknown sign-in (#125). Never the code or password. A throttled attempt, and any attempt once the first admin exists, leaves a rated Warn line instead, like a refused sign-in |
   | Accounts and roles | `user.create` | An admin created an account, or a first SSO sign-in did (actor `sso`) |
   | Accounts and roles | `user.delete` | An admin deleted an account |
   | Accounts and roles | `user.role_changed` | An admin changed a role, or the identity provider's group map moved an account at sign-in (actor `sso`, #76) |

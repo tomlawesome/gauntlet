@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-25
+
+### Added
+
+- The admin account list (`GET /api/auth/users`) shows each account's hold
+  state, each field present only while it applies: `lockedUntil`,
+  `disabledUntil`, `heldSignIn` (when, browser and country of the latest
+  unusual sign-in held and not yet allowed) and `allowedUntil`. The
+  accounts document is version 11 (`User.HeldSignIn`, `Store.HoldSignIn`);
+  a build reading version 10 refuses it (#107).
+- `Gate.ProtectBackground`: `Protect` for a request the application makes
+  for itself, such as a dashboard poll. It enforces every rule `Protect`
+  does but counts as no activity, so an untouched tab still times out
+  after the idle limit (#126).
+- A refused first-run registration records the audit event
+  `user.register_failed`, with the reason and the source address and
+  never the setup code or password (#125). A throttled attempt, and one
+  after the first admin exists, leaves a rated log line instead.
+
+### Changed
+
+- Renovate offers a release only once it is 3 days old; security fixes
+  still open at once. Its dependency dashboard issue stays off (#141).
+- The Renovate job no longer reads `renovate.json` as its global config,
+  and starts Renovate from an empty directory, so no file in the checkout
+  can set global-only options (#141).
+
+### Fixed
+
+- The pipeline on `preview` after a release's back-merge no longer fails
+  its release check when there is nothing new to promote (#142).
+
 ## [0.4.6] - 2026-11-21
 
 ### Security

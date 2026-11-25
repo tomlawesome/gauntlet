@@ -389,8 +389,10 @@ func (s *Store) rememberSignIn(accountID, replacing, country string, loc *Locati
 		if loc != nil {
 			u.LastPlace = &LastPlace{Country: country, Location: *loc, At: now}
 		}
-		// The next completed sign-in is the one an allowance was for.
+		// The next completed sign-in is the one an allowance was for,
+		// and it answers a held sign-in (#107).
 		u.SignInAllowedUntil = time.Time{}
+		u.HeldSignIn = nil
 		return nil
 	})
 	if err != nil {
@@ -421,6 +423,7 @@ func (s *Store) AllowNextSignIn(accountID string, now time.Time) (*User, error) 
 			return ErrUserNotFound
 		}
 		u.SignInAllowedUntil = now.Add(SignInAllowanceLifetime)
+		u.HeldSignIn = nil // allowed now, so no longer "not yet allowed" (#107)
 		allowed = *u
 		return nil
 	})

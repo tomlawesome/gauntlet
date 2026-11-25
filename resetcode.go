@@ -258,6 +258,7 @@ func (s *Store) IssueResetCode(userID string, now time.Time) (*User, string, err
 		// of the next sign-in goes too (#81): the reset is the remedy now.
 		u.SeenCountries, u.LastPlace = nil, nil
 		u.SignInAllowedUntil = time.Time{}
+		u.HeldSignIn = nil
 		issued = *u
 		return nil
 	})

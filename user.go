@@ -194,6 +194,13 @@ type User struct {
 	// by any route. Gauntlet's own field: older documents lack it and read it
 	// as none.
 	SignInAllowedUntil time.Time `json:"signInAllowedUntil,omitzero"`
+	// HeldSignIn is the latest sign-in gate's unusual-sign-in policy held
+	// for this account (#107): every credential right, no session issued.
+	// Set by HoldSignIn, replacing any earlier value; cleared wherever
+	// SignInAllowedUntil is, and by AllowNextSignIn. It has no expiry.
+	// Shown only by the admin account list. Gauntlet's own field: older
+	// documents lack it and read it as nil.
+	HeldSignIn *HeldSignIn `json:"heldSignIn,omitempty"`
 	// TOTPSecret is the shared secret behind the authenticator-app second
 	// factor, stored in the clear -- unlike a password or a recovery
 	// code, it has to be reversible: verifying a 30-second code means
@@ -313,6 +320,10 @@ func (u *User) clone() *User {
 	if u.LastPlace != nil {
 		place := *u.LastPlace
 		cp.LastPlace = &place
+	}
+	if u.HeldSignIn != nil {
+		held := *u.HeldSignIn
+		cp.HeldSignIn = &held
 	}
 	if u.Passkeys != nil {
 		cp.Passkeys = make([]Passkey, len(u.Passkeys))

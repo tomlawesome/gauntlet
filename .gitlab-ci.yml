@@ -250,11 +250,19 @@ release_readiness:
     - git fetch --quiet --force origin "+refs/heads/$target:refs/remotes/origin/$target"
     - git fetch --quiet --force --tags origin
     # A push of main's own commits back into preview (the back-merge after
-    # a release) promotes nothing.
+    # a release) promotes nothing: either the commit is already on main,
+    # or it is the back-merge's own merge commit, whose files are main's
+    # exactly (#142). Any file difference runs the full check.
     - |
-      if [ "$CI_PIPELINE_SOURCE" = push ] && git merge-base --is-ancestor "$CI_COMMIT_SHA" "origin/$target"; then
-        echo "release_readiness: $CI_COMMIT_SHA is already in $target, nothing to promote"
-        exit 0
+      if [ "$CI_PIPELINE_SOURCE" = push ]; then
+        if git merge-base --is-ancestor "$CI_COMMIT_SHA" "origin/$target"; then
+          echo "release_readiness: $CI_COMMIT_SHA is already in $target, nothing to promote"
+          exit 0
+        fi
+        if git diff --quiet "origin/$target" "$CI_COMMIT_SHA" --; then
+          echo "release_readiness: $CI_COMMIT_SHA has the same files as $target, nothing to promote"
+          exit 0
+        fi
       fi
     - |
       case "$CI_JOB_IMAGE" in
@@ -963,18 +971,14 @@ renovate:
   # jobs share is no use to it.
   cache: []
   variables:
-    # The checkout exists only so RENOVATE_CONFIG_FILE below has a file to
-    # read. Renovate clones the repository it updates itself, elsewhere.
+    # The checkout exists only for config-check.sh and the security run's
+    # renovate-security.json. Renovate clones the repository it updates
+    # itself, elsewhere, and reads renovate.json there as repository config.
     GIT_DEPTH: 1
     RENOVATE_PLATFORM: gitlab
     RENOVATE_ENDPOINT: $CI_API_V4_URL
     RENOVATE_AUTODISCOVER: "false"
     RENOVATE_REPOSITORIES: $CI_PROJECT_PATH
-    # Orbit hands Renovate its checkout's copy as global config because its
-    # default branch did not yet carry renovate.json. Gauntlet's default
-    # branch is `dev`, so the repository copy is found anyway and is the same
-    # file; this only keeps the job identical to orbit's.
-    RENOVATE_CONFIG_FILE: $CI_PROJECT_DIR/renovate.json
     RENOVATE_ONBOARDING: "false"
     RENOVATE_REQUIRE_CONFIG: "optional"
     LOG_LEVEL: info
@@ -1010,4 +1014,8 @@ renovate:
         export RENOVATE_ADDITIONAL_CONFIG_FILE="$CI_PROJECT_DIR/renovate-security.json"
         echo "renovate: security fixes only ($RENOVATE_ADDITIONAL_CONFIG_FILE)"
       fi
+      # Renovate reads config.js in its working directory as global config,
+      # which may set options repository config may not (#141). Start it
+      # from an empty directory so no file in the checkout is read that way.
+      cd "$(mktemp -d)"
       renovate

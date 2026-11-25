@@ -1013,6 +1013,13 @@ func New(cfg Config, deps Deps) (*Gate, error)
 // with no local password), admin passkey door (#82), second-factor door,
 // then next.
 func (g *Gate) Protect(next http.Handler) http.Handler
+
+// ProtectBackground (#126, ADR-0018): Protect for a request the app makes
+// for itself (a poll, a heartbeat). Same rules and refusals; it counts as
+// no activity -- ExpiresAt and LastUsedAt do not move, a token's last use
+// is not recorded, an old-cutoff session is refused but not revoked. The
+// app picks the routes; gate reads no header for it.
+func (g *Gate) ProtectBackground(next http.Handler) http.Handler
 func (g *Gate) Handle(kind gauntlet.TokenKind, h http.Handler) // e.g. TokenKindAPI -> the app's read-only mux
 func (g *Gate) Exempt(paths ...string)                          // beyond the built-in /api/auth/* set
 

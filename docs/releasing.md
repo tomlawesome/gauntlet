@@ -236,8 +236,9 @@ way to skip it. A `preview` -> `main` merge request opened by an agent gets
 no pipeline of its own (GitLab runs one only for an author who may merge
 into `preview`), so `preview`'s own pipeline runs the `main` check too, and
 that pipeline is the one the merge request waits on (#134). A push of
-`main`'s own commits back into `preview` passes it at once: there is
-nothing to promote. Run the same script before opening the merge request, from a
+`main`'s own commits back into `preview` passes it at once, and so does
+the back-merge's merge commit, whose files are `main`'s exactly: there is
+nothing to promote (#142). Run the same script before opening the merge request, from a
 checkout of the source branch with the target fetched:
 
 ```
@@ -638,7 +639,11 @@ sub-steps 2 and 3 (one secret per runner, ADR-0007):
    [runners.docker]
      host = "unix:///run/user/988/docker.sock"
      volumes = ["/etc/gauntlet-renovate:/etc/gauntlet-renovate:ro", "/cache"]
+     allowed_pull_policies = ["always", "if-not-present"]
    ```
+   The `renovate` job asks for `if-not-present` (its image is pinned by
+   digest, so a cached copy is the same image); without that line the
+   runner allows only `always` and the job fails before it starts.
    Replace `988` with `id -u gitlab-runner`'s number, as in that step.
    Copy the `light` runner's three `CI_IMAGE_CACHE_*` environment
    entries too, if the `renovate` image is pulled through the host's

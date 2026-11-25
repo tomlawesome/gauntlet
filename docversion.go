@@ -68,6 +68,11 @@ import (
 // on it as #79's did inside one release. A build that reads up to
 // version 9 refuses a version-10 document rather than drop a live
 // allowance on its next save.
+// Version 11 (#107) added User.HeldSignIn, the latest sign-in gate's
+// unusual-sign-in policy held for the account; an older document reads it
+// as nil -- nothing held -- which is what it meant. A build that reads up
+// to version 10 refuses a version-11 document rather than drop a held
+// sign-in on its next save.
 //
 // The sign-in history (#53, signins.go) is the third document, version 1
 // from its first release: {"version":1,"nextSeq":n,"rows":[...]}, and
@@ -89,7 +94,7 @@ import (
 // version-3 document rather than save it back without the expiry, which
 // would turn every token that has one into a token that never expires.
 const (
-	accountsDocumentVersion = 10
+	accountsDocumentVersion = 11
 	tokensDocumentVersion   = 3
 	signInsDocumentVersion  = 3
 )

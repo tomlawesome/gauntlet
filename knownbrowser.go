@@ -137,11 +137,12 @@ func (s *Store) ClearKnownBrowsers(accountID string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
-		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil && u.SignInAllowedUntil.IsZero() {
+		if len(u.KnownBrowsers) == 0 && len(u.SeenCountries) == 0 && u.LastPlace == nil && u.SignInAllowedUntil.IsZero() && u.HeldSignIn == nil {
 			return errNoChange
 		}
 		u.KnownBrowsers, u.SeenCountries, u.LastPlace = nil, nil, nil
 		u.SignInAllowedUntil = time.Time{}
+		u.HeldSignIn = nil
 		return nil
 	})
 }

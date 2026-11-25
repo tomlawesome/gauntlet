@@ -60,6 +60,26 @@ type userSummary struct {
 	// at the passkey door (or, with no local password, the password door
 	// first), so an admin sees who is stuck.
 	HeldForPasskey bool `json:"heldForPasskey"`
+	// LockedUntil, DisabledUntil, HeldSignIn and AllowedUntil are the
+	// account's hold state (#107), each present only while it holds, so
+	// an app's users screen needs no second read per account.
+	// LockedUntil is the end of a lockout after repeated failed sign-ins;
+	// DisabledUntil the end of the longer disable; HeldSignIn the latest
+	// unusual sign-in held and not yet allowed; AllowedUntil the end of
+	// an admin's allowance of the next sign-in.
+	LockedUntil   time.Time          `json:"lockedUntil,omitzero"`
+	DisabledUntil time.Time          `json:"disabledUntil,omitzero"`
+	HeldSignIn    *heldSignInSummary `json:"heldSignIn,omitempty"`
+	AllowedUntil  time.Time          `json:"allowedUntil,omitzero"`
+}
+
+// heldSignInSummary is userSummary's heldSignIn: the fields match a
+// sign-in list row, the user agent as cleaned, not summarised.
+type heldSignInSummary struct {
+	At        time.Time `json:"at"`
+	Outcome   string    `json:"outcome"`
+	UserAgent string    `json:"userAgent,omitempty"`
+	Country   string    `json:"country,omitempty"`
 }
 
 // heldForPasskey reports whether u, read with its passkeys (Users.Get,
@@ -179,8 +199,9 @@ func (g *Gate) writeCreateUserError(w http.ResponseWriter, r *http.Request, err 
 func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	users := g.deps.Users.List()
 	out := make([]userSummary, 0, len(users))
+	now := g.now()
 	for _, u := range users {
-		out = append(out, userSummary{
+		s := userSummary{
 			ID:               u.ID,
 			Username:         u.Username,
 			Role:             string(u.Role),
@@ -191,7 +212,20 @@ func (g *Gate) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			HasTOTP:          u.HasActiveTOTP(),
 			PasskeyCount:     u.PasskeyCount(),
 			HeldForPasskey:   g.heldForPasskeyByID(u.ID, u.Role),
-		})
+		}
+		if now.Before(u.LoginLockedUntil) {
+			s.LockedUntil = u.LoginLockedUntil
+		}
+		if u.LoginDisabled(now) {
+			s.DisabledUntil = u.LoginDisabledAt.Add(gauntlet.LoginDisableDuration)
+		}
+		if h := u.HeldSignIn; h != nil {
+			s.HeldSignIn = &heldSignInSummary{At: h.At, Outcome: string(h.Outcome), UserAgent: h.UserAgent, Country: h.Country}
+		}
+		if u.SignInAllowanceLive(now) {
+			s.AllowedUntil = u.SignInAllowedUntil
+		}
+		out = append(out, s)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

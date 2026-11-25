@@ -449,6 +449,72 @@ def source_ref_problems(doc):
     return problems
 
 
+def passthrough_problems(doc):
+    """#142: run release_readiness's push pass-through step in a scratch
+    repository. It must exit 0 for a commit already on main and for a
+    back-merge commit whose files equal main's, and fall through to the
+    full check for a commit that changes a file."""
+    import subprocess, tempfile
+    rr = resolve_extends(doc, "release_readiness")
+    steps = [str(x) for x in (rr.get("script") or []) if "nothing to promote" in str(x)]
+    if len(steps) != 1:
+        return ["expected one script step that says 'nothing to promote', found %d" % len(steps)]
+    step = steps[0]
+    problems = []
+    with tempfile.TemporaryDirectory() as d:
+        def git(*a):
+            return subprocess.run(["git", "-C", d] + list(a), check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        env_id = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        git("init", "-q", "-b", "main")
+        open(os.path.join(d, "f"), "w").write("one\n")
+        git("add", "f"); git(*env_id, "commit", "-q", "-m", "base")
+        git("checkout", "-q", "-b", "preview")
+        open(os.path.join(d, "f"), "w").write("two\n")
+        git(*env_id, "commit", "-q", "-am", "promoted")
+        git("checkout", "-q", "main")
+        git(*env_id, "merge", "-q", "--no-ff", "-m", "promote", "preview")
+        on_main = git("rev-parse", "main")
+        git("checkout", "-q", "preview")
+        git(*env_id, "merge", "-q", "--no-ff", "-m", "back-merge", "main")
+        back = git("rev-parse", "HEAD")
+        open(os.path.join(d, "f"), "w").write("three\n")
+        git(*env_id, "commit", "-q", "-am", "new work")
+        changed = git("rev-parse", "HEAD")
+        git("update-ref", "refs/remotes/origin/main", on_main)
+        for label, sha, source, want in (
+                ("commit already on main", on_main, "push", 0),
+                ("back-merge with main's files", back, "push", 0),
+                ("commit that changes a file", changed, "push", 3),
+                ("merge request pipeline, same files", back, "merge_request_event", 3)):
+            env = dict(os.environ, CI_PIPELINE_SOURCE=source, CI_COMMIT_SHA=sha, target="main")
+            r = subprocess.run(["bash", "-ec", "cd \"$1\"\n" + step + "\nexit 3", "x", d],
+                               env=env, capture_output=True, text=True)
+            if r.returncode != want:
+                problems.append("%s: exit %d, want %d (%s)" % (label, r.returncode, want, r.stderr.strip()[-200:]))
+    return problems
+
+
+def renovate_global_config_problems(doc):
+    """#141 item 2: renovate.json is repository config only. The job sets no
+    RENOVATE_CONFIG_FILE, and starts `renovate` from a fresh mktemp directory
+    so a config.js in the checkout cannot be read as global config."""
+    job = resolve_extends(doc, "renovate")
+    problems = []
+    if "RENOVATE_CONFIG_FILE" in (job.get("variables") or {}):
+        problems.append("variables: sets RENOVATE_CONFIG_FILE")
+    lines = [l.strip() for x in (job.get("script") or []) for l in str(x).splitlines()]
+    lines = [l for l in lines if l and not l.startswith("#")]
+    run = [i for i, l in enumerate(lines) if re.match(r"^(exec\s+)?renovate(\s|$)", l)]
+    if not run:
+        return problems + ["script has no line that runs renovate"]
+    cds = [i for i, l in enumerate(lines)
+           if re.match(r"^cd\s", l) and "mktemp" in l and i < run[0]]
+    if not cds:
+        problems.append("no `cd` into a mktemp directory before the renovate line")
+    return problems
+
+
 def main():
     fails = 0
     try:
@@ -490,6 +556,28 @@ def main():
     name = "(o) release_readiness takes the source branch sha, inline, not from variables: (#122)"
     try:
         problems = source_ref_problems(doc)
+    except Exception as e:
+        problems = ["cannot evaluate: %s" % e]
+    if not problems:
+        print("PASS: " + name)
+        passes += 1
+    else:
+        print("FAIL: %s -- %s" % (name, problems))
+        fails += 1
+    name = "(s) a no-change back-merge into preview passes release_readiness at once; a change does not (#142)"
+    try:
+        problems = passthrough_problems(doc)
+    except Exception as e:
+        problems = ["cannot evaluate: %s" % e]
+    if not problems:
+        print("PASS: " + name)
+        passes += 1
+    else:
+        print("FAIL: %s -- %s" % (name, problems))
+        fails += 1
+    name = "(t) renovate sets no RENOVATE_CONFIG_FILE and runs from a fresh mktemp directory (#141 item 2)"
+    try:
+        problems = renovate_global_config_problems(doc)
     except Exception as e:
         problems = ["cannot evaluate: %s" % e]
     if not problems:

@@ -11,3 +11,7 @@ sighting; a third sighting of the same check gets an issue.
   'package', found 'EOF'`). The same commit passed on !24. A retry
   (job 30721) passed. Cause is the shared `light` runner's disk, not
   this project.
+
+## oidc: TestHTTPTimeoutBoundsAHungProvider
+
+- 2026-11-25 · ce79579 (local, whole suite) · `go test ./... -count=1`, oidc · `New` failed discovery against the test's own fake provider with `context deadline exceeded`: the test's 100 ms `HTTPTimeout` also bounds discovery, which ran slowly while the rest of the suite was running. Three separate re-runs of the test passed.

@@ -220,6 +220,7 @@ func (g *Gate) startConfirm(w http.ResponseWriter, r *http.Request, user *gauntl
 	ev := loginEvent(user, "", gauntlet.SignInConfirmSent, method)
 	ev.Client.Unusual = signals
 	g.recordSignIn(r, ev, res, now)
+	g.holdSignIn(r, user, res, gauntlet.SignInConfirmSent, now)
 	return confirmSent
 }
 

@@ -45,7 +45,7 @@ import (
 // not hashes of anything: nothing here authenticates. Users are in the
 // username order a save writes them in.
 const accountsFixture = `{
-  "version": 10,
+  "version": 11,
   "seq": 1,
   "users": [
     {
@@ -88,6 +88,12 @@ const accountsFixture = `{
         "at": "2026-01-02T04:04:05Z"
       },
       "signInAllowedUntil": "2026-01-02T04:14:05Z",
+      "heldSignIn": {
+        "at": "2026-01-02T04:09:05Z",
+        "outcome": "refused",
+        "userAgent": "Firefox/131.0 (fixture)",
+        "country": "GB"
+      },
       "totpSecret": "JBSWY3DPEHPK3PXP",
       "totpConfirmedAt": "2026-01-02T03:04:05Z",
       "totpLastCounter": 99,
@@ -308,6 +314,14 @@ const unusualLines = "      \"seenCountries\": [\n" +
 // every-field fixture spells it.
 const allowanceLine = "      \"signInAllowedUntil\": \"2026-01-02T04:14:05Z\",\n"
 
+// heldSignInLines is the field accounts version 11 (#107) added.
+const heldSignInLines = "      \"heldSignIn\": {\n" +
+	"        \"at\": \"2026-01-02T04:09:05Z\",\n" +
+	"        \"outcome\": \"refused\",\n" +
+	"        \"userAgent\": \"Firefox/131.0 (fixture)\",\n" +
+	"        \"country\": \"GB\"\n" +
+	"      },\n"
+
 // bumpedSeq returns doc with its "seq" advanced by one -- what one more
 // no-op save produces, since the counter #59 added goes up on every
 // save, changed or not. A document with no "seq" field at all (one
@@ -346,9 +360,9 @@ func fixtureAtVersion(t *testing.T, version int, without ...string) string {
 		}
 		doc = strings.Replace(doc, line, "", 1)
 	}
-	const current = `"version": 10,`
+	const current = `"version": 11,`
 	if !strings.Contains(doc, current) {
-		t.Fatal("the every-field fixture is no longer at version 10")
+		t.Fatal("the every-field fixture is no longer at version 11")
 	}
 	return strings.Replace(doc, current, `"version": `+strconv.Itoa(version)+`,`, 1)
 }
@@ -371,7 +385,7 @@ func openSaveAndCompare(t *testing.T, doc, want string) *Store {
 		t.Fatal(err)
 	}
 	if string(snap.Payload) != want {
-		t.Errorf("a saved older document differs from the fixture at version 10 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
+		t.Errorf("a saved older document differs from the fixture at version 11 without the fields it lacked:\n--- want ---\n%s\n--- saved ---\n%s",
 			want, snap.Payload)
 	}
 	return s
@@ -391,8 +405,8 @@ func openSaveAndCompare(t *testing.T, doc, want string) *Store {
 // from zero).
 func TestAVersion1AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 	const sessionsLine = "      \"sessionsEndedAt\": \"2026-01-02T03:06:05Z\",\n"
-	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine)
-	want := fixtureAtVersion(t, 10, sessionsLine, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine)
+	v1 := fixtureAtVersion(t, 1, sessionsLine, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
+	want := fixtureAtVersion(t, 11, sessionsLine, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
 
 	s := openSaveAndCompare(t, v1, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -420,8 +434,8 @@ func TestAVersion1AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // opens with both zero, its lockout still in force, and saves back as
 // exactly the fixture without the others at version 10, seq stamped at 1.
 func TestAVersion2AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
-	v2 := fixtureAtVersion(t, 2, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine)
-	want := fixtureAtVersion(t, 10, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine)
+	v2 := fixtureAtVersion(t, 2, lockoutLines, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
+	want := fixtureAtVersion(t, 11, lockoutLines, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
 
 	s := openSaveAndCompare(t, v2, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -447,8 +461,8 @@ func TestAVersion2AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // seq stamped at 1 -- after which a build reading only up to version 3
 // refuses it (errNewerDocument).
 func TestAVersion3AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
-	v3 := fixtureAtVersion(t, 3, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine)
-	want := fixtureAtVersion(t, 10, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine)
+	v3 := fixtureAtVersion(t, 3, knownBrowserLines, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
+	want := fixtureAtVersion(t, 11, knownBrowserLines, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
 
 	s := openSaveAndCompare(t, v3, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -479,8 +493,8 @@ func TestAVersion3AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // (TestMikroviewUsersJSONFixtureRoundTripsByteIdentical, on the
 // every-field fixture).
 func TestAVersion4AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
-	v4 := fixtureAtVersion(t, 4, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine)
-	want := fixtureAtVersion(t, 10, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine)
+	v4 := fixtureAtVersion(t, 4, breachLines, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
+	want := fixtureAtVersion(t, 11, breachLines, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
 
 	s := openSaveAndCompare(t, v4, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -514,8 +528,8 @@ func TestAVersion4AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // with the counter at zero and being stamped on its next save, as
 // docs/design.md §4 describes.
 func TestAVersion5AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
-	v5 := fixtureAtVersion(t, 5, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine)
-	want := fixtureAtVersion(t, 10, totpPendingLine, heldLines, unusualLines, allowanceLine)
+	v5 := fixtureAtVersion(t, 5, seqLine, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
+	want := fixtureAtVersion(t, 11, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
 
 	s := openSaveAndCompare(t, v5, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -536,8 +550,8 @@ func TestAVersion5AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // up to version 6 refuses it (errNewerDocument), rather than drop an
 // enrolment on hold.
 func TestAVersion6AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
-	v6 := fixtureAtVersion(t, 6, totpPendingLine, heldLines, unusualLines, allowanceLine)
-	want := bumpedSeq(t, fixtureAtVersion(t, 10, totpPendingLine, heldLines, unusualLines, allowanceLine))
+	v6 := fixtureAtVersion(t, 6, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines)
+	want := bumpedSeq(t, fixtureAtVersion(t, 11, totpPendingLine, heldLines, unusualLines, allowanceLine, heldSignInLines))
 
 	s := openSaveAndCompare(t, v6, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -616,8 +630,8 @@ func assertFixtureCoversEveryField(t *testing.T, fixture string, types ...reflec
 // version 7 refuses it (errNewerDocument), rather than drop what the
 // account remembers.
 func TestAVersion7AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
-	v7 := fixtureAtVersion(t, 7, unusualLines, allowanceLine)
-	want := bumpedSeq(t, fixtureAtVersion(t, 10, unusualLines, allowanceLine))
+	v7 := fixtureAtVersion(t, 7, unusualLines, allowanceLine, heldSignInLines)
+	want := bumpedSeq(t, fixtureAtVersion(t, 11, unusualLines, allowanceLine, heldSignInLines))
 
 	s := openSaveAndCompare(t, v7, want)
 	admin, ok := s.Get("admin-id-0001")
@@ -650,8 +664,8 @@ func TestAVersion7AccountsDocumentOpensAndSavesAsVersion8(t *testing.T) {
 // version 10 -- after which a build reading only up to version 9
 // refuses it (errNewerDocument), rather than drop a live allowance.
 func TestAVersion9AccountsDocumentOpensAndSavesAsVersion10(t *testing.T) {
-	v9 := fixtureAtVersion(t, 9, allowanceLine)
-	want := bumpedSeq(t, fixtureAtVersion(t, 10, allowanceLine))
+	v9 := fixtureAtVersion(t, 9, allowanceLine, heldSignInLines)
+	want := bumpedSeq(t, fixtureAtVersion(t, 11, allowanceLine, heldSignInLines))
 
 	s := openSaveAndCompare(t, v9, want)
 	admin, ok := s.Get("admin-id-0001")

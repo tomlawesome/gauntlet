@@ -319,7 +319,7 @@ run_renovate() {
 }
 
 REN_FILE="RENOVATE_PLATFORM RENOVATE_AUTODISCOVER RENOVATE_ONBOARDING RENOVATE_REQUIRE_CONFIG LOG_LEVEL GOPROXY GOPRIVATE"
-REN_FORBID="RENOVATE_TOKEN GITHUB_COM_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY NODE_OPTIONS NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED RENOVATE_ADDITIONAL_CONFIG_FILE"
+REN_FORBID="RENOVATE_TOKEN GITHUB_COM_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY NODE_OPTIONS NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED RENOVATE_ADDITIONAL_CONFIG_FILE RENOVATE_CONFIG_FILE"
 
 run_renovate
 expect_rc "env renovate: environment built from the file passes" 0
@@ -338,9 +338,9 @@ for v in $REN_FILE; do
   out_has_word "env renovate: $v unset, named" "$v"
 done
 
-# The control is the project setting, not this check: ENDPOINT, REPOSITORIES
-# and CONFIG_FILE are no longer compared, so any value (or none) passes.
-for v in RENOVATE_ENDPOINT RENOVATE_REPOSITORIES RENOVATE_CONFIG_FILE; do
+# The control is the project setting, not this check: ENDPOINT and REPOSITORIES
+# are no longer compared, so any value (or none) passes.
+for v in RENOVATE_ENDPOINT RENOVATE_REPOSITORIES; do
   run_renovate "$v=https://example.invalid/api/v4"
   expect_rc "env renovate: passes with $v set" 0
   run_renovate "-$v"
